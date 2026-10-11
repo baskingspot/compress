@@ -65,6 +65,13 @@ Verbatim spec text, fetched once with provenance recorded in the directory
 comes from google/snappy (BSD-3-Clause).
 
 - std.compress.flate `Lookup`/persistent-chain design (Zig std, MIT): studied for `src/flate/encode.zig`'s persistent `FinderTable` (absolute wrapping positions, flate-notes.md §8). Studied, not copied.
+- `src/zstd/xxh64.zig`: a port of the XXH64 algorithm following Zig std's
+  `std/hash/xxhash.zig` (MIT; itself the xxHash reference, public domain at
+  github.com/Cyan4973/xxHash) with one deliberate change: the running byte
+  count is `u64`, where std's is a `usize` that wraps past 2^32 on 32-bit
+  targets. The algorithm is ported with the change; the attribution covers
+  the reference. std's `XxHash64` stays in the tests as the differential
+  oracle.
 
 ## Dependencies
 

@@ -677,14 +677,18 @@ Semantics:
 Files (the intended layout; the implementation lanes may split further):
 `root.zig` (public surface), `decode.zig` (the one-shot and the shared decode
 state), `frame.zig` (magic, frame header, block chain, checksum trailer,
-skippable frames), `block.zig` (the block header dispatch, sequence execution,
-the checksum funnel), `literals.zig` (the literals section), `huff0.zig`
-(weights to decoding tables, the backwards Huffman stream), `fse.zig` (the FSE
-table description and construction, shared by the sequences and the Huffman
-weights), `xxh64.zig` (the checksum state over std's kernel), `Reader.zig`
-(the streaming `Io` layer), `golden.zig` (ported golden fixtures, shared by
-every layer's tests), `common.zig` (little-endian integer access), `fuzz.zig`
-(fuzz targets). `bench.zig` (a local benchmark) and `oracle.zig` (an
+skippable frames, the per-block checksum funnel), `block.zig` (the block
+header dispatch), `literals.zig` (the literals section), `huff0.zig`
+(weights to decoding tables, the backwards Huffman stream), `sequences.zig`
+(the sequences section, sequence execution, the repeat-offset machine),
+`fse.zig` (the FSE table description and construction, shared by the
+sequences and the Huffman weights), `bits.zig` (the two bitstream readers:
+the forward and the backwards), `xxh64.zig` (the checksum state over its own
+u64-counted kernel — std's `XxHash64` counts in a `usize` and wraps past
+2^32; std's stays in the tests as the differential oracle), `probe32.zig`
+(the 32-bit proof probe, `just check-32`), `Reader.zig` (the streaming `Io`
+layer), `golden.zig` (ported golden fixtures, shared by every layer's tests),
+`common.zig` (little-endian integer access), `fuzz.zig` (fuzz targets). `bench.zig` (a local benchmark) and `oracle.zig` (an
 external-oracle harness) are not landed at M4: the zstd rows live in the
 fleet driver ("Benchmarks" below), and an oracle lane is the perf wave's to
 add when there is an encoder direction to cross-check.

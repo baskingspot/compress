@@ -318,6 +318,34 @@ pub fn build(b: *Build) void {
         });
         if (b.args) |args| run_zlib_bench.addArgs(args);
 
+        // The 32-bit proof probe (src/zstd/probe32.zig): the large-total
+        // frames driven on a usize=32 target, where their wraps are
+        // observable. wasm32-wasi, ReleaseSafe (a wrap panics), an explicit
+        // 8 MiB stack (the window buffer rides it); `just check-32` runs it
+        // under wasmtime.
+        const probe32_target = b.resolveTargetQuery(.{
+            .cpu_arch = .wasm32,
+            .os_tag = .wasi,
+        });
+        const probe32_mod = b.createModule(.{
+            .root_source_file = b.path("src/zstd/probe32.zig"),
+            .target = probe32_target,
+            .optimize = .ReleaseSafe,
+        });
+        probe32_mod.addImport("fastmem", fastmem_mod);
+        probe32_mod.addImport("zcompress", zcompress_mod);
+        const probe32_exe = b.addExecutable(.{
+            .name = "zstd-probe32",
+            .root_module = probe32_mod,
+        });
+        probe32_exe.stack_size = 8 * 1024 * 1024;
+        const install_probe32 = b.addInstallArtifact(probe32_exe, .{});
+        const probe32_step = b.step(
+            "probe32",
+            "Build the 32-bit proof probe (wasm32-wasi; run under wasmtime)",
+        );
+        probe32_step.dependOn(&install_probe32.step);
+
         const bench_step = b.step("bench", "Run codec benchmarks (use -Doptimize=ReleaseFast)");
         bench_step.dependOn(&run_snappy_bench.step);
         bench_step.dependOn(&run_flate_bench.step);

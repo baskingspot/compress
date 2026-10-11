@@ -51,11 +51,14 @@ it before you change a kernel or make a performance claim.
   land in `fuzz.zig` (fuzz-engineer lane).
 - `src/zstd/`: zstd frames (RFC 8878). `decode.zig` carries the one-shot
   decode and the shared decode state; `frame.zig` the magic, the frame
-  header, the block chain, the checksum trailer, and skippable frames;
-  `block.zig` the block header dispatch, sequence execution, and the checksum
-  funnel; `literals.zig` + `huff0.zig` the literals section and its Huffman
-  trees; `sequences.zig` + `fse.zig` the sequences section and the FSE
-  tables; `xxh64.zig` the checksum state over std's kernel; `Reader.zig` the
+  header, the block chain, the checksum trailer, the skippable frames, and
+  the per-block checksum funnel; `block.zig` the block header dispatch;
+  `literals.zig` + `huff0.zig` the literals section and its Huffman trees;
+  `sequences.zig` the sequences section, sequence execution, and the
+  repeat-offset machine; `fse.zig` + `bits.zig` the FSE tables and the two
+  bitstream readers; `xxh64.zig` the checksum state over its own u64-counted
+  kernel (std's wraps at usize); `probe32.zig` the 32-bit proof probe
+  (`just check-32`); `Reader.zig` the
   streaming `Io` layer (one frame per reader with the exact boundary visible,
   the multi-frame `streamAll` walk — see `src/zstd/README.md`, "Streaming");
   `golden.zig` shares the reference fixtures across every layer's tests.

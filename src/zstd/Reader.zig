@@ -94,6 +94,7 @@ const fastmem = @import("fastmem");
 const block = @import("block.zig");
 const common = @import("common.zig");
 const frame = @import("frame.zig");
+const xxh64 = @import("xxh64.zig");
 const golden = @import("golden.zig");
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
@@ -1479,44 +1480,112 @@ test "Reader: a contiguous request past the window fails closed" {
     try testing.expectError(error.ReadFailed, r.reader.peek(1));
 }
 
-test "Reader: the frame total runs past 2^32 without wrapping" {
-    // The M4 closing review's blocker: the frame's running decoded total was
-    // usize, so a hostile RLE-only frame (4 input bytes per 128 KiB block)
-    // drove the total past 2^32 on the streaming path — a panic in
-    // Debug/ReleaseSafe and UB in ReleaseFast on every 32-bit target, which
-    // `just check-baseline` covers. The state's total is u64 now (`§3.1.1`
-    // puts no usize bound on a frame's output; the probe decoded 4.29 GB in
-    // under a second). Here: 32,770 RLE blocks -> 4,295,163,904 bytes —
-    // 196,608 past 2^32 — decoded through the walk into a discarding
-    // consumer, the input consumed exactly, no error.
-    // Frame: magic + descriptor (no FCS, no checksum) + Window_Descriptor
-    // 0x38 (windowLog 17 = 128 KiB, so Block_Size 131072 is in bounds).
+/// The closing review's RLE-only frame: 32,770 four-byte blocks, each one
+/// RLE block of 128 KiB — a 131 KB input decoding to 4,295,229,440 bytes
+/// (262,144 past 2^32), the shape that found both 32-bit wraps. The
+/// `checksum` switch adds the Content_Checksum_Flag (the descriptor's 0x04)
+/// and the four trailer bytes (the low 32 bits of XXH64 over the decoded
+/// 0x5A bytes, little-endian — 0xB7494A5E, the value the pinned CLI's own
+/// checksum of the same bytes produces).
+fn buildHugeRleFrame(target: []u8, checksum: bool) usize {
     const block_count = 32_770;
     const block_size = 128 * 1024;
-    var frame_buf: [4 + 1 + 1 + 4 * block_count]u8 = undefined;
-    fastmem.copy(u8, frame_buf[0..4], &[_]u8{ 0x28, 0xB5, 0x2F, 0xFD });
-    frame_buf[4] = 0x00; // Frame_Header_Descriptor: every flag clear.
-    frame_buf[5] = 0x38; // Window_Descriptor: exponent 7, mantissa 0.
-    var at: usize = 6;
+    var at: usize = 0;
+    fastmem.copy(u8, target[0..4], &[_]u8{ 0x28, 0xB5, 0x2F, 0xFD });
+    target[4] = if (checksum) 0x04 else 0x00;
+    target[5] = 0x38; // Window_Descriptor: exponent 7, mantissa 0 (128 KiB).
+    at = 6;
     var block_index: usize = 0;
     while (block_index < block_count) : (block_index += 1) {
         const last: u24 = if (block_index + 1 == block_count) 1 else 0;
         const header: u24 = last | (1 << 1) | (@as(u24, block_size) << 3);
-        frame_buf[at] = @truncate(header);
-        frame_buf[at + 1] = @truncate(header >> 8);
-        frame_buf[at + 2] = @truncate(header >> 16);
-        frame_buf[at + 3] = 0x5A;
+        target[at] = @truncate(header);
+        target[at + 1] = @truncate(header >> 8);
+        target[at + 2] = @truncate(header >> 16);
+        target[at + 3] = 0x5A;
         at += 4;
     }
-    try testing.expectEqual(@as(usize, 6 + 4 * block_count), at);
+    if (checksum) {
+        fastmem.copy(u8, target[at..][0..4], &[_]u8{ 0x5E, 0x4A, 0x49, 0xB7 });
+        at += 4;
+    }
+    return at;
+}
 
-    var fixed_in: Io.Reader = .fixed(&frame_buf);
-    var window: Reader.Buffer(128 * 1024) = undefined;
+/// Drive the reader's pump directly, accumulating the served count in a
+/// u64: `streamAll` routes through std's `streamRemaining`, whose own
+/// offset accumulation is a usize that wraps past 2^32 — a std-side limit a
+/// 32-bit caller cannot route around, so the boundary tests drive the pump
+/// themselves (the review's direct-drive shape). The per-call counts are
+/// small on every target; only the total needs the width.
+fn drainU64(r: *Reader, served: *u64) !void {
     var sink: Io.Writer.Discarding = .init(&.{});
-    const served = try Reader.streamAll(128 * 1024, &fixed_in, &sink.writer, &window);
-    const expected: u64 = block_count * block_size;
-    try testing.expectEqual(expected, @as(u64, served));
+    while (true) {
+        const n = r.reader.stream(&sink.writer, .unlimited) catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => return err,
+        };
+        served.* += n;
+    }
+}
+
+test "Reader: the frame total runs past 2^32 without wrapping" {
+    // The M4 closing review's blocker (B1): the frame's running decoded total
+    // was usize, so this hostile RLE-only frame (4 input bytes per 128 KiB
+    // block, the probe decoding 4.29 GB in under a second) drove the total
+    // past 2^32 on the streaming path — a panic in Debug/ReleaseSafe and UB
+    // in ReleaseFast on every 32-bit target. `frame.State.decoded_len` is
+    // u64 now; the direct-drive shape below runs on the 32-bit targets
+    // themselves (`just check-32`), where the wrap is observable — this
+    // aarch64 host cannot see a revert (usize is u64 here), and the comptime
+    // type pin below catches the literal revert on every host.
+    comptime {
+        assert(@FieldType(frame.State, "decoded_len") == u64);
+    }
+    const block_count = 32_770;
+    const block_size = 128 * 1024;
+    var frame_buf: [6 + 4 * block_count]u8 = undefined;
+    const len = buildHugeRleFrame(&frame_buf, false);
+    try testing.expectEqual(@as(usize, 6 + 4 * block_count), len);
+
+    var fixed_in: Io.Reader = .fixed(frame_buf[0..len]);
+    var window: Reader.Buffer(128 * 1024) = undefined;
+    var r: Reader = .init(128 * 1024, &fixed_in, &window);
+    var served: u64 = 0;
+    try drainU64(&r, &served);
+    try testing.expectEqual(@as(u64, block_count) * block_size, served);
     try testing.expectEqual(@as(usize, frame_buf.len), fixed_in.seek);
+    try testing.expectEqual(@as(?Error, null), r.err);
+}
+
+test "Reader: the checksum fold runs past 2^32 without wrapping" {
+    // The closing re-review's B1-prime: the same frame with the
+    // Content_Checksum_Flag set — a legitimate frame the pinned CLI writes
+    // by default and `zstd -t` accepts — where the checksum fold's byte
+    // count was the last usize on the path (std's XxHash64 counts internally
+    // in a usize): a ReleaseSafe panic and a ReleaseFast false
+    // WrongChecksum on the 32-bit targets. The kernel is ours now
+    // (`xxh64.zig`: the u64 byte count, the differential sweep against
+    // std's kernel as the oracle), so this frame verifies its checksum on
+    // every target. The comptime pin catches the literal revert everywhere.
+    comptime {
+        assert(@FieldType(xxh64.State, "byte_count") == u64);
+    }
+    const block_count = 32_770;
+    const block_size = 128 * 1024;
+    var frame_buf: [6 + 4 * block_count + 4]u8 = undefined;
+    const len = buildHugeRleFrame(&frame_buf, true);
+    try testing.expectEqual(@as(usize, 10 + 4 * block_count), len);
+
+    var fixed_in: Io.Reader = .fixed(frame_buf[0..len]);
+    var window: Reader.Buffer(128 * 1024) = undefined;
+    var r: Reader = .init(128 * 1024, &fixed_in, &window);
+    var served: u64 = 0;
+    try drainU64(&r, &served);
+    try testing.expectEqual(@as(u64, block_count) * block_size, served);
+    try testing.expectEqual(@as(usize, frame_buf.len), fixed_in.seek);
+    // The clean end is the trailer's verification: no detail, the state done.
+    try testing.expectEqual(@as(?Error, null), r.err);
 }
 
 test "Reader: an over-the-end request still checks the trailer" {

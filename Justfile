@@ -26,6 +26,12 @@ lint:
 fmt:
     zig fmt src build.zig
 
+# The 32-bit proof: the large-total probe executed on a usize=32 target
+# (wasm32-wasi under wasmtime), where the wraps are observable. The dev host
+# cannot see them (usize is u64 there) and check-baseline only compiles.
+check-32:
+    zig build probe32 && wasmtime zig-out/bin/zstd-probe32.wasm
+
 # Compile-only cross-target gate: every portable fallback path must compile
 # (freestanding targets are excluded: the ztest runner needs an OS)
 check-baseline:

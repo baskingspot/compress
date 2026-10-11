@@ -912,7 +912,9 @@ numbering is mirrored so the two files read together.
   literals into a comptime `[block_size_max]u8` scratch, then execute
   sequences from it into the window (std does exactly this:
   `literals_buffer` + `sequence_buffer`, both `[1 << 17]u8`, `:315-327`).
-  Total stack scratch ~256 KB, comptime, zero allocation; the trailing
+  Total stack scratch ~256 KB, comptime — *a recommendation, not the
+  landed M4 shape*: the staging rides the caller-owned `Buffer` (`S2`, the
+  closing review's stack re-measure). The trailing
   literals (ZD27) come out of the same buffer. The one-shot decode writes
   literals into the target directly when the frame is literals-only — a
   *recommendation*, not the landed M4 shape: both paths decode literals into
