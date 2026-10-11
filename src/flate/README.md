@@ -144,10 +144,11 @@ Contracts, stated plainly:
 - **No hidden copies**: every copy goes through `fastmem.copy` /
   `fastmem.move` / `fastmem.set`; there is no `@memcpy`/`@memmove`/`@memset`
   anywhere in this module, tests included.
-- **Stack**: the encoder's match-finder table is `[1 << 15]u32` = 128 KiB of
-  comptime-sized stack scratch, and the streaming Writer's per-block path
-  adds a 64 KiB compressed-output scratch — an emitted block runs on roughly
-  192 KiB of stack, the one-shot path on roughly 128 KiB. Size thread stacks
+- **Stack**: the encoder's match-finder table is `[1 << 15]u32` = 128 KiB.
+  The one-shot `compress` holds it as a stack local; the streaming `Writer`
+  carries it as a field, so a stack-placed Writer plus its `Writer.Buffer`
+  is ~224 KiB, and each emitted block adds a 64 KiB compressed-output
+  scratch — `Writer.streamAll` peaks around 288 KiB. Size thread stacks
   accordingly when embedding.
 - **Allocation**: zero, end to end. The one-shot functions take no
   allocator; `Reader`/`Writer` take none either (caller-provided buffers
@@ -234,8 +235,9 @@ klauspost/compress's `flate/fast_encoder.go` and `flate/level1.go`
 (`fastEncL1`), which is where the algorithm is ported from; attribution is
 in `THIRD_PARTY.md`:
 
-- A single-slot `[1 << 15]u32` table (128 KiB of comptime-sized stack
-  scratch — zero heap allocation) and a 5-byte hash of the klauspost lineage
+- A single-slot `[1 << 15]u32` table (128 KiB — zero heap allocation; a
+  stack local in the one-shot `compress`, a `Writer` field in the streaming
+  path) and a 5-byte hash of the klauspost lineage
   (`prime5bytes = 889523592379`, 15 table bits).
 - Greedy: no lazy matching (level 1 is lazyless in every fast reference —
   klauspost L1, libdeflate L1, zlib-ng quick, zlib level 1, std level_1;
@@ -254,12 +256,13 @@ in `THIRD_PARTY.md`:
 
 The finder's window is the block's 32-KiB history followed by the block
 itself, so the 32-KiB distance cap is structural and matches cross block
-boundaries exactly as the format allows. The table is a block-scoped
-instance rebuilt from that window (the streaming Writer's scratch is per
-call, so it hashes the history region first; the one-shot path points at the
-source slice directly). If the fleet later shows the rebuild costs
-measurable throughput, klauspost's persistent table plus `shiftOffsets` is
-the known alternative — a perf change, not an API change.
+boundaries exactly as the format allows. One table serves the whole stream:
+entries are absolute stream positions (wrapping `u32`), so a stale entry
+fails the distance cap and the stream's blocks reuse the table with no
+re-zero — each block pays only a strided priming pass over its history. The
+streaming `Writer` keeps the table across its blocks (a window slide
+advances `window_base`, never rebuilds), and the one-shot `compress` shares
+the shape over the source slice.
 
 Block policy:
 
@@ -393,24 +396,32 @@ decompressing `Io.Reader` — the `std.Io` interfaces, in-package, over raw
 deflate. The `std.compress.flate` `Compress`/`Decompress` pair is the
 in-tree precedent for the shape: an embedded interface with a vtable,
 `@fieldParentPtr` back to the parent, a failing state after errors, and
-caller-provided buffers.
+caller-provided buffers. Both layers' entries are the shared pattern book's
+(`src/internal/README.md`): the reader's sticky guard, zero-length poll, and
+fill-and-return-0 count are the generated `internal.reader.VTable` entries;
+the writer's drain top-up, rebase slide, and poisoned `finish` are
+`internal.writer.VTable`'s, over this writer's `emitBlock` and its `03 00`
+ending hook; the tests' overrun sentinel is `internal.sentinel`.
 
 Buffer ownership, in full (OQ4):
 
 - `Writer.Buffer` is `[max_block_size + history_len]u8` (98303 bytes, ~96
   KiB): the uncompressed accumulation block (65535) plus the retained match
-  history (32768). `Writer.init(output: *Io.Writer, buffer: *Writer.Buffer)`.
+  history (32768). `Writer.init(output: *Io.Writer, buffer: *Writer.Buffer,
+  options: encode.Options)`.
 - `Reader.Buffer` is `[2 * history_len]u8` (65536 bytes, 64 KiB): one
   window of decoded output — the last 32 KiB of it is match history (the
   format's reach), the rest is fresh output. There is no compressed staging
   region: the Reader decodes directly from `input` through the bit reader.
   `Reader.init(input: *Io.Reader, buffer: *Reader.Buffer)`.
 - Zero allocation end to end: no allocator appears anywhere in the streaming
-  API. The compressed-output scratch and the finder table are comptime-sized
-  stack locals.
-- Stack: each emitted block uses roughly 192 KiB of stack (the 128 KiB
-  finder table plus the 64 KiB compressed-output scratch) — size thread
-  stacks accordingly when embedding.
+  API. The compressed-output scratch is a comptime-sized stack local; the
+  finder table is a `Writer` field, so it lives wherever the caller places
+  the writer.
+- Stack: a stack-placed `Writer` is ~128 KiB (the finder table dominates it)
+  plus its ~96 KiB `Writer.Buffer`, and each emitted block adds a 64 KiB
+  compressed-output scratch — `Writer.streamAll` peaks around 288 KiB. Size
+  thread stacks accordingly when embedding.
 
 Semantics:
 
@@ -420,13 +431,14 @@ Semantics:
   `error.WriteFailed` instead of a false success.
 - `Writer.flush()` mid-stream emits the buffered partial block and keeps the
   writer usable. It is always safe, because no data block carries BFINAL.
-- Full blocks stay maximal: `drain` emits one buffered block, then accepts
-  what fits of the incoming data; `rebase` (which `writableSliceGreedy`
-  hits when the buffer is full — the `File.Reader` simple-mode stream feeds
-  writers this way) emits the buffered input beyond the retained history and
-  slides the tail to the front, never discarding input. History is a ratio
-  input on the writer side, never a correctness one: a rebase that the
-  caller's capacity request leaves no room for simply drops it.
+- Full blocks stay maximal: `drain` tops the buffered block up from the
+  front of the incoming data, then emits the full block; `rebase` (which
+  `writableSliceGreedy` hits when the buffer is full — the `File.Reader`
+  simple-mode stream feeds writers this way) emits the buffered input beyond
+  the retained history and slides the tail to the front, never discarding
+  input. History is a ratio input on the writer side, never a correctness
+  one: a rebase that the caller's capacity request leaves no room for simply
+  drops it.
 - `Reader` ends cleanly with `error.EndOfStream` (sticky) once the final
   block's output has been consumed, and fails closed with
   `error.ReadFailed` (sticky, details in `err`) on any malformed stream or
@@ -453,14 +465,13 @@ Semantics:
   are independent; flate's window must retain history, so its cap is
   tighter.)
 
-Files (the intended layout; the implementation lanes may split further):
-`root.zig` (public surface), `encode.zig` (fixed-Huffman encoder and match
-finder), `decode.zig` (inflate, bit reader, and the canonical Huffman
-table construction shared by both sides), `golden.zig` (ported golden
-fixtures, shared by every layer's tests), `Writer.zig` + `Reader.zig` (the
-streaming `Io` layer), `Checksum.zig` (the container checksum hook's
-interface), `common.zig` (little-endian integer access), `bench.zig` (local
-benchmark), `oracle.zig` (the
+Files: `root.zig` (public surface), `encode.zig` (fixed-Huffman encoder and
+match finder), `decode.zig` (inflate, bit reader, and the canonical Huffman
+table construction and §3.2.5 code tables shared by both sides), `golden.zig`
+(ported golden fixtures plus the shared corpus shapes, read by every layer's
+tests), `Writer.zig` + `Reader.zig` (the streaming `Io` layer), `Checksum.zig`
+(the container checksum hook's interface), `common.zig` (little-endian
+integer access), `bench.zig` (local benchmark), `oracle.zig` (the
 external-oracle harness behind `just flate-oracle`), `fuzz.zig` (fuzz
 targets).
 
@@ -549,13 +560,13 @@ The conformance bar is the reference suites, ported as fixtures and shared
 by every layer's tests (the snappy pattern: `golden.zig` holds the tables,
 and the block, streaming, and round-trip tests all read them):
 
-- **golang/go `flate_test.go` `TestStreams` (27 hex vectors)** — the primary
+- **golang/go `flate_test.go` `TestStreams` (28 hex vectors)** — the primary
   conformance table: every degenerate dynamic-header corner (empty and
   degenerate HCLenTree/HLitTree/HDistTree, a spanning repeat code, symbol
   284 with count 31, reserved symbol 287, HDistTree "of normal length 30"
   vs "excessive length 31"), a raw stored block, and the
   issue-10426/11030/11033 regressions. `TestTruncatedStreams`: every prefix
-  of a 26-byte two-block stream must fail closed. Both port verbatim
+  of a 22-byte two-block stream must fail closed. Both port verbatim
   (BSD-3-Clause; attribution in `THIRD_PARTY.md`).
 - **golang/go `deflate_test.go` `deflateTests` (15 rows)** — as *decode*
   goldens: every `out` is a valid stream that must decode to `in` (stored
@@ -567,20 +578,23 @@ and the block, streaming, and round-trip tests all read them):
   short-read error, never a panic.
 - **The `huffman-*` `.in`/`.golden` pairs (9)** — `.in` is uncompressed
   input, `.golden` a valid huffman-only stream that decodes to it (verified
-  against the oracle). The `.expect` variants are Go-heuristic byte-exact
-  encoder outputs: valid decoder inputs, not encoder goldens.
-- **Corpus texts** — `e.txt` (97.7 KB of digits of e) and
-  `Isaac.Newton-Opticks.txt` (553.9 KB) from Go's testdata, plus
-  `Mark.Twain-Tom.Sawyer.txt` from klauspost/compress (Go removed it from
-  `src/compress/testdata/`; klauspost is the vendoring source). BSD-3.
+  against the oracle); a single block with BFINAL clear, so verbatim it is a
+  truncated stream, and with BFINAL set it must decode to `.in`. BSD-3
+  (Go's testdata).
+- **The corpus shapes** — repetitive text, PRNG bytes, markup, a single-byte
+  run, and a structured-plus-random batch, built by `golden.makeShape` and
+  read by the one-shot and streaming round trips. The bench and the fleet
+  corpus (`bench/zig/corpus.zig`, `bench/corpus/SHA256SUMS`) build the same
+  shapes.
 - **RFC 1951's own micro-examples** — `§3.2.2`'s canonical-construction
   table (the fixed-header emission test), `§3.2.3`'s overlap copy,
   `§3.2.7`'s repeat expansion, `§3.1`'s 520-as-two-bytes — each test cites
   the section it validates. Plus the two hand-built oracle-verified streams
   in flate-notes.md §3.2 (fixed Huffman; the extra-bit order proved in both
-  directions) and std's four raw micro-streams (MIT, in-tree).
+  directions) and std's three raw micro-streams (MIT, in-tree).
 - **The oracle lanes, both directions** — python3's `zlib`, run as a CLI
-  (nothing vendored), over the committed corpus:
+  (nothing vendored), over the committed fixtures and freshly generated
+  shapes, plus streaming rows through the example CLI:
 
   ```python
   import zlib
@@ -598,12 +612,15 @@ and the block, streaming, and round-trip tests all read them):
 - **Sentinel overrun checks on every decode**: the target is pre-filled with
   cycling sentinel bytes, and every byte past the decoded length must be
   untouched afterwards.
-- **Fuzz**: `fuzz.zig` carries a decode target (over the golden corpus, plus
-  a corrupt-input target that must never panic or overrun) and a round-trip
-  target, run under the default runner: `zig build test
-  -Doptimize=ReleaseSafe -Dfuzz --fuzz=<budget>` (`just fuzz 10M`) — Debug
-  fuzz hits ziglang/zig#30655. Fuzz-target creation is the fuzz-engineer's
-  lane.
+- **Fuzz**: seven targets in `fuzz.zig`, one per layer of the decode
+  surface — block decode (arbitrary bytes, sentinel-checked, re-encode round
+  trip on success), the one-shot round trip, the stream round trip (through
+  both `streamAll` pairs and the exact-boundary property), the writer
+  machinery against a model, corruption against an independent walk,
+  amplification caps, and the reader's consumer machinery — run with `zig
+  build test -Doptimize=ReleaseSafe -Dfuzz --fuzz=<budget>` (`just fuzz
+  10M`). Debug fuzz hits ziglang/zig#30655. Fuzz-target creation is the
+  fuzz-engineer's lane.
 
 Run everything with `zig build test` / `just test` (the ztest plain-text
 runner).
@@ -623,8 +640,7 @@ implementations shaped the work, both BSD-3-Clause and both attributed in
   64-KiB block policy) is ported from here.
 - **[golang/go][golang]** (`src/compress/flate`) — BSD-3-Clause. The
   `TestStreams`, `TestTruncatedStreams`, truncated-stream, and `deflateTests`
-  fixture tables and the `huffman-*` pairs are ported from here, as are the
-  corpus texts.
+  fixture tables and the `huffman-*` pairs are ported from here.
 
 Studied but not ported: Zig std's `std.compress.flate` (MIT — the streaming
 `Compress`/`Decompress` shape and the decoder-validation rules), and the zlib

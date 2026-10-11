@@ -16,7 +16,11 @@
 //!
 //! The `Framing` contract, in full. Every function and constant is
 //! referenced from here, so a missing or misspelled member fails the
-//! container's instantiation, not a runtime call:
+//! container's instantiation, not a runtime call. The type-only members
+//! (`Level`, `Header`, `HeaderError`, `InnerReader`, `InnerWriter`) are
+//! structural: the driver names their values, not their types, so they are
+//! checked where the value flows (a `HeaderError` must coerce into
+//! `Error`, an `initReader` result into the `inner` field):
 //!
 //! - `Level`, `Options` — the public encoder knobs (`Options.level` is a
 //!   `Level`, and `Level` has a `.ratio` seat).
@@ -62,7 +66,6 @@ const Io = std.Io;
 const assert = std.debug.assert;
 
 const lifecycle = @import("reader.zig");
-const State = lifecycle.State;
 
 /// Whether the container's fixed header has reached the output: the header
 /// is lazy, so the first entry that can emit a byte — a write that drains, a

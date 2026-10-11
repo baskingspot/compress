@@ -21,11 +21,12 @@ it before you change a kernel or make a performance claim.
   helper. One-call pumps: `Writer.streamAll`, `Reader.streamAll`.
 - `src/flate/`: raw deflate (RFC 1951). `encode.zig` ports the klauspost
   level-1 match-finder (THIRD_PARTY.md); `decode.zig` carries inflate, the
-  bit reader, and the canonical Huffman-table construction shared by both
-  sides; `Writer.zig` + `Reader.zig` are the streaming `Io` layer over raw
-  deflate (BFINAL self-delimits; there is no in-package framing — see
-  `src/flate/README.md`, "Streaming"); `golden.zig` shares the Go flate
-  fixtures across every layer's tests; `bench.zig` is the local benchmark;
+  bit reader, and the canonical Huffman-table construction and §3.2.5 code
+  tables shared by both sides; `Writer.zig` + `Reader.zig` are the streaming
+  `Io` layer over raw deflate (BFINAL self-delimits; there is no in-package
+  framing — see `src/flate/README.md`, "Streaming"); `golden.zig` shares the
+  Go flate fixtures and the corpus shapes across every layer's tests;
+  `bench.zig` is the local benchmark;
   `oracle.zig` is the external-oracle harness behind `just flate-oracle`.
   Fuzz targets land in `fuzz.zig` (fuzz-engineer lane).
 - `src/gzip/`: gzip members (RFC 1952) over flate. `encode.zig` writes the
@@ -67,8 +68,11 @@ it before you change a kernel or make a performance claim.
   zstd rows live in the fleet driver (`bench/zig/bench_zcompress.zig`, `just
   bench-run`). Fuzz targets land in `fuzz.zig` (fuzz-engineer lane).
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
-  sentinel test machinery and the reader lifecycle + generated vtable
-  entries. Imports only `std` and `fastmem`; reached by relative import
+  sentinel test machinery, the reader lifecycle + generated reader vtable
+  entries, the shared writer machinery (the generated `Io.Writer` entries
+  and the poisoned `finish`), the endian-bound integer helpers the codec
+  `common.zig` files bind, and the container driver over a codec's framing
+  type. Imports only `std` and `fastmem`; reached by relative import
   (`@import("../internal/root.zig")`), never a build module, and never
   re-exported by the barrel; a codec that uses it lifts with it in tow,
   under a module root above both directories (relative imports cannot

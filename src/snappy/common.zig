@@ -2,7 +2,7 @@
 //! (the uncompressed-length prefix) and the framed stream's length-prefix
 //! width.
 
-const mem = @import("std").mem;
+const internal = @import("../internal/root.zig");
 
 /// The framed stream's length-prefix width: a `u32-le` compressed length
 /// (README.md, "Streaming").
@@ -54,19 +54,11 @@ pub fn readUvarint(input: []const u8, pos: *usize) error{DecompressionFailed}!us
 /// Reads an integer from memory with bit count specified by T.
 /// The bit count of T must be evenly divisible by 8.
 /// This function cannot fail and cannot cause undefined behavior.
-/// Forces little-endianness.
-pub inline fn readInt(comptime T: type, buffer: *const [@divExact(@typeInfo(T).int.bits, 8)]u8) T {
-    return mem.readInt(T, buffer, .little);
-}
+/// Forces little-endianness (the body is `internal.int`'s, bound here).
+pub const readInt = internal.int.little.readInt;
 
 /// Writes an integer to memory, storing it in twos-complement.
 /// This function always succeeds, has defined behavior for all inputs, but
 /// the integer bit width must be divisible by 8.
 /// Forces little-endianness.
-pub inline fn writeInt(
-    comptime T: type,
-    buffer: *[@divExact(@typeInfo(T).int.bits, 8)]u8,
-    value: T,
-) void {
-    return mem.writeInt(T, buffer, value, .little);
-}
+pub const writeInt = internal.int.little.writeInt;

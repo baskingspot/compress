@@ -12,6 +12,12 @@ pub const sentinel = @import("sentinel.zig");
 /// The reader lifecycle (`State`, `guard`, `fail`) and the generated
 /// `Io.Reader` vtable entries (`VTable`).
 pub const reader = @import("reader.zig");
+/// The shared writer machinery: the generated `Io.Writer` vtable entries and
+/// the poisoned `finish` every compressing codec writer runs (`VTable`).
+pub const writer = @import("writer.zig");
+/// Endian-bound integer access: the one home of the codecs' `readInt`/
+/// `writeInt` (`Int`, `little`, `big`).
+pub const int = @import("int.zig");
 /// The container driver: the framing-agnostic machinery a container codec
 /// over an inner codec shares (`ReaderHooks`/`WriterHooks`/`EncodeHooks`/
 /// `DecodeHooks`, `readExact`), parameterized over the codec's framing.

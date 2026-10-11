@@ -3,25 +3,18 @@
 //! Adler-32 trailer (§2.2) — so the helpers bake the endianness in and call
 //! sites carry no endian argument. The fuzz seeds' Smith serialization is
 //! little-endian by that harness's format and does not use these helpers.
+//! The bodies are `internal.int`'s, bound here.
 
-const mem = @import("std").mem;
+const internal = @import("../internal/root.zig");
 
 /// Reads an integer from memory with bit count specified by T.
 /// The bit count of T must be evenly divisible by 8.
 /// This function cannot fail and cannot cause undefined behavior.
 /// Forces big-endianness.
-pub inline fn readInt(comptime T: type, buffer: *const [@divExact(@typeInfo(T).int.bits, 8)]u8) T {
-    return mem.readInt(T, buffer, .big);
-}
+pub const readInt = internal.int.big.readInt;
 
 /// Writes an integer to memory, storing it in twos-complement.
 /// This function always succeeds, has defined behavior for all inputs, but
 /// the integer bit width must be divisible by 8.
 /// Forces big-endianness.
-pub inline fn writeInt(
-    comptime T: type,
-    buffer: *[@divExact(@typeInfo(T).int.bits, 8)]u8,
-    value: T,
-) void {
-    return mem.writeInt(T, buffer, value, .big);
-}
+pub const writeInt = internal.int.big.writeInt;

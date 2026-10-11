@@ -49,9 +49,10 @@ const max_block_size = encode.max_block_size;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
 
-/// `§3.2.5` — the longest match a symbol can declare (length code 285 is 258),
-/// so the decoder stops this far short of a full window.
-const max_match_len = 258;
+/// `§3.2.5` — the longest match a symbol can declare (length code 285 is
+/// 258), so the decoder stops this far short of a full window. The constant
+/// lives with the code tables (decode.zig) and is aliased here.
+const max_match_len = decode.max_match_len;
 
 /// The widest peek any read takes: 16 bits, the stored block's LEN or NLEN
 /// (`§3.2.4`). The Huffman tables peek at most 15.

@@ -21,6 +21,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 
 const fastmem = @import("fastmem");
 
+const internal = @import("../internal/root.zig");
 const common = @import("common.zig");
 const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
@@ -41,11 +42,11 @@ const Writer = @This();
 writer: Io.Writer,
 output: *Io.Writer,
 
-const vtable: Io.Writer.VTable = .{
-    .drain = drain,
-    .flush = flush,
-    .rebase = rebase,
-};
+/// The shared writer machinery (`src/internal/writer.zig`): the generated
+/// `Io.Writer` entries and the poisoned `finish`, over this writer's
+/// `emitBlock`. A snappy stream has no ending of its own (the last block is
+/// the last byte), so the ending hook is null.
+const Hooks = internal.writer.VTable(Writer, emitBlock, null);
 
 /// Wrap `output` (the compressed-stream sink) with `buffer` as the
 /// uncompressed accumulation buffer. Write through `&w.writer`; complete the
@@ -55,7 +56,7 @@ pub fn init(output: *Io.Writer, buffer: *Buffer) Writer {
         .writer = .{
             .buffer = buffer,
             .end = 0,
-            .vtable = &vtable,
+            .vtable = &Hooks.vtable,
         },
         .output = output,
     };
@@ -63,12 +64,11 @@ pub fn init(output: *Io.Writer, buffer: *Buffer) Writer {
 
 /// Complete the stream: emit the final partial block, then flush `output`.
 /// Terminal — the writer is poisoned afterwards, and a failed or finished
-/// writer reports `error.WriteFailed` instead of a false success.
+/// writer reports `error.WriteFailed` instead of a false success. The shared
+/// machinery (`src/internal/writer.zig`) owns the poison check, the final
+/// block emission, and the flush.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
-    if (w.writer.vtable != &vtable) return error.WriteFailed;
-    defer w.writer = .failing;
-    try w.emitBlock();
-    try w.output.flush();
+    return Hooks.finish(w);
 }
 
 /// Compress `bytes` (a region of the accumulation buffer) into stack
@@ -85,74 +85,20 @@ fn emit(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
     try w.output.writeAll(scratch[0..n]);
 }
 
-/// Emit the whole buffered block and empty the buffer.
-fn emitBlock(w: *Writer) Io.Writer.Error!void {
-    try w.emit(w.writer.buffer[0..w.writer.end]);
-    w.writer.end = 0;
-    // Postcondition: the block is fully emitted and the buffer is empty.
-    assert(w.writer.end == 0);
-}
-
-/// The buffer is full: emit it as one block, then accept the front of
-/// `data` into the freed buffer. The caller re-slices the remainder and
-/// calls again, so full blocks stay maximal — only `flush`/`finish` emit
-/// partial ones.
-fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-    errdefer w.* = .failing;
-    const parent: *Writer = @fieldParentPtr("writer", w);
-    // Top up the buffered block from the front of `data` (the last slice
-    // repeats `splat` times). `drain` only runs when `data` does not fit, so
-    // the top-up fills the buffer: every emitted block but the last is full.
-    var consumed: usize = 0;
-    for (data[0 .. data.len - 1]) |bytes| {
-        consumed += accept(w, bytes);
-        if (w.end == w.buffer.len) break;
+/// Emit the first `emit_len` bytes of the buffered block, then leave the
+/// unemitted tail at the front of the buffer — the shared writer machinery's
+/// contract (`src/internal/writer.zig`): `drain`/`flush`/`finish` emit the
+/// whole block, `rebase` the front, and the preserved tail is the block
+/// afterwards.
+fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
+    assert(emit_len <= w.writer.end);
+    if (emit_len == 0) return;
+    try w.emit(w.writer.buffer[0..emit_len]);
+    const keep = w.writer.end - emit_len;
+    if (keep != 0) {
+        fastmem.move(u8, w.writer.buffer[0..keep], w.writer.buffer[emit_len..][0..keep]);
     }
-    const pattern = data[data.len - 1];
-    if (pattern.len != 0) {
-        for (0..splat) |_| {
-            if (w.end == w.buffer.len) break;
-            consumed += accept(w, pattern);
-        }
-    }
-    // A full buffer is one maximal block; a degenerate call that accepted
-    // nothing still makes progress by emitting what is buffered.
-    if (w.end == w.buffer.len or consumed == 0) try parent.emitBlock();
-    return consumed;
-}
-
-/// Copy at most the buffer's remaining space from the front of `bytes` to
-/// `buffer[end..]`, returning the bytes taken.
-fn accept(w: *Io.Writer, bytes: []const u8) usize {
-    const n = @min(bytes.len, w.buffer.len - w.end);
-    fastmem.copy(u8, w.buffer[w.end..][0..n], bytes[0..n]);
-    w.end += n;
-    return n;
-}
-
-fn flush(w: *Io.Writer) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    const parent: *Writer = @fieldParentPtr("writer", w);
-    try parent.emitBlock();
-    try parent.output.flush();
-}
-
-/// Everything buffered except the last `preserve` bytes is written data:
-/// emit it as a block, then slide the preserved tail to the front. (A
-/// consumer can ask for a direct writable slice into the buffer via
-/// `writableSliceGreedy`; when the buffer is full, that call lands here —
-/// discarding instead of emitting would silently drop a whole block.)
-fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    assert(preserve + capacity <= w.buffer.len);
-    const parent: *Writer = @fieldParentPtr("writer", w);
-    const keep = @min(preserve, w.end);
-    try parent.emit(w.buffer[0 .. w.end - keep]);
-    fastmem.move(u8, w.buffer[0..keep], w.buffer[w.end - keep ..][0..keep]);
-    w.end = keep;
-    // Postcondition: the preserved tail is buffered and the freed room is at
-    // least the requested capacity.
-    assert(w.buffer.len - w.end >= capacity);
+    w.writer.end = keep;
 }
 
 test "Writer: empty input produces an empty stream" {

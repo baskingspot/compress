@@ -97,15 +97,11 @@ bits: u64 = 0,
 /// Valid bits in `bits` (0-7 between emissions).
 bit_count: u6 = 0,
 
-const vtable: Io.Writer.VTable = .{
-    .drain = drain,
-    .flush = flush,
-    .rebase = rebase,
-};
+/// The shared writer machinery (`src/internal/writer.zig`): the generated
+/// `Io.Writer` entries and the poisoned `finish`, over this writer's
+/// `emitBlock` and its `03 00` ending hook.
+const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 
-/// Wrap `output` (the compressed-stream sink) with `buffer` as the
-/// accumulation window. Write through `&w.writer`; complete the stream with
-/// `finish`.
 /// Wrap `output` (the compressed-stream sink) with `buffer` as the
 /// accumulation window and `options` fixed for the stream's lifetime — the
 /// level is not re-read mid-stream (changing `options` on the struct is not
@@ -126,7 +122,7 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
         .writer = .{
             .buffer = buffer[0..max_block_size],
             .end = 0,
-            .vtable = &vtable,
+            .vtable = &Hooks.vtable,
         },
         .output = output,
         .buffer = buffer,
@@ -137,15 +133,17 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 /// Complete the stream: emit the buffered partial block, then the final empty
 /// fixed block, then flush `output`. Terminal — the writer is poisoned
 /// afterwards, and a failed or finished writer reports `error.WriteFailed`
-/// instead of a false success.
+/// instead of a false success. The shared machinery
+/// (`src/internal/writer.zig`) owns the poison check, the block emission, and
+/// the flush; `writeEnding` is this codec's ending.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
-    if (w.writer.vtable != &vtable) return error.WriteFailed;
-    defer w.writer = .failing;
-    try w.emitBlock(w.writer.end);
+    return Hooks.finish(w);
+}
 
-    // README, "Divergences" T4 — BFINAL=1, BTYPE=01, end-of-block, at the
-    // stream's current bit offset: the same ending the one-shot encoder
-    // emits, from the same function.
+/// README, "Divergences" T4 — BFINAL=1, BTYPE=01, end-of-block, at the
+/// stream's current bit offset: the same ending the one-shot encoder emits,
+/// from the same function.
+fn writeEnding(w: *Writer) Io.Writer.Error!void {
     var tail: [ending_len]u8 = undefined;
     var bw: encode.BitWriter = .{
         .target = &tail,
@@ -157,13 +155,15 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
     w.bits = 0;
     w.bit_count = 0;
     try w.output.writeAll(tail[0..bw.pos]);
-    try w.output.flush();
 }
 
 /// Emit the first `emit_len` bytes of the buffered block as one deflate
 /// block, then slide the window past them: the emitted bytes become history,
 /// so nothing moves until the block region runs out of room behind
-/// `max_block_size` (`compact`). A no-op when `emit_len` is zero.
+/// `max_block_size` (`compact`). The shared writer machinery's contract
+/// (`src/internal/writer.zig`): the unemitted tail ends at the front of the
+/// block region (`writer.end -= emit_len`), which is what `rebase`'s
+/// preserved tail relies on. A no-op when `emit_len` is zero.
 fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     assert(emit_len <= w.writer.end);
     if (emit_len == 0) return;
@@ -225,79 +225,15 @@ fn compact(w: *Writer) void {
     w.block_start = keep;
 }
 
-/// The block region is full: emit it as one maximal block, then accept the
-/// front of `data` into the freed region. The caller re-slices the remainder
-/// and calls again, so full blocks stay maximal — only `flush`, `finish`,
-/// and `rebase` emit partial ones.
-fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-    errdefer w.* = .failing;
-    const parent: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    // Top up the buffered block from the front of `data` (the last slice
-    // repeats `splat` times). `drain` only runs when `data` does not fit, so
-    // the top-up fills the region: every emitted block but the last is full.
-    var consumed: usize = 0;
-    for (data[0 .. data.len - 1]) |bytes| {
-        consumed += accept(w, bytes);
-        if (w.end == w.buffer.len) break;
-    }
-    const pattern = data[data.len - 1];
-    if (pattern.len != 0) {
-        for (0..splat) |_| {
-            if (w.end == w.buffer.len) break;
-            consumed += accept(w, pattern);
-        }
-    }
-    // A full block is one maximal block; a degenerate call that accepted
-    // nothing still makes progress by emitting what is buffered.
-    if (w.end == w.buffer.len or consumed == 0) try parent.emitBlock(w.end);
-    return consumed;
-}
-
-/// Copy at most the block region's remaining space from the front of
-/// `bytes`, returning the bytes taken.
-fn accept(w: *Io.Writer, bytes: []const u8) usize {
-    const n = @min(bytes.len, w.buffer.len - w.end);
-    fastmem.copy(u8, w.buffer[w.end..][0..n], bytes[0..n]);
-    w.end += n;
-    return n;
-}
-
-/// Emit the buffered partial block and flush `output`, keeping the writer
-/// usable: no data block carries BFINAL, so a mid-stream flush is always safe
-/// (README, "Divergences" T4).
-fn flush(w: *Io.Writer) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    const parent: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    try parent.emitBlock(w.end);
-    try parent.output.flush();
-}
-
-/// Everything buffered except the last `preserve` bytes is written data:
-/// emit it as a block, then leave the preserved tail as the block. (A
-/// consumer can ask for a direct writable slice into the block region via
-/// `writableSliceGreedy`; when the region is full, that call lands here —
-/// discarding instead of emitting would silently drop input.)
-fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    assert(preserve + capacity <= w.buffer.len);
-    const parent: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    const keep = @min(preserve, w.end);
-    try parent.emitBlock(w.end - keep);
-    // The preserved tail is now the block, with the emitted bytes as history
-    // behind it: `end` is already `keep`, and the freed room is at least the
-    // requested capacity.
-    assert(w.end == keep);
-    assert(w.buffer.len - w.end >= capacity);
-}
-
 // ---------------------------------------------------------------------------
 // Tests. Every decode goes through the landed one-shot decoder (decode.zig),
 // with the sentinel overrun rule: the target is pre-filled and the bytes past
 // the decoded length must be untouched.
 // ---------------------------------------------------------------------------
 
-/// Encode `source` through `Writer`, decode with the one-shot decoder, expect
-/// identity with the sentinel rule enforced.
+/// Encode `source` through `Writer`, check the T4 ending, decode with the
+/// one-shot decoder, expect identity with the sentinel rule enforced
+/// (`golden.checkDecode`: exact-cap, then slack, both sentinel-checked).
 fn roundTrip(source: []const u8) !void {
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
@@ -311,11 +247,7 @@ fn roundTrip(source: []const u8) !void {
 
     const target = try gpa.alloc(u8, source.len + sentinel.len);
     defer gpa.free(target);
-    sentinel.fill(target);
-    const n = try decode.decompress(out.written(), target);
-    try testing.expectEqual(source.len, n);
-    try testing.expectEqualSlices(u8, source, target[0..n]);
-    try sentinel.expect(target, n);
+    try golden.checkDecode(target, out.written(), source);
 }
 
 test "Writer: empty input is the final empty block" {
@@ -355,8 +287,8 @@ test "Writer: round trips across block boundaries" {
     const gpa = testing.allocator;
     const sizes = [_]usize{ 0, 1, 4, 13, 1000, 65534, 65535, 65536, 65537, 131071 };
     for (sizes) |len| {
-        inline for (.{ Shape.text, Shape.random, Shape.rle }) |shape| {
-            const source = try makeShape(gpa, shape, len);
+        inline for (.{ golden.Shape.text, golden.Shape.random, golden.Shape.rle }) |shape| {
+            const source = try golden.makeShape(gpa, shape, len);
             defer gpa.free(source);
             roundTrip(source) catch |err| {
                 print("FAIL: {s} len {d}\n", .{ @tagName(shape), len });
@@ -372,7 +304,7 @@ test "Writer: blocks are maximal and the split follows the block size" {
     // and the stream is exactly `input + 5 * blocks + 2` — which only holds if
     // the split is exactly `max_block_size`.
     const gpa = testing.allocator;
-    const source = try makeShape(gpa, .random, 16 * max_block_size);
+    const source = try golden.makeShape(gpa, .random, 16 * max_block_size);
     defer gpa.free(source);
 
     var out: Io.Writer.Allocating = .init(gpa);
@@ -831,7 +763,7 @@ test "Writer: the checksum hook folds multi-block streams and changes no byte" {
     const gpa = testing.allocator;
     const sizes = [_]usize{ 0, 1, 1000, 65535, 65536, 3 * max_block_size + 17 };
     for (sizes) |len| {
-        const source = try makeShape(gpa, .text, len);
+        const source = try golden.makeShape(gpa, .text, len);
         defer gpa.free(source);
 
         var plain: Io.Writer.Allocating = .init(gpa);
@@ -897,32 +829,6 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
         if (writes % 7 == 0) try w.writer.flush();
     }
     try w.finish();
-}
-
-/// Corpus shapes, the same set the encoder and bench use: repetitive text,
-/// PRNG bytes (incompressible, so the stored fallback runs), a single-byte
-/// run.
-const Shape = enum { text, random, rle };
-
-fn makeShape(gpa: std.mem.Allocator, shape: Shape, len: usize) ![]u8 {
-    const buf = try gpa.alloc(u8, len);
-    switch (shape) {
-        .text => {
-            const phrase = "the quick brown fox jumps over the lazy dog. ";
-            var i: usize = 0;
-            while (i < len) {
-                const n = @min(phrase.len, len - i);
-                fastmem.copy(u8, buf[i..][0..n], phrase[0..n]);
-                i += n;
-            }
-        },
-        .random => {
-            var rng: DefaultPrng = .init(0xC0FFEE);
-            for (buf) |*b| b.* = rng.random().int(u8);
-        },
-        .rle => fastmem.set(u8, buf, 0x41),
-    }
-    return buf;
 }
 
 /// Stream everything from `in` through one flate `Writer` into `out`,

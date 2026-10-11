@@ -97,8 +97,10 @@ pub const HuffmanFixture = struct {
 
 /// Decode `source` into `target` (sentinel-filled) twice: exact-cap first, so
 /// any write past the decoded length is an out-of-bounds write, then with
-/// slack, to prove the bytes past the decoded length are untouched.
-fn checkDecode(target: []u8, source: []const u8, want: []const u8) !void {
+/// slack, to prove the bytes past the decoded length are untouched. Public:
+/// every layer's round-trip helper runs its stream through this one shape
+/// (the sentinel rule is AGENTS.md's, and it should not be respelled).
+pub fn checkDecode(target: []u8, source: []const u8, want: []const u8) !void {
     try testing.expect(want.len <= target.len);
 
     sentinel.fill(target);
@@ -470,7 +472,7 @@ pub const micro_cases: [9]MicroCase = .{
         .source = &hex("0de0b5010000000220dc66e8ff2729a06e"),
         .want = "ABCCCC",
     },
-    // Zig std's four raw micro-streams (`std/compress/flate/Decompress.zig`,
+    // Zig std's three raw micro-streams (`std/compress/flate/Decompress.zig`,
     // MIT, in-tree), one per block kind: a stored block, a fixed block, and a
     // dynamic block (README.md, "Testing & golden vectors").
     .{
@@ -748,4 +750,46 @@ test "golden decode: BufferTooSmall leaves the cap untouched" {
     sentinel.fill(&target);
     try testing.expectError(error.BufferTooSmall, decompress(source, &target));
     try sentinel.expect(&target, 0);
+}
+
+/// Corpus shapes, the same set the bench and the fleet corpus build:
+/// repetitive text, PRNG bytes (incompressible, so the stored fallback runs),
+/// markup, a single-byte run, and a structured-plus-random batch. The
+/// round-trip tests in encode.zig and Writer.zig share this one builder (the
+/// bench keeps its own copy: it is a separate artifact and cannot import test
+/// code).
+pub const Shape = enum { text, random, html, rle, mixed };
+
+pub fn makeShape(allocator: std.mem.Allocator, shape: Shape, len: usize) ![]u8 {
+    const buf = try allocator.alloc(u8, len);
+    switch (shape) {
+        .text => {
+            const phrase = "the quick brown fox jumps over the lazy dog. ";
+            var i: usize = 0;
+            while (i < len) {
+                const n = @min(phrase.len, len - i);
+                fastmem.copy(u8, buf[i..][0..n], phrase[0..n]);
+                i += n;
+            }
+        },
+        .random => {
+            var rng: std.Random.DefaultPrng = .init(0xC0FFEE);
+            for (buf) |*b| b.* = rng.random().int(u8);
+        },
+        .html => {
+            const phrase = "<div class=\"row\"><span>hello</span><span>flate</span></div>";
+            var i: usize = 0;
+            while (i < len) {
+                const n = @min(phrase.len, len - i);
+                fastmem.copy(u8, buf[i..][0..n], phrase[0..n]);
+                i += n;
+            }
+        },
+        .rle => fastmem.set(u8, buf, 0x41),
+        .mixed => {
+            var rng: std.Random.DefaultPrng = .init(0x5A4BEEF);
+            for (buf, 0..) |*b, i| b.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(i)));
+        },
+    }
+    return buf;
 }

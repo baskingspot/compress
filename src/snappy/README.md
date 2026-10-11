@@ -99,7 +99,11 @@ caller-provided buffers. The reader's entries and lifecycle are the shared
 pattern book's (`src/internal/README.md`, "The Io codec pattern book"):
 the sticky guard, the zero-length poll, and the fill-and-return-0 count are
 the generated `internal.reader.VTable` entries, and the tests' overrun
-sentinel is `internal.sentinel`.
+sentinel is `internal.sentinel`. The writer's entries are shared the same
+way: the drain top-up, the rebase slide, and the poisoned `finish` are
+`internal.writer.VTable`'s generated machinery, over this writer's
+`emitBlock` (a snappy stream has no ending of its own, so the ending hook is
+null).
 
 Buffer ownership, in full:
 
@@ -121,11 +125,12 @@ Semantics:
 - `Writer.finish()` emits the final partial block, flushes `output`, and is
   terminal (the writer is poisoned afterwards). `flush` mid-stream emits the
   partial block and keeps the writer usable.
-- Full blocks stay maximal: `drain` emits one buffered block, then accepts
-  what fits of the incoming data; the machinery re-slices and retries.
-  `rebase` (which `writableSliceGreedy` hits when the buffer is full — the
-  `File.Reader` simple-mode stream feeds writers this way) emits everything
-  buffered beyond the preserved tail, never discards it.
+- Full blocks stay maximal: `drain` tops the buffered block up from the
+  front of the incoming data, then emits the full block; the machinery
+  re-slices and retries. `rebase` (which `writableSliceGreedy` hits when the
+  buffer is full — the `File.Reader` simple-mode stream feeds writers this
+  way) emits everything buffered beyond the preserved tail, never discards
+  it.
 - `Reader` ends cleanly with `error.EndOfStream` at a block boundary (zero
   bytes available; sticky) and fails closed with `error.ReadFailed` (sticky,
   details in `err`) on any corrupt framing or block. A partial length prefix,

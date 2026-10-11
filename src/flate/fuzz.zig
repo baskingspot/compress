@@ -21,6 +21,9 @@
 //!     poked LEN/NLEN, poked tree headers — against an independent walk of the
 //!     same bytes; the `Reader` must fail closed (stickily, `err` set) or serve
 //!     exactly what the walk says, and never write outside its window.
+//!   - `fuzzAmplification`: bomb-shaped streams decoded into caps below, at,
+//!     and above their decoded length: the cap is exact, the guard bytes stay
+//!     untouched, and a small stream never buys output past the cap.
 //!   - `fuzzReaderMachinery`: Smith-chosen consumer op sequences
 //!     (peek/take/discardAll/readSliceAll/stream) over known streams, with the
 //!     contiguous-read cap probed past `history_len`.
@@ -49,6 +52,9 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
+const common = @import("common.zig");
+const readInt = common.readInt;
+const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const golden = @import("golden.zig");
@@ -796,9 +802,9 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) void {
                     2 => math.maxInt(u16),
                     else => smith.value(u16),
                 };
-                writeU16Le(buf, at, value);
+                writeInt(u16, buf[at..][0..2], value);
                 const nlen = if (smith.boolWeighted(1, 1)) ~value else value;
-                writeU16Le(buf, at + 2, nlen);
+                writeInt(u16, buf[at + 2 ..][0..2], nlen);
             },
             .poke_block_type => {
                 if (len.* == 0) continue;
@@ -819,17 +825,6 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) void {
             },
         }
     }
-}
-
-/// u16 little-endian at `at`; the caller has bounds-checked `at + 2`.
-fn writeU16Le(buf: []u8, at: usize, value: u16) void {
-    buf[at] = @truncate(value);
-    buf[at + 1] = @truncate(value >> 8);
-}
-
-/// u16 little-endian at `pos`; the caller has bounds-checked `pos + 2`.
-fn readU16Le(source: []const u8, pos: usize) u16 {
-    return @as(u16, source[pos]) | (@as(u16, source[pos + 1]) << 8);
 }
 
 /// An LSB-first bit reader over the mutated stream. decode.zig's `BitReader`
@@ -924,8 +919,8 @@ fn referenceWalk(source: []const u8, target: []u8) Walk {
 fn walkStored(br: *RefBits, target: []u8, out_pos: *usize) decode.DecompressError!void {
     const header_pos: usize = @intCast((br.bit_pos + 7) / 8);
     if (br.source.len - header_pos < 4) return error.Truncated;
-    const len = readU16Le(br.source, header_pos);
-    const nlen = readU16Le(br.source, header_pos + 2);
+    const len = readInt(u16, br.source[header_pos..][0..2]);
+    const nlen = readInt(u16, br.source[header_pos + 2 ..][0..2]);
     if (len != ~nlen) return error.WrongStoredBlockNlen;
 
     const data_pos = header_pos + 4;
@@ -1117,7 +1112,7 @@ const corruption_corpus: []const []const u8 = &.{
     &streamSeed("\xf3\x48\xcd\xc9\xc9\x57\x28\xcf\x2f\xca\x49\xe1\x02\x00"),
     &streamSeed("\x3d\xc6\x39\x11\x00\x00\x0c\x02\x30\x2b\xb5\x52\x1e\xff\x96\x38" ++
         "\x16\x96\x5c\x1e\x94\xcb\x6d\x01"),
-    // Truncated mid-match: the 26-byte two-block stream Go's
+    // Truncated mid-match: the 22-byte two-block stream Go's
     // `TestTruncatedStreams` walks prefix by prefix.
     &streamSeed(golden.truncated_streams_data),
     &streamSeed("\x07"), // BTYPE = 11, the reserved type

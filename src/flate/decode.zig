@@ -29,6 +29,9 @@ const testing = std.testing;
 
 const fastmem = @import("fastmem");
 
+const common = @import("common.zig");
+const readInt = common.readInt;
+
 /// Every decode failure, in detail (src/flate/README.md, "API"). `decompress`
 /// returns this set; the streaming `Reader` (a later lane) reports the coarse
 /// `error.ReadFailed` through the `Io` interface and records the specific
@@ -72,28 +75,35 @@ pub const TreeError = error{
 /// small.
 const codegen_order = [19]u5{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
 
-/// `§3.2.5` — length code 257-285 bases (index = code - 257).
-const length_base = [29]u16{
+/// `§3.2.5` — the longest match a length symbol can declare (length code 285
+/// is 258). Both sides read it: the decoder stops this far short of a full
+/// window, and the encoder's 258-split keeps a legal tail.
+pub const max_match_len: usize = 258;
+
+/// `§3.2.5` — length code 257-285 bases (index = code - 257). Public, and
+/// read by the encoder too: one spelling of the RFC's tables for both sides
+/// (encode.zig aliases them).
+pub const length_base = [29]u16{
     3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23,  27,
     31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
 };
 
 /// `§3.2.5` — length extra-bit counts (index = code - 257). Code 285 carries
 /// zero extra bits: 258 is its only value.
-const length_extra = [29]u5{
+pub const length_extra = [29]u5{
     0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
     3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
 };
 
 /// `§3.2.5` — distance code 0-29 bases.
-const distance_base = [30]u16{
+pub const distance_base = [30]u16{
     1,    2,    3,    4,    5,    7,    9,    13,    17,    25,
     33,   49,   65,   97,   129,  193,  257,  385,   513,   769,
     1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
 };
 
 /// `§3.2.5` — distance extra-bit counts.
-const distance_extra = [30]u5{
+pub const distance_extra = [30]u5{
     0, 0, 0,  0,  1,  1,  2,  2,  3,  3,  4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
     9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
 };
@@ -467,8 +477,8 @@ fn decodeStoredBlock(br: *BitReader, target: []u8, out_pos: *usize) DecompressEr
     try br.alignToByte();
     const header_pos: usize = @intCast(br.bit_pos / 8);
     if (br.source.len - header_pos < 4) return error.Truncated;
-    const len = readU16Le(br.source, header_pos);
-    const nlen = readU16Le(br.source, header_pos + 2);
+    const len = readInt(u16, br.source[header_pos..][0..2]);
+    const nlen = readInt(u16, br.source[header_pos + 2 ..][0..2]);
     if (len != ~nlen) return error.WrongStoredBlockNlen;
 
     const data_pos = header_pos + 4;
@@ -628,11 +638,6 @@ pub fn copyMatch(target: []u8, out_pos: usize, match_distance: usize, length: us
         fastmem.copy(u8, target[out_pos + written ..][0..n], target[out_pos..][0..n]);
         written += n;
     }
-}
-
-/// u16 little-endian at `pos`; the caller has bounds-checked `pos + 2`.
-fn readU16Le(source: []const u8, pos: usize) u16 {
-    return @as(u16, source[pos]) | (@as(u16, source[pos + 1]) << 8);
 }
 
 test "bit reader: LSB-first fill" {

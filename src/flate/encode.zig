@@ -38,7 +38,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
-const mem = std.mem;
 const print = std.debug.print;
 const math = std.math;
 const DefaultPrng = std.Random.DefaultPrng;
@@ -166,31 +165,14 @@ const fixed_distance_codes: [32]Code = blk: {
     break :blk codes;
 };
 
-/// `§3.2.5` — length code 257-285 bases (index = code - 257).
-const length_bases = [29]u16{
-    3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23,  27,
-    31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
-};
-
-/// `§3.2.5` — length extra-bit counts (index = code - 257). Code 285 carries
-/// zero extra bits: 258 is its only value.
-const length_extras = [29]u5{
-    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2,
-    3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
-};
-
-/// `§3.2.5` — distance code 0-29 bases.
-const distance_bases = [30]u16{
-    1,    2,    3,    4,    5,    7,    9,    13,    17,    25,
-    33,   49,   65,   97,   129,  193,  257,  385,   513,   769,
-    1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
-};
-
-/// `§3.2.5` — distance extra-bit counts.
-const distance_extras = [30]u5{
-    0, 0, 0,  0,  1,  1,  2,  2,  3,  3,  4, 4, 5, 5, 6, 6, 7, 7, 8, 8,
-    9, 9, 10, 10, 11, 11, 12, 12, 13, 13,
-};
+/// `§3.2.5` — the length/distance code tables live once, in decode.zig (the
+/// canonical tables both sides read); the encoder aliases them, so the two
+/// spellings cannot drift.
+const max_match_len = decode.max_match_len;
+const length_base = decode.length_base;
+const length_extra = decode.length_extra;
+const distance_base = decode.distance_base;
+const distance_extra = decode.distance_extra;
 
 /// A length symbol ready to emit: the merged-alphabet symbol (257-285), its
 /// extra-bit count, and the extra-bit value.
@@ -201,9 +183,9 @@ const LengthSymbol = struct { symbol: u16, extra_bits: u5, extra_value: u16 };
 /// 284's entry covers 227-258 by the table's own arithmetic, and code 285
 /// overwrites 258 with zero extra bits — which is what the encoder emits: 258
 /// is code 285, the one code with no extra bits (README, "Encoder"; T5).
-const length_symbols: [259]LengthSymbol = blk: {
-    var table: [259]LengthSymbol = undefined;
-    for (length_bases, length_extras, 0..) |base, extra, i| {
+const length_symbols: [max_match_len + 1]LengthSymbol = blk: {
+    var table: [max_match_len + 1]LengthSymbol = undefined;
+    for (length_base, length_extra, 0..) |base, extra, i| {
         const span = @as(usize, 1) << extra;
         for (@as(usize, base)..@as(usize, base) + span) |length| {
             table[length] = .{
@@ -221,7 +203,7 @@ const length_symbols: [259]LengthSymbol = blk: {
 const distance_codes: [history_len + 1]u8 = blk: {
     @setEvalBranchQuota(100_000);
     var table: [history_len + 1]u8 = undefined;
-    for (distance_bases, distance_extras, 0..) |base, extra, i| {
+    for (distance_base, distance_extra, 0..) |base, extra, i| {
         const span = @as(usize, 1) << extra;
         for (@as(usize, base)..@as(usize, base) + span) |distance| {
             table[distance] = @intCast(i);
@@ -240,8 +222,8 @@ fn distanceSymbol(distance: usize) DistanceSymbol {
     const symbol = distance_codes[distance];
     return .{
         .symbol = symbol,
-        .extra_bits = distance_extras[symbol],
-        .extra = @intCast(distance - distance_bases[symbol]),
+        .extra_bits = distance_extra[symbol],
+        .extra = @intCast(distance - distance_base[symbol]),
     };
 }
 
@@ -426,10 +408,10 @@ fn emitMatch(
     const distance_code = fixed_distance_codes[d.symbol];
     var remaining = length;
     while (true) {
-        const chunk = if (remaining > 258 and remaining - 258 < min_length)
+        const chunk = if (remaining > max_match_len and remaining - max_match_len < min_length)
             255
         else
-            @min(remaining, 258);
+            @min(remaining, max_match_len);
         const l = length_symbols[chunk];
         const length_code = fixed_literal_codes[l.symbol];
         const cost = @as(u64, length_code.len) + l.extra_bits +
@@ -700,13 +682,6 @@ fn compressBlockStateful(
     }
 }
 
-/// Compress `source` as one raw deflate stream into `target`. Returns bytes
-/// written; `error.BufferTooSmall` when `target` is too small — size it via
-/// `maxCompressedLength`. Zero heap allocation.
-///
-/// The stream is self-delimiting: BFINAL on the final empty block ends it
-/// (`§3.2.3`), and every data block is fixed Huffman or stored. The same input
-/// always produces the same bytes.
 /// Compression level. Every numeric zlib-style level is addressable
 /// (`.{ .level = .@"5" }`); pretty names reserve the tuned modes:
 ///
@@ -794,17 +769,10 @@ pub fn compress(
 // decoded length must be untouched.
 // ---------------------------------------------------------------------------
 
-/// The final empty fixed block's ten bits, in wire order (LSB of this value is
-/// the first bit on the wire): BFINAL=1, BTYPE=01, then the end-of-block code.
-/// Assert the stream's last block is the final empty fixed block (README,
-/// "Divergences" T4): bits `1,1,0,0,0,0,0,0,0,0` — BFINAL=1, BTYPE=01,
-/// end-of-block — zero-padded to the byte boundary. The ending's start depends
-/// on the last data block's bit offset, so it is located from the stream's
-/// last set bit: that is the ending's BTYPE low bit, and everything after it
-/// (the end-of-block's seven zeros and the padding) is clear. Shared with the
 /// Compress `input`, check the sizing contract and the T4 ending, then decode
 /// with the landed decoder and prove the bytes past the decoded length are
-/// untouched.
+/// untouched (`golden.checkDecode`: exact-cap, then slack, both sentinel-
+/// checked).
 fn roundTrip(input: []const u8) !void {
     const allocator = testing.allocator;
     const bound = maxCompressedLength(input.len);
@@ -816,50 +784,7 @@ fn roundTrip(input: []const u8) !void {
 
     const target = try allocator.alloc(u8, input.len + sentinel.len);
     defer allocator.free(target);
-    sentinel.fill(target);
-    const n = try decode.decompress(comp[0..clen], target);
-    try testing.expectEqual(input.len, n);
-    try testing.expectEqualSlices(u8, input, target[0..n]);
-    try sentinel.expect(target, n);
-}
-
-/// Corpus shapes, the same set the bench uses: repetitive text, PRNG bytes
-/// (incompressible, so the stored fallback runs), markup, a single-byte run,
-/// and a structured-plus-random batch.
-const Shape = enum { text, random, html, rle, mixed };
-
-fn makeShape(allocator: mem.Allocator, shape: Shape, len: usize) ![]u8 {
-    const buf = try allocator.alloc(u8, len);
-    switch (shape) {
-        .text => {
-            const phrase = "the quick brown fox jumps over the lazy dog. ";
-            var i: usize = 0;
-            while (i < len) {
-                const n = @min(phrase.len, len - i);
-                fastmem.copy(u8, buf[i..][0..n], phrase[0..n]);
-                i += n;
-            }
-        },
-        .random => {
-            var rng: DefaultPrng = .init(0xC0FFEE);
-            for (buf) |*b| b.* = rng.random().int(u8);
-        },
-        .html => {
-            const phrase = "<div class=\"row\"><span>hello</span><span>flate</span></div>";
-            var i: usize = 0;
-            while (i < len) {
-                const n = @min(phrase.len, len - i);
-                fastmem.copy(u8, buf[i..][0..n], phrase[0..n]);
-                i += n;
-            }
-        },
-        .rle => fastmem.set(u8, buf, 0x41),
-        .mixed => {
-            var rng: DefaultPrng = .init(0x5A4BEEF);
-            for (buf, 0..) |*b, i| b.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(i)));
-        },
-    }
-    return buf;
+    try golden.checkDecode(target, comp[0..clen], input);
 }
 
 test "compress: options — every implemented level round-trips" {
@@ -1010,7 +935,7 @@ test "compress: §3.2.4 stored fallback for incompressible input" {
     // cannot beat the stored form, so the whole block is stored: the output is
     // input_len + 5 (one block) + 2 (the ending).
     const allocator = testing.allocator;
-    const input = try makeShape(allocator, .random, 4096);
+    const input = try golden.makeShape(allocator, .random, 4096);
     defer allocator.free(input);
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
@@ -1024,9 +949,12 @@ test "compress: §3.2.4 stored fallback for incompressible input" {
 
 test "compress: round trips through our decoder (shapes)" {
     const allocator = testing.allocator;
-    inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
+    inline for (.{
+        golden.Shape.text, golden.Shape.random, golden.Shape.html,
+        golden.Shape.rle,  golden.Shape.mixed,
+    }) |shape| {
         for ([_]usize{ 0, 1, 3, 4, 13, 64, 1000, 8192 }) |len| {
-            const input = try makeShape(allocator, shape, len);
+            const input = try golden.makeShape(allocator, shape, len);
             defer allocator.free(input);
             roundTrip(input) catch |err| {
                 print("FAIL: shape {s} len {d}\n", .{ @tagName(shape), len });
@@ -1044,9 +972,11 @@ test "compress: round trips across block boundaries" {
     const sizes = [_]usize{
         65534, 65535, 65536, 65537, 131070, 131071, 131072, 196605, 196606,
     };
-    inline for (.{ Shape.text, Shape.random, Shape.rle, Shape.mixed }) |shape| {
+    inline for (.{
+        golden.Shape.text, golden.Shape.random, golden.Shape.rle, golden.Shape.mixed,
+    }) |shape| {
         for (sizes) |len| {
-            const input = try makeShape(allocator, shape, len);
+            const input = try golden.makeShape(allocator, shape, len);
             defer allocator.free(input);
             roundTrip(input) catch |err| {
                 print("FAIL: shape {s} len {d}\n", .{ @tagName(shape), len });
@@ -1061,8 +991,8 @@ test "compress: many blocks round trip (1 MiB)" {
     // of incompressible bytes (all stored), with the sizing contract checked
     // end to end.
     const allocator = testing.allocator;
-    inline for (.{ Shape.text, Shape.mixed }) |shape| {
-        const input = try makeShape(allocator, shape, 1 << 20);
+    inline for (.{ golden.Shape.text, golden.Shape.mixed }) |shape| {
+        const input = try golden.makeShape(allocator, shape, 1 << 20);
         defer allocator.free(input);
         roundTrip(input) catch |err| {
             print("FAIL: shape {s} len 1 MiB\n", .{@tagName(shape)});
@@ -1082,9 +1012,12 @@ test "compress: maxCompressedLength bounds every emission" {
         0,     1,     2,     3,     4,      13,     100,    1024,
         65534, 65535, 65536, 65537, 131070, 131071, 131072, 196605,
     };
-    inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
+    inline for (.{
+        golden.Shape.text, golden.Shape.random, golden.Shape.html,
+        golden.Shape.rle,  golden.Shape.mixed,
+    }) |shape| {
         for (sizes) |len| {
-            const input = try makeShape(allocator, shape, len);
+            const input = try golden.makeShape(allocator, shape, len);
             defer allocator.free(input);
             const bound = maxCompressedLength(len);
             const comp = try allocator.alloc(u8, bound);
@@ -1130,7 +1063,7 @@ test "compress: deterministic" {
     // README, "Encoder" — "the same input and the same block split produce the
     // same bytes".
     const allocator = testing.allocator;
-    const input = try makeShape(allocator, .mixed, 70000);
+    const input = try golden.makeShape(allocator, .mixed, 70000);
     defer allocator.free(input);
     const bound = maxCompressedLength(input.len);
     const first = try allocator.alloc(u8, bound);
@@ -1323,7 +1256,7 @@ test "emit: long matches split at 258 with a legal tail" {
     // Every length 3-258 must have a symbol whose base + extra reconstructs it.
     for (3..259) |length| {
         const l = length_symbols[length];
-        const base = length_bases[l.symbol - 257];
+        const base = length_base[l.symbol - 257];
         try testing.expectEqual(@as(u16, @intCast(length)), base + l.extra_value);
         try testing.expect(l.extra_value < (@as(u32, 1) << l.extra_bits));
     }
@@ -1332,7 +1265,7 @@ test "emit: long matches split at 258 with a legal tail" {
         const d = distanceSymbol(distance);
         try testing.expectEqual(
             @as(u16, @intCast(distance)),
-            distance_bases[d.symbol] + d.extra,
+            distance_base[d.symbol] + d.extra,
         );
         try testing.expect(d.extra < (@as(u32, 1) << d.extra_bits));
     }

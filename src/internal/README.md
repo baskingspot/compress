@@ -15,7 +15,7 @@ directories (the repo's `src/root.zig` is that file): relative imports
 cannot escape the module root's directory, so rooting the module at the
 codec's own `root.zig` fails with "import of file outside module path".
 
-Three namespaces:
+Five namespaces:
 
 - `internal.sentinel` — the decode-overrun sentinel: the constants, the
   fill, and the check every decode test runs (AGENTS.md, "Rules": "Decode
@@ -23,6 +23,17 @@ Three namespaces:
   tests").
 - `internal.reader` — the reader lifecycle (`State`, `guard`, `fail`) and
   the generated `Io.Reader` vtable entries (`VTable`).
+- `internal.writer` — the shared writer machinery: the generated
+  `Io.Writer` vtable entries (`drain`/`flush`/`rebase`) and the poisoned
+  `finish` (`VTable`), over a codec's `emitBlock` and its optional stream
+  ending. Snappy and flate are the two instantiations; the entries own the
+  `errdefer` poison, the drain top-up, the rebase slide, the postconditions,
+  and the terminal finish — the machinery the writer bugs (ea2a581, caeaae9)
+  lived in.
+- `internal.int` — endian-bound integer access (`Int`, `little`, `big`):
+  the one body behind the codec `common.zig` bindings (flate/gzip/snappy
+  little-endian, zlib big-endian). zstd's decoder-only `common.zig` is the
+  remaining follower.
 - `internal.container` — the container driver: the framing-agnostic
   machinery a container codec over an inner codec shares (`ReaderHooks`,
   `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`, `Header`),
@@ -101,9 +112,9 @@ vtable), but the state never returns to `streaming`.
 
 Contract: `rebase` is where a full buffer's bytes go when a consumer asks
 for a direct writable slice (`writableSliceGreedy`) into the buffer. It
-emits everything buffered beyond the preserved tail, then slides the
-preserved bytes to the front. Discarding instead silently drops input, and
-`writeAll`-based tests never touch the direct-slice path.
+emits everything buffered beyond the preserved tail, then leaves the
+preserved bytes as the buffered block. Discarding instead silently drops
+input, and `writeAll`-based tests never touch the direct-slice path.
 
 - std: `std/Io/Writer.zig:82-88` (rebase: "The most recent `preserve` bytes
   must remain buffered"), `std/Io/Writer.zig:397-418`
@@ -113,6 +124,11 @@ preserved bytes to the front. Discarding instead silently drops input, and
   64-KiB block; the `File.Reader` simple-mode stream feeds a writer through
   `writableSliceGreedy` + `advance`. Regression tests: "writableSliceGreedy
   on a full buffer/block emits, never drops" in both `Writer.zig`s.
+- Where it lives: `internal.writer.VTable`'s generated `rebase` — one entry
+  for every codec writer. The codec's `emitBlock(host, len)` owns the slide
+  (flate's window moves the block region over the emitted bytes; snappy's
+  moves the preserved tail to the front), and the entry owns the keep
+  computation, the emit length, and the postconditions.
 
 ### Drain tops up before emitting: maximal blocks, not caller chunking
 
@@ -131,6 +147,8 @@ boundaries instead of the codec's block size.
   instead of 65536/65536/28928. Tests: "blocks are maximal and the split
   follows the block size" (flate), "writes past one block split into full
   blocks" (snappy).
+- Where it lives: `internal.writer.VTable`'s generated `drain` (with
+  `accept`); the codec supplies only the block emission.
 
 ### Contiguity fails closed, never asserts on a consumer request
 
@@ -203,7 +221,9 @@ the clean end themselves.
 Contract: a codec's `finish` checks that the interface is still the codec's
 own vtable before emitting the stream ending, then poisons it
 (`Writer.failing`); a failed or finished writer reports `error.WriteFailed`,
-never a false success on a truncated stream.
+never a false success on a truncated stream. The check is against the
+generated `vtable`'s own address, so a writer must store `&Hooks.vtable`
+(the generated const), never a copy of its value.
 
 - std: `std/Io/Writer.zig:124-125` (`fixed`: "Writes to `buffer` and returns
   `error.WriteFailed` when it is full"), `std/Io/Writer.zig:140-148`
@@ -215,6 +235,9 @@ never a false success on a truncated stream.
   `finish`; the fix is the vtable check plus the `defer w.writer = .failing`
   poison. Tests: "a failed or finished writer never reports a false success"
   in both `Writer.zig`s.
+- Where it lives: `internal.writer.VTable`'s generated `finish` — the
+  poison check, the final block emission, the codec's ending hook, and the
+  output flush, once for every codec writer.
 
 ## API
 
@@ -241,6 +264,20 @@ internal.reader.fail(comptime Detail: type, state: *State, detail: *?Detail, err
 // interface's error set; `rebase` slides the unconsumed bytes and owns the
 // capacity policy.
 const vtable = internal.reader.VTable(Host, pump, rebase).vtable;
+
+// The generated writer entries and finish. Host carries `writer:
+// std.Io.Writer` and `output: *std.Io.Writer`; `emitBlock(host, len)` emits
+// the front of the buffered block and leaves the unemitted tail at the front
+// of the block region; `ending` (optional) writes the codec's stream ending.
+const WriterHooks = internal.writer.VTable(Host, emitBlock, ending);
+// WriterHooks.vtable — store `&WriterHooks.vtable` in init, not a copy
+// WriterHooks.finish(host)  // poison check, final block, ending, flush
+
+// Endian-bound integer access: a codec's `common.zig` re-exports its binding
+// so call sites carry no endian argument.
+internal.int.little.readInt(comptime T, *const [width]u8) T
+internal.int.little.writeInt(comptime T, *[width]u8, T) void
+internal.int.big.readInt / internal.int.big.writeInt   // zlib
 
 // The container driver, over a codec's framing type (`framing.zig`) and the
 // codec's own Host types (container.zig states the full contract):
@@ -278,6 +315,15 @@ over their framing types, and every test those containers carry — the
 streaming suites, the golden tables, the oracles, the fuzz targets — runs
 through the driver unchanged. The two `framing.zig` files are the contract's
 worked instantiations.
+
+The writer generator's acceptance test is the migration of both writers:
+snappy and flate replaced their near-identical drain/accept/flush/rebase and
+poison-finish with `writer.VTable` over their own `emitBlock` (snappy's
+ending hook is null; flate's writes `03 00`), and both suites — the random
+machinery drivers, the rebase and maximal-block tests, the golden suites,
+the checksum-hook tests — pass through the generated entries. The `int`
+bindings' acceptance test is the same: the four `common.zig` files re-export
+the shared bodies with no call-site change.
 
 ## Licensing
 
