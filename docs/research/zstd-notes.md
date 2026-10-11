@@ -445,12 +445,18 @@ the CRC-32 lesson applied — verify, never assume):
   The checksum-on and `--no-check` frames are byte-identical except
   descriptor bit 2 and the 4 trailer bytes (verified with `cmp`), which pins
   the trailer as the only checksum overhead.
-- Verdict: **std's XxHash64 is the day-one kernel** — correct on the check
+- Verdict: **std's XxHash64 was the day-one kernel** — correct on the check
   value, on two real frames' trailers, and in the incremental shape the
-  streaming layer needs. No kernel is written at M4; the perf lane may replace
-  it later behind our own function boundary (the M3 `internal/checksum`
-  precedent: placement in `src/zstd/`, since zstd is the only XXH64 user in
-  the codec set — `src/internal/` waits for a second user).
+  streaming layer needs. **Not the landed shape** (the M4 closing reviews'
+  B1-prime): std counts bytes in a `usize` (`xxhash.zig:14`, `+=` at
+  `:200`/`:204`), so a legitimate checksummed frame past 2^32 — the CLI
+  writes them by default — wrapped on the 32-bit targets through the
+  checksum fold (a ReleaseSafe panic, a ReleaseFast false
+  `WrongChecksum`, observed directly on wasm32). The landed kernel is ours:
+  `src/zstd/xxh64.zig`, the algorithm ported after std's implementation
+  with the byte count widened to `u64`; std's stays in the tests as the
+  differential oracle. The kernel boundary this section designed is exactly
+  what made the swap file-local.
 
 std's own zstd decoder uses exactly this shape (`std/compress/zstd/
 Decompress.zig:403` `hasher_opt: ?std.hash.XxHash64`, `:951`

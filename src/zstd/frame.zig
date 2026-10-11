@@ -108,8 +108,9 @@
 //!
 //! ## The checksum
 //!
-//! `xxh64.zig` holds the fold state over std's kernel (`docs/research/
-//! zstd-notes.md` §3). The trailer is "the result of the XXH64() hash
+//! `xxh64.zig` holds the fold state over its own kernel (a port following
+//! std's implementation, the byte count widened to u64 — the B1-prime fix;
+//! `docs/research/zstd-notes.md` §3). The trailer is "the result of the XXH64() hash
 //! function digesting the original (decoded) data as input, and a seed of
 //! zero. The low 4 bytes of the checksum are stored in little-endian format"
 //! (`§3.1.1`); it is read and compared exactly once, at the frame's end, and

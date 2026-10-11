@@ -250,8 +250,11 @@ pinned), and the fleet run committed:
 docs/results/m4-fleet-20261011.md (run id 20261011T014512Z-m4, seven
 targets, six arms, n=5; the zstd decoder beats the C reference on five of
 seven targets, klauspost nearly everywhere, std everywhere; the M3 snappy
-competitor-set gap closed in the same run). The Opus closing review is the
-final gate.
+competitor-set gap closed in the same run). The Opus closing review passed
+(fca3604 the B1 fix, 6b7e960 the B1-prime fix — the 32-bit wraps, both
+proven closed on wasm32-wasi by `just check-32`, the standing 32-bit
+execution gate; the reviewer's final confirmation: M4 shippable). M4
+shipped.
 
 M5 — zstd encoder, fast level. M6 — brotli, decoder first (RFC 7932 —
 vendor it at M6; the google/brotli C reference is the oracle lane and the

@@ -566,13 +566,16 @@ never assume):
   `--no-check` frames are byte-identical except descriptor bit 2 and the four
   trailer bytes — the trailer is the only checksum overhead.
 
-So `std.hash.XxHash64` is the day-one kernel; no kernel is written at M4. It
-lives behind this module's own function boundary in `src/zstd/xxh64.zig` — a
-fold state plus `xxh64(seed, bytes)`, the `src/gzip/crc32.zig` shape — so the
-perf lane can swap a kernel in without touching a decoder (the M3
-`internal/checksum` precedent: `src/zstd/`, not `src/internal/`, because zstd
-is the only XXH64 user in the codec set). std's `XxHash64` stays as the test
-oracle, and the CLI's trailers are the differential pin.
+`src/zstd/xxh64.zig` holds the kernel: the XXH64 algorithm ported after Zig
+std's implementation (MIT; the xxHash reference is public domain;
+THIRD_PARTY.md), behind this module's own function boundary — a fold state
+plus `xxh64(seed, bytes)`, the `src/gzip/crc32.zig` shape — with one
+deliberate change: the running byte count is `u64`, where std's is a
+`usize` that wraps past 2^32 on the 32-bit targets (the closing reviews'
+B1 and B1-prime: a legitimate checksummed frame the CLI writes by default
+crashed the reader there — the kernel swap is the fix, proven on
+wasm32-wasi by `just check-32`). std's `XxHash64` stays as the differential
+oracle in the tests, and the CLI's trailers are the differential pin.
 
 Where it folds (OQ7): at the **one per-block emission funnel** — the raw
 block's bytes as they are copied to the output, the RLE block's splat, the
@@ -869,7 +872,8 @@ here is ours. The references studied, all attributed in `THIRD_PARTY.md`:
   representation, the error-set naming) and the divergence pins T5, T8, and
   T11, never copied.
 - **[XXHASH][xxhash]** (the spec's `[XXHASH]`) — the checksum algorithm;
-  std's `XxHash64` is the day-one kernel and the test oracle.
+  the kernel is a port following std's implementation (THIRD_PARTY.md), the
+  byte count widened to u64; std's `XxHash64` is the test oracle.
 
 python3's `compression.zstd` (PSF, backed by libzstd) is used as a CLI oracle,
 nothing vendored; the zstd CLI binary on the box is v1.5.7, the same version
