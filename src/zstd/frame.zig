@@ -610,9 +610,7 @@ fn expectFrame(bytes: []const u8, expected: []const u8) !void {
     internal.sentinel.fill(&target);
     var progress: usize = 0;
     const written = try decodeFrame(bytes, &target, &progress);
-    try testing.expectEqual(expected.len, written);
-    try testing.expectEqualSlices(u8, expected, target[0..written]);
-    try internal.sentinel.expect(&target, written);
+    try golden.expectDecoded(&target, written, expected);
 }
 
 /// Walk a fixture frame expecting `err`, proving the failure came before the

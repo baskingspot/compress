@@ -133,6 +133,7 @@ const testing = std.testing;
 const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
+const frame = @import("frame.zig");
 const golden = @import("golden.zig");
 const literals = @import("literals.zig");
 const readInt = @import("common.zig").readInt;
@@ -400,18 +401,6 @@ fn decodeCompressed(
     return section.bytes_written;
 }
 
-/// `§3.1.1.1.2` — `windowLog = 10 + Exponent`, `windowBase = 1 <<
-/// windowLog`, `windowAdd = (windowBase / 8) * Mantissa`, `Window_Size =
-/// windowBase + windowAdd`. The frame layer owns this arithmetic; the
-/// fixture helper below reads a fixture's descriptor back so each frame is
-/// checked against the window it declares.
-fn windowSizeOf(descriptor: u8) u64 {
-    const exponent: u6 = @truncate(descriptor >> 3);
-    const mantissa: u3 = @truncate(descriptor);
-    const base: u64 = @as(u64, 1) << (10 + exponent);
-    return base + (base / 8) * mantissa;
-}
-
 /// Walk a fixture frame's block chain the way the frame layer will: the
 /// 6-byte prefix (magic, Frame_Header_Descriptor, Window_Descriptor) is
 /// checked, then `decode` runs until the Last_Block flag, threading both
@@ -420,7 +409,10 @@ fn windowSizeOf(descriptor: u8) u64 {
 fn decodeFrame(bytes: []const u8, target: []u8) !usize {
     try testing.expectEqualSlices(u8, &golden.frame_magic, bytes[0..4]);
     try testing.expectEqual(golden.frame_descriptor, bytes[4]);
-    const window_size = windowSizeOf(bytes[5]);
+    // The frame layer owns the window arithmetic; the helper reads the
+    // fixture's descriptor back through it so each frame is checked against
+    // the window it declares (`§3.1.1.1.2`).
+    const window_size = frame.window.size(bytes[5]);
     var literals_state: literals.State = .{};
     var sequences_state: sequences.State = .{};
     var decoded_len: usize = 0;
@@ -446,12 +438,11 @@ fn decodeFrame(bytes: []const u8, target: []u8) !usize {
 
 /// Decode a fixture frame and check its output, with the sentinel overrun
 /// check every decode test runs (AGENTS.md, "Rules").
-fn expectFrame(frame: []const u8, expected: []const u8) !void {
+fn expectFrame(bytes: []const u8, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    const written = try decodeFrame(frame, &target);
-    try testing.expectEqualSlices(u8, expected, target[0..written]);
-    try internal.sentinel.expect(&target, written);
+    const written = try decodeFrame(bytes, &target);
+    try golden.expectDecoded(&target, written, expected);
 }
 
 /// Decode a bare block (a fixture frame's bytes after its 6-byte prefix) and
@@ -472,19 +463,19 @@ fn expectBlockError(err: Error, block_bytes: []const u8, target: []u8) !void {
 /// proving nothing past the blocks that did decode was written: the failure
 /// came before the offending write, and the earlier blocks' output (which the
 /// caller discards on error) is all that stands.
-fn expectFrameError(err: Error, frame: []const u8) !void {
+fn expectFrameError(err: Error, bytes: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectEqualSlices(u8, &golden.frame_magic, frame[0..4]);
-    try testing.expectEqual(golden.frame_descriptor, frame[4]);
-    const window_size = windowSizeOf(frame[5]);
+    try testing.expectEqualSlices(u8, &golden.frame_magic, bytes[0..4]);
+    try testing.expectEqual(golden.frame_descriptor, bytes[4]);
+    const window_size = frame.window.size(bytes[5]);
     var literals_state: literals.State = .{};
     var sequences_state: sequences.State = .{};
     var decoded_len: usize = 0;
     var cursor: usize = 6;
     while (true) {
         const section = decode(
-            frame[cursor..],
+            bytes[cursor..],
             &target,
             decoded_len,
             window_size,
@@ -973,13 +964,4 @@ test "decodeContent decodes a block whose header is already parsed" {
     try testing.expectEqual(@as(usize, 8), written);
     try testing.expectEqualSlices(u8, "zstd raw", target[0..written]);
     try internal.sentinel.expect(&target, written);
-}
-
-test "windowSizeOf reads §3.1.1.1.2's descriptor arithmetic" {
-    // RFC 8878 §3.1.1.1.2 — "windowLog = 10 + Exponent", "windowBase = 1 <<
-    // windowLog", "windowAdd = (windowBase / 8) * Mantissa", "Window_Size =
-    // windowBase + windowAdd": the fixture frames' three descriptors.
-    try testing.expectEqual(@as(u64, 1024), windowSizeOf(0x00));
-    try testing.expectEqual(@as(u64, 128 * 1024), windowSizeOf(0x38));
-    try testing.expectEqual(@as(u64, 512 * 1024), windowSizeOf(0x48));
 }

@@ -311,7 +311,7 @@ test "readTree reads the direct representation, high nibble first" {
     // RFC 8878 §4.2.1 — the completion: the sum of 2^(Weight-1) is 15, "the
     // nearest power of 2 is 16. Therefore, Max_Number_of_Bits = 4 and
     // Weight[5] = 16 - 15 = 1."
-    try testing.expectEqual(@as(u5, 4), tree.max_bits);
+    try testing.expectEqual(golden.t1_max_bits, tree.max_bits);
     try testing.expectEqual(@as(u16, 6), tree.symbol_count);
     try testing.expectEqualSlices(
         u8,
@@ -328,7 +328,7 @@ test "decodeStream decodes the T1 pair: Table 25's assignment, not the example's
     // hand-built frames the C CLI v1.5.7 and Zig std decode as written.
     const tree = try readTree(&golden.t1_tree);
     const table = buildTable(&tree);
-    try testing.expectEqual(@as(u5, 4), table.max_bits);
+    try testing.expectEqual(golden.t1_max_bits, table.max_bits);
 
     var target: [4]u8 = @splat(0xaa);
     try decodeStream(&table, &golden.t1_stream, &target);
@@ -357,6 +357,16 @@ test "readTree reads an FSE-compressed weight series" {
     // overflow condition". The fixture is a real frame's tree: 122 weights,
     // completing to 192, so the implied last weight is 7 and the tree depth
     // is 8.
+    // The series' own FSE description (`§4.2.1.2`: header byte 19, then the
+    // compressed series), cross-checked against the recorded counts the
+    // description reader must recover.
+    const description = try fse.readDescription(golden.weights_description[1..], 255, 6);
+    try testing.expectEqualSlices(
+        i16,
+        &golden.weights_description_counts,
+        description.counts[0..description.symbol_count],
+    );
+
     const tree = try readTree(&golden.weights_description);
     try testing.expectEqual(@as(usize, 20), tree.bytes_consumed);
     try testing.expectEqual(@as(u5, 8), tree.max_bits);

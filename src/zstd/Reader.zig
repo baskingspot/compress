@@ -43,10 +43,12 @@
 //! consumer's position fails closed with `error.ReadFailed`
 //! (`err == .StreamTooLong`), never an assert.
 //!
-//! Zero allocation, end to end: the caller owns the buffer — window, serving
-//! region, and staging alike — and the literals scratch is the one comptime
-//! stack local (≤ 128 KiB per compressed block, README, "Stack"). No
-//! allocator appears anywhere in this API.
+//! Zero allocation on every decode path: the caller owns the buffer — window,
+//! serving region, and staging alike — and the literals scratch is the one
+//! comptime stack local (≤ 128 KiB per compressed block, README, "Stack").
+//! The `streamFrameAlloc`/`streamAllAlloc` conveniences take a caller
+//! allocator to allocate the default buffer for one call and free it; the
+//! codec itself still allocates nothing (README, "Allocation").
 //!
 //! ## The frame state machine
 //!
@@ -336,6 +338,45 @@ pub fn streamAll(
         rr = .init(window_len, in, buffer);
         served += try rr.reader.streamRemaining(out);
     }
+}
+
+/// The allocator conveniences' error set: the pumps' interface pair
+/// (`error.ReadFailed`/`error.WriteFailed`) plus the buffer allocation's own
+/// `error.OutOfMemory`.
+pub const StreamAllocError = Io.Reader.StreamRemainingError || error{OutOfMemory};
+
+/// `streamFrame` with the default window: the convenience allocates the
+/// buffer — `Reader.DefaultBuffer`, `default_window_len` plus its serving and
+/// staging rooms, 8 MiB + 256 KiB — from `allocator`, drives the
+/// caller-buffered pump, and frees it before returning (README, "Allocation").
+/// The codec still allocates nothing on any decode path: the allocator is the
+/// caller's, and the buffer is setup for one call. A caller who wants a
+/// smaller window (or no allocation at all) uses `streamFrame` with its own
+/// `Reader.Buffer(window_len)`.
+pub fn streamFrameAlloc(
+    allocator: mem.Allocator,
+    in: *Io.Reader,
+    out: *Io.Writer,
+) StreamAllocError!usize {
+    const buffer = try allocator.create(DefaultBuffer);
+    defer allocator.destroy(buffer);
+    return streamFrame(default_window_len, in, out, buffer);
+}
+
+/// `streamAll` with the default window: the convenience allocates the buffer
+/// (`Reader.DefaultBuffer`, 8 MiB + 256 KiB) from `allocator`, drives the
+/// caller-buffered walk, and frees it before returning (README,
+/// "Allocation"). The walk's semantics are `streamAll`'s — the one-call
+/// multi-frame shape — and the codec still allocates nothing on any decode
+/// path: the allocator is the caller's, and the buffer is setup for one call.
+pub fn streamAllAlloc(
+    allocator: mem.Allocator,
+    in: *Io.Reader,
+    out: *Io.Writer,
+) StreamAllocError!usize {
+    const buffer = try allocator.create(DefaultBuffer);
+    defer allocator.destroy(buffer);
+    return streamAll(default_window_len, in, out, buffer);
 }
 
 /// The generated entries' fill: the frame's detailed errors through `record`
@@ -1201,6 +1242,63 @@ test "Reader: streamAll walks every frame to the input's end" {
     );
     try testing.expectEqualStrings("zstd rawabcdzstd raw", walk_out.written());
     try testing.expectEqual(@as(usize, framed.len), walk_in.seek);
+}
+
+test "Reader: the allocator conveniences own the default buffer" {
+    // README, "Allocation": `streamFrameAlloc`/`streamAllAlloc` allocate the
+    // default window from the caller's allocator, drive the caller-buffered
+    // pumps, and free the buffer before returning. `testing.allocator` makes
+    // the allocation visible: a buffer the convenience forgot to free fails
+    // this test at its end.
+    const gpa = testing.allocator;
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+
+    var walk_in: Io.Reader = .fixed(&golden.frame_two_frames);
+    try testing.expectEqual(@as(usize, 14), try streamAllAlloc(gpa, &walk_in, &out.writer));
+    try testing.expectEqualStrings("zstd rawsecond", out.written());
+    try testing.expectEqual(@as(usize, golden.frame_two_frames.len), walk_in.seek);
+
+    // One frame per call, the exact boundary (`streamFrame`'s semantics with
+    // the buffer allocated for the call).
+    var one_in: Io.Reader = .fixed(&golden.frame_two_frames);
+    out.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 8), try streamFrameAlloc(gpa, &one_in, &out.writer));
+    try testing.expectEqualStrings("zstd raw", out.written());
+    try testing.expectEqual(@as(usize, golden.frame_raw.len), one_in.seek);
+
+    // A small-window frame through the convenience's default window: the
+    // buffer is the cap, not a floor — `frame_window_1k` declares 1 KB and
+    // decodes through the 8 MiB default unchanged.
+    var small_in: Io.Reader = .fixed(&golden.frame_window_1k);
+    out.clearRetainingCapacity();
+    try testing.expectEqual(
+        @as(usize, 2048 + 3),
+        try streamAllAlloc(gpa, &small_in, &out.writer),
+    );
+    try testing.expectEqual(golden.frame_window_1k.len, small_in.seek);
+
+    // The walk's cardinality rules ride the convenience: the empty input is
+    // the clean end with zero frames served (T10), while one frame's pump
+    // over a zero-byte input is `ReadFailed` (no frame unit began).
+    var empty_in: Io.Reader = .fixed("");
+    out.clearRetainingCapacity();
+    try testing.expectEqual(@as(usize, 0), try streamAllAlloc(gpa, &empty_in, &out.writer));
+    var empty_frame_in: Io.Reader = .fixed("");
+    try testing.expectError(
+        error.ReadFailed,
+        streamFrameAlloc(gpa, &empty_frame_in, &out.writer),
+    );
+
+    // The allocation's own failure: a failing allocator surfaces
+    // `error.OutOfMemory` before any input byte is read.
+    var failing: testing.FailingAllocator = .init(gpa, .{ .fail_index = 0 });
+    var oom_in: Io.Reader = .fixed(&golden.frame_raw);
+    try testing.expectError(
+        error.OutOfMemory,
+        streamAllAlloc(failing.allocator(), &oom_in, &out.writer),
+    );
+    try testing.expectEqual(@as(usize, 0), oom_in.seek);
 }
 
 test "Reader: skippable frames are skipped in every layer" {

@@ -201,9 +201,7 @@ fn expectDecode(source: []const u8, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
     const written = try decompress(source, &target);
-    try testing.expectEqual(expected.len, written);
-    try testing.expectEqualSlices(u8, expected, target[0..written]);
-    try internal.sentinel.expect(&target, written);
+    try golden.expectDecoded(&target, written, expected);
 }
 
 /// Decode `source` into a sentinel-filled target expecting `err`, and prove

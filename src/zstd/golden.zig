@@ -52,12 +52,22 @@
 //! - **The `sequences_*` fixtures** are real `zstd` v1.5.7 frames' sequences
 //!   sections and their literals sections, with the CLI's own `zstd -d`
 //!   output as the expected block bytes (`sequences.zig`'s tests compose the
-//!   two landed layers over them).
+//!   two landed layers over them). The hand-built multi-block fixtures
+//!   (`docs/research/zstd-notes.md` §5.4) live here too: their sections and
+//!   their frames are the same data, so the frames are *built* from the
+//!   sections by `buildFrame` — the shared fixture-builder — rather than
+//!   transcribed beside them.
+//!
+//! This module also carries the shared decode-check helper every layer's
+//! tests run (`expectDecoded`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;
+const testing = std.testing;
+
+const internal = @import("../internal/root.zig");
 
 /// Comptime hex decoding, so the ported vectors keep their source spelling
 /// (the CLI's own hex output, the research harness's dumps) instead of a
@@ -70,6 +80,17 @@ fn hex(comptime text: []const u8) [text.len / 2]u8 {
         byte.* = std.fmt.parseInt(u8, text[i * 2 ..][0..2], 16) catch unreachable;
     }
     return bytes;
+}
+
+/// Check a decode's result against the expectation: the served length, the
+/// bytes, and the untouched sentinel past them (AGENTS.md, "Rules": every
+/// decode test proves no write past the decoded length). The shared tail of
+/// the layers' decode-into-target helpers; each caller owns its target's
+/// sizing and its sentinel fill.
+pub fn expectDecoded(target: []const u8, written: usize, expected: []const u8) !void {
+    try testing.expectEqual(expected.len, written);
+    try testing.expectEqualSlices(u8, expected, target[0..written]);
+    try internal.sentinel.expect(target, written);
 }
 
 /// One row of an Appendix A table (`§4.1`'s Symbol / Num_Bits / Baseline).
@@ -513,6 +534,69 @@ pub const frame_magic = [4]u8{ 0x28, 0xb5, 0x2f, 0xfd };
 /// no Content_Checksum, no dictionary, not Single_Segment.
 pub const frame_descriptor = 0x00;
 
+/// A fixture frame's block (`§3.1.1.2.2`): the Block_Type and the
+/// Block_Content. `buildFrame` sets Last_Block on the final block — a
+/// fixture frame's chain always ends with it (`§3.1.1.2.1`).
+pub const FixtureBlock = struct {
+    block_type: FixtureBlockType,
+    content: []const u8,
+};
+
+/// The Block_Type field (`§3.1.1.2.2`, Table 10). Spelled here so the
+/// fixture module stays below the block layer it feeds.
+pub const FixtureBlockType = enum(u2) {
+    raw = 0,
+    rle = 1,
+    compressed = 2,
+};
+
+/// A fixture frame's encoded length: the magic, the descriptor, the
+/// Window_Descriptor, then each block's 3-byte Block_Header and its content.
+fn frameLen(comptime blocks: []const FixtureBlock) usize {
+    var len = frame_magic.len + 2;
+    for (blocks) |b| len += 3 + b.content.len;
+    return len;
+}
+
+/// Assemble a fixture frame (`§3.1`): the magic, the fixtures' descriptor
+/// (`frame_descriptor`), the Window_Descriptor, then each block's 3-byte
+/// little-endian Block_Header (`§3.1.1.2`, Table 9: Last_Block in bit 0,
+/// Block_Type in bits 1-2, Block_Size in bits 3-23) and its Block_Content.
+/// The shared fixture-builder: a frame composed of committed section
+/// fixtures is derived from them, never transcribed beside them, so the two
+/// spellings cannot drift. Comptime only — the frames are consts.
+pub fn buildFrame(
+    comptime window_descriptor: u8,
+    comptime blocks: []const FixtureBlock,
+) [frameLen(blocks)]u8 {
+    @setEvalBranchQuota(10_000);
+    var out: [frameLen(blocks)]u8 = undefined;
+    var cursor: usize = 0;
+    for (frame_magic) |byte| {
+        out[cursor] = byte;
+        cursor += 1;
+    }
+    out[cursor] = frame_descriptor;
+    out[cursor + 1] = window_descriptor;
+    cursor += 2;
+    for (blocks, 0..) |b, index| {
+        const last: u24 = if (index + 1 == blocks.len) 1 else 0;
+        const header = last |
+            (@as(u24, @intFromEnum(b.block_type)) << 1) |
+            (@as(u24, b.content.len) << 3);
+        out[cursor] = @truncate(header);
+        out[cursor + 1] = @truncate(header >> 8);
+        out[cursor + 2] = @truncate(header >> 16);
+        cursor += 3;
+        for (b.content) |byte| {
+            out[cursor] = byte;
+            cursor += 1;
+        }
+    }
+    assert(cursor == out.len);
+    return out;
+}
+
 /// A single Raw block of 8 bytes (`§3.1.1.2.2`); the CLI decodes it to those bytes.
 pub const frame_raw = hex("28b52ffd00484100007a73746420726177");
 
@@ -585,43 +669,128 @@ pub const frame_t1 = hex("28b52ffd004855000042800184432010010d00");
 /// 04`.
 pub const frame_t1_errata = hex("28b52ffd004855000042800184432010100d00");
 
+/// The hand-built fixtures below are whole frames verified with the pinned
+/// zstd CLI v1.5.7: each frame is the magic, a descriptor 0x00 (no
+/// Frame_Content_Size, no checksum), a 512 KB window descriptor, then one or
+/// more compressed blocks of raw literals and the sequences section in
+/// question. `zstd -d` decodes every one of them to the bytes the tests
+/// expect, so the fixtures are conformant frames rather than self-consistent
+/// guesses (the literals slice's hand-built-section pattern, one layer up).
+/// The sections and the frames are the same data: `buildFrame` derives each
+/// frame from its sections, so the two spellings cannot drift.
+///
+/// The shared first block of the three multi-block fixtures
+/// (`frame_repeat`, `frame_temp_offset`, `frame_two_byte`): 17 raw literals
+/// and the six-sequence RLE-mode section (`§3.1.1.3.2`), decoding to 22
+/// bytes — the 22-byte history whose offsets 5 and 6 end the repeats at
+/// {6, 5, 1}.
+pub const first_block_literals: [17]u8 = hex("80202122232425262728292a2b2c2d2e2f");
+pub const first_block_section: [6]u8 = hex("025405030041");
+pub const first_block_expected: [22]u8 = hex("202122232420212225262728292225262a2b2c2d2e2f");
+
+/// The Repeat_Mode fixture: the second block's modes byte is 0xfc (all three
+/// alphabets Repeat, `§3.1.1.3.2.1`), so it carries no table bytes and reuses
+/// the first block's three RLE tables — and, because the offset history
+/// carries across blocks, its offsets continue the first block's.
+pub const repeat_1_literals: [17]u8 = hex("80303132333435363738393a3b3c3d3e3f");
+pub const repeat_1_section: [3]u8 = hex("02fc53");
+pub const repeat_1_expected: [22]u8 = hex("30313233342e2f3035363738392e2f303a3b3c3d3e3f");
+
 /// Block 2's modes byte is 0xfc — all three alphabets Repeat (`§3.1.1.3.2.1`) — and its
 /// offsets continue block 1's history.
-pub const frame_repeat = hex("28b52ffd0048bc000080202122232425262728292a2b2c2d" ++
-    "2e2f025405030041a5000080303132333435363738393a3b" ++
-    "3c3d3e3f02fc53");
+pub const frame_repeat = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(first_block_literals ++ first_block_section) },
+    .{ .block_type = .compressed, .content = &(repeat_1_literals ++ repeat_1_section) },
+});
 
 /// The decoded output of `frame_repeat`: the CLI's own `zstd -d` bytes.
 pub const frame_repeat_expected = hex("202122232420212225262728292225262a2b2c2d2e2f3031" ++
     "3233342e2f3035363738392e2f303a3b3c3d3e3f");
 
+/// The tempOffset fixture, three blocks: the first two sequences lay down a
+/// 22-byte history (offsets 5 and 6, so the repeats end at {6, 5, 1}); the
+/// second block's sequences all have literals_length 0 (LL symbol 0) and
+/// offset_value 3 or 2, the two shifted repeat codes; the third block's all
+/// have offset_value 1, the Repeated_Offset2 selection whose swap alternates
+/// the offsets.
+pub const temp_offset_1_literals: [9]u8 = hex("403031323334353637");
+pub const temp_offset_1_section: [6]u8 = hex("04540001031a");
+pub const temp_offset_1_expected: [32]u8 = hex(
+    "2b2c2d2e2f2b2c2d2e2f2b2c2e2f2b2c2e2f2f2b2c2e2f2f3031323334353637",
+);
+pub const temp_offset_2_literals: [9]u8 = hex("4038393a3b3c3d3e3f");
+pub const temp_offset_2_section: [6]u8 = hex("035400000001");
+pub const temp_offset_2_expected: [17]u8 = hex("34353636373436363738393a3b3c3d3e3f");
+
 /// Three blocks: block 2's literals_length is 0 for every sequence (the shifted repeat
 /// selection) and reaches into block 1, block 3's walk the Repeated_Offset2 swap (`§3.1.1.5`).
-pub const frame_temp_offset = hex("28b52ffd0048bc000080202122232425262728292a2b2c2d" ++
-    "2e2f0254050300417c000040303132333435363704540001" ++
-    "031a7d00004038393a3b3c3d3e3f035400000001");
+pub const frame_temp_offset = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(first_block_literals ++ first_block_section) },
+    .{ .block_type = .compressed, .content = &(temp_offset_1_literals ++ temp_offset_1_section) },
+    .{ .block_type = .compressed, .content = &(temp_offset_2_literals ++ temp_offset_2_section) },
+});
 
 /// The decoded output of `frame_temp_offset`: the CLI's own `zstd -d` bytes.
 pub const frame_temp_offset_expected = hex("202122232420212225262728292225262a2b2c2d2e2f2b2c" ++
     "2d2e2f2b2c2d2e2f2b2c2e2f2b2c2e2f2f2b2c2e2f2f3031" ++
     "32333435363734353636373436363738393a3b3c3d3e3f");
 
+/// The corner fixture: RLE modes with LL symbol 5, ML symbol 0, OF symbol 3
+/// (three extra bits, so offset_value 8-15), six sequences over 32 literals.
+/// Offsets 5, 6, 7, 7 (the equal-offsets rule), 9, 12; two trailing
+/// literals. Modes byte 0x54 = RLE|RLE|RLE.
+pub const corner_literals: [34]u8 = hex(
+    "0402202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d" ++
+        "3e3f",
+);
+pub const corner_section: [8]u8 = hex("0654050300a71404");
+pub const corner_expected: [50]u8 = hex(
+    "202122232420212225262728292225262a2b2c2d2e25262a2f30313233262a2f" ++
+        "343536373833262a393a3b3c3d3536373e3f",
+);
+
 /// The corner fixture: six RLE-mode sequences with two trailing literals (`§3.1.1.4`,
 /// `§3.1.1.3.2`).
-pub const frame_corner = hex("28b52ffd00485501000402202122232425262728292a2b2c" ++
-    "2d2e2f303132333435363738393a3b3c3d3e3f0654050300" ++
-    "a71404");
+pub const frame_corner = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(corner_literals ++ corner_section) },
+});
 
 /// The decoded output of `frame_corner`: the CLI's own `zstd -d` bytes.
 pub const frame_corner_expected = hex("202122232420212225262728292225262a2b2c2d2e25262a" ++
     "2f30313233262a2f343536373833262a393a3b3c3d353637" ++
     "3e3f");
 
+/// The two-byte Number_of_Sequences fixture: the second block's count is
+/// 128, the first count that needs the 2-byte form (`80 80`), and its 128
+/// sequences all have literals_length 0 with offset_value 1 — the shifted
+/// Repeated_Offset2 selection, whose swap alternates offsets 5 and 6 as the
+/// history's own bytes are consumed. The block's 384 bytes start with block
+/// 1's tail (12 bytes) and settle into the six-byte cycle `----./` (62
+/// times), then its 8 literals are trailing (the CLI's output, verbatim).
+pub const two_byte_1_literals: [9]u8 = hex("403031323334353637");
+pub const two_byte_1_section: [7]u8 = hex("80805400000001");
+pub const two_byte_1_expected: [392]u8 = hex(
+    "2b2c2d2d2e2f2c2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
+        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
+        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
+        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
+        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
+        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
+        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
+        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
+        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
+        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
+        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
+        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
+        "3031323334353637",
+);
+
 /// Block 2's Number_of_Sequences is 128, the first count that needs the 2-byte form
 /// (`§3.1.1.3.2.1`).
-pub const frame_two_byte = hex("28b52ffd0048bc000080202122232425262728292a2b2c2d" ++
-    "2e2f02540503004185000040303132333435363780805400" ++
-    "000001");
+pub const frame_two_byte = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(first_block_literals ++ first_block_section) },
+    .{ .block_type = .compressed, .content = &(two_byte_1_literals ++ two_byte_1_section) },
+});
 
 /// The decoded output of `frame_two_byte`: the CLI's own `zstd -d` bytes.
 pub const frame_two_byte_expected = hex("202122232420212225262728292225262a2b2c2d2e2f2b2c" ++
@@ -643,76 +812,98 @@ pub const frame_two_byte_expected = hex("202122232420212225262728292225262a2b2c2
     "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f3031" ++
     "323334353637");
 
+/// The zero-count fixture: the 1-byte zero (the section stops after the
+/// count) and the 2-byte `80 00` that decodes to zero — the corner the
+/// reference accepts and std rejects (T5).
+pub const zero_literals: [9]u8 = hex("402021222324252627");
+pub const zero_section: [1]u8 = hex("00");
+pub const zero_two_byte_section: [2]u8 = hex("8000");
+pub const zero_expected: [8]u8 = hex("2021222324252627");
+
 /// A zero-count sequences section: the block is its literals (`§3.1.1.3.2.1`).
-pub const frame_zero_seq = hex("28b52ffd004855000040202122232425262700");
+pub const frame_zero_seq = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(zero_literals ++ zero_section) },
+});
 
 /// The decoded output of `frame_zero_seq`: the CLI's own `zstd -d` bytes.
 pub const frame_zero_seq_expected = hex("2021222324252627");
 
 /// The 2-byte `80 00` decoded-zero count — T5's corner, which std rejects.
-pub const frame_zero_seq_2b = hex("28b52ffd00485d00004020212223242526278000");
+pub const frame_zero_seq_2b = buildFrame(0x48, &.{
+    .{ .block_type = .compressed, .content = &(zero_literals ++ zero_two_byte_section) },
+});
 
 /// The landed `sequences_predefined` pair as one compressed block (`§3.1.1.3`); the CLI
 /// decodes it to `sequences_predefined_expected`.
-pub const frame_sequences_predefined = hex("28b52ffd0048f50100b402746865206c69746572616c2064" ++
-    "6f67206d617463686a756d70736f7665726666736574666f" ++
-    "78206c617a7906004a098d92e92802374fc7ecf3b52401");
+pub const frame_sequences_predefined = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(sequences_predefined_literals ++ sequences_predefined_section),
+    },
+});
 
 /// The landed `sequences_rle_match_lengths` pair as one compressed block; the CLI decodes it to
 /// `sequences_rle_match_lengths_expected`.
-pub const frame_sequences_rle_match_lengths = hex("28b52ffd004805020082460c09e0e952" ++
-    "eeb41f003002931e" ++
-    "7ac705b774efa78121f4ca66e061a5c76ef16a2b05029cc1" ++
-    "6c798adb9aa411a41138dcb80404040158614e99210464d9" ++
-    "03");
+pub const frame_sequences_rle_match_lengths = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(sequences_rle_match_lengths_literals ++ sequences_rle_match_lengths_section),
+    },
+});
 
 /// The landed `sequences_fse_offsets` pair as one compressed block; the CLI decodes it to
 /// `sequences_fse_offsets_expected`.
-pub const frame_sequences_fse_offsets = hex("28b52ffd004825020014036c69746572616c206c617a7920" ++
-    "746865207a7374646f66667365746a756d70732077696e64" ++
-    "6f776d61746368206f766572062010661f000124416a3902" ++
-    "f096316826");
+pub const frame_sequences_fse_offsets = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(sequences_fse_offsets_literals ++ sequences_fse_offsets_section),
+    },
+});
 
 /// The landed `sequences_fse_all` pair as one compressed block; the CLI decodes it to
 /// `sequences_fse_all_expected`.
-pub const frame_sequences_fse_all = hex("28b52ffd00486d030082840f1490c70d6cd92ea945e8f1c6" ++
-    "efdae6ffff9fcf7fe59d5cca266a32959ca65f6cf98087a9" ++
-    "bbb4ab353921269c34bf1bec81dc1bc483256f4bf4b46bdb" ++
-    "050413a870334b4b6b0f1044a5f5104086591c3771941ce0" ++
-    "d336ec19a7fe6c628af5e54c04a5acad8648e8585306");
+pub const frame_sequences_fse_all = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(sequences_fse_all_literals ++ sequences_fse_all_section),
+    },
+});
 
 /// The landed `literals_1stream` section with a zero-count sequences section (`§3.1.1.3.2.1`);
 /// the CLI decodes it to `literals_1stream_expected`.
-pub const frame_literals_1stream = hex("28b52ffd00484d0100824709855431111f26493580af02b8" ++
-    "5769fb0d42816b26c3a5925aa399d3662b002c31311d940d" ++
-    "0400");
+pub const frame_literals_1stream = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(literals_1stream_section ++ zero_section),
+    },
+});
 
 /// The landed `literals_4stream_sf1` section with a zero-count sequences section; the CLI
 /// decodes it to `literals_4stream_sf1_expected`.
-pub const frame_literals_4stream_sf1 = hex("28b52ffd0048750200469012856543210d0012001200ebfd" ++
-    "fa33eadf58c95ac7bd9d721b6a96b6e34259c82354866c27" ++
-    "0146722fa53f423e4ed12c848e32913d1900248dfa7d14c1" ++
-    "650ecf4bf5efb414a843cae4757f00");
+pub const frame_literals_4stream_sf1 = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(literals_4stream_sf1_section ++ zero_section),
+    },
+});
 
 /// The landed `literals_4stream_sf2` section with a zero-count sequences section; the CLI
 /// decodes it to `literals_4stream_sf2_expected`.
-pub const frame_literals_4stream_sf2 = hex("28b52ffd00488d08006a4030048887654311104000400040" ++
-    "00f94b5bc940528712fbbf96b00205afae9502dc928ea4b6" ++
-    "efb95ea771b56b1cf2e015f7908a60d225bb04218f0f5215" ++
-    "f96124a9284bddf955dcaeed7738e071e77bda8f3e217268" ++
-    "a9481ee09acde923282d7c9be9b66f579f033c3a875650d3" ++
-    "93bdfc9aa20ef0ab0d527cb39322246f066ea9b271e3f974" ++
-    "33c0fc814f69412e019ba58acdd3924b9d7b943ccb60d034" ++
-    "dd8fed536ac7f28dbabb1f1d1184b46eb803b26bf0dce1f1" ++
-    "ce55c1c2a8f0efbabcd38ceb18900147037a9b340b70a78d" ++
-    "014dc3ff792ed399720ddda3d67f80ef1cb488da53ba051a" ++
-    "aa88853c19ad964388045dbfcf703a407a540e80d43be9ea" ++
-    "fd1d170d5b8ac1c90d06f811e6a9b3987100");
+pub const frame_literals_4stream_sf2 = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(literals_4stream_sf2_section ++ zero_section),
+    },
+});
 
 /// The landed `literals_fse_tree` section with a zero-count sequences section; the CLI decodes
 /// it to `literals_fse_tree_expected`.
-pub const frame_literals_fse_tree = hex("28b52ffd0048150100a6800713b0a599030e89989065de6a" ++
-    "21499319061f03600100010001000f0f0f0300");
+pub const frame_literals_fse_tree = buildFrame(0x48, &.{
+    .{
+        .block_type = .compressed,
+        .content = &(literals_fse_tree_section ++ zero_section),
+    },
+});
 
 /// Block type 3, Reserved (`§3.1.1.2.2`): the CLI exits 1.
 pub const frame_reserved = hex("28b52ffd004827000061626364");

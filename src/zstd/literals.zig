@@ -497,9 +497,8 @@ fn expectDecode(section: []const u8, expected: []const u8) !void {
     internal.sentinel.fill(&target);
     var state: State = .{};
     const decoded = try decode(section, &target, &state);
-    try testing.expectEqualSlices(u8, expected, decoded.bytes);
+    try golden.expectDecoded(&target, decoded.bytes.len, expected);
     try testing.expectEqual(section.len, decoded.bytes_consumed);
-    try internal.sentinel.expect(&target, decoded.bytes.len);
 }
 
 test "parseHeader reads the Raw and RLE size formats" {

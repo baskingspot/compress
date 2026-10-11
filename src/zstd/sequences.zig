@@ -880,105 +880,15 @@ fn appendTrailingLiterals(
     return trailing.len;
 }
 
-/// Comptime hex decoding, so the fixtures keep the spelling the generator
-/// printed (the flate/gzip/golden shape).
-fn hex(comptime text: []const u8) [text.len / 2]u8 {
-    @setEvalBranchQuota(100_000);
-    comptime assert(text.len % 2 == 0);
-    var bytes: [text.len / 2]u8 = undefined;
-    for (&bytes, 0..) |*byte, i| {
-        byte.* = std.fmt.parseInt(u8, text[i * 2 ..][0..2], 16) catch unreachable;
-    }
-    return bytes;
-}
-
-/// The hand-built fixtures below are whole frames verified with the pinned
-/// zstd CLI v1.5.7: each frame is a magic, a descriptor 0x00 (no
+/// The hand-built fixtures these tests compose live in `golden.zig` (the
+/// fixture module, shared by every layer): each block's literals section and
+/// sequences section, their expected outputs, and the whole frames
+/// `buildFrame` derives from them. They are whole frames verified with the
+/// pinned zstd CLI v1.5.7 — each is a magic, a descriptor 0x00 (no
 /// Frame_Content_Size, no checksum), a 512 KB window descriptor, then one or
 /// more compressed blocks of raw literals and the sequences section in
-/// question. `zstd -d` decodes every one of them to the bytes the tests
-/// expect, so the fixtures are conformant frames rather than self-consistent
+/// question — so they are conformant frames rather than self-consistent
 /// guesses (the literals slice's hand-built-section pattern, one layer up).
-///
-/// The corner fixture: RLE modes with LL symbol 5, ML symbol 0, OF symbol 3
-/// (three extra bits, so offset_value 8-15), six sequences over 32 literals.
-/// Offsets 5, 6, 7, 7 (the equal-offsets rule), 9, 12; two trailing
-/// literals. Modes byte 0x54 = RLE|RLE|RLE.
-const corner_literals: [34]u8 = hex(
-    "0402202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d" ++
-        "3e3f",
-);
-const corner_section: [8]u8 = hex("0654050300a71404");
-const corner_expected: [50]u8 = hex(
-    "202122232420212225262728292225262a2b2c2d2e25262a2f30313233262a2f" ++
-        "343536373833262a393a3b3c3d3536373e3f",
-);
-
-/// The tempOffset fixture, three blocks: the first two sequences lay down a
-/// 22-byte history (offsets 5 and 6, so the repeats end at {6, 5, 1}); the
-/// second block's sequences all have literals_length 0 (LL symbol 0) and
-/// offset_value 3 or 2, the two shifted repeat codes; the third block's all
-/// have offset_value 1, the Repeated_Offset2 selection whose swap alternates
-/// the offsets.
-const temp_offset_0_literals: [17]u8 = hex("80202122232425262728292a2b2c2d2e2f");
-const temp_offset_0_section: [6]u8 = hex("025405030041");
-const temp_offset_0_expected: [22]u8 = hex("202122232420212225262728292225262a2b2c2d2e2f");
-const temp_offset_1_literals: [9]u8 = hex("403031323334353637");
-const temp_offset_1_section: [6]u8 = hex("04540001031a");
-const temp_offset_1_expected: [32]u8 = hex(
-    "2b2c2d2e2f2b2c2d2e2f2b2c2e2f2b2c2e2f2f2b2c2e2f2f3031323334353637",
-);
-const temp_offset_2_literals: [9]u8 = hex("4038393a3b3c3d3e3f");
-const temp_offset_2_section: [6]u8 = hex("035400000001");
-const temp_offset_2_expected: [17]u8 = hex("34353636373436363738393a3b3c3d3e3f");
-
-/// The Repeat_Mode fixture: the second block's modes byte is 0xfc (all
-/// three alphabets Repeat), so it carries no table bytes and reuses the
-/// first block's three RLE tables — and, because the offset history carries
-/// across blocks, its offsets continue the first block's.
-const repeat_0_literals: [17]u8 = hex("80202122232425262728292a2b2c2d2e2f");
-const repeat_0_section: [6]u8 = hex("025405030041");
-const repeat_0_expected: [22]u8 = hex("202122232420212225262728292225262a2b2c2d2e2f");
-const repeat_1_literals: [17]u8 = hex("80303132333435363738393a3b3c3d3e3f");
-const repeat_1_section: [3]u8 = hex("02fc53");
-const repeat_1_expected: [22]u8 = hex("30313233342e2f3035363738392e2f303a3b3c3d3e3f");
-
-/// The two-byte Number_of_Sequences fixture: the second block's count is
-/// 128, the first count that needs the 2-byte form (`80 80`), and its 128
-/// sequences all have literals_length 0 with offset_value 1 — the shifted
-/// Repeated_Offset2 selection, whose swap alternates offsets 5 and 6 as the
-/// history's own bytes are consumed. The block's 384 bytes start with block
-/// 1's tail (12 bytes) and settle into the six-byte cycle `----./` (62
-/// times), then its 8 literals are trailing (the CLI's output, verbatim).
-const two_byte_0_literals: [17]u8 = hex("80202122232425262728292a2b2c2d2e2f");
-const two_byte_0_section: [6]u8 = hex("025405030041");
-const two_byte_0_expected: [22]u8 = hex("202122232420212225262728292225262a2b2c2d2e2f");
-const two_byte_1_literals: [9]u8 = hex("403031323334353637");
-const two_byte_1_section: [7]u8 = hex("80805400000001");
-const two_byte_1_expected: [392]u8 = hex(
-    "2b2c2d2d2e2f2c2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
-        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
-        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
-        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
-        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
-        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
-        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
-        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
-        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
-        "2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d" ++
-        "2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d" ++
-        "2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f2d2d2d2d2e2f" ++
-        "3031323334353637",
-);
-
-/// The zero-count fixture: the 1-byte zero (the section stops after the
-/// count) and the 2-byte `80 00` that decodes to zero — the corner the
-/// reference accepts and std rejects (T5).
-const zero_literals: [9]u8 = hex("402021222324252627");
-const zero_section: [1]u8 = hex("00");
-const zero_two_byte_section: [2]u8 = hex("8000");
-const zero_expected: [8]u8 = hex("2021222324252627");
-
 /// One fixture block: the two sections of a compressed block (`§3.1.1.3`).
 const FixtureBlock = struct {
     literals_section: []const u8,
@@ -1364,10 +1274,10 @@ test "decode executes the corner fixture: offsets, rotation, trailing literals" 
     // equals Repeated_Offset1, the equal-offsets rule), 9, and 12, with two
     // literals left over that "are added at the end of the block".
     const blocks = [_]FixtureBlock{.{
-        .literals_section = &corner_literals,
-        .sequences_section = &corner_section,
+        .literals_section = &golden.corner_literals,
+        .sequences_section = &golden.corner_section,
     }};
-    try expectBlocks(&blocks, &.{&corner_expected});
+    try expectBlocks(&blocks, &.{&golden.corner_expected});
 }
 
 test "decode threads the repeat offsets and the history across blocks" {
@@ -1378,22 +1288,22 @@ test "decode threads the repeat offsets and the history across blocks" {
     // sequences walk the Repeated_Offset2 swap.
     const blocks = [_]FixtureBlock{
         .{
-            .literals_section = &temp_offset_0_literals,
-            .sequences_section = &temp_offset_0_section,
+            .literals_section = &golden.first_block_literals,
+            .sequences_section = &golden.first_block_section,
         },
         .{
-            .literals_section = &temp_offset_1_literals,
-            .sequences_section = &temp_offset_1_section,
+            .literals_section = &golden.temp_offset_1_literals,
+            .sequences_section = &golden.temp_offset_1_section,
         },
         .{
-            .literals_section = &temp_offset_2_literals,
-            .sequences_section = &temp_offset_2_section,
+            .literals_section = &golden.temp_offset_2_literals,
+            .sequences_section = &golden.temp_offset_2_section,
         },
     };
     try expectBlocks(&blocks, &.{
-        &temp_offset_0_expected,
-        &temp_offset_1_expected,
-        &temp_offset_2_expected,
+        &golden.first_block_expected,
+        &golden.temp_offset_1_expected,
+        &golden.temp_offset_2_expected,
     });
 }
 
@@ -1405,15 +1315,15 @@ test "decode reuses the previous tables in Repeat mode" {
     // three Repeat) and carries no table bytes.
     const blocks = [_]FixtureBlock{
         .{
-            .literals_section = &repeat_0_literals,
-            .sequences_section = &repeat_0_section,
+            .literals_section = &golden.first_block_literals,
+            .sequences_section = &golden.first_block_section,
         },
         .{
-            .literals_section = &repeat_1_literals,
-            .sequences_section = &repeat_1_section,
+            .literals_section = &golden.repeat_1_literals,
+            .sequences_section = &golden.repeat_1_section,
         },
     };
-    try expectBlocks(&blocks, &.{ &repeat_0_expected, &repeat_1_expected });
+    try expectBlocks(&blocks, &.{ &golden.first_block_expected, &golden.repeat_1_expected });
 }
 
 test "decode reads the 2-byte Number_of_Sequences form over 128 sequences" {
@@ -1422,15 +1332,15 @@ test "decode reads the 2-byte Number_of_Sequences form over 128 sequences" {
     // the alternating repeat offsets.
     const blocks = [_]FixtureBlock{
         .{
-            .literals_section = &two_byte_0_literals,
-            .sequences_section = &two_byte_0_section,
+            .literals_section = &golden.first_block_literals,
+            .sequences_section = &golden.first_block_section,
         },
         .{
-            .literals_section = &two_byte_1_literals,
-            .sequences_section = &two_byte_1_section,
+            .literals_section = &golden.two_byte_1_literals,
+            .sequences_section = &golden.two_byte_1_section,
         },
     };
-    try expectBlocks(&blocks, &.{ &two_byte_0_expected, &two_byte_1_expected });
+    try expectBlocks(&blocks, &.{ &golden.first_block_expected, &golden.two_byte_1_expected });
 }
 
 test "decode ends a zero-count section on the literals" {
@@ -1440,18 +1350,21 @@ test "decode ends a zero-count section on the literals" {
     // decoded-zero form (T5) end the same way, and neither updates the
     // frame's tables.
     const blocks = [_]FixtureBlock{
-        .{ .literals_section = &zero_literals, .sequences_section = &zero_section },
         .{
-            .literals_section = &zero_literals,
-            .sequences_section = &zero_two_byte_section,
+            .literals_section = &golden.zero_literals,
+            .sequences_section = &golden.zero_section,
+        },
+        .{
+            .literals_section = &golden.zero_literals,
+            .sequences_section = &golden.zero_two_byte_section,
         },
     };
-    try expectBlocks(&blocks, &.{ &zero_expected, &zero_expected });
+    try expectBlocks(&blocks, &.{ &golden.zero_expected, &golden.zero_expected });
     var state: State = .{};
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    const section = try decode(&zero_section, &zero_expected, &target, 0, &state);
-    try testing.expectEqual(zero_expected.len, section.bytes_written);
+    const section = try decode(&golden.zero_section, &golden.zero_expected, &target, 0, &state);
+    try testing.expectEqual(golden.zero_expected.len, section.bytes_written);
     try testing.expectEqual(@as(usize, 1), section.bytes_consumed);
     try testing.expect(state.tables[0] == null);
     try testing.expectEqualSlices(u32, &repeat_offsets_start, &state.repeat_offsets);

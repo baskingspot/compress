@@ -166,8 +166,10 @@ zstd.decode.DecompressError = error{
 };
 
 // The streaming frame decoder (zstd.Reader): one Zstandard frame per reader,
-// with the exact boundary visible. Buffer ownership is the caller's; there is
-// no allocator anywhere in the API.
+// with the exact boundary visible. Buffer ownership is the caller's; the
+// codec allocates nothing (the `*Alloc` conveniences allocate the default
+// buffer from a caller-provided allocator for one call — README,
+// "Allocation").
 zstd.Reader.Buffer(comptime window_len: usize) type
         // [window_len + max_block_size + min(window_len, max_block_size)]u8
         // — the caller-owned buffer: window_len bytes of retained history
@@ -210,6 +212,11 @@ zstd.Reader.streamFrame(window_len, in, out, buffer) error{ReadFailed, WriteFail
 zstd.Reader.streamAll(window_len, in, out, buffer) error{ReadFailed, WriteFailed}!usize
         // `window_len` is comptime and `buffer` is the exact pointer to a
         // `Reader.Buffer(window_len)`: the two must agree at the call site.
+// The same pumps with the default window, allocating the buffer from the
+// caller's allocator for the call and freeing it before returning — the
+// convenience allocates; the codec never does (README, "Allocation"):
+zstd.Reader.streamFrameAlloc(allocator, in, out) error{ReadFailed, WriteFailed, OutOfMemory}!usize
+zstd.Reader.streamAllAlloc(allocator, in, out) error{ReadFailed, WriteFailed, OutOfMemory}!usize
 ```
 
 `Reader.streamFrame` consumes and decodes one Zstandard frame — consuming and
@@ -219,6 +226,15 @@ above. Both take the comptime `window_len` and the exact pointer to a
 `Reader.Buffer(window_len)` — the compiler holds the two together; the pump
 reports the coarse `error.ReadFailed`, so a caller who needs a failure's
 detail drives a `Reader` (or `streamFrame`) directly.
+
+`Reader.streamFrameAlloc` and `Reader.streamAllAlloc` are the same two pumps
+with the default window: the convenience allocates `Reader.DefaultBuffer` —
+8 MiB + 256 KiB — from `allocator`, drives the primitive, and frees it before
+returning, so the one-call shape is `_ = try
+zstd.Reader.streamAllAlloc(allocator, in, out);`. The convenience is the
+default-window path by design; a caller who wants a smaller window (or no
+allocation at all) uses the primitives with a `Reader.Buffer(window_len)` of
+its own. The allocation's own failure is `error.OutOfMemory`.
 
 Beyond the two namespaces, the layer types the decoder is built from stay
 reachable, named, and stable (the flate precedent: `BitReader`, `copyMatch`):
@@ -236,8 +252,10 @@ these are the named parts the barrels are built from.
 
 Contracts, stated plainly:
 
-- **Ownership**: the caller owns every buffer. Nothing is allocated, freed,
-  or retained. There is no allocator in the API at all.
+- **Ownership**: the caller owns every buffer, and the codec retains nothing.
+  The `*Alloc` conveniences take an allocator to allocate the default buffer
+  for one call and free it before returning — the only allocator in the API
+  ("Allocation" below).
 - **Sizing**: `decompress` takes `target` as a cap and returns the decoded
   length; a frame that does not fit is `error.BufferTooSmall`, reported before
   the overflowing write, never a truncated success. `Frame_Content_Size`
@@ -282,9 +300,12 @@ Contracts, stated plainly:
   Debug) on the main thread, where the shared CLI scaffolding adds two
   64 KiB I/O buffers. Size thread stacks accordingly when embedding: the
   one-shot segfaults in a 128 KiB thread (musl's default).
-- **Allocation**: zero, end to end. The one-shot takes no allocator; the
-  reader takes none either (caller-provided buffers through the named buffer
-  type).
+- **Allocation**: zero on every decode path. The one-shot takes no
+  allocator; the reader's primitives take none either (caller-provided
+  buffers through the named buffer type). The `streamFrameAlloc` /
+  `streamAllAlloc` conveniences take one and allocate `Reader.DefaultBuffer`
+  for the call — the convenience allocates the buffer, the codec never does —
+  and free it before returning; a failing allocation is `error.OutOfMemory`.
 
 ## The frame format
 
@@ -611,12 +632,15 @@ full:
   *Buffer(window_len))` takes the comptime window and the exact pointer to
   the named buffer type; the two must agree, so the cap and the buffer cannot
   disagree.
-- Zero allocation end to end: no allocator appears anywhere in the streaming
-  API. The block staging lives in the caller's `Buffer` (its trailing
-  `min(window_len, max_block_size)` bytes); the literals scratch is the one
-  comptime stack local (<= 128 KiB, "Stack").
+- Zero allocation on every decode path: no allocator appears anywhere in
+  the reader's decode machinery. The block staging lives in the caller's
+  `Buffer` (its trailing `min(window_len, max_block_size)` bytes); the
+  literals scratch is the one comptime stack local (<= 128 KiB, "Stack").
+  The `streamFrameAlloc`/`streamAllAlloc` conveniences are the one place an
+  allocator appears, and only to allocate the default buffer for the call.
 - The one-call pumps take the same buffer pointer; there is no stack-buffered
-  default-window pump, because 8 MiB + 256 KiB does not belong on a stack.
+  default-window pump, because 8 MiB + 256 KiB does not belong on a stack —
+  the `*Alloc` conveniences allocate it from the caller's allocator instead.
 
 Semantics:
 
@@ -668,7 +692,10 @@ Semantics:
   `Reader` itself.
 - `Reader.streamFrame` / `Reader.streamAll` are the one-call pumps: one frame
   unit / every frame unit `in` holds, through the caller's buffer, zero
-  allocation. `streamAll` is the walk above: skippable units pass through with
+  allocation. `Reader.streamFrameAlloc` / `Reader.streamAllAlloc` are the same
+  two with `Reader.DefaultBuffer` allocated from the caller's allocator for
+  the call (the codec still allocates nothing; the convenience does).
+  `streamAll` is the walk above: skippable units pass through with
   zero bytes, a file of only skippable frames is the clean end with zero bytes
   served, the zero-byte input is the clean end (zero frames served), and
   garbage fails closed. `streamFrame` on a zero-byte input fails with the
@@ -690,7 +717,8 @@ the forward and the backwards), `xxh64.zig` (the checksum state over its own
 u64-counted kernel — std's `XxHash64` counts in a `usize` and wraps past
 2^32; std's stays in the tests as the differential oracle), `probe32.zig`
 (the 32-bit proof probe, `just check-32`), `Reader.zig` (the streaming `Io`
-layer), `golden.zig` (ported golden fixtures, shared by every layer's tests),
+layer), `golden.zig` (ported golden fixtures, the shared fixture-builder and
+decode-check helper, shared by every layer's tests),
 `common.zig` (little-endian integer access), `fuzz.zig` (fuzz targets). `bench.zig` (a local benchmark) and `oracle.zig` (an
 external-oracle harness) are not landed at M4: the zstd rows live in the
 fleet driver ("Benchmarks" below), and an oracle lane is the perf wave's to

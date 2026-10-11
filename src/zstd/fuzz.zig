@@ -118,14 +118,6 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-serialized `u64`: the little-endian form every `smith.value` call
-/// consumes, so hand-built seeds can pin the values the target reads.
-fn u64Le(comptime value: u64) [8]u8 {
-    var out: [8]u8 = undefined;
-    mem.writeInt(u64, &out, value, .little);
-    return out;
-}
-
 /// A nonzero byte to XOR with, so a flip always changes the byte.
 fn flipValue(smith: *Smith) u8 {
     return @intCast(1 + rangeAtMost(smith, 0, 254));
@@ -933,16 +925,6 @@ const walk_rows = [_]WalkRow{
         .kind = .first_then_fail,
     },
 };
-
-fn walkIndex(comptime desc: []const u8) usize {
-    comptime {
-        @setEvalBranchQuota(10_000);
-        for (walk_rows, 0..) |row, index| {
-            if (mem.eql(u8, row.desc, desc)) return index;
-        }
-        @compileError("no walk row named " ++ desc);
-    }
-}
 
 /// The reader over one frame unit, pumped to its clean end: identity against
 /// the model, the trailer-verified clean end (no detail, state `done`), the
