@@ -2,9 +2,9 @@
 //! (README.md, "Streaming") produced by `Writer`.
 //!
 //! Buffer layout: `buffer[0..decoded_region_len]` is the decoded serving
-//! region (two blocks, so a `peek` of up to two blocks is contiguous), and the
-//! bytes behind it stage one compressed block during decode. Zero
-//! allocation; the block decodes run through `decompressBlock`.
+//! region — two blocks of contiguous decoded reads plus room for a fresh
+//! block — and the bytes behind it stage one compressed block during decode.
+//! Zero allocation; the block decodes run through `decompressBlock`.
 //!
 //! The input's own buffer must hold at least 4 bytes (or the stream must end
 //! before then). The contiguous decoded read cap is two blocks
@@ -13,10 +13,10 @@
 
 const std = @import("std");
 const Io = std.Io;
-const mem = std.mem;
 const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
+const print = std.debug.print;
 
 const fastmem = @import("fastmem");
 
@@ -24,6 +24,7 @@ const internal = @import("../internal/root.zig");
 const VTable = internal.reader.VTable;
 const State = internal.reader.State;
 const common = @import("common.zig");
+const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
@@ -31,11 +32,12 @@ const encode = @import("encode.zig");
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
 
-/// The caller-provided buffer: two decoded blocks plus the compressed-block
-/// staging region.
+/// The caller-provided buffer: the decoded serving region plus the
+/// compressed-block staging region.
 pub const Buffer = [decoded_region_len + Writer.scratch_len]u8;
 
-/// Two blocks of contiguous decoded serving region.
+/// The serving region: two blocks of contiguous decoded reads plus room for
+/// a fresh block (README, "Streaming").
 const decoded_region_len = 3 * encode.max_block_size;
 
 const Reader = @This();
@@ -92,10 +94,7 @@ pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
 fn fillNextBlock(r: *Reader) Io.Reader.Error!usize {
     if (r.reader.end + encode.max_block_size > decoded_region_len) {
         // Slide the unconsumed bytes to the front to make room for a block.
-        const keep = r.reader.end - r.reader.seek;
-        fastmem.move(u8, r.reader.buffer[0..keep], r.reader.buffer[r.reader.seek..][0..keep]);
-        r.reader.seek = 0;
-        r.reader.end = keep;
+        slide(r);
         // The consumer asked for more contiguous bytes than the region can
         // hold beside a fresh block: fail closed, never assert on it.
         if (r.reader.end + encode.max_block_size > decoded_region_len) {
@@ -104,14 +103,14 @@ fn fillNextBlock(r: *Reader) Io.Reader.Error!usize {
     }
 
     // Zero bytes read at a block boundary is the clean, sticky end of the
-    // stream; 1-3 bytes is a truncated framing prefix.
-    var prefix: [4]u8 = undefined;
+    // stream; a short read is a truncated framing prefix.
+    var prefix: [frame_prefix_len]u8 = undefined;
     const prefix_len = r.input.readSliceShort(&prefix) catch |e| return fail(r, e);
     if (prefix_len == 0) {
         r.state = .done;
         return error.EndOfStream;
     }
-    if (prefix_len < 4) return fail(r, error.Truncated);
+    if (prefix_len < frame_prefix_len) return fail(r, error.Truncated);
     const block_len = readInt(u32, &prefix);
     if (block_len == 0 or block_len > Writer.scratch_len) return fail(r, error.InvalidStream);
 
@@ -139,6 +138,16 @@ fn fail(r: *Reader, err: Error) Io.Reader.Error {
     return internal.reader.fail(Error, &r.state, &r.err, err);
 }
 
+/// Slide the unconsumed bytes to the front of the serving region, so the
+/// region then has `decoded_region_len - end` contiguous free. Shared by
+/// the pump (making room for a fresh block) and the rebase hook.
+fn slide(r: *Reader) void {
+    const keep = r.reader.end - r.reader.seek;
+    fastmem.move(u8, r.reader.buffer[0..keep], r.reader.buffer[r.reader.seek..][0..keep]);
+    r.reader.seek = 0;
+    r.reader.end = keep;
+}
+
 /// The generated entries' rebase hook: slide the unconsumed bytes to the
 /// front, so the serving region then has `decoded_region_len - end`
 /// contiguous free.
@@ -147,10 +156,7 @@ fn fail(r: *Reader, err: Error) Io.Reader.Error {
 /// buffer capacity is the full `Buffer`, larger than the region, so std's
 /// `peek` assert does not catch it first) fails closed, never asserts.
 fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
-    const keep = r.reader.end - r.reader.seek;
-    fastmem.move(u8, r.reader.buffer[0..keep], r.reader.buffer[r.reader.seek..][0..keep]);
-    r.reader.seek = 0;
-    r.reader.end = keep;
+    slide(r);
     if (capacity > decoded_region_len) return fail(r, error.StreamTooLong);
 }
 
@@ -192,7 +198,7 @@ test "Reader: golden golang/snappy vectors through the framed stream" {
             continue;
         }
         _ = r.reader.streamRemaining(&plain.writer) catch |err| {
-            std.debug.print("\nFAIL: {s}\n", .{tc.desc});
+            print("\nFAIL: {s}\n", .{tc.desc});
             return err;
         };
         try testing.expectEqualSlices(u8, tc.want, plain.written());
@@ -203,7 +209,7 @@ test "Reader: golden outputs round-trip Writer -> Reader" {
     for (golden.golden_decode_cases) |tc| {
         if (tc.want_err) continue; // Corrupt sources have no output.
         roundTrip(tc.want) catch |err| {
-            std.debug.print("\nFAIL: {s}\n", .{tc.desc});
+            print("\nFAIL: {s}\n", .{tc.desc});
             return err;
         };
     }
@@ -365,10 +371,10 @@ test "Reader: a contiguous request past the two-block cap fails closed" {
 /// Frame one raw block for a golden stream test: the `u32-le` length
 /// prefix plus the block. Asserts `buf` can hold the frame.
 fn framedBlock(source: []const u8, buf: []u8) []u8 {
-    assert(source.len + 4 <= buf.len);
-    writeInt(u32, buf.ptr[0..4], @intCast(source.len));
-    fastmem.copy(u8, buf[4..][0..source.len], source);
-    return buf[0 .. 4 + source.len];
+    assert(source.len + frame_prefix_len <= buf.len);
+    writeInt(u32, buf[0..frame_prefix_len], @intCast(source.len));
+    fastmem.copy(u8, buf[frame_prefix_len..][0..source.len], source);
+    return buf[0 .. frame_prefix_len + source.len];
 }
 
 test "Reader: corrupt framing fails closed and stays failed" {

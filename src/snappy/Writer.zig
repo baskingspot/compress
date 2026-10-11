@@ -22,6 +22,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const common = @import("common.zig");
+const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
@@ -78,7 +79,7 @@ fn emit(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
     var scratch: [scratch_len]u8 = undefined;
     // `scratch` is sized to the exact worst case for any block.
     const n = encode.compressBlock(bytes, &scratch) catch unreachable;
-    var prefix: [4]u8 = undefined;
+    var prefix: [frame_prefix_len]u8 = undefined;
     writeInt(u32, &prefix, @intCast(n));
     try w.output.writeAll(&prefix);
     try w.output.writeAll(scratch[0..n]);
@@ -149,6 +150,9 @@ fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void 
     try parent.emit(w.buffer[0 .. w.end - keep]);
     fastmem.move(u8, w.buffer[0..keep], w.buffer[w.end - keep ..][0..keep]);
     w.end = keep;
+    // Postcondition: the preserved tail is buffered and the freed room is at
+    // least the requested capacity.
+    assert(w.buffer.len - w.end >= capacity);
 }
 
 test "Writer: empty input produces an empty stream" {
@@ -248,8 +252,8 @@ test "Writer: golden decoded outputs encode to streams the block decoder verifie
         const stream = out.written();
         var pos: usize = 0;
         while (pos < stream.len) {
-            const block_len = readInt(u32, stream[pos..][0..4].ptr[0..4]);
-            pos += 4;
+            const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
+            pos += frame_prefix_len;
             const block = stream[pos..][0..block_len];
             pos += block_len;
             const d_len = try decode.decompressedBlockLength(block);
@@ -382,8 +386,8 @@ fn countBlocks(stream: []const u8) usize {
     var n: usize = 0;
     var pos: usize = 0;
     while (pos < stream.len) {
-        const block_len = readInt(u32, stream[pos..][0..4]);
-        pos += 4 + block_len;
+        const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
+        pos += frame_prefix_len + block_len;
         n += 1;
     }
     return n;

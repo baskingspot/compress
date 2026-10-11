@@ -20,7 +20,6 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
-const mem = std.mem;
 const DefaultPrng = std.Random.DefaultPrng;
 
 const fastmem = @import("fastmem");
@@ -63,7 +62,6 @@ const input_margin: usize = 8;
 /// spot the reference settled on.
 const table_bits = 14;
 const table_size: usize = 1 << table_bits;
-const table_mask: usize = table_size - 1;
 
 /// 6-byte hash multiplier (klauspost `prime6bytes`). Multiplying the low 48
 /// bits of a u64 by this and taking the top `table_bits` bits gives a
@@ -84,32 +82,6 @@ inline fn load64(b: []const u8, i: usize) u64 {
 /// Load 4 bytes from `b[i..]` as a little-endian u32.
 inline fn load32(b: []const u8, i: usize) u32 {
     return readInt(u32, b[i..][0..4]);
-}
-
-/// Number of leading matching bytes of `a` and `b`, compared 8 bytes at a time,
-/// using `@ctz` on the first differing u64 to find the exact mismatch byte.
-/// Assumes `a_base <= b_base` positions into the same `source` and that neither
-/// read runs off the end (the caller keeps an 8-byte margin). Returns the match
-/// length starting from the current `a`/`b` offsets.
-fn matchLen(source: []const u8, a: usize, b: usize, limit: usize) usize {
-    var p = a;
-    var q = b;
-    while (q + 8 <= limit) {
-        const x = load64(source, p) ^ load64(source, q);
-        if (x != 0) {
-            // First differing byte = number of trailing zero bits / 8.
-            return p - a + (@ctz(x) >> 3);
-        }
-        p += 8;
-        q += 8;
-    }
-    while (q < limit) : ({
-        p += 1;
-        q += 1;
-    }) {
-        if (source[p] != source[q]) return p - a;
-    }
-    return p - a;
 }
 
 /// Compress `source` into `target` as a raw snappy block (varint uncompressed length
@@ -350,17 +322,26 @@ fn emitLiteral(target: []u8, literal: []const u8) error{BufferTooSmall}!usize {
     return i + literal.len;
 }
 
+/// The format's per-tag copy length cap: the 6-bit length field plus 1
+/// (copy-2 and copy-4 both encode `(tag >> 2) + 1`, 1..64).
+const max_copy_len = 64;
+
+/// The encoder's copy-2 chunk length: `max_copy_len - 4`, so the final
+/// remainder is >= 4 and can always use a copy-1 (length 4..11) or copy-2.
+const copy2_chunk_len = max_copy_len - 4;
+
 /// Upper bound on the bytes `emitCopy` will write for one (offset, length)
 /// copy, so the caller can bounds-check `target` before emitting. A copy is at
-/// most 5 bytes (copy-4) per 64-byte chunk for large offsets, or 3 bytes
-/// (copy-2) per 60-byte chunk for smaller offsets, plus a final chunk (<= 5).
+/// most 5 bytes (copy-4) per `max_copy_len`-byte chunk for large offsets, or
+/// 3 bytes (copy-2) per `copy2_chunk_len`-byte chunk for smaller offsets,
+/// plus a final chunk (<= 5).
 fn emitCopySize(offset: usize, length: usize) usize {
     if (offset >= 65536) {
-        // 5 bytes per 64-byte chunk + a final chunk (<= 5 bytes).
-        return 5 * ((length + 63) / 64);
+        // 5 bytes per chunk + a final chunk (<= 5 bytes).
+        return 5 * ((length + max_copy_len - 1) / max_copy_len);
     }
-    // 3 bytes per 60-byte chunk + a final chunk (<= 3 bytes).
-    return 3 * ((length + 59) / 60);
+    // 3 bytes per chunk + a final chunk (<= 3 bytes).
+    return 3 * ((length + copy2_chunk_len - 1) / copy2_chunk_len);
 }
 
 /// Write a copy tag for (offset, length) into `target`. Returns bytes written.
@@ -374,39 +355,39 @@ fn emitCopy(target: []u8, offset: usize, match_len: usize) usize {
     var i: usize = 0;
 
     if (offset >= 65536) {
-        // 4-byte offset: chew through 64-byte chunks, then a final copy-4.
-        while (length > 64) {
-            target[i] = 63 << 2 | 0b11; // length 64
+        // 4-byte offset: chew through `max_copy_len`-byte chunks, then a
+        // final copy-4.
+        while (length > max_copy_len) {
+            target[i] = (max_copy_len - 1) << 2 | 0b11; // length 64
             writeInt(u32, target[i + 1 ..][0..4], @intCast(offset));
             i += 5;
-            length -= 64;
+            length -= max_copy_len;
         }
         target[i] = @as(u8, @intCast(length - 1)) << 2 | 0b11;
         writeInt(u32, target[i + 1 ..][0..4], @intCast(offset));
         return i + 5;
     }
 
-    // Offset fits in 2 bytes. Emit 60-byte copy-2 chunks until the remainder
-    // is <= 64 (and, because we used 60 not 64, >= 4 when we entered this
-    // branch with length > 64).
-    while (length > 64) {
-        target[i] = 59 << 2 | 0b10; // length 60
-        target[i + 1] = @truncate(@as(u32, @intCast(offset)));
-        target[i + 2] = @truncate(@as(u32, @intCast(offset)) >> 8);
+    // Offset fits in 2 bytes. Emit copy-2 chunks until the remainder is
+    // <= `max_copy_len` (and, because the chunk is 60 not 64, >= 4 when we
+    // entered this branch with length > `max_copy_len`).
+    while (length > max_copy_len) {
+        target[i] = (copy2_chunk_len - 1) << 2 | 0b10; // length 60
+        writeInt(u16, target[i + 1 ..][0..2], @intCast(offset));
         i += 3;
-        length -= 60;
+        length -= copy2_chunk_len;
     }
 
     if (length >= 12 or offset >= 2048) {
         target[i] = @as(u8, @intCast(length - 1)) << 2 | 0b10;
-        target[i + 1] = @truncate(@as(u32, @intCast(offset)));
-        target[i + 2] = @truncate(@as(u32, @intCast(offset)) >> 8);
+        writeInt(u16, target[i + 1 ..][0..2], @intCast(offset));
         return i + 3;
     }
-    // 1-byte offset copy: length 4..11, offset < 2048.
+    // 1-byte offset copy: length 4..11, offset < 2048 (the top three offset
+    // bits ride in the tag byte, the low eight in the byte after it).
     target[i] = @as(u8, @intCast(offset >> 8)) << 5 |
         @as(u8, @intCast(length - 4)) << 2 | 0b01;
-    target[i + 1] = @truncate(@as(u32, @intCast(offset)));
+    target[i + 1] = @truncate(offset);
     return i + 2;
 }
 

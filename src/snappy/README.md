@@ -5,12 +5,13 @@ encoder and a SIMD-accelerated decoder. Imports only `std` and `fastmem`; no
 heap allocation on any codec path. The `zcompress.snappy` namespace of the
 zcompress module.
 
-This implements the [Snappy block format][format]. The block functions have
-no framing; the streaming layer (`Reader`/`Writer`, below) adds one — this
-package's canonical stream format. A consumer that needs a different framing
-(Xerial, LZO-style length-prefixed chunks, anything else) uses the block
-functions and owns its framing bytes. See "S2 vs Snappy" below for what is
-deliberately out.
+This implements the [Snappy block format][format], vendored verbatim at
+`docs/research/specs/snappy-format-description.txt`. The block functions
+have no framing; the streaming layer (`Reader`/`Writer`, below) adds one —
+this package's canonical stream format. A consumer that needs a different
+framing (Xerial, LZO-style length-prefixed chunks, anything else) uses the
+block functions and owns its framing bytes. See "S2 vs Snappy" below for
+what is deliberately out.
 
 ## API
 
@@ -78,8 +79,9 @@ hence the explicit length prefix.
 
 The format, precisely, for reimplementers:
 
-- `compressed_length` is a `u32-le` in `[1, scratch_len]` (`snappy.scratch_len`
-  = `maxCompressedLength(65536)`); a decoded block is at most
+- `compressed_length` is a `u32-le` in `[1, scratch_len]`
+  (`snappy.Writer.scratch_len` = `maxCompressedLength(65536)`); a decoded
+  block is at most
   `max_block_size` bytes. An empty stream is 0 bytes. A block decoding to 0
   bytes is degenerate but valid and accepted (the golden table's first case);
   this Writer never emits one.
@@ -93,16 +95,20 @@ The `std.compress.flate` `Compress`/`Decompress` pair is the in-tree
 precedent for this shape: an embedded interface with a
 `{drain, flush, rebase}` / `{stream, discard, readVec, rebase}` vtable,
 `@fieldParentPtr` back to the parent, a failing state after errors, and
-caller-provided buffers.
+caller-provided buffers. The reader's entries and lifecycle are the shared
+pattern book's (`src/internal/README.md`, "The Io codec pattern book"):
+the sticky guard, the zero-length poll, and the fill-and-return-0 count are
+the generated `internal.reader.VTable` entries, and the tests' overrun
+sentinel is `internal.sentinel`.
 
 Buffer ownership, in full:
 
-- `WriterBuffer` is `[max_block_size]u8`: the uncompressed accumulation
-  buffer, one block. `Writer.init(output: *Io.Writer, buffer: *WriterBuffer)`.
-- `ReaderBuffer` is `[3 * max_block_size + scratch_len]u8`: a three-block
+- `Writer.Buffer` is `[max_block_size]u8`: the uncompressed accumulation
+  buffer, one block. `Writer.init(output: *Io.Writer, buffer: *Writer.Buffer)`.
+- `Reader.Buffer` is `[3 * max_block_size + scratch_len]u8`: a three-block
   serving region holding two blocks of contiguous decoded reads plus room
   for a fresh block, and the compressed-block staging region behind it.
-  `Reader.init(input: *Io.Reader, buffer: *ReaderBuffer)`.
+  `Reader.init(input: *Io.Reader, buffer: *Reader.Buffer)`.
 - Zero allocation end to end: no allocator appears anywhere in the streaming
   API, and the compressed-output scratch is a comptime-sized stack local.
   The full encode/decode path allocates nothing.
@@ -132,8 +138,8 @@ Semantics:
 Files: `root.zig` (public surface), `encode.zig` (match-finder),
 `decode.zig` (SIMD decoder), `golden.zig` (ported golden fixtures, shared by
 every layer's tests), `Writer.zig` + `Reader.zig` (streaming `Io` layer),
-`common.zig` (LEB128 varint), `bench.zig` (local benchmark), `fuzz.zig`
-(fuzz targets).
+`common.zig` (shared helpers: the LEB128 varint and the framing prefix
+width), `bench.zig` (local benchmark), `fuzz.zig` (fuzz targets).
 
 An example CLI (`examples/snappy.zig`, `zig build example-snappy -- encode
 README.md > out`) exercises the streaming surface end-to-end as a thin pump:
@@ -258,7 +264,15 @@ The same vectors run through every layer: the block decoder directly
 decoder, and full `Writer` -> `Reader` round trips on the golden outputs. The
 fixtures live in `golden.zig`, shared by all layers.
 
-Run everything with `zig build test` (the ztest plain-text runner).
+- **Fuzz**: five targets in `fuzz.zig` — block decode over the golden corpus
+  (sentinel overrun check plus a re-encode round trip), block round trip,
+  stream round trip, writer machinery against a model, and framing
+  corruption — run with `zig build test -Doptimize=ReleaseSafe -Dfuzz
+  --fuzz=<budget>` (`just fuzz 10M`). Debug fuzz hits ziglang/zig#30655.
+  Fuzz-target creation is the fuzz-engineer's lane.
+
+Run everything with `zig build test` / `just test` (the ztest plain-text
+runner).
 
 **On encoder golden vectors**: Snappy does not mandate a canonical compressed
 form — as golang/snappy's own test code puts it, "there is more than one valid

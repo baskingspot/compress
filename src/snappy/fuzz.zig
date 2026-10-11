@@ -36,6 +36,7 @@ const fastmem = @import("fastmem");
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const common = @import("common.zig");
+const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
@@ -44,7 +45,7 @@ const block_max: usize = encode.max_block_size;
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
 /// The worst-case compressed size of one block — the stack scratch `Writer`
-/// itself uses (`snappy.scratch_len`).
+/// itself uses (`snappy.Writer.scratch_len`).
 const scratch_max: usize = Writer.scratch_len;
 
 /// Bytes past the decoded length checked on every decode: an out-of-bounds
@@ -431,7 +432,7 @@ const Mutation = enum(u8) {
 
 /// The framing-corruption stream cap: the worst-case compressed form of one
 /// `framing_max` block plus its length prefix, plus room for appended bytes.
-const mut_max: usize = encode.maxCompressedLength(framing_max) + 4 + 64;
+const mut_max: usize = encode.maxCompressedLength(framing_max) + frame_prefix_len + 64;
 
 /// Apply a Smith-chosen sequence of corruptions to `buf[0..len.*]`.
 fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
@@ -445,10 +446,10 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
             },
             .poke_length => {
                 // A declared block length: zero, one, absurd, or arbitrary.
-                // Poked at any offset, which is usually a block's 4-byte
+                // Poked at any offset, which is usually a block's length
                 // prefix and sometimes data inside a block.
-                if (len.* < 4) continue;
-                const at = smith.index(len.* - 3);
+                if (len.* < frame_prefix_len) continue;
+                const at = smith.index(len.* - (frame_prefix_len - 1));
                 const value: u32 = switch (smith.valueRangeAtMost(u8, 0, 3)) {
                     0 => 0,
                     1 => 1,
@@ -487,9 +488,9 @@ fn referenceDecode(stream: []const u8, plain: *Io.Writer.Allocating) !bool {
     var block_buf: [block_max]u8 = undefined;
     var pos: usize = 0;
     while (pos < stream.len) {
-        if (stream.len - pos < 4) return false;
-        const block_len = readInt(u32, stream[pos..][0..4]);
-        pos += 4;
+        if (stream.len - pos < frame_prefix_len) return false;
+        const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
+        pos += frame_prefix_len;
         if (block_len == 0 or block_len > Writer.scratch_len) return false;
         if (stream.len - pos < block_len) return false;
         const block = stream[pos..][0..block_len];

@@ -20,7 +20,6 @@ const internal = @import("../internal/root.zig");
 const decode = @import("decode.zig");
 const decompressBlock = decode.decompressBlock;
 const decompressedBlockLength = decode.decompressedBlockLength;
-const readInt = common.readInt;
 
 /// The decode-overrun sentinel (src/internal/sentinel.zig): the output buffer
 /// is pre-filled with the cycling bytes, and after decode every byte past
@@ -268,7 +267,7 @@ pub const golden_decode_cases: [30]DecodeCase = table_blk: {
 };
 
 test "golden decode: golang/snappy TestDecode vector table" {
-    // Spec: snappy-format-description.txt §2 (preamble varint) and §3 (tags).
+    // Spec: snappy-format-description.txt §1 (preamble varint) and §2 (tags).
     var d_buf: [100]u8 = undefined;
     for (golden_decode_cases) |tc| {
         checkDecodeCase(&d_buf, tc) catch |err| {
@@ -339,7 +338,7 @@ test "golden decode: invalid length varints (golang TestInvalidVarint)" {
 
 test "golden decode: large copy-4 offset (golang TestDecodeCopy4)" {
     // decodedLen=65545: exercises the 4-byte-offset copy with a real large
-    // offset and a 64KiB literal. Spec: snappy-format-description.txt §3.1
+    // offset and a 64KiB literal. Spec: snappy-format-description.txt §2.2.3
     // (copy-4 tag) and §2.1 (extended literal lengths).
     const source = try testing.allocator.alloc(u8, copy4_source_len);
     defer testing.allocator.free(source);
@@ -357,7 +356,7 @@ test "golden decode: large copy-4 offset (golang TestDecodeCopy4)" {
 }
 
 test "golden decode: literal + copy2 + literal (golang TestDecodeLengthOffset)" {
-    // Spec: snappy-format-description.txt §3.1 (copy-2 tag) across every
+    // Spec: snappy-format-description.txt §2.2.2 (copy-2 tag) across every
     // small offset and length, including overlapping (offset < length) RLE.
     // Exhaustive sweep over length, offset, suffixLen (1..18 each) of a
     // literal(prefix) + copy2(length, offset) + literal(suffix) pattern, with

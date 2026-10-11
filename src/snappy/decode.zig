@@ -141,9 +141,10 @@ inline fn shuffleBytes(v: Vec16, mask: Vec16) Vec16 {
     }
 }
 
-/// Copy `length` bytes from `target[pos - offset ..]` to `target[pos ..]`, handling
-/// overlap (RLE). `offset > 0` and `offset <= pos` and `pos + length <= target.len`
-/// are asserted by the caller. This is the hot path for copy tags.
+/// Copy `length` bytes from `target[pos - offset ..]` to `target[pos ..]`,
+/// handling overlap (RLE). The caller guarantees `offset > 0`,
+/// `offset <= pos`, and `pos + length <= target.len`; the asserts at the top
+/// check them. This is the hot path for copy tags.
 ///
 /// Strategy:
 ///   - `offset >= length`: no overlap within the copy window -> `fastmem.copy`.
@@ -326,7 +327,7 @@ fn decodeCopy(
 }
 
 test "decompress: empty block" {
-    // Spec: snappy-format-description.txt §2 (preamble: dLen=0).
+    // Spec: snappy-format-description.txt §1 (preamble: dLen=0).
     const block = [_]u8{0x00}; // varint(0)
     const dlen = try decompressedBlockLength(&block);
     try testing.expectEqual(@as(usize, 0), dlen);
@@ -336,7 +337,7 @@ test "decompress: empty block" {
 }
 
 test "decompress: literal-only block" {
-    // Spec: snappy-format-description.txt §3 (literal tag).
+    // Spec: snappy-format-description.txt §2.1 (literal tag).
     // varint(13) + literal tag (13-1)<<2=0x30 + 13 bytes.
     const msg = "hello, snappy";
     var block: [16]u8 = undefined;
@@ -351,7 +352,7 @@ test "decompress: literal-only block" {
 }
 
 test "decompress: copy with 1-byte offset (overlapping RLE)" {
-    // Spec: snappy-format-description.txt §3.1 (copy-1 tag).
+    // Spec: snappy-format-description.txt §2.2.1 (copy-1 tag).
     // Decompressed: "ABABABAB" (8 bytes).
     // varint(8)=0x08, literal "AB" (tag 0x04), copy len6 off2 (0x09 0x02).
     const snappy_block = [_]u8{ 0x08, 0x04, 'A', 'B', 0x09, 0x02 };
@@ -362,7 +363,7 @@ test "decompress: copy with 1-byte offset (overlapping RLE)" {
 }
 
 test "decompress: copy with 2-byte offset" {
-    // Spec: snappy-format-description.txt §3.1 (copy-2 tag).
+    // Spec: snappy-format-description.txt §2.2.2 (copy-2 tag).
     // Decompressed: "XXXX" + 64 bytes of 'Y' (68 bytes total).
     // varint(68)=0x44, literal "XXXX" (tag 0x0C), copy len64 off4 (0xFE 0x04 0x00).
     const snappy_block = [_]u8{ 0x44, 0x0C, 'X', 'X', 'X', 'X', 0xFE, 0x04, 0x00 };
@@ -376,7 +377,7 @@ test "decompress: copy with 2-byte offset" {
 }
 
 test "decompress: overlapping copy offset 1 (single-byte run)" {
-    // Spec: snappy-format-description.txt §3.1 (overlapping copy).
+    // Spec: snappy-format-description.txt §2.2 (overlapping copy).
     // varint(5)=0x05, literal "A" (tag 0x00), copy len4 off1 (0x01 0x01).
     const snappy_block = [_]u8{ 0x05, 0x00, 'A', 0x01, 0x01 };
     var target: [5]u8 = undefined;
@@ -386,7 +387,7 @@ test "decompress: overlapping copy offset 1 (single-byte run)" {
 }
 
 test "decompress: corrupt block returns DecompressionFailed" {
-    // Spec: snappy-format-description.txt §3 (tag bounds).
+    // Spec: snappy-format-description.txt §1 (truncated preamble).
     const bad = [_]u8{0x80}; // truncated varint
     var target: [8]u8 = undefined;
     try testing.expectError(error.DecompressionFailed, decompressBlock(&bad, &target));
@@ -394,7 +395,7 @@ test "decompress: corrupt block returns DecompressionFailed" {
 }
 
 test "decompress: too-small target buffer returns BufferTooSmall" {
-    // Spec: snappy-format-description.txt §2 (dLen).
+    // Spec: snappy-format-description.txt §1 (dLen).
     // varint(13) + literal tag + 13 bytes, but target is only 4 bytes.
     const msg = "hello, snappy";
     var block: [16]u8 = undefined;

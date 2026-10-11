@@ -1,7 +1,12 @@
-//! Shared helpers for the snappy block codec: the LEB128 varint used for the
-//! uncompressed-length prefix.
+//! Shared helpers for the snappy module: the block format's LEB128 varint
+//! (the uncompressed-length prefix) and the framed stream's length-prefix
+//! width.
 
 const mem = @import("std").mem;
+
+/// The framed stream's length-prefix width: a `u32-le` compressed length
+/// (README.md, "Streaming").
+pub const frame_prefix_len: usize = 4;
 
 /// Number of bytes to encode `value` as an unsigned LEB128 varint.
 pub fn uvarintSize(value: usize) usize {
