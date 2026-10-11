@@ -305,10 +305,11 @@ pub fn HuffmanDecoder(
 
         /// Decode one symbol: peek `max_bits`, resolve the code, consume its
         /// length. `error.InvalidCode` for a bit pattern no code matches.
-        /// `br` is any bit source with `peek`/`take` and an `ErrorSet`: this
-        /// file's `BitReader` over a slice, or the streaming `Reader`'s over
-        /// its input (whose reads can fail).
-        pub fn decode(self: *const Self, br: anytype) @TypeOf(br.*).ErrorSet!u16 {
+        /// `Bits` is the bit source the caller spells out — this file's
+        /// `BitReader` over a slice, the streaming `Reader`'s over its input
+        /// (whose reads can fail), the fuzz lane's `RefBits` — with `peek`,
+        /// `take`, and an `ErrorSet`.
+        pub fn decode(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
             // The primary table is indexed by the next `lookup_bits` bits,
             // which is exactly the code for codes no longer than that.
             const peeked = try br.peek(max_bits);
@@ -441,7 +442,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
             .dynamic => {
                 var literal: LitDecoder = .{};
                 var distance: DistDecoder = .{};
-                try readDynamicHeader(&br, &literal, &distance);
+                try readDynamicHeader(BitReader, &br, &literal, &distance);
                 try decodeCompressedBlock(&br, target, &out_pos, &literal, &distance);
             },
             .reserved => return error.InvalidBlockType,
@@ -492,7 +493,7 @@ fn decodeCompressedBlock(
     distance: *const DistDecoder,
 ) DecompressError!void {
     while (true) {
-        const symbol = try literal.decode(br);
+        const symbol = try literal.decode(BitReader, br);
         if (symbol < 256) {
             if (out_pos.* == target.len) return error.BufferTooSmall;
             target[out_pos.*] = @intCast(symbol);
@@ -503,11 +504,11 @@ fn decodeCompressedBlock(
         // §3.2.6: values 286-287 "will never actually occur".
         if (symbol > 285) return error.InvalidCode;
 
-        const length = try decodeLength(br, symbol);
-        const dist_symbol = try distance.decode(br);
+        const length = try decodeLength(BitReader, br, symbol);
+        const dist_symbol = try distance.decode(BitReader, br);
         // §3.2.6: distance codes 30-31 "will never actually occur".
         if (dist_symbol > 29) return error.InvalidCode;
-        const match_distance = try decodeDistance(br, dist_symbol);
+        const match_distance = try decodeDistance(BitReader, br, dist_symbol);
         // §3.2.3: "a distance cannot refer past the beginning of the output
         // stream" — in the one-shot path `target` is the whole output.
         if (match_distance > out_pos.*) return error.InvalidMatch;
@@ -521,7 +522,7 @@ fn decodeCompressedBlock(
 /// `§3.2.5` — length = base + extra, computed *unclamped* (README, "Divergences"
 /// T5): code 284 with extra bits 31 is 258, even though the table states 284's
 /// range as 227-257, because the whole reference lineage computes it that way.
-pub fn decodeLength(br: anytype, symbol: u16) @TypeOf(br.*).ErrorSet!usize {
+pub fn decodeLength(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet!usize {
     const index: usize = symbol - 257;
     const extra = length_extra[index];
     const bits: usize = if (extra == 0) 0 else @intCast(try br.take(extra));
@@ -529,7 +530,7 @@ pub fn decodeLength(br: anytype, symbol: u16) @TypeOf(br.*).ErrorSet!usize {
 }
 
 /// `§3.2.5` — distance = base + extra, unclamped; the result is 1-32768.
-pub fn decodeDistance(br: anytype, symbol: u16) @TypeOf(br.*).ErrorSet!usize {
+pub fn decodeDistance(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet!usize {
     const index: usize = symbol;
     const extra = distance_extra[index];
     const bits: usize = if (extra == 0) 0 else @intCast(try br.take(extra));
@@ -540,10 +541,11 @@ pub fn decodeDistance(br: anytype, symbol: u16) @TypeOf(br.*).ErrorSet!usize {
 /// lengths, then HLIT+HDIST code lengths as one sequence that repeat codes may
 /// carry across the literal/distance boundary.
 pub fn readDynamicHeader(
-    br: anytype,
+    comptime Bits: type,
+    br: *Bits,
     literal: *LitDecoder,
     distance: *DistDecoder,
-) @TypeOf(br.*).ErrorSet!void {
+) Bits.ErrorSet!void {
     const hlit: usize = @as(usize, @intCast(try br.take(5))) + 257;
     const hdist: usize = @as(usize, @intCast(try br.take(5))) + 1;
     const hclen: usize = @as(usize, @intCast(try br.take(4))) + 4;
@@ -562,7 +564,7 @@ pub fn readDynamicHeader(
     const total = hlit + hdist;
     var pos: usize = 0;
     while (pos < total) {
-        const symbol = try precode.decode(br);
+        const symbol = try precode.decode(Bits, br);
         if (symbol < 16) {
             lens[pos] = @intCast(symbol);
             pos += 1;

@@ -376,8 +376,10 @@ fn expectStickyFailure(r: *gzip.Reader) !void {
     }
 }
 
-/// A failed decode where no specific error is pinned.
-fn expectFailure(result: anytype) !void {
+/// A failed decode where no specific error is pinned: the parameter's named
+/// type is the one-shot's own error union, so a call that hands over anything
+/// else does not compile.
+fn expectFailure(result: gzip.decode.DecompressError!usize) !void {
     if (result) |_| return error.ExpectedFailure else |_| {}
 }
 

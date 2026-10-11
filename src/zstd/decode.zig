@@ -474,6 +474,16 @@ test "decompress's history is the output, so a match cannot reach before it" {
     try testing.expectEqual(@as(usize, 2048 + 3), written);
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
+    // The addressable-span precision (T12): ten literals put the match
+    // position ten bytes past the window, so offset 1025 reads a byte of the
+    // second RLE block — accepted here and by the pinned CLI alike, because
+    // the bound is the addressable span (the history region plus the block's
+    // own writes), not Window_Size alone.
+    internal.sentinel.fill(&target);
+    const span = try decompress(&golden.frame_window_1k_span, &target);
+    try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);
+    try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
+    try internal.sentinel.expect(&target, span);
     // The 128 KB window sibling, whose decoded length passes both
     // Block_Maximum_Size and Window_Size.
     internal.sentinel.fill(&target);

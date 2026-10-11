@@ -49,6 +49,20 @@ it before you change a kernel or make a performance claim.
   benchmark; `oracle.zig` is the external-oracle harness behind `just
   zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   land in `fuzz.zig` (fuzz-engineer lane).
+- `src/zstd/`: zstd frames (RFC 8878). `decode.zig` carries the one-shot
+  decode and the shared decode state; `frame.zig` the magic, the frame
+  header, the block chain, the checksum trailer, and skippable frames;
+  `block.zig` the block header dispatch, sequence execution, and the checksum
+  funnel; `literals.zig` + `huff0.zig` the literals section and its Huffman
+  trees; `sequences.zig` + `fse.zig` the sequences section and the FSE
+  tables; `xxh64.zig` the checksum state over std's kernel; `Reader.zig` the
+  streaming `Io` layer (one frame per reader with the exact boundary visible,
+  the multi-frame `streamAll` walk — see `src/zstd/README.md`, "Streaming");
+  `golden.zig` shares the reference fixtures across every layer's tests.
+  Decoder-only at M4 — the namespace is `{Reader, decode}`, and
+  `encode.zig`/`Writer.zig` are M5 — so there is no `bench.zig` yet: the
+  zstd rows live in the fleet driver (`bench/zig/bench_zcompress.zig`, `just
+  bench-run`). Fuzz targets land in `fuzz.zig` (fuzz-engineer lane).
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
   sentinel test machinery and the reader lifecycle + generated vtable
   entries. Imports only `std` and `fastmem`; reached by relative import

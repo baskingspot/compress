@@ -44,23 +44,26 @@
 //!
 //! - **The output region.** `target[0..decoded_len]` is the frame's output
 //!   so far — the one-shot's `target`, the streaming reader's serving
-//!   region — and `target[decoded_len..]` is this block's capacity. A match
-//!   may read `min(decoded_len, Window_Size)` bytes back and no further
-//!   (`§3.1.1.4`: "all offsets leading to previously decoded data must be
-//!   smaller than Window_Size"), so the region the sequences layer sees is
-//!   re-based at `decoded_len - history`: the writes still land at
-//!   `target[decoded_len..]` while the history bound is the window. That is
-//!   the one place the window rule is applied, and it is what lets a 256 KB
-//!   frame over a 128 KB window decode with the same call as a 20-byte one
-//!   (`frame_window_128k`). The RFC's "smaller than Window_Size" is the
-//!   window's addressable span: an offset of exactly Window_Size reads the
-//!   oldest retained byte, which the reference family's windowSize-byte
-//!   history accepts and the reference encoder can emit (its match search
-//!   is bounded by the window). The reference's whole-buffer decoder is
-//!   *looser* than this when the bytes are still around — it checks the
+//!   region — and `target[decoded_len..]` is this block's capacity. The
+//!   region the sequences layer sees is re-based at `decoded_len - history`
+//!   (`history = min(decoded_len, Window_Size)`): the writes still land at
+//!   `target[decoded_len..]` while a match may read from the region's start
+//!   through the current write position — the history region plus this
+//!   block's own writes (T12, stated precisely). That addressable span, not
+//!   the declared Window_Size alone, is the bound the sequences layer
+//!   enforces: `executeSequence` rejects only an offset that reaches before
+//!   the region's start, so an offset of exactly Window_Size reads the
+//!   oldest retained byte (the reference family's windowSize-byte history
+//!   accepts it and its encoder can emit it — its match search is bounded
+//!   by the window), and `frame_window_1k_span`'s ten literals make an
+//!   offset of 1025 over a declared 1 KB window addressable — it decodes
+//!   here and through the pinned CLI alike. The reference's whole-buffer
+//!   decoder is *looser* still when more bytes are around: it checks the
 //!   available history, not the declared window (`frame_window_*_over` are
-//!   frames it decodes and we refuse) — and ours is the fail-closed
-//!   reading, the RFC's rule.
+//!   frames it decodes and we refuse). Ours fails closed at the region's
+//!   start, so a hostile frame cannot read past what this decoder holds,
+//!   and it is what lets a 256 KB frame over a 128 KB window decode with
+//!   the same call as a 20-byte one (`frame_window_128k`).
 //! - **The literals state** (`literals.State`): the Huffman tree a
 //!   Treeless_Literals_Block reuses — "The Huffman tree comes from the
 //!   previous Compressed_Literals_Block" (`§3.1.1.3`) — one per frame,
@@ -366,8 +369,10 @@ fn decodeCompressed(
     );
     const section_source = block[literals_section.bytes_consumed..];
     // §3.1.1.4 — "all offsets leading to previously decoded data must be
-    // smaller than Window_Size": the history a match may read is the frame's
-    // decoded bytes so far, capped by the frame's window.
+    // smaller than Window_Size": the retained history is the frame's decoded
+    // bytes so far, capped by the frame's window, and the sequences layer's
+    // bound is the addressable span in front of the match — this region's
+    // start through the current write position (T12, the module doc above).
     const history: usize = @intCast(@min(decoded_len, window_size));
     // The sequences layer's region: the retained history in front of this
     // block's output, the output capped at Block_Maximum_Size.
@@ -842,14 +847,18 @@ test "decode reads the hand-built fixture blocks as whole frames" {
     try expectFrame(&golden.frame_zero_seq_2b, &golden.frame_zero_seq_expected);
 }
 
-test "the history a match may read is capped by Window_Size" {
+test "the history a match may read is the addressable span at the match" {
     // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded data
-    // must be smaller than Window_Size": with 2 KB decoded over a 1 KB
-    // window, a match at offset 1024 reads the window's oldest retained
-    // byte and decodes; one byte further is `OffsetTooFar`, whatever the
-    // target still holds. The CLI decodes both — its whole-buffer decoder
-    // checks the bytes it still has, not the declared window — and the
-    // module doc above records the divergence.
+    // must be smaller than Window_Size" is enforced as the addressable span
+    // (T12): with 2 KB decoded over a 1 KB window, a match at offset 1024
+    // reads the window's oldest retained byte and decodes; at literals
+    // length 0 one byte further is `OffsetTooFar` — the region's start is
+    // the floor — while ten literals move the write position ten bytes past
+    // the window, and `frame_window_1k_span`'s offset 1025 reads a byte the
+    // declared window alone would not admit. The CLI decodes the `*_over`
+    // pair too — its whole-buffer decoder checks the bytes it still has,
+    // not the declared window — and the module doc above records the
+    // divergence.
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_1k, &target);
@@ -861,6 +870,16 @@ test "the history a match may read is capped by Window_Size" {
     // Offset 1024 from position 2048 is the B block's first byte.
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
+    // The span fixture: ten literals, then offset 1025 — past the declared
+    // window, inside the history region plus this block's writes. The CLI
+    // decodes it to the same 2061 bytes (T12's precision fixture).
+    internal.sentinel.fill(&target);
+    const span = try decodeFrame(&golden.frame_window_1k_span, &target);
+    try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);
+    try testing.expectEqualSlices(u8, &first, target[0..1024]);
+    try testing.expectEqualSlices(u8, &second, target[1024..2048]);
+    try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
+    try internal.sentinel.expect(&target, span);
     try expectFrameError(error.OffsetTooFar, &golden.frame_window_1k_over);
     // The same compressed block at the frame's start: with no history at
     // all, its offset reaches before `target[0]` and is `OffsetTooFar` —

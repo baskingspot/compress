@@ -204,7 +204,10 @@ fn complete(tree: *Tree) Error!void {
     const max_bits: u5 = @intCast(highBit(total) + 1);
     if (max_bits > code_length_max) return error.MalformedHuffmanWeights;
     const rest = (@as(u32, 1) << max_bits) - total;
-    if (rest == 0) return error.MalformedHuffmanWeights;
+    // `max_bits` is `highBit(total) + 1`, so the power is strictly above the
+    // total: the remainder is never zero (the M4 closing review's N3 — the
+    // check this replaces could not fire).
+    assert(rest > 0);
     if ((@as(u32, 1) << highBit(rest)) != rest) return error.MalformedHuffmanWeights;
     const last_weight: u8 = highBit(rest) + 1;
 

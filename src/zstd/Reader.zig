@@ -23,26 +23,30 @@
 //!
 //! ## The buffer is the cap
 //!
-//! `Reader.Buffer(window_len)` is `[window_len + max_block_size]u8`: the
-//! retained history — "all offsets leading to previously decoded data must be
-//! smaller than Window_Size" (`§3.1.1.4`), capped by the caller — plus the
-//! largest decoded block (`§3.1.1.2.4`'s Block_Maximum_Size ≤ 128 KB).
-//! `init` takes the exact pointer to it and derives the authorized window
-//! from the buffer's type, so the cap and the buffer cannot disagree; a frame
-//! declaring a larger Window_Size fails `WindowTooLarge` before any block
-//! byte (`§3.1.1.1.2`: "a decoder is allowed to reject a compressed frame
-//! that requests a memory size beyond the decoder's authorized range"), never
-//! a silent truncation. The serving region slides forward as it fills,
-//! keeping the consumer's unconsumed bytes and the retained history: any
-//! contiguous request (the `peek`/`take` family) of at most Block_Maximum_Size
-//! — 128 KiB — is served, and a request beyond what the window can hold at
-//! the consumer's position fails closed with `error.ReadFailed`
+//! `Reader.Buffer(window_len)` is `[window_len + max_block_size + staging]u8`
+//! (`staging = min(window_len, max_block_size)`): the retained history — "all
+//! offsets leading to previously decoded data must be smaller than
+//! Window_Size" (`§3.1.1.4`), capped by the caller — the largest decoded
+//! block (`§3.1.1.2.4`'s Block_Maximum_Size ≤ 128 KB) as the serving region,
+//! and the block staging room (each block's whole content: both backwards
+//! bitstreams need its end first, `§3.1.1.3.2.1.2`). `init` takes the exact
+//! pointer to it and derives the authorized window from the buffer's type, so
+//! the cap and the buffer cannot disagree; a frame declaring a larger
+//! Window_Size fails `WindowTooLarge` before any block byte (`§3.1.1.1.2`:
+//! "a decoder is allowed to reject a compressed frame that requests a memory
+//! size beyond the decoder's authorized range"), never a silent truncation,
+//! and `window_len` is at least 1 KiB (`§3.1.1.1.2`'s minimum — a comptime
+//! assert). The serving region slides forward as it fills, keeping the
+//! consumer's unconsumed bytes and the retained history: any contiguous
+//! request (the `peek`/`take` family) of at most Block_Maximum_Size — 128 KiB
+//! — is served, and a request beyond what the window can hold at the
+//! consumer's position fails closed with `error.ReadFailed`
 //! (`err == .StreamTooLong`), never an assert.
 //!
-//! Zero allocation, end to end: the caller owns the window buffer, the block
-//! staging and the literals scratch are comptime-sized stack locals (up to
-//! ~256 KiB per compressed block, README, "Stack"), and no allocator appears
-//! anywhere in this API.
+//! Zero allocation, end to end: the caller owns the buffer — window, serving
+//! region, and staging alike — and the literals scratch is the one comptime
+//! stack local (≤ 128 KiB per compressed block, README, "Stack"). No
+//! allocator appears anywhere in this API.
 //!
 //! ## The frame state machine
 //!
@@ -96,20 +100,35 @@ const sentinel = internal.sentinel;
 const State = internal.reader.State;
 const VTable = internal.reader.VTable;
 
-/// The caller-owned window buffer (`§3.1.1.1.2`): `window_len` bytes of
-/// retained history plus the largest decoded block (`§3.1.1.2.4`'s
-/// Block_Maximum_Size ≤ 128 KB). The buffer *is* the cap: `init` takes the
-/// exact pointer to it and derives the authorized window from its type, so
-/// the two cannot disagree (README, "Streaming").
+/// The block staging room `Buffer(window_len)` adds on top of the serving
+/// region: one block's whole content, which both backwards bitstreams need
+/// staged before the first symbol (`§3.1.1.3.2.1.2`, README "The block and
+/// entropy layers"). A frame the buffer admits declares Window_Size ≤
+/// `window_len` (`checkWindow`), so its Block_Maximum_Size — "the smallest
+/// of: Window_Size, 128 KB" (`§3.1.1.2.4`) — is at most
+/// `min(window_len, max_block_size)`.
+fn stagingLength(comptime window_len: usize) usize {
+    return @min(window_len, block.max_block_size);
+}
+
+/// The caller-owned buffer (`§3.1.1.1.2`): `window_len` bytes of retained
+/// history plus the largest decoded block (`§3.1.1.2.4`'s Block_Maximum_Size
+/// ≤ 128 KB) as the serving region, then one block's staging room
+/// (`stagingLength`). The buffer *is* the cap: `init` takes the exact pointer
+/// to it and derives the authorized window from its type, so the two cannot
+/// disagree (README, "Streaming"). `window_len` is at least `§3.1.1.1.2`'s
+/// 1-KB minimum — a comptime assert, so `Buffer(0)` does not compile.
 pub fn Buffer(comptime window_len: usize) type {
-    return [window_len + block.max_block_size]u8;
+    comptime assert(window_len >= 1024);
+    return [window_len + block.max_block_size + stagingLength(window_len)]u8;
 }
 
 /// `§3.1.1.1.2` — "It is recommended to support Window_Size up to 8 MB": the
 /// default cap, and the pin from the CLI's level-19 frames (`windowLog` 23).
 pub const default_window_len: usize = 8 * 1024 * 1024;
 
-/// `Reader.Buffer(default_window_len)` — 8 MiB + 128 KiB.
+/// `Reader.Buffer(default_window_len)` — 8 MiB + 128 KiB serving + 128 KiB
+/// staging.
 pub const DefaultBuffer = Buffer(default_window_len);
 
 /// The detailed error recorded once `state == .failed` (README, "API"):
@@ -214,6 +233,11 @@ reader: Io.Reader,
 /// fits inside) — or the input must end before then (README, "Streaming";
 /// std's decoder names the same class `InputBufferUndersize`).
 input: *Io.Reader,
+/// The block staging room: the caller's buffer's trailing
+/// `stagingLength(window_len)` bytes, where each block's content is staged
+/// before it is decoded (`§3.1.1.3.2.1.2`). A slice of the caller's buffer,
+/// never a stack local (README, "Stack").
+staging: []u8,
 /// The authorized window: the buffer's type less the block room, derived
 /// once at `init`.
 window_len: usize,
@@ -249,13 +273,17 @@ const vtable = VTable(Reader, pump, rebase).vtable;
 /// through the frame's last byte; bytes after it are left unconsumed
 /// (README, "Streaming").
 pub fn init(comptime window_len: usize, input: *Io.Reader, buffer: *Buffer(window_len)) Reader {
+    // The serving region is the buffer's front `window_len + max_block_size`
+    // bytes; the staging room is its tail (README, "Stack").
+    const serving_len = window_len + block.max_block_size;
     return .{
         .reader = .{
-            .buffer = buffer,
+            .buffer = buffer[0..serving_len],
             .seek = 0,
             .end = 0,
             .vtable = &vtable,
         },
+        .staging = buffer[serving_len..],
         .input = input,
         .window_len = window_len,
     };
@@ -511,14 +539,18 @@ fn decodeBlock(r: *Reader) Error!usize {
     // compliant decoder must reject it." No Block_Content is read.
     if (header.block_type == .reserved) return error.ReservedBlock;
     // §3.1.1.2.4 — Block_Maximum_Size bounds "both the decompressed size and
-    // the compressed size of any block in the frame": the check that lets the
-    // staging scratch be comptime-sized. An RLE block's one content byte
-    // passes it here; its Block_Size (the repeat count) is checked by
-    // `decodeContent`.
+    // the compressed size of any block in the frame": the *declared*
+    // Block_Size is checked against it before any content byte is read, so an
+    // oversized RLE block — whose Block_Size is the repeat count, not the
+    // content length — reports `BlockOversize` here exactly as the one-shot's
+    // declared-size check does (the M4 closing review's N1; the reader used
+    // to stage the one content byte first and report the input's end
+    // instead). The check also bounds the staging read below:
+    // content_len <= block_size <= blockRoom() <= staging.len.
+    if (header.block_size > r.blockRoom()) return error.BlockOversize;
     const content_len = block.contentLength(header);
-    if (content_len > r.blockRoom()) return error.BlockOversize;
-    var scratch: [block.max_block_size]u8 = undefined;
-    try r.readExact(scratch[0..content_len]);
+    assert(content_len <= r.staging.len);
+    try r.readExact(r.staging[0..content_len]);
     // The block phase implies the header was parsed: the frame's state is
     // the one this block decodes through.
     assert(r.frame_state != null);
@@ -526,7 +558,7 @@ fn decodeBlock(r: *Reader) Error!usize {
     const retained_len = r.reader.end;
     const written = block.decodeContent(
         header,
-        scratch[0..content_len],
+        r.staging[0..content_len],
         r.reader.buffer,
         retained_len,
         state.header.window_size,
@@ -796,15 +828,22 @@ const stream_cases = [_]Case{
     .{ .desc = "frame_checksum_off", .source = &golden.frame_checksum_off, .expected = "abcd" },
 };
 
-test "Reader: the buffer type is the documented window plus a block" {
+test "Reader: the buffer type is the documented window, block, and staging" {
     // RFC 8878 §3.1.1.1.2 — "It is recommended to support Window_Size up to
     // 8 MB": the default window is 8 MiB, and the buffer is the window plus
-    // Block_Maximum_Size (§3.1.1.2.4 — "128 KB").
+    // Block_Maximum_Size (§3.1.1.2.4 — "128 KB") plus the block staging room
+    // (`stagingLength`: one block's content at most, the smaller of the
+    // window and 128 KB).
     try testing.expectEqual(@as(usize, 8 * 1024 * 1024), default_window_len);
     try testing.expectEqual(@as(usize, 128 * 1024), block.max_block_size);
-    try testing.expectEqual(@as(usize, 8 * 1024 * 1024 + 128 * 1024), @sizeOf(DefaultBuffer));
-    try testing.expectEqual(@as(usize, 1024 + 128 * 1024), @sizeOf(Buffer(1024)));
-    try testing.expectEqual(@as(usize, 1152 + 128 * 1024), @sizeOf(Buffer(1152)));
+    try testing.expectEqual(
+        @as(usize, 8 * 1024 * 1024 + 128 * 1024 + 128 * 1024),
+        @sizeOf(DefaultBuffer),
+    );
+    // A window below Block_Maximum_Size stages its own size, not 128 KiB.
+    try testing.expectEqual(@as(usize, 1024 + 128 * 1024 + 1024), @sizeOf(Buffer(1024)));
+    try testing.expectEqual(@as(usize, 1152 + 128 * 1024 + 1152), @sizeOf(Buffer(1152)));
+    try testing.expectEqual(@as(usize, 128 * 1024), stagingLength(128 * 1024));
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
@@ -1361,13 +1400,29 @@ test "Reader: the window cap is the buffer's" {
         try testing.expectEqual(golden.frame_window_1k.len, fixed_in.seek);
         try testing.expectEqualSlices(u8, "BBB", out.written()[2048..2051]);
     }
+    {
+        // The addressable-span precision (T12): ten literals move the match
+        // position past the window, and offset 1025 is inside the span — the
+        // reader accepts it exactly as the one-shot and the pinned CLI do.
+        out.clearRetainingCapacity();
+        var rbuf: Buffer(1024) = undefined;
+        var fixed_in: Io.Reader = .fixed(&golden.frame_window_1k_span);
+        var r: Reader = .init(1024, &fixed_in, &rbuf);
+        try testing.expectEqual(
+            @as(usize, 2048 + 10 + 3),
+            try r.reader.streamRemaining(&out.writer),
+        );
+        try testing.expectEqual(@as(?Error, null), r.err);
+        try testing.expectEqual(golden.frame_window_1k_span.len, fixed_in.seek);
+        try testing.expectEqualSlices(u8, "0123456789BBB", out.written()[2048..2061]);
+    }
 }
 
 test "Reader: the window slides to serve a frame larger than the buffer" {
     // RFC 8878 §3.1.1.4 — the window is the match reach: a frame whose output
     // exceeds the buffer decodes through the slide, which keeps the retained
     // history and the consumer's unconsumed bytes. `frame_window_128k` is
-    // 262147 bytes with a 128-KiB window; the buffer is exactly
+    // 262147 bytes with a 128-KiB window; the serving region is exactly
     // window + Block_Maximum_Size (262144), so every slide matters. The
     // expected output is the fixture's own shape — two 131072-byte RLE
     // blocks, 'A' then 'B', and a match copying "BBB" — and the canaries

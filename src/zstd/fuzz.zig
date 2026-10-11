@@ -219,9 +219,10 @@ fn windowTailLen() usize {
     return block.max_block_size;
 }
 
-/// The reader's whole buffer, window plus block room: a request of this size
-/// necessarily exceeds `buffer.len - seek` once the consumer has advanced, so
-/// the std fill routes it through the codec's `rebase` (the B1 shape).
+/// The reader's whole caller buffer — window, block room, and staging: a
+/// request of this size necessarily exceeds the serving region's
+/// `buffer.len - seek` once the consumer has advanced, so the std fill routes
+/// it through the codec's `rebase` (the B1 shape).
 fn bufferLen() usize {
     return @sizeOf(Reader.Buffer(fixture_window_len));
 }
@@ -470,6 +471,17 @@ const rows = [_]Row{
             .second_byte = 'B',
             .second_count = 1024,
             .tail = "BBB",
+        } },
+    },
+    .{
+        .desc = "frame_window_1k_span",
+        .source = &golden.frame_window_1k_span,
+        .output = .{ .two_runs = .{
+            .first_byte = 'A',
+            .first_count = 1024,
+            .second_byte = 'B',
+            .second_count = 1024,
+            .tail = "0123456789BBB",
         } },
     },
     .{
@@ -1563,20 +1575,15 @@ fn checkReader(
                 try testing.expectEqual(Reader.Error.WindowTooLarge, detail);
             } else |err| {
                 if (err != error.BufferTooSmall) {
-                    // The reader's only own refusal is the window cap; the
-                    // one recorded codec divergence is the RLE staging
-                    // order (the pinned test at the file's end): an RLE
-                    // block whose declared Block_Size is past
-                    // Block_Maximum_Size with its content byte missing
-                    // stages the content first and reports the input's end
-                    // (`Truncated`) where the one-shot's declared-size check
-                    // fires `BlockOversize` first. Both fail closed.
-                    const rle_staging_order = err == error.BlockOversize and
-                        detail == Reader.Error.Truncated;
+                    // The reader's only own refusal is the window cap: every
+                    // other detail is the one-shot's, name for name (the
+                    // RLE staging-order divergence the M4 closing review's
+                    // N1 named is fixed — the declared Block_Size is checked
+                    // before the staging read — and its pin flipped, the
+                    // test at the file's end).
                     try testing.expect(
                         sameErrorName(err, detail) or
-                            detail == Reader.Error.WindowTooLarge or
-                            rle_staging_order,
+                            detail == Reader.Error.WindowTooLarge,
                     );
                 }
             }
@@ -2648,15 +2655,15 @@ test "zstd fuzz: the T9 exceed-only table corner" {
     );
 }
 
-test "zstd fuzz: the RLE staging-order divergence is recorded" {
-    // A finding of the corruption lane, pinned: an RLE block whose declared
-    // Block_Size is past Block_Maximum_Size with its content byte missing.
-    // The one-shot's declared-size check fires first (`BlockOversize`,
-    // `§3.1.1.2.4`); the reader stages the content first and reports the
-    // input's end (`Truncated`). Both fail closed — the divergence is the
-    // name alone, and it is allowed, named, in `checkReader`'s agreement
-    // check. If the reader's declared-size check moves ahead of its staging
-    // read, this pin flips to `BlockOversize` and that allowance can go.
+test "zstd fuzz: an oversized RLE block fails the same way on both paths" {
+    // The M4 closing review's N1, fixed and pinned: an RLE block whose
+    // declared Block_Size is past Block_Maximum_Size with its content byte
+    // missing. The one-shot's declared-size check fires first
+    // (`BlockOversize`, `§3.1.1.2.4`); the reader used to stage the content
+    // first and report the input's end (`Truncated`), a name-only
+    // divergence. The reader's declared-size check now precedes its staging
+    // read, so both paths report `BlockOversize` — the agreement check in
+    // `checkReader` no longer allows the pair.
     const source = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0xfb, 0xff, 0xff };
     var target: [1024]u8 = undefined;
     sentinel.fill(&target);
@@ -2670,6 +2677,6 @@ test "zstd fuzz: the RLE staging-order divergence is recorded" {
     var fw: Io.Writer = .fixed(&got);
     const pumped = try pumpCapped(&r.reader, &fw, 64);
     try testing.expectEqual(Stop.read_failed, pumped.stop);
-    try testing.expectEqual(Reader.Error.Truncated, r.err.?);
+    try testing.expectEqual(Reader.Error.BlockOversize, r.err.?);
     try expectStickyFailure(&r);
 }

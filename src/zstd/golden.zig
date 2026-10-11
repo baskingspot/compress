@@ -488,10 +488,13 @@ pub const sequences_fse_all_expected = hex(
 ///   to the bytes the tests expect.
 /// - **The window fixtures** (`frame_window_*`): two 128 KB RLE blocks and a compressed block
 ///   whose match reaches exactly Window_Size back — the 1 KB and 128 KB variants, so the decoded
-///   length passes both Window_Size and Block_Maximum_Size. The CLI decodes all four, the
+///   length passes both Window_Size and Block_Maximum_Size. The CLI decodes all of them, the
 ///   `*_over` siblings included: its whole-buffer decoder checks the bytes it still has, not the
-///   declared window. Ours enforces `§3.1.1.4`'s bound and refuses the `*_over` pair with
-///   `OffsetTooFar` — the recorded divergence, stated in `block.zig`'s module doc.
+///   declared window. Ours enforces the addressable-span reading of `§3.1.1.4` — the history
+///   region plus the block's own writes (T12, stated precisely in `block.zig`'s module doc) —
+///   so the `*_over` pair is `OffsetTooFar` while `frame_window_1k_span` (an offset past the
+///   declared window at ten literals in, still inside the addressable span) is accepted, as the
+///   CLI accepts it.
 /// - **The landed fixture blocks, framed** (`frame_sequences_*`, `frame_literals_*`, `frame_t1*`,
 ///   `frame_treeless`, `frame_repeat`, `frame_temp_offset`, `frame_two_byte`, `frame_corner`,
 ///   `frame_zero_seq*`): each carries a landed fixture block or pair as its block content, and
@@ -535,6 +538,15 @@ pub const frame_window_1k = hex("28b52ffd00000220004102200042450000000154000a000
 /// ours refuses it.
 pub const frame_window_1k_over = hex("28b52ffd00000220004102200042450000000154000a0004" ++
     "04");
+
+/// The addressable-span fixture: the same two 1024-byte RLE blocks, then a compressed block
+/// with ten raw literals (`0123456789`) and its match at offset 1025 — one byte past the
+/// declared 1 KB Window_Size, but inside the bytes addressable at the match: the block's
+/// 1024-byte history region plus its own ten literals. The CLI decodes it to 1024 + 1024 +
+/// 10 + 3 bytes (`... BBB 0123456789 BBB`, exit 0); ours accepts it too, because the bound is
+/// the addressable span, not the declared window (T12).
+pub const frame_window_1k_span = hex("28b52ffd00000220004102200042950000503031323334353637383901" ++
+    "540a0a000404");
 
 /// A 128 KB window (descriptor 0x38), two 131072-byte RLE blocks, then a match at offset 131072
 /// — Window_Size and Block_Maximum_Size both — from position 262144.

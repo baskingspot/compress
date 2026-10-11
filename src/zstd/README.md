@@ -59,13 +59,15 @@ layering question in `zstd-notes.md` §7:
   frame-declared — 1 KB to 3.75 TB (`§3.1.1.1.2`) — against flate's fixed
   32 KB, and the spec explicitly authorizes rejection beyond a decoder's range
   while recommending support to 8 MB. So the streaming buffer type is
-  `zstd.Reader.Buffer(comptime window_len)` = `[window_len + max_block_size]u8`
-  with a default constant of 8 MiB (the recommendation, and the pin from the
-  CLI's level-19 frames: `windowLog` 23), and a frame declaring a larger
-  Window_Size fails `WindowTooLarge` — fail closed, never a silent
-  truncation. The **one-shot decode needs no window at all**: its history is
-  `target` itself, so the cap is a streaming concern and `WindowTooLarge` is
-  not in the one-shot's error set.
+  `zstd.Reader.Buffer(comptime window_len)` = `[window_len + max_block_size +
+  min(window_len, max_block_size)]u8` — the retained history, the largest
+  decoded block, and the block staging room ("Stack" below) — with a default
+  constant of 8 MiB (the recommendation, and the pin from the CLI's level-19
+  frames: `windowLog` 23), and a frame declaring a larger Window_Size fails
+  `WindowTooLarge` — fail closed, never a silent truncation. The **one-shot
+  decode needs no window at all**: its history is `target` itself, so the cap
+  is a streaming concern and `WindowTooLarge` is not in the one-shot's error
+  set.
 - **One Zstandard frame per reader, at the exact boundary** (OQ3). The reader
   consumes `input` through the frame's last byte — the checksum trailer's last
   byte when the flag is set, the last block's last byte otherwise — and stops
@@ -155,8 +157,9 @@ zstd.decode.DecompressError = error{
     InvalidBitStream,        // a state or code that cannot decode (§4.1, §4.2)
     BitstreamNotConsumed,    // bits left over at a bitstream's end (§3.1.1.3.2.1.2)
     ZeroOffset,              // offset 0: offset_value 3 with Repeated_Offset1 == 1 (T6)
-    OffsetTooFar,            // an offset outside the frame's decoded output or
-                             // its Window_Size (§3.1.1.4)
+    OffsetTooFar,            // an offset reaching before the addressable
+                             // history at the match — the retained history
+                             // plus the block's own writes (§3.1.1.4, T12)
     ContentSizeMismatch,     // Frame_Content_Size != the frame's decoded total (§3.1.1.1.4)
     WrongChecksum,           // the XXH64 trailer (§3.1.1; T8 — verify, never skip)
     Truncated,               // the input ended inside the frame
@@ -166,20 +169,23 @@ zstd.decode.DecompressError = error{
 // with the exact boundary visible. Buffer ownership is the caller's; there is
 // no allocator anywhere in the API.
 zstd.Reader.Buffer(comptime window_len: usize) type
-        // [window_len + max_block_size]u8 — the caller-owned window buffer:
-        // window_len bytes of retained history (§3.1.1.1.2's Window_Size,
-        // capped by the caller) plus the largest decoded block
-        // (Block_Maximum_Size <= 128 KB, §3.1.1.2.4). The buffer IS the cap:
-        // init takes its exact pointer and derives the authorized window from
-        // its type, so the two cannot disagree.
+        // [window_len + max_block_size + min(window_len, max_block_size)]u8
+        // — the caller-owned buffer: window_len bytes of retained history
+        // (§3.1.1.1.2's Window_Size, capped by the caller), the largest
+        // decoded block (Block_Maximum_Size <= 128 KB, §3.1.1.2.4), and the
+        // block staging room (one block's whole content, staged before it is
+        // decoded — "Stack" below). The buffer IS the cap: init takes its
+        // exact pointer and derives the authorized window from its type, so
+        // the two cannot disagree.
 zstd.Reader.default_window_len
         // 8 MiB — §3.1.1.1.2's recommendation ("support values of
         // Window_Size up to 8 MB") and the CLI level-19 pin (windowLog 23).
 zstd.Reader.DefaultBuffer
-        // Reader.Buffer(default_window_len) — 8 MiB + 128 KiB. A caller
-        // choosing smaller pays smaller: any window_len >= 1 KiB is legal
-        // (§3.1.1.1.2's minimum), and frames that need more fail
-        // `WindowTooLarge`.
+        // Reader.Buffer(default_window_len) — 8 MiB + 128 KiB (serving) +
+        // 128 KiB (staging). A caller choosing smaller pays smaller: any
+        // window_len >= 1 KiB is legal (§3.1.1.1.2's minimum — a comptime
+        // assert, so Buffer(0) does not compile), and frames that need more
+        // fail `WindowTooLarge`.
 var rbuf: zstd.Reader.DefaultBuffer = undefined;
 // The comptime window and the buffer's type must agree — the compiler is
 // the check — so the cap and the buffer cannot disagree. No allocator.
@@ -197,7 +203,7 @@ zstd.Reader.Error = error{
 };
 
 // The one-call pumps: one frame / every frame through the caller's window
-// buffer, zero allocation, and no stack buffer of their own (8 MiB + 128 KiB
+// buffer, zero allocation, and no stack buffer of their own (8 MiB + 256 KiB
 // does not belong on a stack — a caller who wants a small pump instantiates a
 // small window).
 zstd.Reader.streamFrame(window_len, in, out, buffer) error{ReadFailed, WriteFailed}!usize
@@ -259,12 +265,23 @@ Contracts, stated plainly:
   match length) replicates the offset-byte pattern — the snappy decoder's
   shuffle technique applies — or rides `fastmem.move`; never `fastmem.copy`,
   which is non-overlapping only.
-- **Stack**: a compressed block runs on ~256 KiB of comptime stack scratch
-  (the staged compressed block, up to 128 KiB, plus the literals scratch, up
-  to 128 KiB — the backwards bitstreams force the staging, "The block and
-  entropy layers" below). The one-shot decode adds nothing else; the streaming
-  reader's window is the caller's buffer, not a stack local. Size thread
-  stacks accordingly when embedding.
+- **Stack**: a compressed block runs on the literals scratch alone — a
+  comptime `[max_block_size]u8` stack local, <= 128 KiB, the blessed
+  KiB-scale exception (`AGENTS.md`, "Tiger style") — because the staged
+  compressed block is never a stack local: the one-shot's `source` is the
+  input itself, and the streaming reader stages into the trailing room of the
+  caller's `Buffer` (the backwards bitstreams force the staging, "The block
+  and entropy layers" below). The reader's window and staging are both the
+  caller's; it used to carry its own 128 KiB staging local on top of the
+  literals scratch (the M4 closing review's finding, fixed by the buffer's
+  staging room). Measured on this box (the review's thread-stack probe,
+  re-run after the fix): the one-shot needs ~149 KiB of thread stack in
+  ReleaseFast (~177 KiB Debug); the reader and `streamAll` need the same
+  ~149 KiB (~189 KiB Debug — roughly the one-shot's, where the review
+  measured 272-288 KiB before); the example CLI needs ~308 KiB (~352 KiB
+  Debug) on the main thread, where the shared CLI scaffolding adds two
+  64 KiB I/O buffers. Size thread stacks accordingly when embedding: the
+  one-shot segfaults in a 128 KiB thread (musl's default).
 - **Allocation**: zero, end to end. The one-shot takes no allocator; the
   reader takes none either (caller-provided buffers through the named buffer
   type).
@@ -374,9 +391,11 @@ A conformant decoder's obligations, all enforced here:
 
 Two of the four block types never reach the entropy layers, and both are fast
 paths: a **Raw block** (`§3.1.1.2.2`, Block_Content is Block_Size literal
-bytes) is one `fastmem.copy` — from `source` on the one-shot, straight from
-`input` on the streaming reader, since nothing needs staging to be read
-forward — and an **RLE block** (one content byte repeated Block_Size times)
+bytes) is one `fastmem.copy` — from `source` on the one-shot, from the
+reader's staged block content on the streaming path (the reader stages every
+block's content, Raw included, before the dispatch; reading a Raw block
+straight from `input` is the shape's perf follow-up, not the current path) —
+and an **RLE block** (one content byte repeated Block_Size times)
 is one `fastmem.set` plus a doubling splat — the `rle-first-block.zst`
 fixture pins RLE as a *first* block, which the CLI itself never emits. Both
 are bounded by Block_Maximum_Size (`BlockOversize` otherwise, `§3.1.1.2.4`)
@@ -389,12 +408,14 @@ before it is decoded**, and that is the format's own requirement, not a
 choice: both backwards bitstreams (the sequences stream, `§3.1.1.3.2.1.2`,
 and each Huffman literals stream, `§4.2.2`) are read from the block's *end*
 toward its beginning, so the last byte's offset must be known before the first
-symbol. The compressed block is staged into a comptime `[max_block_size]u8`
-scratch (<= 128 KiB, `§3.1.1.2.4`), and every read is bounds-checked against
-that staged region — never against the input's end, never against the frame's
-end. That staging is the answer to `§8`'s named vector, "the encoding of
-Number_of_Sequences values that cause the decoder to read into the block
-header (and beyond)".
+symbol. The one-shot's `source` is the input itself — a contiguous slice, so
+the block is already staged — while the streaming reader stages the block's
+content into the caller's buffer (the `Buffer`'s trailing staging room, at
+most `min(window_len, max_block_size)` bytes; no stack staging, "Stack"
+above), and every read is bounds-checked against that staged region — never
+against the input's end, never against the frame's end. That staging is the
+answer to `§8`'s named vector, "the encoding of Number_of_Sequences values
+that cause the decoder to read into the block header (and beyond)".
 
 The literals (`§3.1.1.3.1`) come first: a byte-aligned 1-5 byte header
 (Table 12: a 2-bit type, a 1-2 bit Size_Format, a 5-20 bit Regenerated_Size,
@@ -431,10 +452,9 @@ then the sequences execute from it (`§3.1.1.3.1`: "They can be decoded first
 and then copied during Sequence Execution, or they can be decoded on the
 flow") — the references' shape, and the one the trailing literals come out of
 too (`§3.1.1.3.2`: leftover literals "are added at the end of the block").
-Total per-block stack scratch ~256 KiB, comptime, zero allocation. The
-one-shot decode writes literals straight into `target` when the frame is
-literals-only, and the streaming reader writes them straight into its serving
-region in the same case.
+Total per-block stack scratch: the literals scratch alone, <= 128 KiB,
+comptime, zero allocation — the staged block is the caller's buffer on the
+reader and the input itself on the one-shot.
 
 The sequences section (`§3.1.1.3.2`) is a header, an optional table per symbol
 type, and one bitstream. Number_of_Sequences (`§3.1.1.3.2.1`) is 1-3 bytes:
@@ -556,8 +576,8 @@ oracle, and the CLI's trailers are the differential pin.
 
 Where it folds (OQ7): at the **one per-block emission funnel** — the raw
 block's bytes as they are copied to the output, the RLE block's splat, the
-compressed block's sequence-execution writes and trailing literals, and the
-literals-only shortcut's write. Every decoded byte hashed exactly once, in
+compressed block's sequence-execution writes and trailing literals. Every
+decoded byte hashed exactly once, in
 order, with no second pass and no buffer of our own; the one-shot decode
 hashes into `target` through the same funnel. That is the M3 OQ1 discipline
 ("hashing rides the codec boundary", `src/gzip/README.md`, "The checksums")
@@ -581,17 +601,19 @@ the zero-length poll, the sticky lifecycle (`State` + the detail in `err`),
 the contiguity failure, and the wrapper-rebase funnel. Buffer ownership, in
 full:
 
-- `Reader.Buffer(window_len)` is `[window_len + max_block_size]u8`: the
-  retained history (up to the frame's Window_Size, capped by `window_len`)
-  plus the largest decoded block. `Reader.init(comptime window_len, input,
-  buffer: *Buffer(window_len))` takes the comptime window and the exact
-  pointer to the named buffer type; the two must agree, so the cap and the
-  buffer cannot disagree.
+- `Reader.Buffer(window_len)` is `[window_len + max_block_size +
+  min(window_len, max_block_size)]u8`: the retained history (up to the
+  frame's Window_Size, capped by `window_len`), the largest decoded block,
+  and the block staging room. `Reader.init(comptime window_len, input, buffer:
+  *Buffer(window_len))` takes the comptime window and the exact pointer to
+  the named buffer type; the two must agree, so the cap and the buffer cannot
+  disagree.
 - Zero allocation end to end: no allocator appears anywhere in the streaming
-  API. The block staging and the literals scratch are comptime-sized stack
-  locals.
+  API. The block staging lives in the caller's `Buffer` (its trailing
+  `min(window_len, max_block_size)` bytes); the literals scratch is the one
+  comptime stack local (<= 128 KiB, "Stack").
 - The one-call pumps take the same buffer pointer; there is no stack-buffered
-  default-window pump, because 8 MiB + 128 KiB does not belong on a stack.
+  default-window pump, because 8 MiB + 256 KiB does not belong on a stack.
 
 Semantics:
 
@@ -634,6 +656,13 @@ Semantics:
   layer's largest fixed-size read (the 3-byte block header and the 4-byte
   checksum fit inside it) — or the input must end before then. std's decoder
   names the same class `InputBufferUndersize`.
+- The pumps' counts are `usize`: `streamFrame`/`streamAll` return served
+  bytes as a `usize`, and std's `streamRemaining` under them accumulates the
+  same way, so a 32-bit caller decoding past 4 GiB through a pump panics
+  inside std — a recorded std-level limit shared by every codec family's
+  pumps, not a zstd one (the M4 closing review's note; the reader's own
+  frame total is `u64`, B1). A 32-bit caller decoding past 4 GiB drives the
+  `Reader` itself.
 - `Reader.streamFrame` / `Reader.streamAll` are the one-call pumps: one frame
   unit / every frame unit `in` holds, through the caller's buffer, zero
   allocation. `streamAll` is the walk above: skippable units pass through with
@@ -654,17 +683,20 @@ the checksum funnel), `literals.zig` (the literals section), `huff0.zig`
 table description and construction, shared by the sequences and the Huffman
 weights), `xxh64.zig` (the checksum state over std's kernel), `Reader.zig`
 (the streaming `Io` layer), `golden.zig` (ported golden fixtures, shared by
-every layer's tests), `common.zig` (little-endian integer access), `bench.zig`
-(local benchmark), `oracle.zig` (the external-oracle harness behind
-`just zstd-oracle`), `fuzz.zig` (fuzz targets).
+every layer's tests), `common.zig` (little-endian integer access), `fuzz.zig`
+(fuzz targets). `bench.zig` (a local benchmark) and `oracle.zig` (an
+external-oracle harness) are not landed at M4: the zstd rows live in the
+fleet driver ("Benchmarks" below), and an oracle lane is the perf wave's to
+add when there is an encoder direction to cross-check.
 
 An example CLI (`examples/zstd.zig`, `zig build example-zstd -- decode
 <file.zst> > out`) is a thin streaming pump over this surface, the same shape
 as the other codecs' — decode-only until M5 adds the encoder direction. One
-divergence from the other examples: its window is the 8.4 MiB default, which
-cannot be a portable stack local (8 MiB is a common stack limit), so the
-CLI scaffolding's arena owns the buffer for the run — the example is the
-caller the pumps expect, and the codec itself still allocates nothing.
+divergence from the other examples: its buffer is the 8.25 MiB default
+(8 MiB window + 128 KiB serving + 128 KiB staging), which cannot be a
+portable stack local (8 MiB is a common stack limit), so the CLI
+scaffolding's arena owns the buffer for the run — the example is the caller
+the pumps expect, and the codec itself still allocates nothing.
 
 ## Testing & golden vectors
 
@@ -695,9 +727,11 @@ before it was written down:
   doesn't match checksum`, exit 1 (T8); a size-unknown level-19 frame reports
   `Window Size: 8.00 MiB` (the `windowLog` 23 pin; level 3 reports 2 MiB) and
   `Check: XXH64`; `--long=26` emits a 64 MB window (rejected by the default
-  cap with `WindowTooLarge`, accepted by a caller who sizes for it). The lane is
-  `src/zstd/oracle.zig` + `scripts/zstd_oracle.py` behind `just zstd-oracle`
-  (the `flate-oracle` precedent).
+  cap with `WindowTooLarge`, accepted by a caller who sizes for it). The
+  external-oracle lane — `src/zstd/oracle.zig` + `scripts/zstd_oracle.py`
+  behind a `just zstd-oracle` recipe, the `flate-oracle` precedent — is not
+  landed at M4: the CLI lanes above ran as hand incantations, and the lane is
+  the perf wave's to add alongside the encoder direction.
 - **CPython 3.14's `compression.zstd`** (PSF; libzstd underneath — the same
   shape as M3's python3 `zlib` lane, and the same `unused_data` boundary
   check): `compress`/`decompress` for the one-shot lanes and
@@ -778,14 +812,21 @@ and committed like every other reference blob. The corpus keeps the
 family's sizes (32 KiB / 64 KiB): the one-shot needs no window (the target
 is the history), so the window slide is the streaming layer's concern, not
 the fleet corpus's.
-Rows:
 
-- `BenchmarkZstdDecompress` — the one-shot decode per shape and size.
-- `BenchmarkStdZstdDecompress` — `std.compress.zstd` over the same bytes **in
-  the same binary**: the paired in-binary comparison the code-layout rule
-  demands (cross-binary rows are not comparable; `src/gzip/bench.zig`'s header
-  records the finding).
-- `BenchmarkZstdRatio` — frame size over uncompressed size, untimed.
+The zstd rows live in the **fleet driver** (`bench/zig/bench_zcompress.zig`,
+`just bench-run`; `bench/README.md`, "Rows"), not in a `src/zstd/bench.zig`:
+M4 ships no local bench file — the fleet harness is where the zstd rows are
+wired, and the perf wave can add a local file when there is a codec to tune
+(the other codecs' local benches are `src/<codec>/bench.zig`, wired into
+`zig build bench`). The rows are the `<codec>/<direction>/<shape>/<size>`
+case IDs:
+
+- `zstd/decompress/...` — the one-shot decode per shape and size on the `zc`
+  arm, and `std.compress.zstd` decoding the same blobs **in the same binary**
+  (the paired in-binary comparison the code-layout rule demands: cross-binary
+  rows are not comparable; `src/gzip/bench.zig`'s header records the
+  finding). No ratio row: with no encoder, frame size over input size has
+  nothing of ours to measure.
 - The streaming direction comes from the example pump (`just example zstd
   decode <file>`), which sizes the reader's window and times the real path
   with a file sink — the streaming bench row stays out of the bench binary
@@ -795,11 +836,14 @@ Rows:
 The fleet arms (the `bench/` harness, the M3 port): `zc` (ours, plus the
 in-binary `std.compress.zstd` rows), `klauspost` (`DecodeAll` — the
 single-buffer arm the one-shot races — and `NewReader`, the streaming arm),
-and `zstd-c` (a new driver, `bench/drivers/c/bench_zstd.c`: `ZSTD_decompress`
-and `ZSTD_decompressStream` against the box's libzstd, the pinned version
-recorded per run; the plan's native ceiling). The `zstd-c` driver's rows must be built with the same
-window-cap posture as ours (`ZSTD_d_windowLogMax`), or the comparison measures
-two different acceptance policies.
+and `zstd-c` (`bench/drivers/c/bench_zstd.c`: `ZSTD_decompress` against the
+box's libzstd, the pinned version recorded per run; the plan's native
+ceiling). The `zstd-c` driver pins `ZSTD_d_windowLogMax` to the reference's
+own default — the driver's posture, recorded so the arm cannot silently
+accept windows the default build refuses — while our one-shot applies no
+window cap at all (its history is `target`), so the corpus's small frames
+sit below every arm's bound; the driver's comment records this rather than
+claiming a shared acceptance policy.
 
 ## Licensing & attribution
 

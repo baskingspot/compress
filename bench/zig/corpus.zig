@@ -13,9 +13,11 @@
 //! the pinned zstd CLI (v1.5.7, the flake) at `zstd_cli_level` produces the
 //! frames — level 1 matches the harness-wide fast class — and this
 //! generator verifies each one byte-exact with our decoder
-//! (`zstd.zstd.decode.decompress`) before writing it. Pass `--zstd` to
-//! (re)generate them; a plain run re-hashes the committed `.zst` files into
-//! the manifest, so both modes reproduce the tree exactly.
+//! (`zstd.zstd.decode.decompress`) before writing it. A `--zstd` run checks
+//! the CLI's own version first (`zstd_cli_version`), so a different PATH
+//! binary fails the run rather than silently rewriting the corpus. Pass
+//! `--zstd` to (re)generate them; a plain run re-hashes the committed `.zst`
+//! files into the manifest, so both modes reproduce the tree exactly.
 //!
 //! Run from the repo root: `zig build corpus -- [--zstd] [DIR]` (default
 //! bench/corpus). Rewrites only files whose bytes differ and prints the
@@ -47,6 +49,17 @@ pub const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
 /// is the fast class every other arm's rows measure (zc `.fast`,
 /// klauspost/libdeflate/zlib-ng level 1).
 const zstd_cli_level = "-1";
+
+/// The pinned zstd CLI version the `.zst` reference blobs come from (v1.5.7,
+/// the flake — src/zstd/README.md, "Benchmarks"): `--zstd` runs check
+/// `zstd --version` against it once, so a different PATH binary cannot
+/// silently produce blobs the committed corpus was not generated with.
+const zstd_cli_version = "v1.5.7";
+
+/// The four one-shot encoders' error unions: they share the payload (`usize`,
+/// the produced length) and their error sets coerce to this one, so
+/// `writeBlob` takes one named type rather than a duck-typed value.
+const Generated = error{ BufferTooSmall, Unimplemented }!usize;
 
 /// One definition of the corpus shapes: the fleet drivers read the files
 /// this generates; nothing regenerates shapes on the boxes.
@@ -94,6 +107,7 @@ pub fn main(init: std.process.Init) !void {
     defer dir.close(io);
 
     var sums: std.ArrayList(u8) = .empty;
+    if (gen_zstd) try checkZstdCli(io, arena);
     for (std.enums.values(Shape)) |shape| {
         for (sizes) |size| {
             const raw = try arena.alloc(u8, size);
@@ -147,7 +161,7 @@ fn writeBlob(
     base_name: []const u8,
     ext: []const u8,
     target: []u8,
-    generated: anytype,
+    generated: Generated,
 ) !void {
     const n = generated catch |err| {
         std.debug.print("corpus: {s} {s} failed: {s}\n", .{ base_name, ext, @errorName(err) });
@@ -191,9 +205,31 @@ fn writeZstdBlob(
     };
     if (n != raw.len or !mem.eql(u8, back, raw)) return error.ZstdBlobMismatch;
     const name = try std.fmt.allocPrint(arena, "{s}.zst", .{base_name});
-    const current: ?[]u8 = dir.readFileAlloc(io, name, arena, .unlimited) catch null;
+    // A missing blob is the normal first-run case; any other read failure is
+    // the run's, not a reason to overwrite the file blindly.
+    const current: ?[]u8 = dir.readFileAlloc(io, name, arena, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => |e| return e,
+    };
     if (current == null or !mem.eql(u8, current.?, result.stdout)) {
         try dir.writeFile(io, .{ .sub_path = name, .data = result.stdout });
+    }
+}
+
+/// `zstd --version` against the pin: a mismatch fails a `--zstd` run before
+/// any blob is written, so the committed corpus's provenance is the pinned
+/// CLI alone.
+fn checkZstdCli(io: Io, arena: Allocator) !void {
+    const result = try std.process.run(arena, io, .{ .argv = &.{ "zstd", "--version" } });
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.ZstdCliFailed,
+        else => return error.ZstdCliFailed,
+    }
+    if (mem.indexOf(u8, result.stdout, zstd_cli_version) == null) {
+        std.debug.print("corpus: `zstd --version` is not the pinned {s}: {s}\n", .{
+            zstd_cli_version, result.stdout,
+        });
+        return error.ZstdCliVersionMismatch;
     }
 }
 
@@ -218,7 +254,13 @@ fn writeFile(
     name: []const u8,
     bytes: []const u8,
 ) !void {
-    const current: ?[]u8 = dir.readFileAlloc(io, name, arena, .limited(bytes.len + 1)) catch null;
+    // A missing file (first run) and a file past the one-byte-larger limit
+    // (different bytes by construction) both mean "rewrite"; any other read
+    // failure is the run's, never a reason to overwrite blindly.
+    const current: ?[]u8 = dir.readFileAlloc(io, name, arena, .limited(bytes.len + 1)) catch |err| switch (err) {
+        error.FileNotFound, error.StreamTooLong => null,
+        else => |e| return e,
+    };
     if (current == null or !mem.eql(u8, current.?, bytes)) {
         try dir.writeFile(io, .{ .sub_path = name, .data = bytes });
     }

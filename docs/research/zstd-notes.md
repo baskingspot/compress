@@ -585,27 +585,38 @@ v1.18.0-5-g8df4d01; `std` cites the 0.16.0 store.
   leaves acquisition out of band (`§5`) and `§2` requires the unambiguous
   error. Decision: M4 fails closed on dictionaries (OQ4) — the std/zlib-FDICT
   posture; klauspost's support is a recorded divergence.
-- **T12 — the window bound: the C accepts offsets one byte past the declared
-  Window_Size.** `§3.1.1.4` states the rule: "all offsets leading to
-  previously decoded data must be smaller than Window_Size". The C's
-  whole-buffer decoder checks the *available history*, not the declared
-  window, so a frame whose match reaches one byte past its Window_Size decodes
-  there when the bytes are still in its buffer (verified: the hand-built
+- **T12 — the window bound is the addressable history at the match.**
+  `§3.1.1.4` states the rule: "all offsets leading to previously decoded data
+  must be smaller than Window_Size". The C's whole-buffer decoder checks the
+  *available history*, not the declared window, so it decodes any match whose
+  bytes are still in its buffer (verified: the hand-built
   `frame_window_1k_over` and `frame_window_128k_over` — a 1 KB and a 128 KB
-  window, each with its match one byte past the declaration — both decode
-  byte-exact through the pinned CLI v1.5.7, exit 0, 2051 and 262147 bytes).
-  The encoder family cannot emit such a frame (its match search is bounded by
-  the window), so the divergence is decoder leniency only. Decision: enforce
-  the declared bound — an offset past Window_Size is `OffsetTooFar` — while
-  accepting an offset of *exactly* Window_Size, which reads the window's
-  oldest retained byte and is what the reference family's windowSize-byte
-  history resolves (the fixtures' own match, `frame_window_1k` /
-  `frame_window_128k`, is at exactly Window_Size and the CLI decodes both, so
-  the RFC's "smaller than" is read as the window's addressable span rather
-  than as an exclusive bound). The `*_over` pair is the bad-frame corpus for
-  the rule, and `block.zig`'s module doc carries the divergence at the point
-  of enforcement; `frame_window_1k_over`/`frame_window_128k_over` are the
-  fixtures.
+  window, each with its match one byte past the declaration at
+  literals_length 0 — both decode byte-exact through the pinned CLI v1.5.7,
+  exit 0, 2051 and 262147 bytes). Ours is stricter than the C but not the
+  declared bound alone: the sequences layer's region is re-based at
+  `decoded_len - history` (`history = min(decoded_len, Window_Size)`,
+  `block.zig`), and the bound it enforces is the *addressable span at the
+  match* — the retained history plus the bytes this block has already written
+  (its literals and its earlier matches) — because a match may read from the
+  region's start through the current write position and no further. An offset
+  of exactly Window_Size reads the window's oldest retained byte (the
+  reference family's windowSize-byte history accepts it and its encoder can
+  emit it — its match search is bounded by the window), and an offset *past*
+  Window_Size is accepted when the block's own writes make the byte
+  addressable: the hand-built `frame_window_1k_span` — a 1 KB window, ten raw
+  literals, then a match at offset 1025 — decodes here and through the pinned
+  CLI alike (verified: 1024 + 1024 + 10 + 3 bytes, exit 0). The `*_over` pair
+  fails `OffsetTooFar` here because at literals_length 0 the span is exactly
+  Window_Size bytes and the offset reaches before the region's start — the
+  fail-closed reading of `§3.1.1.4` — where the C's whole-buffer decoder,
+  with the frame's bytes still around, decodes. Nothing the accepted span
+  admits reads outside the decoder's own output, so the divergence is decoder
+  leniency in the C only; the encoder family cannot emit such a frame. The
+  fixtures are `frame_window_1k`/`frame_window_128k` (accepted by both),
+  `frame_window_1k_span` (accepted by both — the precision fixture), and the
+  `*_over` pair (the bad-frame corpus for the refused side); `block.zig`'s
+  module doc carries the rule at the point of enforcement.
 - **T13 — the empty zero-size Compressed_Block.** `§3.1.1.3`: "A compressed
   block consists of two sections: a Literals_Section and a
   Sequences_Section" — and `§3.1.1.2.3` lets Block_Size be 0 for any type.
@@ -635,6 +646,21 @@ v1.18.0-5-g8df4d01; `std` cites the 0.16.0 store.
   reader's is its buffer), so the divergence is the check alone. Found by this
   slice's fixtures (`frame_fcs_max` in `golden.zig` records it beside the
   bytes); it is the only value where the two readings differ.
+- **T15 — the C's Huffman table-log cap is 12 bits; the RFC's is 11.**
+  `§4.2.1`: "This specification limits the maximum code length to 11 bits."
+  The C's `HUF_TABLELOG_MAX` is 12 (`lib/common/huf.h:37`), and
+  `HUF_readStats_body` rejects only `tableLog > HUF_TABLELOG_MAX`
+  (`lib/common/entropy_common.c:288`), so the C decoder accepts a
+  Huffman_Tree_Description whose completion needs 12-bit codes — one bit past
+  the RFC's cap. klauspost follows the RFC (`tableLogMax = 11`,
+  `huff0/huff0.go:21`, rejected at `huff0/decompress.go:92`), and the zstd
+  *encoder* family emits at most 11 (the C's literals compressor pins
+  `LitHufLog 11`, `lib/common/zstd_internal.h:101`) — the 12 is huff0's own
+  generic cap leaking into the zstd decode path. Decision: reject over 11
+  (`MalformedHuffmanWeights`, the RFC's limit), the fail-closed reading; the
+  C's 12 is a recorded divergence. No fixture: a 12-bit table is one no zstd
+  encoder produces, and the cap is enforced at `huff0.complete`
+  (`code_length_max = 11`).
 
 ## 5. Fixture inventory (every entry verified live where a decoder can run it)
 
@@ -719,6 +745,12 @@ source. Its default distributions (`zstd.zig:12-30`) match the RFC's
   order, the final-bit flag, the direct-weights tree description, the
   literals-only compressed block, the 1-stream size format, the
   decoded-zero sequences section end (T5).
+- The **window set** (T12): the 1 KB- and 128 KB-window fixtures with their
+  match at exactly Window_Size, the `*_over` siblings one byte past it at
+  literals_length 0 (refused here, decoded by the C's whole-buffer decoder),
+  and `frame_window_1k_span` — a 1 KB window, two 1024-byte RLE blocks, ten
+  raw literals, then a match at offset 1025 — which both the CLI and ours
+  decode to 2061 bytes (the addressable-span precision).
 - The **single-segment FCS=4 frames** with oversized blocks (T7): both
   references' rejection behavior.
 - The **skippable-frame set**: one 0x184D2A53 frame prepended to a good
@@ -882,7 +914,10 @@ numbering is mirrored so the two files read together.
   `literals_buffer` + `sequence_buffer`, both `[1 << 17]u8`, `:315-327`).
   Total stack scratch ~256 KB, comptime, zero allocation; the trailing
   literals (ZD27) come out of the same buffer. The one-shot decode writes
-  literals into the target directly when the frame is literals-only.
+  literals into the target directly when the frame is literals-only — a
+  *recommendation*, not the landed M4 shape: both paths decode literals into
+  the scratch (the shortcut is a recorded perf follow-up, and the M4 closing
+  review's S4 corrected the README where it read as implemented).
 - **OQ7 — where the XXH64 rides.** The M3 OQ1 question, answered far more
   simply here: zstd's decode is block-batched, and every decoded byte of a
   block lands in the window/output through one per-block funnel (raw: the

@@ -925,6 +925,14 @@ test "the frame walk carries the window accounting across blocks" {
     try testing.expectEqual(@as(usize, 2 * 131072 + 3), written);
     try testing.expectEqualSlices(u8, "BBB", target[262144..262147]);
     try internal.sentinel.expect(&target, written);
+    // The addressable-span precision (T12): ten literals move the match
+    // position past the 1 KB window, and the offset reads a byte the
+    // declared window alone would not admit — the CLI decodes it too.
+    internal.sentinel.fill(&target);
+    written = try decodeFrame(&golden.frame_window_1k_span, &target, &progress);
+    try testing.expectEqual(@as(usize, 2048 + 10 + 3), written);
+    try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
+    try internal.sentinel.expect(&target, written);
     // The one-byte-past siblings: `OffsetTooFar` (T12 — the CLI decodes
     // both, its whole-buffer decoder checking the bytes it still has rather
     // than the declared window).

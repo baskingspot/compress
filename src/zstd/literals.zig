@@ -348,8 +348,11 @@ fn decodeTreeless(
 ) Error!Section {
     const compressed_size: usize = header.compressed_size;
     if (compressed_size > content.len) return error.LiteralsTooLarge;
-    const table = state.table orelse return error.TreelessLiteralsFirst;
-    try decodeStreams(header, content[0..compressed_size], target, &table);
+    // The pointer capture, not a copy: `state.table` is the frame's one
+    // 4-KiB tree, and a Treeless block must read it in place (the M4 closing
+    // review's N4 — `orelse` on the optional copies it into a local).
+    const table = if (state.table) |*table| table else return error.TreelessLiteralsFirst;
+    try decodeStreams(header, content[0..compressed_size], target, table);
     return .{
         .bytes = target[0..header.regenerated_size],
         .bytes_consumed = header.header_len + compressed_size,

@@ -322,7 +322,7 @@ fn step(r: *Reader) Error!usize {
                 .stored => try r.readStoredHeader(),
                 .fixed => r.phase = .fixed_block,
                 .dynamic => {
-                    try decode.readDynamicHeader(&r.bits, &r.literal, &r.distance);
+                    try decode.readDynamicHeader(Bits, &r.bits, &r.literal, &r.distance);
                     r.phase = .dynamic_block;
                 },
                 .reserved => return error.InvalidBlockType,
@@ -385,7 +385,7 @@ fn decodeSymbols(r: *Reader) Error!usize {
     }
     const fixed = r.phase == .fixed_block;
     const literal = if (fixed) &decode.fixed_literal else &r.literal;
-    const symbol = try literal.decode(&r.bits);
+    const symbol = try literal.decode(Bits, &r.bits);
     if (symbol < 256) {
         r.reader.buffer[r.reader.end] = @intCast(symbol);
         r.reader.end += 1;
@@ -400,7 +400,7 @@ fn decodeSymbols(r: *Reader) Error!usize {
     // §3.2.6: values 286-287 "will never actually occur in the compressed
     // data, but participate in the code construction".
     if (symbol > 285) return error.InvalidCode;
-    const length = try decode.decodeLength(&r.bits, symbol);
+    const length = try decode.decodeLength(Bits, &r.bits, symbol);
     r.phase = if (fixed)
         .{ .fixed_match = @intCast(length) }
     else
@@ -412,10 +412,10 @@ fn decodeSymbols(r: *Reader) Error!usize {
 /// against the whole output, and the format's overlapping copy.
 fn copyMatchStep(r: *Reader, length: u16, fixed: bool) Error!usize {
     const distance = if (fixed) &decode.fixed_distance else &r.distance;
-    const symbol = try distance.decode(&r.bits);
+    const symbol = try distance.decode(Bits, &r.bits);
     // §3.2.6: distance codes 30-31 "will never actually occur".
     if (symbol > 29) return error.InvalidCode;
-    const match_distance = try decode.decodeDistance(&r.bits, symbol);
+    const match_distance = try decode.decodeDistance(Bits, &r.bits, symbol);
     // §3.2.3 — "a distance cannot refer past the beginning of the output
     // stream". The window always retains the last 32 KiB of the output, so a
     // distance that passes this check is in the window.

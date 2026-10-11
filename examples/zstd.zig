@@ -9,11 +9,12 @@
 //! clean end; garbage where a frame unit should start fails `BadMagic`,
 //! never silently skipped; the zero-byte input is the clean end).
 //!
-//! The window is the codec's default — 8 MiB (`§3.1.1.1.2`'s recommendation,
-//! the pin from the CLI's level-19 frames) plus Block_Maximum_Size — and
-//! that is why the codec's pumps take a caller-owned buffer: 8.4 MiB cannot
-//! be a portable stack local (an 8 MiB stack limit is the common case, and
-//! the CLI scaffolding's arena is exactly the caller the pumps expect). Every
+//! The buffer is the codec's default — an 8 MiB window (`§3.1.1.1.2`'s
+//! recommendation, the pin from the CLI's level-19 frames) plus the serving
+//! block room and the block staging room, 8 MiB + 256 KiB in all — and that
+//! is why the codec's pumps take a caller-owned buffer: 8.25 MiB cannot be a
+//! portable stack local (an 8 MiB stack limit is the common case, and the
+//! CLI scaffolding's arena is exactly the caller the pumps expect). Every
 //! other codec's example sizes its window on the stack; zstd's is the
 //! divergence, and the arena owns the buffer for the run. The codec still
 //! allocates nothing — the example, as its caller, does.
@@ -22,6 +23,7 @@ const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const testing = std.testing;
+const print = std.debug.print;
 
 const cli = @import("cli");
 const zstd = @import("zcompress").zstd;
@@ -44,13 +46,34 @@ fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
-    // The example's window, owned by the run's arena: 8.4 MiB, the codec's
-    // default cap. The pump is the same one a caller with a stack-sized
-    // window drives (`Reader.Buffer(window_len)`), and no allocator appears
-    // anywhere in the codec itself.
+    // The example's buffer, owned by the run's arena: the 8 MiB default
+    // window plus its serving block room and block staging room. The pumps
+    // take the same caller-owned buffer, and no allocator appears anywhere
+    // in the codec itself.
     const buffer = try arena.create(zstd.Reader.DefaultBuffer);
     defer arena.destroy(buffer);
-    _ = try zstd.Reader.streamAll(zstd.Reader.default_window_len, in, out, buffer);
+    // `Reader.streamAll`'s walk, driven here so the one failure a user can
+    // act on — the window refusal for a valid frame the default cap is too
+    // small for (`--long=27` against the 8 MiB window) — is printed by name:
+    // the pump reports only the coarse `error.ReadFailed`, and the detail is
+    // the reader's `err`. Every other detail keeps the coarse trace the
+    // shared example scaffolding prints.
+    while (true) {
+        // A clean end between frames is the file's end; any byte where a
+        // frame unit should start is parsed as one, so garbage fails closed.
+        _ = in.peekByte() catch |err| switch (err) {
+            error.EndOfStream => return,
+            else => |e| return e,
+        };
+        var r: zstd.Reader = .init(zstd.Reader.default_window_len, in, buffer);
+        _ = r.reader.streamRemaining(out) catch |err| {
+            if (r.err) |detail| switch (detail) {
+                error.WindowTooLarge => print("zstd: {s}\n", .{@errorName(detail)}),
+                else => {},
+            };
+            return err;
+        };
+    }
 }
 
 test "example: the decode pump walks a multi-frame file" {

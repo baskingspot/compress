@@ -6,11 +6,13 @@
  * milestone and the zc arm has no encoder, so there is no compress row to
  * compare against.
  *
- * Window posture (src/zstd/README.md, "Benchmarks": the driver's rows must
- * share the one-shot's acceptance policy): ZSTD_d_windowLogMax pinned to
- * ZSTD_WINDOWLOG_LIMIT_DEFAULT (27, the reference default). The corpus
- * frames are single-segment with Window_Size = FCS <= 64 KiB, so every
- * arm's cap accepts them; the pin keeps the posture explicit and recorded.
+ * Window posture: ZSTD_d_windowLogMax pinned to ZSTD_WINDOWLOG_LIMIT_DEFAULT
+ * (27, the reference default) — the driver's own posture, recorded so the
+ * arm cannot silently accept windows the default build refuses. It is not a
+ * mirror of the zc arm: our one-shot has no window cap at all (its history
+ * is the destination buffer; src/zstd/README.md, "Benchmarks"), and the
+ * corpus frames are single-segment with Window_Size = FCS <= 64 KiB, so
+ * every arm's bound accepts them either way.
  *
  * Build defines: CBENCH_TARGET (triple string), CBENCH_CPU, ZIG_VERSION,
  * COMPETITOR_VERSION.

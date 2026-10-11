@@ -903,7 +903,7 @@ fn referenceWalk(source: []const u8, target: []u8) Walk {
             .dynamic => {
                 var literal: decode.LitDecoder = .{};
                 var distance: decode.DistDecoder = .{};
-                decode.readDynamicHeader(&br, &literal, &distance) catch |err| return .{
+                decode.readDynamicHeader(RefBits, &br, &literal, &distance) catch |err| return .{
                     .err = err,
                     .produced = out_pos,
                 };
@@ -948,7 +948,7 @@ fn walkHuffman(
     distance: *const decode.DistDecoder,
 ) decode.DecompressError!void {
     while (true) {
-        const symbol = try literal.decode(br);
+        const symbol = try literal.decode(RefBits, br);
         if (symbol < 256) {
             if (out_pos.* == target.len) return error.BufferTooSmall;
             target[out_pos.*] = @intCast(symbol);
@@ -957,10 +957,10 @@ fn walkHuffman(
         }
         if (symbol == 256) return; // §3.2.7 — end of block
         if (symbol > 285) return error.InvalidCode; // §3.2.6 — never emitted
-        const length = try decode.decodeLength(br, symbol);
-        const dist_symbol = try distance.decode(br);
+        const length = try decode.decodeLength(RefBits, br, symbol);
+        const dist_symbol = try distance.decode(RefBits, br);
         if (dist_symbol > 29) return error.InvalidCode; // §3.2.6 — never emitted
-        const match_distance = try decode.decodeDistance(br, dist_symbol);
+        const match_distance = try decode.decodeDistance(RefBits, br, dist_symbol);
         if (match_distance > out_pos.*) return error.InvalidMatch; // §3.2.3
         if (target.len - out_pos.* < length) return error.BufferTooSmall;
         decode.copyMatch(target, out_pos.*, match_distance, length);
