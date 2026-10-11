@@ -14,33 +14,34 @@
 //! stream through flate and writes the trailer from the checksum state the
 //! hook accumulated (CRC-32 and the input length, OQ1). Every byte is hashed
 //! exactly once, at flate's emit funnel, with no container buffer and no
-//! second pass.
+//! second pass. The driver machinery — the lazy header, the position sync,
+//! the checksum arming, the poison check, the `Io.Writer` entries — is
+//! `src/internal/container.zig`'s, instantiated over this module's framing
+//! (`framing.zig`).
 
 const std = @import("std");
 const Io = std.Io;
-const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 const print = std.debug.print;
 
 const fastmem = @import("fastmem");
 
-const internal = @import("../internal/root.zig");
-const sentinel = internal.sentinel;
 const flate = @import("../flate/root.zig");
-const crc32 = @import("crc32.zig");
-const decode = @import("decode.zig");
-const encode = @import("encode.zig");
-const golden = @import("golden.zig");
-
 /// The caller-provided buffer: flate's, re-exported — the container adds no
 /// buffer of its own (OQ6). `[max_block_size + history_len]u8`, 98303 bytes.
 pub const Buffer = flate.Writer.Buffer;
-
+const internal = @import("../internal/root.zig");
+const sentinel = internal.sentinel;
+const container = internal.container;
 /// Whether the fixed header has reached `output`: the header is lazy
 /// (README, "Streaming"), so the first entry that can emit a byte — a write
 /// that drains, a flush, a rebase, or `finish` — writes it first.
-const Header = enum { pending, written };
+const Header = container.Header;
+const decode = @import("decode.zig");
+const encode = @import("encode.zig");
+const framing = @import("framing.zig");
+const golden = @import("golden.zig");
 
 const Writer = @This();
 
@@ -50,41 +51,19 @@ inner: flate.Writer,
 options: encode.Options,
 /// The checksum state folded at flate's emit funnel: CRC-32 over the input
 /// and the input length for ISIZE (`§2.3.1`).
-checksum: crc32.Checksum = .{},
+checksum: framing.Checksum = .{},
 header: Header = .pending,
 
-const vtable: Io.Writer.VTable = .{
-    .drain = drain,
-    .flush = flush,
-    .rebase = rebase,
-};
+/// The shared container driver over this module's framing
+/// (`src/internal/container.zig`): the lazy header, the position sync, the
+/// checksum arming, the poison check, and the generated `Io.Writer` entries.
+const Hooks = container.WriterHooks(framing, Writer);
 
 /// Wrap `output` (the member's sink) with `buffer` as the compression window
 /// and `options` fixed for the stream's lifetime. Write through `&w.writer`;
 /// complete the member with `finish`.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
-    if (options.level == .ratio) {
-        // The reserved seat: `.ratio` is Unimplemented, never silent
-        // aliasing (README, "API"). Poisoning the interface makes every
-        // write and finish report `error.WriteFailed`, matching
-        // `streamAll`'s rejection.
-        return .{
-            .writer = .failing,
-            .output = output,
-            .inner = flate.Writer.init(output, buffer, .{ .level = options.level }),
-            .options = options,
-        };
-    }
-    return .{
-        .writer = .{
-            .buffer = buffer[0..flate.encode.max_block_size],
-            .end = 0,
-            .vtable = &vtable,
-        },
-        .output = output,
-        .inner = flate.Writer.init(output, buffer, .{ .level = options.level }),
-        .options = options,
-    };
+    return Hooks.init(output, buffer, options);
 }
 
 /// Complete the member: emit the header if it is still pending, complete the
@@ -94,93 +73,7 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 /// afterwards, and a failed or finished writer reports `error.WriteFailed`
 /// instead of a false success (the pattern book's poison check).
 pub fn finish(w: *Writer) Io.Writer.Error!void {
-    if (w.writer.vtable != &vtable) return error.WriteFailed;
-    defer w.writer = .failing;
-    try w.emitHeader();
-    w.arm();
-    w.commit();
-    try w.inner.finish();
-    var trailer: [encode.trailer_len]u8 = undefined;
-    encode.writeTrailer(&trailer, w.checksum.final(), w.checksum.len);
-    try w.output.writeAll(&trailer);
-    try w.output.flush();
-}
-
-/// The lazily written header: the first entry that can emit writes the
-/// 10-byte deterministic header (OQ7) before any compressed byte reaches
-/// `output`.
-fn emitHeader(w: *Writer) Io.Writer.Error!void {
-    if (w.header == .written) return;
-    var header: [encode.header_len]u8 = undefined;
-    encode.writeHeader(&header, w.options.level);
-    try w.output.writeAll(&header);
-    w.header = .written;
-}
-
-/// Arm the checksum hook before the first byte is emitted (README, "Checksum
-/// hook"): a hook set mid-stream would see only later blocks. The state's
-/// address is stable once the caller's `Writer` is placed, so arming happens
-/// at the first entry, not in `init` (which cannot take its own address).
-fn arm(w: *Writer) void {
-    if (w.inner.checksum == null) w.inner.checksum = w.checksum.hook();
-}
-
-/// Hand the front's buffer position to the codec: the two share one region,
-/// and `std.Io.Writer`'s fast paths move only the front's `end`.
-fn commit(w: *Writer) void {
-    assert(w.writer.buffer.ptr == w.inner.writer.buffer.ptr);
-    assert(w.writer.buffer.len == w.inner.writer.buffer.len);
-    w.inner.writer.end = w.writer.end;
-}
-
-/// Take the codec's (possibly rebased) region back as the front's.
-fn adopt(w: *Writer) void {
-    w.writer.buffer = w.inner.writer.buffer;
-    w.writer.end = w.inner.writer.end;
-}
-
-/// The block region is full: emit the header if pending and let flate's
-/// `drain` consume from `data` (it tops up the block, emits it, and slides
-/// the window). The returned count is the bytes consumed from `data`,
-/// excluding the buffered ones (`std/Io/Writer.zig`'s drain contract).
-fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
-    errdefer w.* = .failing;
-    const self: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    try self.emitHeader();
-    self.arm();
-    self.commit();
-    const consumed = try self.inner.writer.writeSplat(data, splat);
-    self.adopt();
-    return consumed;
-}
-
-/// Emit the buffered partial block and flush `output`, keeping the writer
-/// usable: no data block carries BFINAL, so a mid-stream flush is always
-/// safe (`rfc1951-deflate.txt §3.2.3`; README, "Streaming"). The trailer is
-/// never written before `finish`.
-fn flush(w: *Io.Writer) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    const self: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    try self.emitHeader();
-    self.arm();
-    self.commit();
-    try self.inner.writer.flush();
-    self.adopt();
-}
-
-/// Make room for `capacity` more bytes in the region, keeping the most recent
-/// `preserve` buffered: flate's `rebase` emits the front of the partly
-/// written block and slides the tail to the front, never discarding input.
-/// (A consumer can ask for a direct writable slice into the region via
-/// `writableSliceGreedy`; when the region is full, that call lands here.)
-fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
-    errdefer w.* = .failing;
-    const self: *Writer = @alignCast(@fieldParentPtr("writer", w));
-    try self.emitHeader();
-    self.arm();
-    self.commit();
-    try self.inner.writer.rebase(preserve, capacity);
-    self.adopt();
+    return Hooks.finish(w);
 }
 
 /// Stream everything from `in` through a stack-buffered `Writer` into `out`,
@@ -193,12 +86,7 @@ pub fn streamAll(
     out: *Io.Writer,
     options: encode.Options,
 ) Io.Reader.StreamRemainingError!usize {
-    if (options.level == .ratio) return error.ReadFailed;
-    var buffer: Buffer = undefined;
-    var ww: Writer = .init(out, &buffer, options);
-    const n = try in.streamRemaining(&ww.writer);
-    try ww.finish();
-    return n;
+    return Hooks.streamOne(in, out, options);
 }
 
 // ---------------------------------------------------------------------------

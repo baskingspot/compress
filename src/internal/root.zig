@@ -12,3 +12,7 @@ pub const sentinel = @import("sentinel.zig");
 /// The reader lifecycle (`State`, `guard`, `fail`) and the generated
 /// `Io.Reader` vtable entries (`VTable`).
 pub const reader = @import("reader.zig");
+/// The container driver: the framing-agnostic machinery a container codec
+/// over an inner codec shares (`ReaderHooks`/`WriterHooks`/`EncodeHooks`/
+/// `DecodeHooks`, `readExact`), parameterized over the codec's framing.
+pub const container = @import("container.zig");

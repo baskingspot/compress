@@ -7,7 +7,11 @@
 //! (`rfc1950-zlib.txt §2.1`, `§2.2`). The Adler-32 is hashed directly over
 //! `source` (OQ1's one-shot shape: the container holds the bytes, so one
 //! pass, no flate involvement). Zero heap allocation; the stream is
-//! byte-identical for the same input and options.
+//! byte-identical for the same input and options. The driver — the
+//! framing/body/trailer order and the bound — is
+//! `src/internal/container.zig`'s `EncodeHooks`, instantiated over this
+//! module's framing (`framing.zig`); the header and trailer emissions below
+//! are the framing's own.
 
 const std = @import("std");
 const testing = std.testing;
@@ -16,39 +20,37 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
+const adler32 = @import("adler32.zig");
 const common = @import("common.zig");
 const readInt = common.readInt;
 const writeInt = common.writeInt;
-const flate = @import("../flate/root.zig");
-const adler32 = @import("adler32.zig");
 const decode = @import("decode.zig");
-const golden = @import("golden.zig");
-
+const framing = @import("framing.zig");
 /// The flate level type, re-exported: the container adds no levels of its own
 /// (README, "API"). `.ratio` is flate's reserved seat — `error.Unimplemented`
 /// here, never silent aliasing.
-pub const Level = flate.encode.Level;
-
+pub const Level = framing.Level;
 /// Encoder configuration. `.{}` is the default: the fast level.
-pub const Options = struct {
-    level: Level = .fast,
-};
-
+pub const Options = framing.Options;
 /// RFC 1950 §2.2 — the header's length: CMF and FLG.
-pub const header_len = 2;
-
+pub const header_len = framing.header_len;
 /// RFC 1950 §2.2 — the trailer's length: ADLER32.
-pub const trailer_len = 4;
+pub const trailer_len = framing.trailer_len;
+const golden = @import("golden.zig");
 
 /// The emitted CMF: CM = 8 ("deflate", `§2.2`) in the low four bits, CINFO = 7
 /// (a 32-KiB window: "the base-2 log of the window size minus eight", `§2.2`)
 /// in the high four. Fixed — the encoder exposes no header knobs.
 pub const cmf: u8 = 0x78;
 
+/// The shared container driver over this module's framing
+/// (`src/internal/container.zig`).
+const Hooks = internal.container.EncodeHooks(framing);
+
 /// The worst-case stream length: the fixed header, flate's worst-case body,
 /// and the fixed trailer (README, "API").
 pub fn maxCompressedLength(input_len: usize) usize {
-    return header_len + flate.encode.maxCompressedLength(input_len) + trailer_len;
+    return Hooks.maxCompressedLength(input_len);
 }
 
 /// Emit the deterministic 2-byte header: CMF fixed, FLG carrying only the
@@ -107,21 +109,7 @@ pub fn compress(
     target: []u8,
     options: Options,
 ) error{ BufferTooSmall, Unimplemented }!usize {
-    if (options.level == .ratio) return error.Unimplemented;
-    // The header is written before the body is attempted, so the check must
-    // come first: a target that cannot hold even the framing is too small.
-    if (target.len < header_len + trailer_len) return error.BufferTooSmall;
-    writeHeader(target[0..header_len], options.level);
-
-    const body_len = try flate.encode.compress(source, target[header_len..], .{
-        .level = options.level,
-    });
-    const trailer_at = header_len + body_len;
-    // A body that compressed under the bound can still leave no room for the
-    // trailer: report that before the overflowing write, never after.
-    if (target.len - trailer_at < trailer_len) return error.BufferTooSmall;
-    writeTrailer(target[trailer_at..][0..trailer_len], adler32.adler32(1, source));
-    return trailer_at + trailer_len;
+    return Hooks.compress(source, target, options);
 }
 
 // ---------------------------------------------------------------------------

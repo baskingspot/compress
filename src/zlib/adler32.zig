@@ -137,11 +137,18 @@ pub const Checksum = struct {
     /// 1 (`§8.2`: "s1 is initialized to 1").
     adler: u32 = 1,
 
+    /// Fold one contiguous payload run directly: the one-shot encoder's
+    /// route over `source`, no hook indirection. The state moves exactly as
+    /// `update` moves it.
+    pub fn fold(self: *Checksum, bytes: []const u8) void {
+        self.adler = adler32(self.adler, bytes);
+    }
+
     /// Fold one contiguous payload run: the hook's `update_fn`, called with
     /// non-empty runs in stream order (`src/flate/Checksum.zig`).
     fn update(context: *anyopaque, bytes: []const u8) void {
         const self: *Checksum = @ptrCast(@alignCast(context));
-        self.adler = adler32(self.adler, bytes);
+        self.fold(bytes);
     }
 
     /// The flate checksum hook over this state. `flate.Writer.Checksum` and

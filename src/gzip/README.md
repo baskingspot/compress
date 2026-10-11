@@ -153,13 +153,21 @@ here for a self-contained surface):
 - `gzip.Writer.Buffer = flate.Writer.Buffer` — `[max_block_size +
   history_len]u8`, 98303 bytes.
 
-The streaming `Reader`/`Writer` are the pattern book's shape
-(`src/internal/README.md`, "The Io codec pattern book"): the sticky
-lifecycle (`State` + the detail in `err`), the count contracts, the
-zero-length poll, the poison check on `finish`, and the contiguity failure
-run through the internal flate layer's entries, which this module decorates
-with the framing — the member boundary and the trailer check. See
+The streaming `Reader`/`Writer` run through the shared container driver
+(`src/internal/container.zig`; `src/internal/README.md`, "The Io codec
+pattern book"): the sticky lifecycle (`State` + the detail in `err`), the
+count contracts, the zero-length poll, the poison check on `finish`, the
+contiguity failure, and the trailer-at-the-clean-end funnel are the
+driver's, instantiated over this module's framing (`framing.zig`) — the
+header parse, the trailer check, the CRC-32, and the member boundary. See
 "Streaming".
+
+The same driver holds this module's one-shot shape: `gzip.encode.compress`
+is `container.EncodeHooks(Framing).compress` (the header, then flate's body,
+then the trailer from a direct fold over `source`), and
+`gzip.decode.decompress` is `container.DecodeHooks(Framing, Reader)` (the
+whole member through the streaming reader over the fixed input, the detail
+mapped back from `err`).
 
 Contracts, stated plainly:
 
@@ -341,12 +349,13 @@ container buffer, no copy of the payload, no second pass.
 
 `gzip.Writer` is a compressing `Io.Writer`; `gzip.Reader` is a decompressing
 `Io.Reader` — the `std.Io` interfaces, in-package, over one gzip member. The
-machinery is the pattern book's (`src/internal/README.md`, "The Io codec
-pattern book"); the entries that serve bytes, the count contracts, the
-zero-length poll, the sticky lifecycle, and the contiguity failure are the
-internal flate layer's, which this module decorates with the framing — the
-header, the trailer, and the member boundary. The container has no serving
-region of its own: decoded bytes are served straight out of flate's window
+machinery is the shared container driver's (`src/internal/container.zig`;
+`src/internal/README.md`, "The Io codec pattern book"); the entries that
+serve bytes, the count contracts, the zero-length poll, the sticky
+lifecycle, the contiguity failure, and the trailer-at-the-clean-end funnel
+are `internal.container.ReaderHooks`/`WriterHooks` over this module's
+framing (`framing.zig`) — the header, the trailer, and the member boundary.
+The container has no serving region of its own: decoded bytes are served straight out of flate's window
 (the caller's `Reader.Buffer`), and written bytes land straight in flate's
 block buffer (the caller's `Writer.Buffer`) — one region, one position, no
 staging copy.
@@ -417,10 +426,13 @@ Semantics:
 Files (the intended layout; the implementation lanes may split further):
 `root.zig` (public surface), `encode.zig` (member emission), `decode.zig`
 (the header parse and trailer check, shared by both layers), `Writer.zig` +
-`Reader.zig` (the streaming `Io` layer), `crc32.zig` (the checksum kernel
-boundary), `golden.zig` (ported golden fixtures, shared by every layer's
-tests), `common.zig` (little-endian integer access), `bench.zig` (local
-benchmark), `fuzz.zig` (fuzz targets).
+`Reader.zig` (the streaming `Io` layer), `framing.zig` (the framing type the
+shared container driver is instantiated over — the header, the trailer, the
+CRC-32, the error sets, flate's streaming types; `src/internal/container.zig`
+holds the driver), `crc32.zig` (the checksum kernel boundary), `golden.zig`
+(ported golden fixtures, shared by every layer's tests), `common.zig`
+(little-endian integer access), `bench.zig` (local benchmark), `fuzz.zig`
+(fuzz targets).
 
 An example CLI (`examples/gzip.zig`, `zig build example-gzip -- encode
 README.md > out`) is a thin streaming pump over this surface, the same shape

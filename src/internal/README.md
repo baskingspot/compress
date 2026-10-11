@@ -15,7 +15,7 @@ directories (the repo's `src/root.zig` is that file): relative imports
 cannot escape the module root's directory, so rooting the module at the
 codec's own `root.zig` fails with "import of file outside module path".
 
-Two namespaces:
+Three namespaces:
 
 - `internal.sentinel` — the decode-overrun sentinel: the constants, the
   fill, and the check every decode test runs (AGENTS.md, "Rules": "Decode
@@ -23,6 +23,16 @@ Two namespaces:
   tests").
 - `internal.reader` — the reader lifecycle (`State`, `guard`, `fail`) and
   the generated `Io.Reader` vtable entries (`VTable`).
+- `internal.container` — the container driver: the framing-agnostic
+  machinery a container codec over an inner codec shares (`ReaderHooks`,
+  `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`, `Header`),
+  parameterized over the codec's framing type. gzip and zlib over flate are
+  the two instantiations; each codec's `framing.zig` is its half of the
+  contract (the header, the trailer, the checksum, the error sets), and its
+  `Reader`/`Writer`/`encode`/`decode` instantiate the driver over it. The
+  contract is stated in full in the file; the driver owns the machinery the
+  M3 closing review had to fix twice — see "A wrapper's rebase routes the
+  inner end through the same ending as fill" below.
 
 ## The Io codec pattern book
 
@@ -180,6 +190,11 @@ the clean end themselves.
   prior op bounded its request by the bytes still to come, which is exactly
   why the fuzzers never asked past the end. Tests: "an over-the-end request
   still checks the trailer" (both containers).
+- Where it lives: `internal.container.ReaderHooks.rebase` — one funnel for
+  every container. The B1 fix had to be made twice (fca3604's gzip half and
+  its zlib twin) while the funnel was per-container; the driver owns it now,
+  the framing supplies only `readTrailer`'s check, and the regression tests
+  stay per container.
 - Applies to: every M4+ frame with a trailer the wrapper must verify — the
   zstd frame checksum rides this exact shape.
 
@@ -226,6 +241,20 @@ internal.reader.fail(comptime Detail: type, state: *State, detail: *?Detail, err
 // interface's error set; `rebase` slides the unconsumed bytes and owns the
 // capacity policy.
 const vtable = internal.reader.VTable(Host, pump, rebase).vtable;
+
+// The container driver, over a codec's framing type (`framing.zig`) and the
+// codec's own Host types (container.zig states the full contract):
+const framing = @import("framing.zig");
+const ReaderHooks = internal.container.ReaderHooks(framing, Reader);
+        // init, pump, rebase, streamOne (the stack-buffered one-call pump)
+const WriterHooks = internal.container.WriterHooks(framing, Writer);
+        // init (the .ratio poison), finish, streamOne
+const EncodeHooks = internal.container.EncodeHooks(framing);
+        // maxCompressedLength, compress
+const DecodeHooks = internal.container.DecodeHooks(framing, Reader);
+        // decompress
+internal.container.readExact(input, target)  // Truncated / ReadFailed
+internal.container.Header  // enum { pending, written }: the lazy header
 ```
 
 ## Testing
@@ -241,6 +270,14 @@ poll tests, and the contiguity tests — passes through the generated
 entries. The lift story runs as a scratch project per codec (the codec
 directory, `src/internal/`, and a path dependency on fastmem): 48/48 snappy
 tests and 84/84 flate tests pass in the scratch projects.
+
+The container driver's acceptance test is the same shape: gzip and zlib
+replaced their near-identical fill/rebase/commit/drain/finish machinery
+with `container.ReaderHooks`/`WriterHooks`/`EncodeHooks`/`DecodeHooks`
+over their framing types, and every test those containers carry — the
+streaming suites, the golden tables, the oracles, the fuzz targets — runs
+through the driver unchanged. The two `framing.zig` files are the contract's
+worked instantiations.
 
 ## Licensing
 

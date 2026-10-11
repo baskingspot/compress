@@ -1,14 +1,17 @@
 //! gzip.Reader: a decompressing `Io.Reader` over one gzip member (README.md,
 //! "Streaming").
 //!
-//! The machinery is the pattern book's (`src/internal/README.md`, "The Io
-//! codec pattern book"): the sticky lifecycle (`state` + the detail in
-//! `err`), the zero-length poll, the fill-and-return-0 count, and the
-//! contiguity failure all run through `internal.reader.VTable`. What this
-//! module adds is the framing: the header parse before the first body byte,
-//! the trailer read and check at the body's clean end, and the member
-//! boundary — `input` is consumed exactly through the trailer's last byte
-//! and stops there (OQ2/OQ3).
+//! The machinery is the shared container driver's
+//! (`src/internal/container.zig`; `src/internal/README.md`, "The Io codec
+//! pattern book"): the sticky lifecycle (`state` + the detail in `err`), the
+//! zero-length poll, the fill-and-return-0 count, the contiguity failure,
+//! and the trailer-at-the-clean-end funnel all run through
+//! `internal.container.ReaderHooks`, which this module instantiates over its
+//! framing (`framing.zig`). What this module adds is the framing — the
+//! header parse, the trailer check, the CRC-32 — and the member walk
+//! (`streamAll`); `streamMember` is the driver's one-member pump. The member
+//! boundary is the framing's: `input` is consumed exactly through the
+//! trailer's last byte and stops there (OQ2/OQ3).
 //!
 //! The window is flate's, re-exported: the caller's `Reader.Buffer` is handed
 //! to the inner `flate.Reader`, and this reader's serving position is that
@@ -20,7 +23,6 @@
 const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
-const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 const print = std.debug.print;
@@ -34,24 +36,16 @@ pub const Buffer = flate.Reader.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const State = internal.reader.State;
-const VTable = internal.reader.VTable;
-const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
+const framing = @import("framing.zig");
+/// The detailed error recorded once `state == .failed` (README, "API"):
+/// the framing's set — flate's decode detail set (minus `BufferTooSmall`,
+/// the window is the caller's and flate owns it) plus this module's header
+/// and trailer entries.
+pub const Error = framing.Error;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
-
-/// The detailed error recorded once `state == .failed` (README, "API"):
-/// flate's decode detail set — minus `BufferTooSmall`, the window is the
-/// caller's and flate owns it — plus this module's header and trailer
-/// entries.
-pub const Error = flate.Reader.Error || error{
-    BadHeader,
-    HeaderTooLong,
-    WrongHeaderChecksum,
-    WrongChecksum,
-    WrongSize,
-};
 
 const Reader = @This();
 
@@ -61,10 +55,10 @@ inner: flate.Reader,
 /// from it, both at flate's exact positions.
 input: *Io.Reader,
 /// The header parse (`§2.3.1`), run once, before the first body byte.
-header: decode.HeaderParser = .{},
+header: framing.Header = .{},
 /// The checksum state folded through flate's hook: CRC-32 over the decoded
 /// bytes and the decoded length mod 2^32, the trailer's ISIZE (`§2.3.1`).
-checksum: crc32.Checksum = .{},
+checksum: framing.Checksum = .{},
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// trailer is verified (`done`) or a failure sticks (`failed`, details in
 /// `err`).
@@ -73,10 +67,11 @@ state: State = .streaming,
 /// `error.ReadFailed`.
 err: ?Error = null,
 
-/// The generated `Io.Reader` entries (the pattern book): the sticky guard,
-/// the zero-length poll, and the fill-and-return-0 count are structural.
-/// `pump` is the member's fill; `rebase` owns the window's capacity policy.
-const vtable = VTable(Reader, pump, rebase).vtable;
+/// The shared container driver over this module's framing
+/// (`src/internal/container.zig`): the lifecycle funnel, the window
+/// hand-off, the trailer-at-the-clean-end funnel (the wrapper-rebase rule),
+/// and the generated `Io.Reader` entries.
+const Hooks = internal.container.ReaderHooks(framing, Reader);
 
 /// Wrap `input` (one gzip member) with `buffer` as the decoded window.
 /// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
@@ -86,134 +81,7 @@ const vtable = VTable(Reader, pump, rebase).vtable;
 /// consumes `input` exactly through the trailer's last byte; bytes after it
 /// are left unconsumed (README, "Streaming").
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
-    return .{
-        .reader = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &vtable },
-        .inner = flate.Reader.init(input, buffer),
-        .input = input,
-    };
-}
-
-/// The generated entries' fill: the detailed errors through `record` (the
-/// pattern book's funnel), so the interface sees `error.ReadFailed` with the
-/// detail sticky in `err`, or the clean `error.EndOfStream` once the trailer
-/// is verified.
-fn pump(r: *Reader) Io.Reader.Error!usize {
-    return r.record(r.fillMember());
-}
-
-/// The one place a detailed failure becomes the interface's coarse error.
-fn record(r: *Reader, result: Error!usize) Io.Reader.Error!usize {
-    return result catch |err| switch (err) {
-        error.EndOfStream => return error.EndOfStream,
-        else => return r.fail(err),
-    };
-}
-
-/// Fail closed, stickily: the detail is recorded beside the state and the
-/// interface's coarse `error.ReadFailed` is returned.
-fn fail(r: *Reader, err: Error) Io.Reader.Error {
-    return internal.reader.fail(Error, &r.state, &r.err, err);
-}
-
-/// One member fill: the header parse (once), then flate's window, then the
-/// trailer at the body's clean end.
-fn fillMember(r: *Reader) Error!usize {
-    if (!r.header.done()) try r.readHeader();
-    // The window is flate's: hand it the consumer's position, fill, and take
-    // the (possibly slid) position back — one region, one position (OQ6).
-    r.inner.reader.seek = r.reader.seek;
-    r.inner.reader.end = r.reader.end;
-    r.inner.reader.fillMore() catch |err| switch (err) {
-        // flate's clean end: the body is complete, and its bit reader
-        // consumed the input exactly through the last byte — the trailer is
-        // next (the exact-consumption contract, OQ2). `record` owns the
-        // failing: the specific trailer error propagates to it, so the
-        // detail lands beside the state, not the coarse error over it.
-        error.EndOfStream => {
-            try r.readTrailer();
-            return error.EndOfStream;
-        },
-        // The detail is recorded by `record`'s funnel, once.
-        error.ReadFailed => return r.inner.err.?,
-    };
-    r.reader.seek = r.inner.reader.seek;
-    r.reader.end = r.inner.reader.end;
-    assert(r.reader.end > r.reader.seek);
-    return r.reader.end - r.reader.seek;
-}
-
-/// Parse the member header from `input` (`§2.3.1`), feeding the parser from
-/// the input's buffered bytes and consuming them as it goes: the optional
-/// fields are skipped streaming, never staged (T7, OQ6). A header cut short
-/// by the input's end is `Truncated`.
-fn readHeader(r: *Reader) Error!void {
-    while (!r.header.done()) {
-        r.input.fill(1) catch |err| switch (err) {
-            error.EndOfStream => return error.Truncated,
-            error.ReadFailed => return error.ReadFailed,
-        };
-        const buffered = r.input.buffer[r.input.seek..r.input.end];
-        const consumed = try r.header.feed(buffered);
-        // `feed` consumes at least one byte while the header is incomplete,
-        // so the loop always progresses (or fails).
-        assert(consumed > 0);
-        r.input.toss(consumed);
-    }
-    // The checksum hook (OQ1) is armed before the first body byte is
-    // decoded: every decoded byte folds into the CRC-32 and the length
-    // exactly once, in stream order (`src/flate/Checksum.zig`).
-    r.inner.checksum = r.checksum.hook();
-}
-
-/// Read and verify the trailer at the body's clean end (`§2.3.1`): CRC-32 of
-/// the decoded bytes and ISIZE, both u32 little-endian (`§2.1`). Verified
-/// exactly once, then the reader is `done` (sticky); a mismatch is the
-/// specific error.
-fn readTrailer(r: *Reader) error{ Truncated, ReadFailed, WrongChecksum, WrongSize }!void {
-    var trailer: [decode.trailer_len]u8 = undefined;
-    try readExact(r.input, &trailer);
-    try decode.checkTrailer(&trailer, r.checksum.final(), r.checksum.len);
-    r.state = .done;
-}
-
-/// Read exactly `target.len` bytes from `input`, consuming them: the trailer
-/// route, one refill at a time (the input's buffer may deliver one byte). A
-/// short input is `Truncated`; the input's own failure is `ReadFailed`. The
-/// same shape as the zlib sibling's `decode.readExact`.
-fn readExact(input: *Io.Reader, target: []u8) error{ Truncated, ReadFailed }!void {
-    for (target) |*byte| {
-        input.fill(1) catch |err| switch (err) {
-            error.EndOfStream => return error.Truncated,
-            error.ReadFailed => return error.ReadFailed,
-        };
-        byte.* = input.buffer[input.seek];
-        input.toss(1);
-    }
-}
-
-/// The generated entries' rebase hook: make room for `capacity` more
-/// contiguous bytes by sliding flate's window, with the consumer's position
-/// synced in. A request the window cannot hold at the consumer's position
-/// fails closed with `error.ReadFailed` (`err == .StreamTooLong`), never an
-/// assert (the pattern book's contiguity rule).
-fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
-    r.inner.reader.seek = r.reader.seek;
-    r.inner.reader.end = r.reader.end;
-    r.inner.reader.rebase(capacity) catch |err| switch (err) {
-        // flate's sticky end is the body's clean end: the trailer is next,
-        // the same funnel `fillMember` runs — read it, check it, and only
-        // then report the clean end. The input stands exactly at the
-        // trailer's first byte (the exact-consumption contract), so the
-        // check consumes exactly through the member's last byte.
-        error.EndOfStream => {
-            r.readTrailer() catch |trailer_err| return r.fail(trailer_err);
-            return error.EndOfStream;
-        },
-        error.ReadFailed => return r.fail(r.inner.err.?),
-    };
-    r.reader.seek = r.inner.reader.seek;
-    r.reader.end = r.inner.reader.end;
-    assert(r.reader.buffer.len - r.reader.seek >= capacity);
+    return Hooks.init(input, buffer);
 }
 
 /// Stream one complete member from `in` through a stack-buffered `Reader`
@@ -222,9 +90,7 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 /// member's, or garbage — are left unconsumed (README, "Streaming"). Zero
 /// allocation: the window is a stack local.
 pub fn streamMember(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
-    var buffer: Buffer = undefined;
-    var rr: Reader = .init(in, &buffer);
-    return rr.reader.streamRemaining(out);
+    return Hooks.streamOne(in, out);
 }
 
 /// Stream every member `in` holds — RFC 1952 §2.2: "a gzip file is a
@@ -237,10 +103,9 @@ pub fn streamMember(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingEr
 /// member cut off mid-stream fails as `streamMember` would. The walk is
 /// `streamMember`'s semantics per member; for a failure's detail, drive a
 /// `Reader` (or `streamMember`) directly — this pump reports the coarse
-/// `error.ReadFailed`. Zero allocation: the window is a stack local.
+/// `error.ReadFailed`. Zero allocation: each member's window is a stack
+/// local.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
-    var buffer: Buffer = undefined;
-    var rr: Reader = undefined;
     var served: usize = 0;
     while (true) {
         // A clean end between members is the file's end; any byte where a
@@ -249,8 +114,7 @@ pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError
             error.EndOfStream => return served,
             else => |e| return e,
         };
-        rr = .init(in, &buffer);
-        served += try rr.reader.streamRemaining(out);
+        served += try Hooks.streamOne(in, out);
     }
 }
 

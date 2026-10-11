@@ -7,10 +7,12 @@
 //! and the name/comment scans fold the bytes into the header CRC as they
 //! pass, so a 65,535-byte XLEN cannot amplify memory (T7, OQ6). The trailer
 //! check is one function, so both layers report the same specific errors
-//! (`WrongChecksum`, `WrongSize`, T4).
+//! (`WrongChecksum`, `WrongSize`, T4). The one-shot driver — the
+//! streaming-Reader route and the error mapping — is
+//! `src/internal/container.zig`'s `DecodeHooks`, instantiated over this
+//! module's framing (`framing.zig`).
 
 const std = @import("std");
-const Io = std.Io;
 const mem = std.mem;
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -19,37 +21,34 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
+const container = internal.container;
 const common = @import("common.zig");
 const readInt = common.readInt;
 const writeInt = common.writeInt;
-const flate = @import("../flate/root.zig");
 const crc32 = @import("crc32.zig");
 const encode = @import("encode.zig");
-const Reader = @import("Reader.zig");
-const golden = @import("golden.zig");
-
 /// The framing lengths, defined with the emitter (`encode.zig`) and
 /// re-exported here: the decoder side reads them without reaching across
 /// namespaces. RFC 1952 §2.3 — the fixed header's 10 bytes (`§2.3.1`) and
 /// the trailer's CRC32 + ISIZE (`§2.3.1`).
 pub const header_len = encode.header_len;
 pub const trailer_len = encode.trailer_len;
+const framing = @import("framing.zig");
+/// The one-shot decoder's error set (README, "API"; `framing.zig` defines
+/// it): flate's decode detail set plus this module's header and trailer
+/// entries — `BadHeader` (ID1/ID2/CM wrong, or a reserved FLG bit,
+/// §2.3.1.2), `HeaderTooLong` (FNAME/FCOMMENT past the 512-byte cap, T7),
+/// `WrongHeaderChecksum` (§2.3.1), `WrongChecksum` and `WrongSize`
+/// (§2.3.1). `BufferTooSmall` is flate's (a member that does not fit the
+/// caller's cap).
+pub const DecompressError = framing.DecompressError;
+const golden = @import("golden.zig");
+const Reader = @import("Reader.zig");
 
 /// The FNAME/FCOMMENT NUL-scan cap (T7): Go's house rule (`gunzip.go:145`),
 /// not a spec rule — the RFC bounds nothing. At most this many bytes are
 /// scanned for the terminator; none found is `HeaderTooLong`.
 pub const name_comment_cap = 512;
-
-/// The one-shot decoder's error set (README, "API"): flate's decode detail
-/// set plus this module's header and trailer entries. `BufferTooSmall` is
-/// flate's (a member that does not fit the caller's cap).
-pub const DecompressError = flate.decode.DecompressError || error{
-    BadHeader, // ID1/ID2/CM wrong, or a reserved FLG bit (§2.3.1.2)
-    HeaderTooLong, // FNAME/FCOMMENT past the 512-byte cap (T7)
-    WrongHeaderChecksum, // FHCRC mismatch (§2.3.1)
-    WrongChecksum, // CRC32 mismatch (§2.3.1)
-    WrongSize, // ISIZE mismatch (§2.3.1)
-};
 
 /// The header parser's own failures; the drivers add `Truncated` when the
 /// input ends mid-header.
@@ -276,6 +275,10 @@ pub fn checkTrailer(
     if (readInt(u32, trailer[4..8]) != len) return error.WrongSize;
 }
 
+/// The shared container driver over this module's framing and streaming
+/// reader (`src/internal/container.zig`).
+const Hooks = container.DecodeHooks(framing, Reader);
+
 /// Decode one complete gzip member from `source` into `target`. `target` is
 /// a cap; the return is the decoded length. The member is located by exact
 /// consumption (OQ2): the body runs through the streaming `Reader` over the
@@ -287,33 +290,7 @@ pub fn checkTrailer(
 /// Zero heap allocation: the streaming reader's 64-KiB window is a stack
 /// local. `error.BufferTooSmall` is reported before the overflowing write.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
-    var input: Io.Reader = .fixed(source);
-    var output: Io.Writer = .fixed(target);
-    var buffer: Reader.Buffer = undefined;
-    var reader: Reader = .init(&input, &buffer);
-    _ = reader.reader.streamRemaining(&output) catch |err| switch (err) {
-        // The output cap: `Io.Writer.fixed` reports `WriteFailed` before
-        // writing past `target`, and the one-shot's name for that is
-        // `BufferTooSmall` (README, "Sizing").
-        error.WriteFailed => return error.BufferTooSmall,
-        // The detail recorded beside the interface's coarse `ReadFailed`.
-        error.ReadFailed => return detail(&reader),
-    };
-    return output.end;
-}
-
-/// The one-shot's view of a streaming failure: the detail recorded in
-/// `err`. Three `Reader.Error` entries cannot occur on this path — the
-/// one-shot's consumer never asks for contiguous bytes (no `StreamTooLong`),
-/// its input is a fixed slice (no input `ReadFailed`), and `streamRemaining`
-/// consumes the clean end itself (no `EndOfStream`) — so they are
-/// unreachable here.
-fn detail(reader: *const Reader) DecompressError {
-    const recorded = reader.err.?;
-    return switch (recorded) {
-        error.StreamTooLong, error.ReadFailed, error.EndOfStream => unreachable,
-        else => |err| err,
-    };
+    return Hooks.decompress(source, target);
 }
 
 // ---------------------------------------------------------------------------

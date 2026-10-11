@@ -8,36 +8,43 @@
 //! drives the streaming `Reader` over the whole source, exactly as the gzip
 //! sibling does: the header parse, the body's exact end, and the trailer
 //! verification all run through one funnel, and the one-shot maps the
-//! recorded detail back to this module's error set.
+//! recorded detail back to this module's error set. The one-shot driver —
+//! the streaming-Reader route and the error mapping — is
+//! `src/internal/container.zig`'s `DecodeHooks`, instantiated over this
+//! module's framing (`framing.zig`).
 
 const std = @import("std");
-const Io = std.Io;
 const testing = std.testing;
 
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
+const container = internal.container;
+/// Read exactly `target.len` bytes from `input`, consuming them: the
+/// streaming route for the header and the trailer, one refill at a time (the
+/// input's buffer may deliver one byte). A short input is `Truncated`; the
+/// input's own failure is `ReadFailed`. The shared container driver's
+/// (`src/internal/container.zig`), named here because the header and trailer
+/// routes are composed from it.
+pub const readExact = container.readExact;
 const common = @import("common.zig");
 const readInt = common.readInt;
-const flate = @import("../flate/root.zig");
 const encode = @import("encode.zig");
-const Reader = @import("Reader.zig");
-const golden = @import("golden.zig");
-
 /// The framing lengths, defined with the emitter (`encode.zig`) and
 /// re-exported here: the decoder side reads them without reaching across
 /// namespaces. RFC 1950 §2.2 — the header's 2 bytes (CMF and FLG) and the
 /// trailer's ADLER32.
 pub const header_len = encode.header_len;
 pub const trailer_len = encode.trailer_len;
-
-/// The one-shot decoder's error set (README, "API"): flate's decode detail
-/// set plus this module's header and trailer entries. `BufferTooSmall` is
+const framing = @import("framing.zig");
+/// The one-shot decoder's error set (README, "API"; `framing.zig` defines
+/// it): flate's decode detail set plus this module's header and trailer
+/// entries — `BadHeader` (CM != 8, CINFO > 7, or FCHECK, §2.2/§2.3),
+/// `DictionaryRequired` (FDICT set: no preset-dictionary support, §2.3), and
+/// `WrongChecksum` (ADLER32 mismatch, §2.2/§2.3). `BufferTooSmall` is
 /// flate's (a stream that does not fit the caller's cap).
-pub const DecompressError = flate.decode.DecompressError || error{
-    BadHeader, // CM != 8, CINFO > 7, or FCHECK (§2.2, §2.3)
-    DictionaryRequired, // FDICT set: no preset-dictionary support (§2.3)
-    WrongChecksum, // ADLER32 mismatch (§2.2, §2.3)
-};
+pub const DecompressError = framing.DecompressError;
+const golden = @import("golden.zig");
+const Reader = @import("Reader.zig");
 
 /// The header check's own failures; the drivers add `Truncated` when the
 /// input ends mid-header.
@@ -77,21 +84,6 @@ pub fn checkHeader(cmf: u8, flg: u8) HeaderError!void {
     if (flg & flg_fdict != 0) return error.DictionaryRequired;
 }
 
-/// Read exactly `target.len` bytes from `input`, consuming them: the
-/// streaming route for the header and the trailer, one refill at a time (the
-/// input's buffer may deliver one byte). A short input is `Truncated`; the
-/// input's own failure is `ReadFailed`.
-pub fn readExact(input: *Io.Reader, target: []u8) error{ Truncated, ReadFailed }!void {
-    for (target) |*byte| {
-        input.fill(1) catch |err| switch (err) {
-            error.EndOfStream => return error.Truncated,
-            error.ReadFailed => return error.ReadFailed,
-        };
-        byte.* = input.buffer[input.seek];
-        input.toss(1);
-    }
-}
-
 /// Verify the 4-byte trailer against the folded Adler-32 (`§2.2`, `§2.3`):
 /// "the Adler-32 checksum of the uncompressed data (excluding any dictionary
 /// data)", stored "in most-significant-byte first (network) order". RFC 1950
@@ -101,6 +93,10 @@ pub fn readExact(input: *Io.Reader, target: []u8) error{ Truncated, ReadFailed }
 pub fn checkTrailer(trailer: *const [trailer_len]u8, adler: u32) error{WrongChecksum}!void {
     if (readInt(u32, trailer[0..4]) != adler) return error.WrongChecksum;
 }
+
+/// The shared container driver over this module's framing and streaming
+/// reader (`src/internal/container.zig`).
+const Hooks = container.DecodeHooks(framing, Reader);
 
 /// Decode one complete zlib stream from `source` into `target`. `target` is a
 /// cap; the return is the decoded length. The stream is located by exact
@@ -114,32 +110,7 @@ pub fn checkTrailer(trailer: *const [trailer_len]u8, adler: u32) error{WrongChec
 /// Zero heap allocation: the streaming reader's 64-KiB window is a stack
 /// local. `error.BufferTooSmall` is reported before the overflowing write.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
-    var input: Io.Reader = .fixed(source);
-    var output: Io.Writer = .fixed(target);
-    var buffer: Reader.Buffer = undefined;
-    var reader: Reader = .init(&input, &buffer);
-    _ = reader.reader.streamRemaining(&output) catch |err| switch (err) {
-        // The output cap: `Io.Writer.fixed` reports `WriteFailed` before
-        // writing past `target`, and the one-shot's name for that is
-        // `BufferTooSmall` (README, "Sizing").
-        error.WriteFailed => return error.BufferTooSmall,
-        // The detail recorded beside the interface's coarse `ReadFailed`.
-        error.ReadFailed => return detail(&reader),
-    };
-    return output.end;
-}
-
-/// The one-shot's view of a streaming failure: the detail recorded in `err`.
-/// Three `Reader.Error` entries cannot occur on this path — the one-shot's
-/// consumer never asks for contiguous bytes (no `StreamTooLong`), its input
-/// is a fixed slice (no input `ReadFailed`), and `streamRemaining` consumes
-/// the clean end itself (no `EndOfStream`) — so they are unreachable here.
-fn detail(reader: *const Reader) DecompressError {
-    const recorded = reader.err.?;
-    return switch (recorded) {
-        error.StreamTooLong, error.ReadFailed, error.EndOfStream => unreachable,
-        else => |err| err,
-    };
+    return Hooks.decompress(source, target);
 }
 
 // ---------------------------------------------------------------------------

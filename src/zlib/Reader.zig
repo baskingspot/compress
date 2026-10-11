@@ -1,14 +1,16 @@
 //! zlib.Reader: a decompressing `Io.Reader` over one zlib stream (README.md,
 //! "Streaming").
 //!
-//! The machinery is the pattern book's (`src/internal/README.md`, "The Io
-//! codec pattern book"): the sticky lifecycle (`state` + the detail in
-//! `err`), the zero-length poll, the fill-and-return-0 count, and the
-//! contiguity failure all run through `internal.reader.VTable`. What this
-//! module adds is the framing: the 2-byte header check before the first body
-//! byte, the trailer read and check at the body's clean end, and the stream
-//! boundary — `input` is consumed exactly through ADLER32's last byte and
-//! stops there (OQ2, `§2.2`).
+//! The machinery is the shared container driver's
+//! (`src/internal/container.zig`; `src/internal/README.md`, "The Io codec
+//! pattern book"): the sticky lifecycle (`state` + the detail in `err`), the
+//! zero-length poll, the fill-and-return-0 count, the contiguity failure,
+//! and the trailer-at-the-clean-end funnel all run through
+//! `internal.container.ReaderHooks`, which this module instantiates over its
+//! framing (`framing.zig`). What this module adds is the framing — the
+//! two-byte header check, the trailer check, the Adler-32. The stream
+//! boundary is the framing's: `input` is consumed exactly through ADLER32's
+//! last byte and stops there (OQ2, `§2.2`).
 //!
 //! The window is flate's, re-exported: the caller's `Reader.Buffer` is handed
 //! to the inner `flate.Reader`, and this reader's serving position is that
@@ -20,7 +22,6 @@
 const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
-const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 const print = std.debug.print;
@@ -34,26 +35,16 @@ pub const Buffer = flate.Reader.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const State = internal.reader.State;
-const VTable = internal.reader.VTable;
-const adler32 = @import("adler32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
+const framing = @import("framing.zig");
+/// The detailed error recorded once `state == .failed` (README, "API"):
+/// the framing's set — flate's decode detail set (minus `BufferTooSmall`,
+/// the window is the caller's and flate owns it) plus this module's header
+/// and trailer entries.
+pub const Error = framing.Error;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
-
-/// The detailed error recorded once `state == .failed` (README, "API"):
-/// flate's decode detail set — minus `BufferTooSmall`, the window is the
-/// caller's and flate owns it — plus this module's header and trailer
-/// entries.
-pub const Error = flate.Reader.Error || error{
-    BadHeader,
-    DictionaryRequired,
-    WrongChecksum,
-};
-
-/// Whether the header has been parsed: the check runs once, before the first
-/// body byte.
-const Header = enum { pending, parsed };
 
 const Reader = @This();
 
@@ -63,10 +54,10 @@ inner: flate.Reader,
 /// it, both at flate's exact positions.
 input: *Io.Reader,
 /// The header check (`§2.2`), run once, before the first body byte.
-header: Header = .pending,
+header: framing.Header = .pending,
 /// The checksum state folded through flate's hook: the Adler-32 over the
 /// decoded bytes (`§2.2`).
-checksum: adler32.Checksum = .{},
+checksum: framing.Checksum = .{},
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// trailer is verified (`done`) or a failure sticks (`failed`, details in
 /// `err`).
@@ -75,10 +66,11 @@ state: State = .streaming,
 /// `error.ReadFailed`.
 err: ?Error = null,
 
-/// The generated `Io.Reader` entries (the pattern book): the sticky guard,
-/// the zero-length poll, and the fill-and-return-0 count are structural.
-/// `pump` is the stream's fill; `rebase` owns the window's capacity policy.
-const vtable = VTable(Reader, pump, rebase).vtable;
+/// The shared container driver over this module's framing
+/// (`src/internal/container.zig`): the lifecycle funnel, the window
+/// hand-off, the trailer-at-the-clean-end funnel (the wrapper-rebase rule),
+/// and the generated `Io.Reader` entries.
+const Hooks = internal.container.ReaderHooks(framing, Reader);
 
 /// Wrap `input` (one zlib stream) with `buffer` as the decoded window.
 /// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
@@ -89,111 +81,7 @@ const vtable = VTable(Reader, pump, rebase).vtable;
 /// of the zlib stream" (`§2.2`) and are left unconsumed (README,
 /// "Streaming").
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
-    return .{
-        .reader = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &vtable },
-        .inner = flate.Reader.init(input, buffer),
-        .input = input,
-    };
-}
-
-/// The generated entries' fill: the detailed errors through `record` (the
-/// pattern book's funnel), so the interface sees `error.ReadFailed` with the
-/// detail sticky in `err`, or the clean `error.EndOfStream` once the trailer
-/// is verified.
-fn pump(r: *Reader) Io.Reader.Error!usize {
-    return r.record(r.fillStream());
-}
-
-/// The one place a detailed failure becomes the interface's coarse error.
-fn record(r: *Reader, result: Error!usize) Io.Reader.Error!usize {
-    return result catch |err| switch (err) {
-        error.EndOfStream => return error.EndOfStream,
-        else => return r.fail(err),
-    };
-}
-
-/// Fail closed, stickily: the detail is recorded beside the state and the
-/// interface's coarse `error.ReadFailed` is returned.
-fn fail(r: *Reader, err: Error) Io.Reader.Error {
-    return internal.reader.fail(Error, &r.state, &r.err, err);
-}
-
-/// One stream fill: the header check (once), then flate's window, then the
-/// trailer at the body's clean end.
-fn fillStream(r: *Reader) Error!usize {
-    if (r.header == .pending) try r.readHeader();
-    // The window is flate's: hand it the consumer's position, fill, and take
-    // the (possibly slid) position back — one region, one position (OQ6).
-    r.inner.reader.seek = r.reader.seek;
-    r.inner.reader.end = r.reader.end;
-    r.inner.reader.fillMore() catch |err| switch (err) {
-        // flate's clean end: the body is complete, and its bit reader
-        // consumed the input exactly through the last byte — the trailer is
-        // next (the exact-consumption contract, OQ2). `record` owns the
-        // failing: the specific trailer error propagates to it, so the
-        // detail lands beside the state, not the coarse error over it.
-        error.EndOfStream => {
-            try r.readTrailer();
-            return error.EndOfStream;
-        },
-        // The detail is recorded by `record`'s funnel, once.
-        error.ReadFailed => return r.inner.err.?,
-    };
-    r.reader.seek = r.inner.reader.seek;
-    r.reader.end = r.inner.reader.end;
-    assert(r.reader.end > r.reader.seek);
-    return r.reader.end - r.reader.seek;
-}
-
-/// Check the stream header (`§2.2`, `§2.3`), consuming its two bytes: CM,
-/// CINFO, FCHECK, and the FDICT refusal — before any body byte, never a
-/// silent skip of the DICTID the flag announces (`§2.3`, ZD3/ZD4). A header
-/// cut short by the input's end is `Truncated`.
-fn readHeader(r: *Reader) Error!void {
-    var header: [decode.header_len]u8 = undefined;
-    try decode.readExact(r.input, &header);
-    try decode.checkHeader(header[0], header[1]);
-    // The checksum hook (OQ1) is armed before the first body byte is
-    // decoded: every decoded byte folds into the Adler-32 exactly once, in
-    // stream order (`src/flate/Checksum.zig`).
-    r.inner.checksum = r.checksum.hook();
-    r.header = .parsed;
-}
-
-/// Read and verify the trailer at the body's clean end (`§2.2`): the
-/// Adler-32 of the decoded bytes, u32 most-significant-byte first (`§2.1`).
-/// Verified exactly once, then the reader is `done` (sticky); a mismatch is
-/// the specific error, a short trailer `Truncated`.
-fn readTrailer(r: *Reader) error{ Truncated, ReadFailed, WrongChecksum }!void {
-    var trailer: [decode.trailer_len]u8 = undefined;
-    try decode.readExact(r.input, &trailer);
-    try decode.checkTrailer(&trailer, r.checksum.final());
-    r.state = .done;
-}
-
-/// The generated entries' rebase hook: make room for `capacity` more
-/// contiguous bytes by sliding flate's window, with the consumer's position
-/// synced in. A request the window cannot hold at the consumer's position
-/// fails closed with `error.ReadFailed` (`err == .StreamTooLong`), never an
-/// assert (the pattern book's contiguity rule).
-fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
-    r.inner.reader.seek = r.reader.seek;
-    r.inner.reader.end = r.reader.end;
-    r.inner.reader.rebase(capacity) catch |err| switch (err) {
-        // flate's sticky end is the body's clean end: the trailer is next,
-        // the same funnel `fillStream` runs — read it, check it, and only
-        // then report the clean end. The input stands exactly at the
-        // trailer's first byte (the exact-consumption contract), so the
-        // check consumes exactly through the stream's last byte.
-        error.EndOfStream => {
-            r.readTrailer() catch |trailer_err| return r.fail(trailer_err);
-            return error.EndOfStream;
-        },
-        error.ReadFailed => return r.fail(r.inner.err.?),
-    };
-    r.reader.seek = r.inner.reader.seek;
-    r.reader.end = r.inner.reader.end;
-    assert(r.reader.buffer.len - r.reader.seek >= capacity);
+    return Hooks.init(input, buffer);
 }
 
 /// Stream one complete zlib stream from `in` through a stack-buffered
@@ -202,9 +90,7 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 /// unconsumed (README, "Streaming"). Zero allocation: the window is a stack
 /// local.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
-    var buffer: Buffer = undefined;
-    var rr: Reader = .init(in, &buffer);
-    return rr.reader.streamRemaining(out);
+    return Hooks.streamOne(in, out);
 }
 
 // ---------------------------------------------------------------------------

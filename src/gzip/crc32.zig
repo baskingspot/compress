@@ -81,7 +81,7 @@ comptime {
 /// convention: the state starts at `0xffff_ffff` and `final()` complements
 /// it). Exactly the state transition of std's bytewise `Crc32.update`,
 /// sixteen bytes per step; the tail under sixteen bytes steps bytewise.
-fn fold(raw: u32, bytes: []const u8) u32 {
+fn foldRaw(raw: u32, bytes: []const u8) u32 {
     var crc = raw;
     var rest = bytes;
     while (rest.len >= slice_count) {
@@ -120,12 +120,19 @@ pub const Checksum = struct {
     /// (uncompressed) input data modulo 2^32").
     len: u32 = 0,
 
+    /// Fold one contiguous payload run directly: the one-shot encoder's
+    /// route over `source`, no hook indirection. The state's raw field and
+    /// the length move exactly as `update` moves them.
+    pub fn fold(self: *Checksum, bytes: []const u8) void {
+        self.raw = foldRaw(self.raw, bytes);
+        self.len +%= @as(u32, @truncate(bytes.len));
+    }
+
     /// Fold one contiguous payload run: the hook's `update_fn`, called with
     /// non-empty runs in stream order (`src/flate/Checksum.zig`).
     fn update(context: *anyopaque, bytes: []const u8) void {
         const self: *Checksum = @ptrCast(@alignCast(context));
-        self.raw = fold(self.raw, bytes);
-        self.len +%= @as(u32, @truncate(bytes.len));
+        self.fold(bytes);
     }
 
     /// The flate checksum hook over this state. `flate.Writer.Checksum` and
@@ -150,7 +157,7 @@ pub const Checksum = struct {
 pub fn crc32(crc: u32, bytes: []const u8) u32 {
     // The digest is the complemented raw state, so the raw state behind a
     // digest `d` is `d ^ 0xffff_ffff` — complement in, fold, complement out.
-    return fold(crc ^ 0xffff_ffff, bytes) ^ 0xffff_ffff;
+    return foldRaw(crc ^ 0xffff_ffff, bytes) ^ 0xffff_ffff;
 }
 
 // ---------------------------------------------------------------------------

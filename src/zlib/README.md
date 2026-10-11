@@ -285,11 +285,15 @@ window fills on decode, `source` directly on the one-shot encode.
 ## Streaming
 
 `zlib.Writer` / `zlib.Reader` are the gzip sibling's shape over one zlib
-stream: the pattern book's machinery, the caller's flate buffers, the lazy
-header (2 bytes, written before the first compressed byte), the trailer at
-`finish`, the terminal poison, the contiguity cap, and the sticky lifecycle
-(`src/gzip/README.md`, "Streaming"; `src/internal/README.md`, "The Io codec
-pattern book"). What differs:
+stream, through the same shared container driver
+(`src/internal/container.zig`; `src/gzip/README.md`, "Streaming";
+`src/internal/README.md`, "The Io codec pattern book"): the caller's flate
+buffers, the lazy header (2 bytes, written before the first compressed
+byte), the trailer at `finish`, the terminal poison, the contiguity cap,
+the sticky lifecycle, and the trailer-at-the-clean-end funnel are
+`internal.container.ReaderHooks`/`WriterHooks` over this module's framing
+(`framing.zig`). `zlib.encode.compress` and `zlib.decode.decompress` are the
+driver's one-shot hooks over the same framing. What differs:
 
 - The reader consumes `input` exactly through ADLER32's last byte and stops;
   bytes after it are "not part of the zlib stream" (`§2.2`) and stay
@@ -319,9 +323,12 @@ pattern book"). What differs:
 Files (the intended layout; the implementation lanes may split further):
 `root.zig` (public surface), `encode.zig` (stream emission), `decode.zig`
 (the header parse and trailer check, shared by both layers), `Writer.zig` +
-`Reader.zig` (the streaming `Io` layer), `adler32.zig` (the checksum kernel
-boundary), `golden.zig` (ported golden fixtures, shared by every layer's
-tests), `common.zig` (big-endian integer access), `bench.zig` (local
+`Reader.zig` (the streaming `Io` layer), `framing.zig` (the framing type the
+shared container driver is instantiated over — the header check, the
+trailer, the Adler-32, the error sets, flate's streaming types;
+`src/internal/container.zig` holds the driver), `adler32.zig` (the checksum
+kernel boundary), `golden.zig` (ported golden fixtures, shared by every
+layer's tests), `common.zig` (big-endian integer access), `bench.zig` (local
 benchmark), `fuzz.zig` (fuzz targets).
 
 An example CLI (`examples/zlib.zig`, `zig build example-zlib -- encode
@@ -344,7 +351,8 @@ built from stay reachable, named, and stable (the flate precedent:
   `flg_fdict` bit and the `HeaderError` set (`BadHeader`,
   `DictionaryRequired`) beside it.
 - `zlib.decode.readExact(input, target)` — the byte-exact reader the header
-  and trailer both use (a short input is `Truncated`).
+  and trailer both use (a short input is `Truncated`); the shared container
+  driver's (`src/internal/container.zig`), re-exported here.
 - `zlib.decode.checkTrailer(trailer, adler)` — the one trailer check both
   layers report through (`WrongChecksum`, `§2.2`, `§2.3`).
 - `zlib.decode.header_len` / `zlib.decode.trailer_len` — re-exported from
