@@ -111,6 +111,12 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
     if not names and not startup:
         raise click.ClickException("No running targets. Use --up or select a target.")
     instances = {name: fleet.one(name) for name in names}
+    # The corpus is the run's fixed input: refuse before creating a run
+    # directory when it is missing or disagrees with the committed hashes.
+    try:
+        corpus = load_corpus(config.root)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     path, manifest = create_run(
         config.root,
         label,
@@ -120,7 +126,6 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
     )
     seed = secrets.randbits(32)
     source = resolve(config, revision)
-    corpus = load_corpus(config.root)
     schedule = orders([*ARMS, *([] if no_aa else ["aa"])], rounds, seed)
     manifest.update(
         {

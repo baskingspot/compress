@@ -1,6 +1,8 @@
-//! The fleet corpus generator (bench/README.md). Deterministic: the same
-//! bytes on every host, so the committed `bench/corpus/` tree regenerates
-//! exactly and every implementation on the fleet measures the same inputs.
+//! The fleet corpus generator (bench/README.md, "Corpus"). Deterministic:
+//! the same bytes on every host, so a generated tree reproduces the
+//! committed `bench/corpus/SHA256SUMS` exactly — the trust anchor, and the
+//! only corpus file tracked in git. The bytes themselves live in a
+//! gitignored directory (default `bench/corpus-gen/`), generated on demand.
 //!
 //! Shapes and sizes mirror the codec bench files (src/flate/bench.zig):
 //! text, random, html, rle, mixed at 32 KiB and 64 KiB. Alongside each raw
@@ -13,15 +15,17 @@
 //! the pinned zstd CLI (v1.5.7, the flake) at `zstd_cli_level` produces the
 //! frames — level 1 matches the harness-wide fast class — and this
 //! generator verifies each one byte-exact with our decoder
-//! (`zstd.zstd.decode.decompress`) before writing it. A `--zstd` run checks
-//! the CLI's own version first (`zstd_cli_version`), so a different PATH
-//! binary fails the run rather than silently rewriting the corpus. Pass
-//! `--zstd` to (re)generate them; a plain run re-hashes the committed `.zst`
-//! files into the manifest, so both modes reproduce the tree exactly.
+//! (`zstd.zstd.decode.decompress`) before writing it. Every run checks the
+//! CLI's own version first (`zstd_cli_version`), so a different PATH binary
+//! fails the run rather than silently rewriting the corpus.
 //!
-//! Run from the repo root: `zig build corpus -- [--zstd] [DIR]` (default
-//! bench/corpus). Rewrites only files whose bytes differ and prints the
-//! SHA256SUMS.
+//! Generation is correct-or-fails: after writing every file the generator
+//! checks the result against the committed anchor file by file and fails
+//! naming any disagreement. Only a manifest that reproduces the anchor is
+//! written next to the bytes.
+//!
+//! Run from the repo root: `zig build corpus [-- DIR]` (`just corpus`),
+//! default DIR bench/corpus-gen. Rewrites only files whose bytes differ.
 
 const std = @import("std");
 const Io = std.Io;
@@ -44,6 +48,14 @@ pub const Shape = enum {
 
 pub const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
 
+/// The generated corpus directory (gitignored): the raw shapes and the
+/// reference blobs generate here on demand. A positional DIR overrides it.
+const default_dir = "bench/corpus-gen";
+
+/// The committed trust anchor: the only corpus file tracked in git. Every
+/// generated file is checked against it before anything trusts the bytes.
+const committed_sums_path = "bench/corpus/SHA256SUMS";
+
 /// The recorded zstd CLI level of the corpus's `.zst` reference blobs
 /// (src/zstd/README.md, "Benchmarks"). The CLI's own default is 3; level 1
 /// is the fast class every other arm's rows measure (zc `.fast`,
@@ -51,7 +63,7 @@ pub const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
 const zstd_cli_level = "-1";
 
 /// The pinned zstd CLI version the `.zst` reference blobs come from (v1.5.7,
-/// the flake — src/zstd/README.md, "Benchmarks"): `--zstd` runs check
+/// the flake — src/zstd/README.md, "Benchmarks"): every run checks
 /// `zstd --version` against it once, so a different PATH binary cannot
 /// silently produce blobs the committed corpus was not generated with.
 const zstd_cli_version = "v1.5.7";
@@ -92,22 +104,22 @@ pub fn main(init: std.process.Init) !void {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    var dir_path: []const u8 = "bench/corpus";
-    var gen_zstd = false;
+    var dir_path: []const u8 = default_dir;
     for (args[1..]) |arg| {
-        if (mem.eql(u8, arg, "--zstd")) {
-            gen_zstd = true;
-        } else {
-            dir_path = arg;
+        if (mem.startsWith(u8, arg, "-")) {
+            std.debug.print("corpus: unknown flag {s} (usage: corpus [DIR])\n", .{arg});
+            return error.UnknownFlag;
         }
+        dir_path = arg;
     }
+    try refuseCommittedDir(arena, dir_path);
+    try checkZstdCli(io, arena);
 
     try Io.Dir.cwd().createDirPath(io, dir_path);
     var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
 
     var sums: std.ArrayList(u8) = .empty;
-    if (gen_zstd) try checkZstdCli(io, arena);
     for (std.enums.values(Shape)) |shape| {
         for (sizes) |size| {
             const raw = try arena.alloc(u8, size);
@@ -122,13 +134,13 @@ pub fn main(init: std.process.Init) !void {
             try writeBlob(io, arena, dir, &sums, base_name, "gz", target, zcompress.gzip.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "zz", target, zcompress.zlib.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, zcompress.snappy.encode.compressBlock(raw, target));
-            if (gen_zstd) try writeZstdBlob(io, arena, dir, dir_path, base_name, raw);
+            try writeZstdBlob(io, arena, dir, dir_path, base_name, raw);
         }
     }
 
-    // The .zst reference blobs, committed after a `--zstd` run: every mode
-    // re-hashes them into the manifest (sorted, after the generated rows),
-    // so a plain regeneration reproduces the committed SHA256SUMS exactly.
+    // The .zst frames just written: hash them into the manifest (sorted,
+    // after the generated rows), so the manifest reproduces the committed
+    // SHA256SUMS byte for byte.
     var names: std.ArrayList([]const u8) = .empty;
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
@@ -146,10 +158,15 @@ pub fn main(init: std.process.Init) !void {
         try writeFile(io, arena, dir, &sums, name, blob);
     }
 
+    // Correct-or-fails: the committed anchor is what the harness trusts, so
+    // the generated bytes must reproduce it before the manifest is written.
+    const file_count = try verifyAgainstCommitted(io, arena, sums.items);
     try dir.writeFile(io, .{ .sub_path = "SHA256SUMS", .data = sums.items });
     var out_buf: [4096]u8 = undefined;
     var stdout: Io.File.Writer = .init(.stdout(), io, &out_buf);
-    try stdout.interface.print("wrote {s}\n{s}", .{ dir_path, sums.items });
+    try stdout.interface.print("corpus: {s} reproduces {s} ({d} files)\n", .{
+        dir_path, committed_sums_path, file_count,
+    });
     try stdout.interface.flush();
 }
 
@@ -175,8 +192,7 @@ fn writeBlob(
 /// the frame as `<base_name>.zst` — but only after OUR decoder reproduces
 /// the raw bytes exactly (the inverse verification of the family's pattern:
 /// the reference tool encodes, our decoder is the gate). The manifest entry
-/// is added by the sorted `.zst` pass in main, keeping plain and `--zstd`
-/// runs byte-identical.
+/// is added by the sorted `.zst` pass in main.
 fn writeZstdBlob(
     io: Io,
     arena: Allocator,
@@ -216,9 +232,9 @@ fn writeZstdBlob(
     }
 }
 
-/// `zstd --version` against the pin: a mismatch fails a `--zstd` run before
-/// any blob is written, so the committed corpus's provenance is the pinned
-/// CLI alone.
+/// `zstd --version` against the pin: a mismatch fails the run before any
+/// blob is written, so the committed corpus's provenance is the pinned CLI
+/// alone.
 fn checkZstdCli(io: Io, arena: Allocator) !void {
     const result = try std.process.run(arena, io, .{ .argv = &.{ "zstd", "--version" } });
     switch (result.term) {
@@ -245,7 +261,7 @@ fn maxCompressedLength(input_len: usize) usize {
 
 /// Write `bytes` as `name`, hash it into the SHA256SUMS accumulator, and skip
 /// the write when the file already holds exactly these bytes (a regenerated
-/// corpus leaves the committed tree untouched).
+/// corpus leaves the generated tree untouched).
 fn writeFile(
     io: Io,
     arena: Allocator,
@@ -268,4 +284,84 @@ fn writeFile(
     Sha256.hash(bytes, &digest, .{});
     const hex = std.fmt.bytesToHex(digest, .lower);
     try sums.print(arena, "{s}  {s}\n", .{ hex, name });
+}
+
+const Sum = struct { name: []const u8, digest: []const u8 };
+
+/// Parse a SHA256SUMS body (`<hex>  <name>` per line, the sha256sum format)
+/// into name/digest pairs.
+fn parseSums(arena: Allocator, text: []const u8) !std.ArrayList(Sum) {
+    var sums: std.ArrayList(Sum) = .empty;
+    var lines = mem.splitScalar(u8, text, '\n');
+    while (lines.next()) |line| {
+        if (line.len == 0) continue;
+        const separator = mem.indexOf(u8, line, "  ") orelse return error.MalformedSums;
+        try sums.append(arena, .{
+            .digest = line[0..separator],
+            .name = line[separator + 2 ..],
+        });
+    }
+    return sums;
+}
+
+fn findSum(sums: []const Sum, name: []const u8) ?[]const u8 {
+    for (sums) |sum| {
+        if (mem.eql(u8, sum.name, name)) return sum.digest;
+    }
+    return null;
+}
+
+/// Check the generated manifest against the committed anchor file by file
+/// and fail naming every file that disagrees, is missing, or is extra.
+/// Returns the number of verified files.
+fn verifyAgainstCommitted(io: Io, arena: Allocator, generated: []const u8) !usize {
+    const committed = Io.Dir.cwd().readFileAlloc(io, committed_sums_path, arena, .unlimited) catch |err| {
+        std.debug.print("corpus: cannot read the committed anchor {s}: {s}\n", .{
+            committed_sums_path, @errorName(err),
+        });
+        return err;
+    };
+    const generated_sums = try parseSums(arena, generated);
+    const committed_sums = try parseSums(arena, committed);
+    var mismatches: usize = 0;
+    for (generated_sums.items) |sum| {
+        const recorded = findSum(committed_sums.items, sum.name) orelse {
+            std.debug.print("corpus: {s} is not in the committed anchor\n", .{sum.name});
+            mismatches += 1;
+            continue;
+        };
+        if (!mem.eql(u8, recorded, sum.digest)) {
+            std.debug.print("corpus: {s}: generated {s}, committed {s}\n", .{
+                sum.name, sum.digest, recorded,
+            });
+            mismatches += 1;
+        }
+    }
+    for (committed_sums.items) |sum| {
+        if (findSum(generated_sums.items, sum.name) == null) {
+            std.debug.print("corpus: {s} is missing from the generated corpus\n", .{sum.name});
+            mismatches += 1;
+        }
+    }
+    if (mismatches != 0) {
+        std.debug.print("corpus: {d} file(s) disagree with {s} (the trust anchor)\n", .{
+            mismatches, committed_sums_path,
+        });
+        return error.CorpusMismatch;
+    }
+    return generated_sums.items.len;
+}
+
+/// The committed anchor directory holds SHA256SUMS alone: generating into it
+/// would drop untracked blobs into the tracked tree.
+fn refuseCommittedDir(arena: Allocator, dir_path: []const u8) !void {
+    const anchor_dir = std.fs.path.dirname(committed_sums_path).?;
+    const target = try std.fs.path.resolve(arena, &.{dir_path});
+    const anchor = try std.fs.path.resolve(arena, &.{anchor_dir});
+    if (mem.eql(u8, target, anchor)) {
+        std.debug.print("corpus: {s} is the committed anchor directory; generate into {s}\n", .{
+            dir_path, default_dir,
+        });
+        return error.CommittedDirRefused;
+    }
 }

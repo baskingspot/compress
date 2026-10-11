@@ -1,7 +1,8 @@
 //! The fleet benchmark driver for the zcompress arms (bench/README.md).
 //!
-//! One process run is one round of one arm. The binary reads the committed
-//! corpus (`bench/corpus/`, uploaded to the box by the harness), measures
+//! One process run is one round of one arm. The binary reads the fleet
+//! corpus (generated into `bench/corpus-gen/`, verified against the
+//! committed hashes, and uploaded to the box by the harness), measures
 //! each (case, implementation) cell for `--samples` time-boxed samples of
 //! `--sample-ms` milliseconds each, and writes schema-v1 JSONL on stdout: a
 //! meta record, one sample record per measurement, and an end record.

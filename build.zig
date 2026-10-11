@@ -199,8 +199,9 @@ pub fn build(b: *Build) void {
     fleet_bench_step.dependOn(&install_fleet_bench.step);
 
     // The fleet corpus generator (bench/README.md): deterministic,
-    // byte-identical across hosts; writes bench/corpus/ (run from the repo
-    // root): `zig build corpus`.
+    // byte-identical across hosts; writes the gitignored bench/corpus-gen/
+    // and verifies every file against the committed
+    // bench/corpus/SHA256SUMS (run from the repo root): `zig build corpus`.
     const corpus_mod = b.createModule(.{
         .root_source_file = b.path("bench/zig/corpus.zig"),
         .target = target,
@@ -219,7 +220,7 @@ pub fn build(b: *Build) void {
     if (b.args) |args| run_corpus.addArgs(args);
     const corpus_step = b.step(
         "corpus",
-        "Regenerate the committed fleet corpus (bench/corpus/)",
+        "Generate + verify the fleet corpus (bench/corpus-gen/)",
     );
     corpus_step.dependOn(&run_corpus.step);
 

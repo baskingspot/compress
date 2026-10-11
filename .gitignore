@@ -1,4 +1,5 @@
 bench-results/
+bench/corpus-gen/
 zig-pkg/
 .zig-cache/
 zig-out/

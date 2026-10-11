@@ -49,21 +49,28 @@ in-binary std.compress.zstd rows), klauspost (`DecodeAll`), and zstd-c.
 
 ## Corpus
 
-`bench/corpus/` is committed, fixed, and hashed (`SHA256SUMS`). Shapes and
-sizes mirror the codec bench files (src/flate/bench.zig): text, random,
-html, rle, mixed at 32 KiB and 64 KiB. The generator is
-bench/zig/corpus.zig (`zig build corpus`); it is deterministic and rewrites
-only changed bytes. Next to each raw file sit the **reference blobs**
-(`.flate`, `.gz`, `.zz`, `.snappy`), produced by the zcompress encoders:
-every arm's decompression rows decode these identical bytes.
+`bench/corpus/SHA256SUMS` is committed — the trust anchor, and the only
+corpus file in git. The bytes generate on demand into the gitignored
+`bench/corpus-gen/` (`just corpus`; the generator is bench/zig/corpus.zig,
+`zig build corpus`). Shapes and sizes mirror the codec bench files
+(src/flate/bench.zig): text, random, html, rle, mixed at 32 KiB and 64 KiB.
+Next to each raw file sit the **reference blobs** (`.flate`, `.gz`, `.zz`,
+`.snappy`), produced by the zcompress encoders: every arm's decompression
+rows decode these identical bytes.
 
 The `.zst` blobs invert the pattern (M4 has no zstd encoder): the pinned
 zstd CLI (v1.5.7, the flake) at level 1 — the fast class every arm's rows
 measure — produces the frames (XXH64 checksums on), and the generator
-verifies each one byte-exact with our decoder before writing it
-(`zig build corpus -- --zstd`). Each driver's
-meta record carries the SHA-256 of every raw file it read; the parser
-rejects a round whose hashes disagree with the committed corpus.
+verifies each one byte-exact with our decoder before writing it.
+
+Generation is correct-or-fails: the generator re-derives every file, checks
+the result against the committed `SHA256SUMS` file by file, and refuses on
+any disagreement. The harness verifies the same way before it uses the
+tree — `zcompress_bench/corpus.py` checks every generated file against the
+committed hashes and fails loudly when the generated directory is missing
+(run `just corpus`) or disagrees; a run without a verified corpus refuses.
+Each driver's meta record carries the SHA-256 of every raw file it read;
+the parser rejects a round whose hashes disagree with the committed corpus.
 
 ## Schema v1 (the JSONL contract)
 
@@ -109,6 +116,7 @@ check before running concurrently with a fastmem run. A dedicated
 ## Commands
 
 ```sh
+just corpus                   # generate + verify the fleet corpus (bench/corpus-gen/)
 just bench-up                 # launch the seven targets (2h TTL default)
 just bench-ls                 # show the fleet
 just bench-test               # correctness gate: every arm's --check on every box

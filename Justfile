@@ -81,6 +81,15 @@ flate-oracle:
     zig build flate-oracle-harness
     uv run scripts/flate_oracle.py
 
+# Generate + verify the fleet corpus (bench/README.md, "Corpus"): the raw
+# shapes and the reference blobs — our encoders for flate/gzip/zlib/snappy,
+# the flake-pinned zstd CLI for the .zst frames — land in the gitignored
+# bench/corpus-gen/, every file checked against the committed
+# bench/corpus/SHA256SUMS (the trust anchor). The fleet harness refuses to
+# run without a verified generated corpus.
+corpus:
+    zig build corpus
+
 bench *ARGS:
     zig build bench -Doptimize=ReleaseFast -- {{ ARGS }}
 

@@ -1,9 +1,10 @@
 """The fleet correctness gate: every arm's --check matrix on every box.
 
-Cross-builds the four arms per target, uploads them with the committed
-corpus, and runs each driver's correctness matrix (round trip plus
-reference-blob decode for every case) without CPU isolation. The gate of a
-benchmark run: a box whose drivers do not pass never measures.
+Cross-builds the four arms per target, uploads them with the generated
+corpus (verified against the committed hashes before anything is uploaded),
+and runs each driver's correctness matrix (round trip plus reference-blob
+decode for every case) without CPU isolation. The gate of a benchmark run:
+a box whose drivers do not pass never measures.
 """
 
 import json
@@ -110,6 +111,12 @@ def test_fleet(config: Config, targets: tuple[str, ...], launch: bool, ttl: str 
         )
     if not names and not startup:
         raise click.ClickException("No running targets. Use --up or select a target.")
+    # The corpus is the gate's fixed input: refuse before creating a run
+    # directory when it is missing or disagrees with the committed hashes.
+    try:
+        corpus = load_corpus(config.root)
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     path, manifest = create_run(
         config.root,
         "test",
@@ -117,7 +124,6 @@ def test_fleet(config: Config, targets: tuple[str, ...], launch: bool, ttl: str 
         {},
         results_dir=config.results_dir,
     )
-    corpus = load_corpus(config.root)
     manifest.update(
         {
             "kind": "correctness",
