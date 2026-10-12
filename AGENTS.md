@@ -96,6 +96,25 @@ it before you change a kernel or make a performance claim.
 - The flake is the environment. A missing tool goes in `flake.nix`; do not
   install it globally.
 
+## Disk discipline
+
+The dev box shares one disk with everything else on it (~25 GB free at
+best). Lanes and the parent clean up after themselves — this bit us once
+(ENOSPC killed two lanes mid-write; the caches and scratch had piled ~20 GB
+onto a nearly-full disk):
+
+- Lane scratch trees live under one root (`/tmp/<lane>-*`), and the PARENT
+  deletes them at the lane's commit or salvage. A timed-out lane's tree
+  dies with its salvage.
+- The fuzz corpus cache (`.zig-cache/f/`) accumulates forever — Zig's fuzzer
+  never prunes. Prune it (`rm -rf .zig-cache/f`) at each wave's close and
+  before any big-budget run; corpora re-warm in minutes.
+- Big validation corpora are GENERATED from `just corpus` shapes on demand,
+  never hand-built, and deleted at the milestone's close — a 2 GB text
+  file and its three decoded outputs lived in /tmp for two days once.
+- `du -sh /tmp/* .zig-cache` before assuming headroom; report to the
+  parent if anything needs more than a few GB.
+
 ## Commands
 
 - `just test`: unit tests for every codec, under the ztest plain-text runner.
