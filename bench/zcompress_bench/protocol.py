@@ -59,7 +59,9 @@ def execute(
     remote = config.project["remote_dir"].rstrip("/") + "/" + path.name
     progress("upload corpus and binaries")
     box.run(f"mkdir -p {shlex.quote(remote)}")
-    box.upload(corpus_dir, remote)  # lands as <remote>/corpus
+    box.upload(corpus_dir, remote)
+    # The local generated tree is corpus-gen/; the remote contract is <remote>/corpus.
+    box.run(f"mv {shlex.quote(remote + '/' + corpus_dir.name)} {shlex.quote(remote + '/corpus')}")
     by_arm = dict(builds)
     if aa:
         by_arm["aa"] = builds["zc"]

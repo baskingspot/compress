@@ -55,6 +55,8 @@ def check_target(  # noqa: PLR0917 — the target lifecycle stays together
     remote = f"{config.project['remote_dir'].rstrip('/')}/{path.name}-{name}"
     box.run(f"mkdir -p {shlex.quote(remote)}")
     box.upload(corpus_dir, remote)
+    # The local generated tree is corpus-gen/; the remote contract is <remote>/corpus.
+    box.run(f"mv {shlex.quote(remote + '/' + corpus_dir.name)} {shlex.quote(remote + '/corpus')}")
     local = path / name
     results: dict[str, Any] = {}
     for arm in ARMS:
