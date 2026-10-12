@@ -82,15 +82,21 @@ sizing question.
    zstd dicts (rejected on decode, nonexistent on encode), brotli's
    static dictionary (the M6 research owns the decision). User-supplied
    dictionaries are a cross-codec feature, not one codec's gap.
-3. **flate's level distinctness**: 1–9 are the same encoder. gzip and
+3. **Dictionary training**: the tool side — given a corpus of samples,
+   produce a tuned dictionary (the content selection + the pre-seeded
+   entropy tables; the `zstd --train` equivalent). Not started; it
+   depends on the zstd encoder (training seeds entropy tables, so no
+   encoder, no training) and the dictionary format work above it.
+   Slots after dictionary use in the milestone order.
+4. **flate's level distinctness**: 1–9 are the same encoder. gzip and
    zlib inherit the plateau. The middle levels (lazy matching, dynamic
    block emission) are the classic flate ladder — unbuilt. The real
    `ratio` seat too.
-4. **brotli** (M6, research in flight).
-5. **gzip metadata options on encode** (name/comment/mtime) — the
+5. **brotli** (M6, research in flight).
+6. **gzip metadata options on encode** (name/comment/mtime) — the
    deterministic header is a choice; an options struct could carry
    opt-in metadata without breaking the default.
-6. The `s2` extensions (the snappy-compatible better-compression format):
+7. The `s2` extensions (the snappy-compatible better-compression format):
    explicitly post-M6, only if wanted (the plan's decision).
 
 ## What is deliberately NOT a gap
