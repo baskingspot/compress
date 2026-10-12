@@ -25,15 +25,17 @@ const print = std.debug.print;
 
 const fastmem = @import("fastmem");
 
-const block = @import("block.zig");
-const common = @import("common.zig");
-const frame = @import("frame.zig");
-const xxh64 = @import("xxh64.zig");
-const golden = @import("golden.zig");
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const State = internal.reader.State;
 const VTable = internal.reader.VTable;
+const block = @import("block.zig");
+const common = @import("common.zig");
+const readInt = common.readInt;
+const writeInt = common.writeInt;
+const frame = @import("frame.zig");
+const golden = @import("golden.zig");
+const xxh64 = @import("xxh64.zig");
 
 /// The block staging room `Buffer(window_len)` adds on top of the serving
 /// region: one block's whole content, staged because both backwards
@@ -436,7 +438,7 @@ fn beginUnit(r: *Reader, kind: frame.Kind) Error!void {
         .zstandard => r.phase = .header,
         .skippable => {
             const bytes = try r.readFixed(frame.frame_size_len);
-            r.phase = .{ .skip = @intCast(common.readInt(u32, &bytes)) };
+            r.phase = .{ .skip = @intCast(readInt(u32, &bytes)) };
         },
     }
 }
@@ -540,6 +542,9 @@ fn decodeBlock(r: *Reader) Error!usize {
     // still holds. That is not the frame's decoded total
     // (`state.decoded_len`), which keeps growing after the window slides.
     const retained_len = r.reader.end;
+    // A Raw block's bytes reach the checksum inside the copy
+    // (`block.decodeContent`), so it records with `recordRawBlock`.
+    const checksum: ?*xxh64.State = if (state.header.checksum) &state.checksum else null;
     const written = block.decodeContent(
         header,
         r.staging[0..content_len],
@@ -548,6 +553,7 @@ fn decodeBlock(r: *Reader) Error!usize {
         state.header.window_size,
         &state.literals,
         &state.sequences,
+        checksum,
     ) catch |err| switch (err) {
         // The block phase guarantees the serving region's room (it slides
         // until Block_Maximum_Size is free, `§3.1.1.2.4`), so no decode can
@@ -563,8 +569,13 @@ fn decodeBlock(r: *Reader) Error!usize {
     };
     // Exactly the bytes this block wrote, in order, go into the checksum and
     // the frame's running total, so every decoded byte is hashed once, with
-    // no second pass.
-    try state.recordBlock(r.reader.buffer[retained_len..][0..written]);
+    // no second pass — for a Raw block the fold already happened inside the
+    // copy, chunk by chunk, and only the accounting remains.
+    if (header.block_type == .raw) {
+        try state.recordRawBlock(written);
+    } else {
+        try state.recordBlock(r.reader.buffer[retained_len..][0..written]);
+    }
     r.reader.end += written;
     if (header.last_block) r.phase = .trailer;
     return written;
@@ -1515,6 +1526,62 @@ test "Reader: a contiguous request past the window fails" {
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectError(error.ReadFailed, r.reader.stream(&sink.writer, .unlimited));
     try testing.expectError(error.ReadFailed, r.reader.peek(1));
+}
+
+test "Reader: a checksummed raw-block frame folds inside the copy" {
+    // The streaming reader's Raw blocks fold into the checksum inside the
+    // copy (`block.decodeContent`), not in `recordBlock`: two Raw blocks
+    // whose sizes straddle the fold chunk must verify their trailer after
+    // the window has slid, and a flipped content byte fails with
+    // `WrongChecksum`.
+    const first_len = 40 * 1024 + 513;
+    const second_len = 25 * 1024 + 7;
+    const total = first_len + second_len;
+    var data: [total]u8 = undefined;
+    var rng: DefaultPrng = .init(0xf01d);
+    rng.random().bytes(&data);
+
+    var framed: [4 + 2 + 4 + 6 + total + 4]u8 = undefined;
+    var at: usize = 0;
+    fastmem.copy(u8, framed[at..][0..4], &[_]u8{ 0x28, 0xB5, 0x2F, 0xFD });
+    at += 4;
+    // Descriptor: four-byte FCS and the Content_Checksum flag; window
+    // descriptor exponent 6 (64 KiB); then the FCS.
+    framed[at] = 0x84;
+    framed[at + 1] = 0x30;
+    at += 2;
+    writeInt(u32, framed[at..][0..4], total);
+    at += 4;
+    var src: usize = 0;
+    for ([_]usize{ first_len, second_len }, 0..) |size, i| {
+        const last: u24 = if (i == 1) 1 else 0;
+        writeInt(u24, framed[at..][0..3], last | @as(u24, @intCast(size)) << 3);
+        at += 3;
+        fastmem.copy(u8, framed[at..][0..size], data[src..][0..size]);
+        src += size;
+        at += size;
+    }
+    writeInt(u32, framed[at..][0..4], @truncate(xxh64.xxh64(0, &data)));
+    at += 4;
+
+    const window_len = 64 * 1024;
+    var rbuf: Buffer(window_len) = undefined;
+    var fixed_in: Io.Reader = .fixed(framed[0..at]);
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try testing.expectEqual(
+        total,
+        try streamAll(window_len, &fixed_in, &out.writer, &rbuf),
+    );
+    try testing.expectEqualSlices(u8, &data, out.written());
+
+    // A flipped byte in the second block's content fails the trailer.
+    framed[4 + 2 + 4 + 3 + first_len + 3 + 100] ^= 0x01;
+    var bad_in: Io.Reader = .fixed(framed[0..at]);
+    var r: Reader = .init(window_len, &bad_in, &rbuf);
+    var sink: Io.Writer.Discarding = .init(&.{});
+    try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
+    try testing.expectEqual(Error.WrongChecksum, r.err.?);
 }
 
 /// An RLE-only frame: 32,770 four-byte blocks, each one RLE block of

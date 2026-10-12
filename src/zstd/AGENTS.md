@@ -48,9 +48,17 @@ writer will instantiate `internal.writer.VTable`.
   unsupported parameter (the zlib FDICT precedent). No dictionary entry point
   exists; revisit if a use case lands.
 - **The checksum rides the block emission funnel (OQ7, T8).**
-  `frame.State.recordBlock` is the only place decoded bytes reach XXH64 (Raw copy,
-  RLE splat, Compressed sequence output plus trailing literals), so each byte is
-  hashed once, in order, with no second pass and no container buffer. There is no
+  Decoded bytes reach XXH64 exactly once, in order, with no container buffer.
+  RLE and Compressed blocks fold in `frame.State.recordBlock`, handed exactly
+  the bytes the block wrote. Raw blocks are the one exception: their output is
+  the staged bytes verbatim, so `block.decodeRaw` folds each 4 KiB chunk into
+  the checksum right after copying it, while the source bytes are still
+  cache-hot, and the frame records the block with `State.recordRawBlock`
+  (accounting only). Folding a whole Raw block after the whole copy re-reads
+  up to 128 KiB; the interleave was the measured win on incompressible
+  corpus shapes (4 KiB beat 8/16/64 KiB chunks locally; 16 KiB was flat, 64
+  KiB negative). The digest is chunk-boundary-independent, pinned by the
+  checksummed raw-block frame tests in `frame.zig` and `Reader.zig`. There is no
   `flate.Checksum`-style hook. We verify: §2 allows ignoring the checksum, but
   every working reference verifies and std's verification is a documented panic.
 - **A compressed block is staged whole before it is decoded (OQ6).** Both

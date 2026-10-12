@@ -19,6 +19,7 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+const DefaultPrng = std.Random.DefaultPrng;
 
 const fastmem = @import("fastmem");
 
@@ -814,6 +815,18 @@ fn copyMatch(target: []u8, match_start: usize, offset: u32, match_length: u32) v
         fastmem.copy(u8, target[match_start..][0..length], target[source..][0..length]);
         return;
     }
+    // A 1-byte period is a fill.
+    if (distance == 1) {
+        fastmem.set(u8, target[match_start..][0..length], target[source]);
+        return;
+    }
+    // A period that divides the chunk broadcasts into a register and fills.
+    if (distance <= 16 and (distance & (distance - 1)) == 0 and
+        length >= 2 * overlap_chunk)
+    {
+        copyOverlapFill(target.ptr + match_start, distance, length);
+        return;
+    }
     // Overlapping (distance < length): the match replicates the `distance`
     // bytes at the source, so the copy must see its own writes — a memmove
     // would copy the bytes that were there before. Doubling: copy the
@@ -832,6 +845,49 @@ fn copyMatch(target: []u8, match_start: usize, offset: u32, match_length: u32) v
             target[match_start..][0..chunk],
         );
         copied += chunk;
+    }
+}
+
+/// The fill kernel's width: one comptime-width vector store per loop trip.
+/// 32 bytes is the floor (two NEON pairs, one AVX register); a CPU with
+/// wider vectors fills wider.
+const overlap_chunk = @max(32, std.simd.suggestVectorLength(u8) orelse 16);
+
+/// The register-fill kernel for an overlap whose period divides the chunk
+/// (offset 2, 4, 8, or 16; offset 1 is `fastmem.set`): the pattern
+/// broadcasts into one vector register once, and the loop is stores only,
+/// so no load ever waits on a store the loop just made. The register holds
+/// the period's phase at a chunk boundary, which only the chunk-aligned
+/// stores may use; the tail is a memory copy one chunk back (the chunk
+/// width is a multiple of the period, so the phase lines up), reading bytes
+/// the loop already wrote. `dst - period` is the match's own source, which
+/// the caller's `offset <= match_start` bound keeps in bounds.
+fn copyOverlapFill(dst: [*]u8, distance: usize, length: usize) void {
+    assert(distance >= 2);
+    assert(distance <= 16);
+    assert((distance & (distance - 1)) == 0);
+    assert(length >= 2 * overlap_chunk);
+    switch (distance) {
+        inline 2, 4, 8, 16 => |period| {
+            // The period as one integer, broadcast to the chunk width; the
+            // array->int->vector->array bitcasts are inverse mappings, so
+            // the byte order cancels on any host.
+            const Word = std.meta.Int(.unsigned, 8 * period);
+            const Vec = @Vector(overlap_chunk / period, Word);
+            const word: Word = @bitCast((dst - period)[0..period].*);
+            const wide: Vec = @splat(word);
+            const fill: [overlap_chunk]u8 = @bitCast(wide);
+            var copied: usize = 0;
+            while (copied + overlap_chunk <= length) : (copied += overlap_chunk) {
+                dst[copied..][0..overlap_chunk].* = fill;
+            }
+            if (copied < length) {
+                const tail = dst[length - overlap_chunk ..][0..overlap_chunk];
+                const tail_src = (dst - overlap_chunk)[length - overlap_chunk ..][0..overlap_chunk];
+                fastmem.copy(u8, tail, tail_src);
+            }
+        },
+        else => unreachable,
     }
 }
 
@@ -1189,6 +1245,41 @@ test "copyMatch replicates an overlapping match" {
     fastmem.copy(u8, target[20..24], "abcd");
     copyMatch(&target, 24, 4, 4);
     try testing.expectEqualSlices(u8, "abcd", target[24..28]);
+}
+
+test "copyMatch fills a long match at a period dividing the chunk" {
+    // The fill kernel (offset 1/2/4/8/16, length >= 2 * overlap_chunk) and
+    // the doubling loop around it: every distance below and across the
+    // chunk boundary, with lengths that stop short of, land on, and pass a
+    // whole chunk (so the tail store runs at every phase). The expected
+    // bytes are the offset-periodic repetition of the match's source. Regresion
+    // guard for the fill tail's phase: the tail copies one chunk back in
+    // memory, not the phase-0 register.
+    var rng: DefaultPrng = .init(0x5eed);
+    const random = rng.random();
+    for (1..overlap_chunk + 2) |offset| {
+        // Distinct bytes: a repeated period must come from the copy, not
+        // from a coincidence in the source.
+        for ([_]usize{
+            2 * overlap_chunk,
+            3 * overlap_chunk,
+            3 * overlap_chunk + 1,
+            4 * overlap_chunk + 7,
+        }) |length| {
+            var target: [4096]u8 = undefined;
+            fastmem.set(u8, &target, 0);
+            const match_start = 64;
+            for (0..match_start) |i| target[i] = random.int(u8);
+            if (offset >= 2) target[match_start - offset] = 1;
+            const source = target[match_start - offset ..][0..offset];
+            copyMatch(&target, match_start, @intCast(offset), @intCast(length));
+            for (0..length) |i| {
+                try testing.expectEqual(source[i % offset], target[match_start + i]);
+            }
+            // Nothing past the match's end was touched.
+            try testing.expectEqual(@as(u8, 0), target[match_start + length]);
+        }
+    }
 }
 
 test "decode reads a real frame's Predefined-mode sequences section" {

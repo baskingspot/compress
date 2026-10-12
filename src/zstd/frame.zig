@@ -18,6 +18,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+const DefaultPrng = std.Random.DefaultPrng;
+
+const fastmem = @import("fastmem");
 
 const block = @import("block.zig");
 const common = @import("common.zig");
@@ -338,8 +341,11 @@ pub fn checkWindow(header: Header, max_window_size: u64) error{WindowTooLarge}!v
 /// literals and sequences layers' cross-block states, the decoded length so
 /// far, and the checksum.
 ///
-/// `recordBlock` is the only place decoded bytes reach the checksum, and it is
-/// handed exactly the bytes each block wrote, in order.
+/// `recordBlock` is where decoded bytes reach the checksum — handed exactly
+/// the bytes each block wrote, in order — except Raw blocks, whose bytes the
+/// copy folds chunk by chunk while they are cache-hot (`block.decodeContent`;
+/// those record with `recordRawBlock`). Either way each byte is folded once,
+/// in order.
 pub const State = struct {
     /// The parsed Frame_Header (`§3.1.1.1`).
     header: Header,
@@ -380,15 +386,20 @@ pub const State = struct {
     /// `target` and record its output. This is the one-shot's step:
     /// `target[0..decoded_len]` is the frame's output so far, so the frame's
     /// decoded length is also the block's position in `target`. Returns the
-    /// errors of `block.decode`, plus `ContentSizeMismatch` from `recordBlock`.
+    /// errors of `block.decode`, plus `ContentSizeMismatch` from the record.
     ///
     /// The streaming reader's output window slides, so it does not use this.
     /// It parses the Block_Header itself, stages the content, calls
     /// `block.decodeContent` with the length it has retained, and then calls
     /// `recordBlock`.
     pub fn decodeBlock(state: *State, source: []const u8, target: []u8) Error!block.Section {
-        const section = try block.decode(
-            source,
+        const header = try block.parseHeader(source);
+        // A Raw block's bytes reach the checksum inside the copy (see
+        // `block.decodeContent`), so it records with `recordRawBlock`.
+        const checksum: ?*xxh64.State = if (state.header.checksum) &state.checksum else null;
+        const written = try block.decodeContent(
+            header,
+            source[block.block_header_len..],
             target,
             // The one-shot's target is the caller-bounded history, so the
             // running total is bounded by target.len: the usize the block
@@ -397,18 +408,39 @@ pub const State = struct {
             state.header.window_size,
             &state.literals,
             &state.sequences,
+            checksum,
         );
-        // The output slice is taken with the pre-call `decoded_len`: the
-        // bytes this block just wrote, which `recordBlock` then folds and
-        // counts.
-        const output = target[@intCast(state.decoded_len)..][0..section.bytes_written];
-        try state.recordBlock(output);
-        return section;
+        if (header.block_type == .raw) {
+            try state.recordRawBlock(written);
+        } else {
+            // The output slice is taken with the pre-call `decoded_len`: the
+            // bytes this block just wrote, which `recordBlock` then folds
+            // and counts.
+            const output = target[@intCast(state.decoded_len)..][0..written];
+            try state.recordBlock(output);
+        }
+        return .{
+            .bytes_written = written,
+            .bytes_consumed = block.block_header_len + block.contentLength(header),
+            .last_block = header.last_block,
+        };
+    }
+
+    /// Record a Raw block, whose output the copy already folded into the
+    /// checksum chunk by chunk (`block.decodeContent`): only the accounting
+    /// remains — the decoded total and the Frame_Content_Size running bound.
+    pub fn recordRawBlock(state: *State, bytes_written: usize) error{ContentSizeMismatch}!void {
+        state.decoded_len += bytes_written;
+        if (state.header.content_size) |declared| {
+            if (state.decoded_len > declared) return error.ContentSizeMismatch;
+        }
     }
 
     /// Record one decoded block: fold its output into the checksum (when the
     /// frame has one), add its length to the decoded total, and enforce
-    /// Frame_Content_Size as a running bound. A frame that has produced more
+    /// Frame_Content_Size as a running bound. Raw blocks are the exception:
+    /// their fold rides the copy (`block.decodeContent`), so they record
+    /// with `recordRawBlock`. A frame that has produced more
     /// bytes than it declared fails at that block with `ContentSizeMismatch`,
     /// so a header that understates the size cannot keep the frame decoding
     /// until its end (`§3.1.1.1.4`, `§8`'s smaller-than-actual vector).
@@ -871,8 +903,9 @@ test "the checksum folds each block's output exactly once, in order" {
 
 test "the fold is independent of the block boundaries" {
     // The digest over a frame's blocks in order is the digest over the
-    // concatenation, whatever the boundaries. `recordBlock` is the only path,
-    // and it is handed exactly the bytes each block wrote.
+    // concatenation, whatever the boundaries. `recordBlock` is the path for
+    // everything but Raw blocks (whose fold rides the copy), and it is
+    // handed exactly the bytes each block wrote.
     const first = "the quick brown fox ";
     const second = "jumps over the lazy dog";
     var state: State = undefined;
@@ -903,6 +936,63 @@ test "the fold is independent of the block boundaries" {
     });
     try plain.recordBlock(first);
     try testing.expectEqual(@as(u32, 0x51D8E999), plain.checksum.final());
+}
+
+test "a checksummed raw-block frame folds inside the copy" {
+    // The Raw-block fold rides the copy chunk by chunk
+    // (`block.decodeContent`), not `recordBlock`: a frame of two Raw blocks
+    // whose sizes straddle the fold chunk must still verify its trailer —
+    // the digest is boundary-independent — and a flipped content byte in
+    // either block must fail `WrongChecksum`.
+    const first_len = 40 * 1024 + 513;
+    const second_len = 25 * 1024 + 7;
+    const total = first_len + second_len;
+    var data: [total]u8 = undefined;
+    var rng: DefaultPrng = .init(0xf01d);
+    rng.random().bytes(&data);
+
+    // Magic, then the descriptor (four-byte FCS, Content_Checksum set), the
+    // window descriptor (exponent 6: 64 KiB), the FCS, the two Raw blocks,
+    // and the trailer.
+    var bytes: [magic_len + 2 + 4 + 2 * block.block_header_len + total + checksum_len]u8 =
+        undefined;
+    var at: usize = 0;
+    std.mem.writeInt(u32, bytes[at..][0..4], magic, .little);
+    at += magic_len;
+    bytes[at] = 0x80 | descriptor_checksum;
+    bytes[at + 1] = 0x30;
+    at += 2;
+    std.mem.writeInt(u32, bytes[at..][0..4], total, .little);
+    at += 4;
+    var src: usize = 0;
+    for ([_]usize{ first_len, second_len }, 0..) |size, i| {
+        const last: u24 = if (i == 1) 1 else 0;
+        std.mem.writeInt(u24, bytes[at..][0..3], last | @as(u24, @intCast(size)) << 3, .little);
+        at += block.block_header_len;
+        fastmem.copy(u8, bytes[at..][0..size], data[src..][0..size]);
+        src += size;
+        at += size;
+    }
+    std.mem.writeInt(u32, bytes[at..][0..4], @truncate(xxh64.xxh64(0, &data)), .little);
+    at += checksum_len;
+
+    const framed = bytes[0..at];
+    var target: [total]u8 = undefined;
+    internal.sentinel.fill(&target);
+    var progress: usize = 0;
+    const written = try decodeFrame(framed, &target, &progress);
+    try testing.expectEqual(total, written);
+    try golden.expectDecoded(&target, written, &data);
+
+    // A flipped byte in either block's content fails the trailer.
+    const first_content = magic_len + 2 + 4 + block.block_header_len;
+    const second_content = first_content + block.block_header_len + first_len;
+    for ([_]usize{ first_content, second_content + 40 }) |flip| {
+        var bad: [bytes.len]u8 = undefined;
+        fastmem.copy(u8, &bad, &bytes);
+        bad[flip] ^= 0x01;
+        try testing.expectError(error.WrongChecksum, decodeFrame(&bad, &target, &progress));
+    }
 }
 
 test "Frame_Content_Size is a running bound, and the frame end closes it" {

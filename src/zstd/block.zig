@@ -27,6 +27,7 @@ const golden = @import("golden.zig");
 const literals = @import("literals.zig");
 const readInt = @import("common.zig").readInt;
 const sequences = @import("sequences.zig");
+const xxh64 = @import("xxh64.zig");
 
 /// `§3.1.1.2.4` — "128 KB": Block_Maximum_Size's ceiling. A frame's own
 /// bound is `min(Window_Size, this)`, so this is also the largest block any
@@ -147,6 +148,7 @@ pub fn decode(
     window_size: u64,
     literals_state: *literals.State,
     sequences_state: *sequences.State,
+    checksum: ?*xxh64.State,
 ) Error!Section {
     const header = try parseHeader(source);
     const bytes_written = try decodeContent(
@@ -157,6 +159,7 @@ pub fn decode(
         window_size,
         literals_state,
         sequences_state,
+        checksum,
     );
     return .{
         .bytes_written = bytes_written,
@@ -176,6 +179,13 @@ pub fn decode(
 /// Staging is the caller's job because a Compressed block's two backward
 /// bitstreams are read from the block's end, so all of its content must be in
 /// memory before decoding starts.
+/// `checksum` is the frame's XXH64 state when the frame carries the
+/// Content_Checksum flag, null otherwise. Only a Raw block uses it: its
+/// output is the staged bytes verbatim, so the copy folds each chunk into
+/// the checksum while the bytes are still cache-hot, instead of the frame
+/// layer re-reading the whole block afterwards. The fold is the same bytes,
+/// once, in block order; the caller must then record the block with
+/// `frame.State.recordRawBlock`, not `recordBlock`.
 pub fn decodeContent(
     header: Header,
     content: []const u8,
@@ -184,6 +194,7 @@ pub fn decodeContent(
     window_size: u64,
     literals_state: *literals.State,
     sequences_state: *sequences.State,
+    checksum: ?*xxh64.State,
 ) Error!usize {
     assert(decoded_len <= target.len);
     // A Reserved block has no Block_Content whose size could be checked:
@@ -198,7 +209,7 @@ pub fn decodeContent(
     if (content.len < content_len) return error.Truncated;
     const block = content[0..content_len];
     return switch (header.block_type) {
-        .raw => try decodeRaw(header.block_size, block, target, decoded_len),
+        .raw => try decodeRaw(header.block_size, block, target, decoded_len, checksum),
         .rle => try decodeRle(header.block_size, block, target, decoded_len),
         .compressed => try decodeCompressed(
             block,
@@ -216,13 +227,38 @@ pub fn decodeContent(
 /// `§3.1.1.2.2` — "This is an uncompressed block. Block_Content contains
 /// Block_Size bytes". A size that does not fit in the rest of `target` is
 /// `BufferTooSmall`, raised before the copy.
-fn decodeRaw(block_size: usize, block: []const u8, target: []u8, decoded_len: usize) Error!usize {
+fn decodeRaw(
+    block_size: usize,
+    block: []const u8,
+    target: []u8,
+    decoded_len: usize,
+    checksum: ?*xxh64.State,
+) Error!usize {
     assert(block.len == block_size);
     assert(decoded_len <= target.len);
     if (block_size > target.len - decoded_len) return error.BufferTooSmall;
-    fastmem.copy(u8, target[decoded_len..][0..block_size], block);
+    const out = target[decoded_len..][0..block_size];
+    const sum = checksum orelse {
+        fastmem.copy(u8, out, block);
+        return block_size;
+    };
+    // The copy and the fold in one pass: copy a chunk, then fold the chunk's
+    // bytes out of the source while they are still cache-hot. Folding the
+    // whole block after the whole copy re-reads up to 128 KiB per block.
+    var done: usize = 0;
+    while (done < block_size) {
+        const chunk = @min(block_size - done, raw_fold_chunk);
+        fastmem.copy(u8, out[done..][0..chunk], block[done..][0..chunk]);
+        sum.update(block[done..][0..chunk]);
+        done += chunk;
+    }
     return block_size;
 }
+
+/// The copy-and-fold chunk for a Raw block: small enough that a chunk's
+/// source bytes are still cache-resident when the fold reads them right
+/// after the copy, large enough that the per-chunk calls amortize.
+const raw_fold_chunk = 4 * 1024;
 
 /// `§3.1.1.2.2` — "This is a single byte, repeated Block_Size times. ...
 /// On the decompression side, this byte must be repeated Block_Size times".
@@ -343,6 +379,7 @@ fn decodeFrame(bytes: []const u8, target: []u8) !usize {
             window_size,
             &literals_state,
             &sequences_state,
+            null,
         );
         cursor += section.bytes_consumed;
         decoded_len += section.bytes_written;
@@ -372,7 +409,7 @@ fn expectBlockError(err: Error, block_bytes: []const u8, target: []u8) !void {
     internal.sentinel.fill(target);
     try testing.expectError(
         err,
-        decode(block_bytes, target, 0, 512 * 1024, &literals_state, &sequences_state),
+        decode(block_bytes, target, 0, 512 * 1024, &literals_state, &sequences_state, null),
     );
     try internal.sentinel.expect(target, 0);
 }
@@ -399,6 +436,7 @@ fn expectFrameError(err: Error, bytes: []const u8) !void {
             window_size,
             &literals_state,
             &sequences_state,
+            null,
         ) catch |actual| {
             try testing.expectEqual(err, actual);
             try internal.sentinel.expect(&target, decoded_len);
@@ -473,6 +511,7 @@ test "decode copies a Raw block" {
         512 * 1024,
         &literals_state,
         &sequences_state,
+        null,
     );
     try testing.expectEqual(@as(usize, 8), section.bytes_written);
     try testing.expectEqual(@as(usize, 3 + 8), section.bytes_consumed);
@@ -497,6 +536,7 @@ test "decode splats an RLE block" {
         512 * 1024,
         &literals_state,
         &sequences_state,
+        null,
     );
     try testing.expectEqual(@as(usize, 10), section.bytes_written);
     try testing.expectEqual(@as(usize, 3 + 1), section.bytes_consumed);
@@ -525,6 +565,7 @@ test "decode walks a multi-block chain" {
             512 * 1024,
             &literals_state,
             &sequences_state,
+            null,
         );
         try testing.expectEqual(consumed, section.bytes_consumed);
         cursor += consumed;
@@ -554,6 +595,7 @@ test "Raw and RLE blocks leave the frame's cross-block state alone" {
             512 * 1024,
             &literals_state,
             &sequences_state,
+            null,
         );
         cursor += section.bytes_consumed;
         decoded_len += section.bytes_written;
@@ -598,7 +640,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ [_]u8{0} ** 8;
     try testing.expectError(
         error.BlockOversize,
-        decode(&oversize, &target, 0, 1024, &literals_state, &sequences_state),
+        decode(&oversize, &target, 0, 1024, &literals_state, &sequences_state, null),
     );
     try internal.sentinel.expect(&target, 0);
     // The legal neighbor: an RLE block at exactly 128 KB in a 512 KB-window
@@ -645,6 +687,7 @@ test "decode fails on a target too small" {
             512 * 1024,
             &literals_state,
             &sequences_state,
+            null,
         ),
     );
     try internal.sentinel.expect(&target, 0);
@@ -657,6 +700,7 @@ test "decode fails on a target too small" {
             512 * 1024,
             &literals_state,
             &sequences_state,
+            null,
         ),
     );
     try internal.sentinel.expect(&target, 0);
@@ -669,6 +713,7 @@ test "decode fails on a target too small" {
             512 * 1024,
             &literals_state,
             &sequences_state,
+            null,
         ),
     );
     try internal.sentinel.expect(&target, 0);
@@ -682,6 +727,7 @@ test "decode fails on a target too small" {
         512 * 1024,
         &literals_state,
         &sequences_state,
+        null,
     );
     try testing.expectEqual(@as(usize, 77), section.bytes_written);
     try testing.expectEqualSlices(u8, &golden.sequences_predefined_expected, &fits);
@@ -808,6 +854,7 @@ test "the history a match may read is the addressable span at the match" {
             1024,
             &literals_state,
             &sequences_state,
+            null,
         ),
     );
     try internal.sentinel.expect(&bare, 0);
@@ -877,6 +924,7 @@ test "decodeContent decodes a block whose header is already parsed" {
         512 * 1024,
         &literals_state,
         &sequences_state,
+        null,
     );
     try testing.expectEqual(@as(usize, 8), written);
     try testing.expectEqualSlices(u8, "zstd raw", target[0..written]);
