@@ -245,10 +245,10 @@ implementation has to pick. Recorded both sides; not silently picked.
   spells out the single-code and zero-code rules for *distance* codes only.
   For the literal/length tree it is silent on (a) a tree whose only code is
   256 (an empty block) and (b) a complete tree with no code for 256. Behavior:
-  zlib's `inflate` accepts both tree shapes (incomplete is legal when the
-  longest code is 1 bit — madler/zlib `inftrees.c:147` `if (left > 0 && (type
-  == CODES || max != 1)) return -1`), and a missing EOB then surfaces later
-  as a stream that cannot terminate; Go accepts the empty-block shape (its
+  zlib 1.3.2 (checked through python3) accepts the only-EOB tree and rejects
+  the other degenerate shapes up front with "invalid code -- missing
+  end-of-block": a complete tree with no code for 256, an empty literal tree,
+  and a single 1-bit code that is not 256; Go accepts the empty-block shape (its
   TestStreams vectors "degenerate HLitTree" decode to "") and rejects the
   "empty HLitTree" (no codes at all) as invalid; Zig std rejects the missing
   EOB up front (`Decompress.zig` `MissingEndOfBlockCode`, HuffmanDecoder
@@ -771,8 +771,8 @@ Decisions deferred to the API sketch; each labeled with its recommendation.
    zero distance codes, are explicitly legal (`§3.2.7`); a literal/length
    tree whose only code is the EOB (an empty block) is legal by reference
    behavior but unaddressed by the RFC; a complete tree missing the EOB code
-   is unaddressed and the references split (std rejects up front; zlib
-   accepts the tree and dies at stream end). A decoder that builds its
+   is unaddressed by the RFC, and zlib 1.3.2 and std both reject it up
+   front. A decoder that builds its
    tables without the single-code special case rejects legal streams (the
    exact Go regressions 11030/11033); one that accepts incomplete trees
    generally accepts illegal ones. The completeness check must be: reject

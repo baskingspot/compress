@@ -1,152 +1,145 @@
-# zcompress bench: the fleet harness
+# zcompress bench
 
-The claim-maker. Local `just bench` numbers iterate; numbers that close a
-milestone come from a fleet run through this harness, and every claim names
-its run directory under `docs/results/` (docs/zcompress-plan.md, "Benchmark
-methodology").
+The remote benchmark harness. It cross-builds zcompress and its competitors for
+each EC2 target, runs them over one fixed corpus in interleaved rounds on
+dedicated boxes, and reports ratios with exact confidence intervals.
 
-The harness ports fastmem's (`~/code/fastmem-zig/bench/`, design:
-`docs/bench-design.md` there): `ec2bench/` is the generic EC2 fleet core,
-copied from fastmem's and kept free of benchmark-specific code;
-`zcompress_bench/` is the zcompress adapter — the suite, the cross builds,
-the schema, the analysis.
+Local `just bench` numbers are for iterating and are not claims. A number that
+gets quoted comes from a run of this harness. The run directory is
+`bench-results/<run-id>` (gitignored), and the write-up is a file under
+`docs/results/` that names the run id.
+
+The harness is adapted from fastmem's (`~/code/fastmem-zig/bench/`).
+`ec2bench/` is the generic EC2 core and holds no benchmark-specific code
+(`ec2bench/README.md`). `zcompress_bench/` is the zcompress adapter: the suite,
+the cross builds, the result schema, and the analysis.
 
 ## Arms
 
-A run measures **arms**, one binary each, interleaved per round through a
-seeded balanced Latin square under CPU isolation (the last physical core,
-via systemd; `ec2bench/isolation.py`):
+A run measures **arms**, one binary each. Each round runs every arm once, in an
+order drawn from a seeded balanced Latin square, and each binary runs on the
+last physical core of the box, isolated through systemd
+(`ec2bench/isolation.py`).
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots (flate/gzip/zlib level `.fast`, snappy block), both directions, **plus the `std` rows**: std.compress.flate raw/gzip/zlib at `level_1` | cross per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
-| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate/gzip/zlib level 1 + snappy, both directions | `go build`, GOOS=linux per arch; module pins v1.18.1-0.20250402062133-8df4d013ff17 (the research's local checkout commit) |
-| `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip/zlib/deflate one-shots, level 1 | `zig cc -static` per target/CPU over the zon-pinned source tree |
-| `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming (zlib-compat API, windowBits -15/15/31), level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target/CPU |
-| `googlesnappy` | bench/drivers/google-snappy/bench_snappy.cc | google/snappy 1.3.1 raw blocks (`snappy::RawCompress`/`RawUncompress`), both directions | cmake (static `snappy`) with zig-cc/zig-c++ wrappers, per target/CPU over the zon-pinned source tree |
-| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 (the notes' pinned tag, docs/research/zstd-notes.md §6.1) whole-buffer `ZSTD_decompressDCtx`, decode-only | cmake (`build/cmake`, static lib, no programs/tests/threads) with a zig-cc wrapper, per target/CPU over the zon-pinned source tree |
-| `aa` | the `zc` binary again | the A/A noise floor | — |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks) plus zstd decode, and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1` and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `DecodeAll` | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
+| `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
+| `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
+| `googlesnappy` | bench/drivers/google-snappy/bench_snappy.cc | google/snappy 1.3.1 raw blocks (`snappy::RawCompress`, `RawUncompress`), both directions | cmake (static `snappy`) with zig-cc and zig-c++ wrappers, per target and CPU |
+| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_decompressDCtx`, decode only | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
+| `aa` | the `zc` binary again | the A/A noise floor | none |
 
-The four native arms' sources are pinned in `bench/build.zig.zon`
-(release-tarball url+hash, lazy) — the bench tool's own build root, the ztls
-`conformance/` shape: the harness's competitors are the harness's concern,
-and the root package's zon stays clean. `zig build bench-vendor` (the repo root's step
+The sources of the four native arms are pinned by release-tarball URL and hash
+in `bench/build.zig.zon`, a separate build root, so that the root package and
+`zig build test` never fetch them. `zig build bench-vendor` (the root step
 delegates to `bench/build.zig`) materializes them under
-`bench/zig-out/bench-src/<name>/`, hash-verified by zig's own fetcher, so the
-harness never downloads or unpacks a tarball itself. Keeping the
-`lazyDependency` call in the bench build root is what keeps a competitor out
-of `zig build test`: the call marks the dependency needed at configure time,
-and the build runner fetches every marked dependency on any invocation.
+`bench/zig-out/bench-src/<name>/`, hash-verified by zig's own fetcher. The
+harness runs that step itself and never downloads or unpacks a tarball.
 
-Snappy competitor coverage: klauspost plus google/snappy C++ (the plan's
-pinned canonical implementation, `docs/zcompress-plan.md`, "Benchmark
-methodology"), both over raw blocks. The M3 run carried klauspost only —
-its results file records that gap; the google/snappy arm landed for the M4
-run, which closes it.
-
-zstd is decode-only in M4 (the encoder is M5): the zstd rows are
-`zstd/decompress/...` on every arm that carries the codec — zc (plus the
-in-binary std.compress.zstd rows), klauspost (`DecodeAll`), and zstd-c.
+zcompress has no zstd encoder, so zstd rows are decode only
+(`zstd/decompress/...`) on the arms that carry the codec: zc (with the in-binary
+std.compress.zstd rows), klauspost, and zstd-c.
 
 ## Corpus
 
-`bench/corpus/SHA256SUMS` is committed — the trust anchor, and the only
-corpus file in git. The bytes generate on demand into the gitignored
-`bench/corpus-gen/` (`just corpus`; the generator is bench/zig/corpus.zig,
-`zig build corpus`). Shapes and sizes mirror the codec bench files
-(src/flate/bench.zig): text, random, html, rle, mixed at 32 KiB and 64 KiB.
-Next to each raw file sit the **reference blobs** (`.flate`, `.gz`, `.zz`,
-`.snappy`), produced by the zcompress encoders: every arm's decompression
-rows decode these identical bytes.
+`bench/corpus/SHA256SUMS` is committed and is the only corpus file in git. It is
+the trust anchor. The bytes generate on demand into the gitignored
+`bench/corpus-gen/` with `just corpus` (the generator is `bench/zig/corpus.zig`,
+run as `zig build corpus`).
 
-The `.zst` blobs invert the pattern (M4 has no zstd encoder): the pinned
-zstd CLI (v1.5.7, the flake) at level 1 — the fast class every arm's rows
-measure — produces the frames (XXH64 checksums on), and the generator
-verifies each one byte-exact with our decoder before writing it.
+There are seven shapes at two sizes (32 KiB and 64 KiB): `text`, `random`,
+`html`, `rle`, `mixed`, `words`, and `skewlit`. The first five mirror the codec
+bench files (`src/flate/bench.zig`). `words` and `skewlit` are literals-heavy
+shapes that exercise zstd's Huffman path.
 
-Generation is correct-or-fails: the generator re-derives every file, checks
-the result against the committed `SHA256SUMS` file by file, and refuses on
-any disagreement. The harness verifies the same way before it uses the
-tree — `zcompress_bench/corpus.py` checks every generated file against the
-committed hashes and fails loudly when the generated directory is missing
-(run `just corpus`) or disagrees; a run without a verified corpus refuses.
-Each driver's meta record carries the SHA-256 of every raw file it read;
-the parser rejects a round whose hashes disagree with the committed corpus.
-The manifest records one `tree_sha256` over the verified anchor (names and
-digests, sorted) beside the per-file hashes: the run's single corpus
-identity, for cross-run comparison without the bytes.
+Next to each raw file sit reference blobs: `.flate`, `.gz`, `.zz`, and `.snappy`
+from the zcompress encoders, and `.zst` from the pinned zstd CLI (v1.5.7, from
+the flake). Every arm's decompression rows decode these identical bytes. The
+CLI writes the `.zst` frames at level 1, the fast class that every arm's rows
+measure, except for `words` and `skewlit`, which use level 19 so that their
+frames carry Huffman-coded literals. The frames carry XXH64 checksums, and the
+generator checks each one byte for byte with our decoder before writing it.
 
-## Schema v1 (the JSONL contract)
+The generator compares every file it writes with `SHA256SUMS` and exits with an
+error on any difference, missing file, or extra file. The harness checks again
+before it uses the tree: `zcompress_bench/corpus.py` verifies each generated
+file against the committed hashes, and a run fails if the generated directory
+is missing (run `just corpus`) or differs. Each driver's meta record carries the
+SHA-256 of every raw file it read, and the parser rejects a round whose hashes
+differ from the committed ones. The manifest records one `tree_sha256` over the
+verified anchor (names and digests, sorted) next to the per-file hashes. It
+identifies the corpus across runs without the bytes.
 
-One file per (arm, round): a `meta` record (arm, tool, rev, toolchain,
-target, cpu, optimize, suite, seed, samples, sample_ms, impls, corpus
-hashes), one `sample` record per (case, impl, sample) — case is
-`<codec>/<direction>/<shape>/<size>`, plus iters, ns, out_len — and an `end`
-record. `zcompress_bench/jsonl.py` is the strict contract; every fleet
-driver (Zig, Go, C, C++) emits it.
+## Result schema (JSONL, v1)
+
+Each driver (Zig, Go, C, C++) writes one JSONL file per arm and round: a `meta`
+record (arm, tool, rev, toolchain, target, cpu, optimize, suite, seed, samples,
+sample_ms, impls, corpus hashes), one `sample` record per case, implementation,
+and sample (the case is `<codec>/<direction>/<shape>/<size>`, plus iters, ns,
+out_len), and an `end` record. `zcompress_bench/jsonl.py` validates the schema
+strictly, and a file that does not validate fails the round.
 
 ## Analysis
 
-The estimator core ports verbatim from fastmem: per-cell round medians,
-two-sample Hodges-Lehmann + exact Mann-Whitney intervals across arms (and
-A/A), one-sample Hodges-Lehmann + exact Wilcoxon signed-rank intervals for
-rows sharing a process, outlier rounds flagged and never removed,
-significance gated on ≥5 rounds and the A/A noise floor. Comparisons:
+The estimator core is carried over from fastmem. Each (arm, case,
+implementation) cell reduces to the median of its samples in each round. Cells
+from separate processes get a two-sample Hodges-Lehmann estimate with an exact
+Mann-Whitney interval. Cells that share a process get a one-sample
+Hodges-Lehmann estimate with an exact Wilcoxon signed-rank interval. Outlier
+rounds are flagged and never removed. A significance mark needs at least 5
+rounds and an interval that clears the A/A noise floor. The comparisons:
 
-- `A/A` — aa vs zc: the noise floor.
-- `<arm>/zc` — a competitor arm against zc (two-sample, cross-binary).
-- `zc/std` — zc against the in-binary std rows (paired).
-- `container/flate` — each gzip/zlib row against the flate row of the SAME
-  implementation in the SAME processes: the honest container-overhead
-  reference. Cross-binary code-layout interference inflates cross-binary
-  comparisons on latency-bound shapes; the paired row is the reference for
-  the container story.
+- `A/A`: aa against zc, the noise floor.
+- `<arm>/zc`: a competitor arm against zc (two-sample, across binaries).
+- `zc/std`: zc against the in-binary std rows (paired).
+- `container/flate`: each gzip or zlib row against the flate row of the same
+  implementation in the same processes. Code layout differs between binaries
+  and skews cross-binary comparisons on latency-bound shapes, so this paired
+  row is the reference for container overhead.
 
-`sizes` rows record the median compressed length per cell: the ratio half
-of the story.
+The `sizes` rows record the median compressed length per cell, which gives the
+compression ratio.
 
 ## Credentials and infrastructure
 
-The fleet shares fastmem's: profile `fastmem-bench`, the same launch
-templates and reaper, `tofu_dir` pointing (read-only — the harness only
-runs `tofu output`) at `~/code/fastmem-zig/infra/base`. The IAM policy pins
-`Project=fastmem-bench`, so `project.name` in `bench.toml` stays
-`fastmem-bench` and both repos' boxes appear in either's `bench ls` —
-check before running concurrently with a fastmem run. A dedicated
-`zcompress-bench` stack needs the human bootstrap in fastmem's
-`infra/README.md` ("Copy into another project"), which needs the
-`playground-ops` SSO profile.
+The harness uses fastmem's AWS setup: profile `fastmem-bench`, the same launch
+templates and reaper, and `tofu_dir` pointing at `~/code/fastmem-zig/infra/base`
+(read-only: the harness only runs `tofu output`). The IAM policy pins
+`Project=fastmem-bench`, so `project.name` in `bench.toml` stays `fastmem-bench`.
+
+Both repos' boxes therefore carry the same tag and the same `Target` names, and
+the two harnesses see each other's boxes. `bench ls` lists both,
+`bench down --all` terminates both, and `bench up` adopts an existing box for a
+target and terminates later duplicates, whichever repo launched it. Check
+`just bench-ls` before launching, and do not run this harness while a fastmem
+run is using its boxes.
+
+A dedicated `zcompress-bench` stack needs the human bootstrap in fastmem's
+`infra/README.md` ("Copy into another project"), which needs the `playground-ops`
+SSO profile.
 
 ## Commands
 
 ```sh
-just corpus                   # generate + verify the fleet corpus (bench/corpus-gen/)
-just bench-up                 # launch the seven targets (2h TTL default)
-just bench-ls                 # show the fleet
-just bench-test               # correctness gate: every arm's --check on every box
-just bench-run --rounds 5 --label m3   # the measurement
-just b analyze <run-dir>      # re-analyze a run without AWS/SSH/builds
-just b watch <run-dir>        # exit when summary.json exists
-just bench-down               # terminate the fleet
-just bench-check              # uv format + uv check over the harness
+just corpus                              # generate and verify the corpus (bench/corpus-gen/)
+just bench-up                            # launch the seven targets (2h TTL default)
+just bench-ls                            # show the running boxes
+just bench-test                          # correctness gate: every arm's --check on every box
+just bench-run --rounds 5 --label base   # the measurement
+just b analyze <run-dir>                 # re-analyze a run without AWS, SSH, or builds
+just b watch <run-dir>                   # exit when summary.json exists
+just bench-down                          # terminate the boxes
+just bench-check                         # uv format and uv check over the harness
 ```
 
-A run directory (`bench-results/<run-id>/`) holds the manifest (seed,
-schedule, the corpus tree hash and per-file hashes, competitor pins, build
-cache keys and binary SHA-256s, git provenance), per-target raw rounds and
-host facts, the summary.json, and report.md. The uploaded binaries and the
-generated corpus do NOT land there: both regenerate from the pins the
-manifest records (the content-addressed revisions, the binary SHA-256s, the
-corpus hashes and the committed anchor), so the run directory holds only
-the non-regenerable evidence — the trimmed-past-runs shape is the harness's
-default. A correctness run (`bench test`) holds each arm's
-`check.json`/`check.exit`/`check.stderr` per target plus its summary. The
-committed claim lives under `docs/results/<run-id>/`.
-
-## Dropped in the port
-
-fastmem's goals.py (the G1-G6 gates), stability.py (spike/process-share
-tables), codegen.py/libc probes (fastmem kernel evidence), the dist/large
-suites, and the runtime-dispatch machinery (zcompress has no dispatch yet).
-The harness test suite (fastmem's bench/tests) is not ported; the adapter
-is covered by a local end-to-end smoke (see the run notes) instead.
+A run directory (`bench-results/<run-id>/`) holds the manifest (seed, schedule,
+corpus tree hash and per-file hashes, competitor pins, build cache keys and
+binary SHA-256s, git provenance), the raw rounds and host facts for each target,
+`summary.json`, and `report.md`. The uploaded binaries and the generated corpus
+are not kept there. Both can be regenerated from what the manifest records
+(source revision, build cache keys, binary SHA-256s, corpus hashes, and the
+committed anchor), so the run directory holds only evidence that cannot be
+regenerated. A correctness run (`bench test`) holds each arm's `check.json`,
+`check.exit`, and `check.stderr` per target, plus its summary.

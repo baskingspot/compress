@@ -1,332 +1,37 @@
 # internal
 
-The codec-agnostic layer a zcompress codec may import
-(docs/zcompress-plan.md, "Architecture"): it imports only `std` and
-`fastmem`, holds no codec-specific state, and travels with a codec that uses
-it. Nothing lands here before two codecs need it.
-
-Codec files import it relatively (`@import("../internal/root.zig")`); there
-is no `internal` build module, and neither the barrel (`src/root.zig`) nor
-the codec namespaces re-export it. A codec lifts out of the repo with
-`src/internal/` in tow, wired the same way: a scratch project holding the
-codec directory, `src/internal/`, and the fastmem dependency builds and
-runs the codec's tests. The scratch project needs a root file above both
-directories (the repo's `src/root.zig` is that file): relative imports
-cannot escape the module root's directory, so rooting the module at the
-codec's own `root.zig` fails with "import of file outside module path".
-
-Five namespaces:
-
-- `internal.sentinel` — the decode-overrun sentinel: the constants, the
-  fill, and the check every decode test runs (AGENTS.md, "Rules": "Decode
-  never writes past the decoded length; sentinel overrun checks prove it in
-  tests").
-- `internal.reader` — the reader lifecycle (`State`, `guard`, `fail`) and
-  the generated `Io.Reader` vtable entries (`VTable`).
-- `internal.writer` — the shared writer machinery: the generated
-  `Io.Writer` vtable entries (`drain`/`flush`/`rebase`) and the poisoned
-  `finish` (`VTable`), over a codec's `emitBlock` and its optional stream
-  ending. Snappy and flate are the two instantiations; the entries own the
-  `errdefer` poison, the drain top-up, the rebase slide, the postconditions,
-  and the terminal finish — the machinery the writer bugs (ea2a581, caeaae9)
-  lived in.
-- `internal.int` — endian-bound integer access (`Int`, `little`, `big`):
-  the one body behind the codec `common.zig` bindings (flate/gzip/snappy
-  little-endian, zlib big-endian). zstd's decoder-only `common.zig` is the
-  remaining follower.
-- `internal.container` — the container driver: the framing-agnostic
-  machinery a container codec over an inner codec shares (`ReaderHooks`,
-  `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`, `Header`),
-  parameterized over the codec's framing type. gzip and zlib over flate are
-  the two instantiations; each codec's `framing.zig` is its half of the
-  contract (the header, the trailer, the checksum, the error sets), and its
-  `Reader`/`Writer`/`encode`/`decode` instantiate the driver over it. The
-  contract is stated in full in the file; the driver owns the machinery the
-  M3 closing review had to fix twice — see "A wrapper's rebase routes the
-  inner end through the same ending as fill" below.
-
-## The Io codec pattern book
-
-The `std.Io.Reader`/`std.Io.Writer` vtable contracts a codec discovers the
-hard way, one entry per bug class. Snappy and flate are the worked examples;
-a new codec's README-first sketch cites the entries it adopts (the
-gzip/zlib/zstd/lzw streaming lanes start here).
-
-`std/...` citations are files under the flake's Zig 0.16.0 standard library:
-`/nix/store/amh3bnymjncd56jwmd2hqdkciz9d7pys-zig-0.16.0/lib/zig/`.
-
-### Fill and return 0, never the bytes-added count
-
-Contract: an entry that stores decoded bytes in `reader.buffer` (adjusting
-`seek`/`end`) returns 0, never the number of bytes stored. The count is the
-bytes the entry served to the caller's writer, and the interface advances
-its logical position by that count; returning the stored count serves the
-same bytes twice.
-
-- std: `std/Io/Reader.zig:26-28` ("The number returned, including zero, does
-  not indicate end of stream"), `std/Io/Reader.zig:43-44` ("the
-  implementation may choose to store data in `buffer`, modifying `seek` and
-  `end` accordingly").
-- Worked examples: snappy `Reader.fillNextBlock` and flate
-  `Reader.fillWindow` return a count to their pumps, and the generated
-  entries discard it (`_ = try pump(host); return 0;`,
-  `src/internal/reader.zig`). The random consumer-machinery drivers in both
-  `Reader.zig`s pin the count contract across peek/take/discardAll/
-  readSliceAll/stream mixes.
-
-### The zero-length poll answers 0 without filling
-
-Contract: `std.Io.Reader.stream` slices the buffered region by `limit`; a
-zero limit leaves that slice empty, so the original limit (0) reaches
-`vtable.stream` even when bytes are buffered. The entry answers 0 without
-filling: a fill can fail `StreamTooLong` on a valid stream whose serving
-region cannot hold a fresh block beside unconsumed bytes.
-
-- std: `std/Io/Reader.zig:168-177` — `limit.slice(r.buffer[r.seek..r.end])`
-  empty → `r.vtable.stream(r, w, limit)` with the original limit.
-- Caught: the identical bug in both readers. Flate fixed first (8057598,
-  R2), snappy separately (5c5eb16) — the duplication this layer exists to
-  remove. The generated `stream` entry owns the check; both readers keep "a
-  zero-length stream poll does not fail the stream" tests.
-
-### Sticky lifecycle: clean end, sticky failure, detail in `err`
-
-Contract: the interface error set carries two coarse values
-(`error.ReadFailed`, `error.EndOfStream`); the detail is recorded in the
-codec's `err` field, set once and never cleared. Every vtable entry opens
-with the sticky guard: `failed` reports `error.ReadFailed`, `done` reports
-`error.EndOfStream`. `done` is set only when the input ends cleanly at a
-stream boundary. A failed reader may drop or keep its already-buffered
-decoded bytes (flate drops — no partial output past the error; snappy keeps
-them, and `std.Io.Reader.stream` serves buffered bytes before consulting the
-vtable), but the state never returns to `streaming`.
-
-- std: `std/Io/Reader.zig:111-116` (the error set: "See the `Reader`
-  implementation for detailed diagnostics").
-- Evidence: the `done: bool` + `err` pair became `State` + shared guard as
-  the Tiger-style reference pattern (972925d); the golden suites assert
-  stickiness in both readers ("The failure is sticky"); the poll test
-  asserts a poll leaves `err == null` on a valid stream (8057598).
-
-### Rebase emits, never discards (writers)
-
-Contract: `rebase` is where a full buffer's bytes go when a consumer asks
-for a direct writable slice (`writableSliceGreedy`) into the buffer. It
-emits everything buffered beyond the preserved tail, then leaves the
-preserved bytes as the buffered block. Discarding instead silently drops
-input, and `writeAll`-based tests never touch the direct-slice path.
-
-- std: `std/Io/Writer.zig:82-88` (rebase: "The most recent `preserve` bytes
-  must remain buffered"), `std/Io/Writer.zig:397-418`
-  (`writableSliceGreedyPreserve` calls `rebase` when the buffer cannot
-  satisfy the request).
-- Caught: ea2a581 — a 2.19-GB corpus encoded to a stream missing exactly one
-  64-KiB block; the `File.Reader` simple-mode stream feeds a writer through
-  `writableSliceGreedy` + `advance`. Regression tests: "writableSliceGreedy
-  on a full buffer/block emits, never drops" in both `Writer.zig`s.
-- Where it lives: `internal.writer.VTable`'s generated `rebase` — one entry
-  for every codec writer. The codec's `emitBlock(host, len)` owns the slide
-  (flate's window moves the block region over the emitted bytes; snappy's
-  moves the preserved tail to the front), and the entry owns the keep
-  computation, the emit length, and the postconditions.
-
-### Drain tops up before emitting: maximal blocks, not caller chunking
-
-Contract: `drain` runs only when `data` cannot fit in the buffer. It fills
-the remaining space from the front of `data` (the last slice repeated
-`splat` times), then emits the full block; the caller re-slices and calls
-again. Emitting before topping up splits blocks at the caller's write
-boundaries instead of the codec's block size.
-
-- std: `std/Io/Writer.zig:21-22` (drain: "A write will only be sent here if
-  it could not fit into `buffer`"), `std/Io/Writer.zig:27-28`
-  ("`buffer[0..end]` is consumed first, followed by each slice of `data` in
-  order"), `std/Io/Writer.zig:183-186` (`writeSplat` calls `drain` only when
-  the data does not fit).
-- Caught: caeaae9 — `writeAll(40000)` four times emitted 40000-byte blocks
-  instead of 65536/65536/28928. Tests: "blocks are maximal and the split
-  follows the block size" (flate), "writes past one block split into full
-  blocks" (snappy).
-- Where it lives: `internal.writer.VTable`'s generated `drain` (with
-  `accept`); the codec supplies only the block emission.
-
-### Contiguity fails closed, never asserts on a consumer request
-
-Contract: a consumer (`peek`, `take`, delimiter scans, `fillMore`) can ask
-for more contiguous bytes than the codec's buffer can hold at its position.
-The request reaches `vtable.rebase` as the capacity; the entry fails closed
-with `error.ReadFailed` and `err == .StreamTooLong`. It never asserts: the
-request is the consumer's, not a codec bug. std's own `rebase` contract is
-an assert; the codecs replace it with a sticky failure.
-
-- std: `std/Io/Reader.zig:89-92` (rebase: "Asserts `capacity` is within
-  buffer capacity, or that the stream ends within `capacity` bytes"),
-  `std/Io/Reader.zig:1132-1136` (`fillMore` passes `r.end - r.seek + 1`),
-  `std/Io/Reader.zig:1402-1409` (the wrapper calls `vtable.rebase` with the
-  consumer's capacity).
-- Caught: caeaae9 (R1) — snappy's serving region included the staging
-  region, so ordinary consumer calls asserted in Debug and segfaulted in
-  ReleaseFast; the fix separated the region and made over-capacity requests
-  fail closed. The same class survived in snappy's hand-written rebase
-  (`assert(capacity <= decoded_region_len)`): a plain `peek` past the
-  serving region asserted in Debug (a812b4f; the reproduction test is in
-  that commit). The generated `rebase` entry owns the guard; the codec hook
-  owns the capacity check. Tests: "a contiguous request past the two-block
-  cap fails closed", "a peek past the serving region fails closed"
-  (snappy), "a request past the window fails closed with StreamTooLong"
-  (flate).
-
-### A wrapper's rebase routes the inner end through the same ending as fill
-
-Contract: a wrapping reader's `rebase` (a container over a codec, a frame over
-a raw stream) inherits the inner reader's sticky `error.EndOfStream` when the
-inner stream ends mid-slide. That end is the wrapper's own clean-end signal:
-whatever step the wrapper's `fill` runs at the inner end — reading and
-checking a trailer, verifying a checksum, consuming to the frame boundary —
-`rebase` must run the same step. The failure mode it prevents: the wrapper
-passes the inner end straight to the consumer, reporting a clean
-`error.EndOfStream` with its own state still `streaming` and its trailer never
-read — the input stops before the frame's end and a caller loop parses the
-trailer as the next frame. The consumer reaches it with ordinary calls: a
-`peek` or `take` larger than the window's room at its position, or a record
-loop with records sized past the remaining tail.
-
-The ending step returns the trailer's own errors (the specific set, not the
-coarse `ReadFailed`); the wrapper's fill lets its `record` funnel own the
-failing, while `rebase` — below the funnel — fails directly, once. A
-`readTrailer` that only ends the stream is `Error!void` in truth: no trailing
-`return error.EndOfStream`, a narrowed error set, and both call sites report
-the clean end themselves.
-
-- Caught: fca3604 (M3's closing review, B1) — the gzip and zlib readers
-  passed flate's sticky end through `rebase` unchecked, so a 30-KiB peek at
-  a member's last 1,000 bytes ended "cleanly" with the trailer unread; a
-  plain 4,096-byte record loop hit it in 1 of 64 member sizes. The fix
-  funnels `rebase`'s inner end through `readTrailer`; the regression tests
-  drive the 39-KiB-take + 30-KiB-peek shape on good and corrupted trailers,
-  and the reader-machinery fuzz targets gained an `over_end_peek` op — every
-  prior op bounded its request by the bytes still to come, which is exactly
-  why the fuzzers never asked past the end. Tests: "an over-the-end request
-  still checks the trailer" (both containers).
-- Where it lives: `internal.container.ReaderHooks.rebase` — one funnel for
-  every container. The B1 fix had to be made twice (fca3604's gzip half and
-  its zlib twin) while the funnel was per-container; the driver owns it now,
-  the framing supplies only `readTrailer`'s check, and the regression tests
-  stay per container.
-- Applies to: every M4+ frame with a trailer the wrapper must verify — the
-  zstd frame checksum rides this exact shape.
-
-### Poison checks: finish after failure never reports false success
-
-Contract: a codec's `finish` checks that the interface is still the codec's
-own vtable before emitting the stream ending, then poisons it
-(`Writer.failing`); a failed or finished writer reports `error.WriteFailed`,
-never a false success on a truncated stream. The check is against the
-generated `vtable`'s own address, so a writer must store `&Hooks.vtable`
-(the generated const), never a copy of its value.
-
-- std: `std/Io/Writer.zig:124-125` (`fixed`: "Writes to `buffer` and returns
-  `error.WriteFailed` when it is full"), `std/Io/Writer.zig:140-148`
-  (`Writer.failing`, the poisoned-writer precedent),
-  `std/Io/Writer.zig:43-45` ("Number of bytes returned may be zero, which
-  does not indicate stream end. A subsequent call may return nonzero, or
-  signal end of stream via `error.WriteFailed`").
-- Caught: caeaae9 — `finish` reported success after a failed write and after
-  `finish`; the fix is the vtable check plus the `defer w.writer = .failing`
-  poison. Tests: "a failed or finished writer never reports a false success"
-  in both `Writer.zig`s.
-- Where it lives: `internal.writer.VTable`'s generated `finish` — the
-  poison check, the final block emission, the codec's ending hook, and the
-  output flush, once for every codec writer.
-
-## API
+Code shared by more than one zcompress codec. It is not public API: the barrel
+(`src/root.zig`) and the codec namespaces never re-export it, and there is no
+build module for it. A codec reaches it by relative import:
 
 ```zig
-// From a codec file under src/<codec>/:
 const internal = @import("../internal/root.zig");
-
-// The decode-overrun sentinel: fill, then prove [decoded_len, target.len)
-// still holds the cycle.
-internal.sentinel.base   // u8: the first sentinel byte
-internal.sentinel.len    // u8: the cycle length (37, prime)
-internal.sentinel.at(i)  // u8: the sentinel byte at absolute index i
-internal.sentinel.fill(target: []u8) void
-internal.sentinel.expect(target: []const u8, decoded_len: usize) !void
-
-// The reader lifecycle: the codec owns `state: State` and `err: ?Detail`;
-// `fail` runs once, from the entry that discovers the failure.
-internal.reader.State = enum { streaming, done, failed };
-internal.reader.guard(state: State) ?std.Io.Reader.Error
-internal.reader.fail(comptime Detail: type, state: *State, detail: *?Detail, err: Detail) std.Io.Reader.Error
-
-// The generated vtable quartet. Host carries `reader: std.Io.Reader` and
-// `state: State`; `pump` fills the serving region and maps failures to the
-// interface's error set; `rebase` slides the unconsumed bytes and owns the
-// capacity policy.
-const vtable = internal.reader.VTable(Host, pump, rebase).vtable;
-
-// The generated writer entries and finish. Host carries `writer:
-// std.Io.Writer` and `output: *std.Io.Writer`; `emitBlock(host, len)` emits
-// the front of the buffered block and leaves the unemitted tail at the front
-// of the block region; `ending` (optional) writes the codec's stream ending.
-const WriterHooks = internal.writer.VTable(Host, emitBlock, ending);
-// WriterHooks.vtable — store `&WriterHooks.vtable` in init, not a copy
-// WriterHooks.finish(host)  // poison check, final block, ending, flush
-
-// Endian-bound integer access: a codec's `common.zig` re-exports its binding
-// so call sites carry no endian argument.
-internal.int.little.readInt(comptime T, *const [width]u8) T
-internal.int.little.writeInt(comptime T, *[width]u8, T) void
-internal.int.big.readInt / internal.int.big.writeInt   // zlib
-
-// The container driver, over a codec's framing type (`framing.zig`) and the
-// codec's own Host types (container.zig states the full contract):
-const framing = @import("framing.zig");
-const ReaderHooks = internal.container.ReaderHooks(framing, Reader);
-        // init, pump, rebase, streamOne (the stack-buffered one-call pump)
-const WriterHooks = internal.container.WriterHooks(framing, Writer);
-        // init (the .ratio poison), finish, streamOne
-const EncodeHooks = internal.container.EncodeHooks(framing);
-        // maxCompressedLength, compress
-const DecodeHooks = internal.container.DecodeHooks(framing, Reader);
-        // decompress
-internal.container.readExact(input, target)  // Truncated / ReadFailed
-internal.container.Header  // enum { pending, written }: the lazy header
 ```
 
-## Testing
+The layer imports only `std` and `fastmem` and holds no codec-specific state.
+Code moves here when a second codec needs it, not before.
 
-`internal` has no test target of its own: the sentinel machinery is test
-machinery, and the lifecycle and generated entries run under every reader
-test in both codecs. The acceptance test for the generated quartet is the
-migration of both readers: snappy (three-block serving region, whole-block
-staging) and flate (sliding window, bit reader) each replaced four hand
-written entries with `VTable(Host, pump, rebase)`, and the full suite —
-including the random consumer-machinery drivers, the golden suites, the
-poll tests, and the contiguity tests — passes through the generated
-entries. The lift story runs as a scratch project per codec (the codec
-directory, `src/internal/`, and a path dependency on fastmem): 48/48 snappy
-tests and 84/84 flate tests pass in the scratch projects.
+- `sentinel.zig`: the byte pattern decode tests pre-fill output buffers with,
+  and the check that a decode did not write past its decoded length.
+- `reader.zig`: the `Io.Reader` lifecycle (`State`, `guard`, `fail`) and the
+  generated reader vtable entries.
+- `writer.zig`: the generated `Io.Writer` entries and `finish` for
+  block-based compressing writers.
+- `int.zig`: little-endian and big-endian integer access, which each codec's
+  `common.zig` binds to its wire byte order.
+- `container.zig`: the reader, writer, and one-shot drivers that gzip and zlib
+  share over flate. Each container supplies its own framing.
 
-The container driver's acceptance test is the same shape: gzip and zlib
-replaced their near-identical fill/rebase/commit/drain/finish machinery
-with `container.ReaderHooks`/`WriterHooks`/`EncodeHooks`/`DecodeHooks`
-over their framing types, and every test those containers carry — the
-streaming suites, the golden tables, the oracles, the fuzz targets — runs
-through the driver unchanged. The two `framing.zig` files are the contract's
-worked instantiations.
+Each file's `//!` header lists its entry points and what a codec has to supply.
 
-The writer generator's acceptance test is the migration of both writers:
-snappy and flate replaced their near-identical drain/accept/flush/rebase and
-poison-finish with `writer.VTable` over their own `emitBlock` (snappy's
-ending hook is null; flate's writes `03 00`), and both suites — the random
-machinery drivers, the rebase and maximal-block tests, the golden suites,
-the checksum-hook tests — pass through the generated entries. The `int`
-bindings' acceptance test is the same: the four `common.zig` files re-export
-the shared bodies with no call-site change.
+## Copying a codec out
 
-## Licensing
+A codec that uses this layer takes it along. Copy the codec's directory and
+`src/internal/` into a project, add `fastmem` as a dependency, and make the
+module root a file in a directory above both. Relative imports cannot leave the
+module root's directory, so rooting the module at the codec's own `root.zig`
+fails with "import of file outside module path". The repo's `src/root.zig` is
+that kind of root file.
 
-Original. The sentinel range and period match golang/snappy's
-`notPresentBase`/`notPresentLen` (THIRD_PARTY.md); the std source is cited,
-never copied.
+Notes on the `std.Io` contracts that the generated reader and writer code
+relies on are in `AGENTS.md`.

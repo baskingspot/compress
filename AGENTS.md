@@ -15,8 +15,8 @@ it before you change a kernel or make a performance claim.
   `decode.zig` is original, with golden vectors in `golden.zig` (ported
   golang/snappy fixtures, shared by every layer's tests); `Writer.zig` +
   `Reader.zig` are the streaming `Io` layer (a compressing `Io.Writer` and a
-  decompressing `Io.Reader` over the framed stream — see
-  `src/snappy/README.md`, "Streaming"); `bench.zig` is the local benchmark;
+  decompressing `Io.Reader` over the framed stream; see
+  `src/snappy/README.md`); `bench.zig` is the local benchmark;
   `fuzz.zig` ships fuzz targets; `common.zig` (LEB128 varint) is a shared
   helper. One-call pumps: `Writer.streamAll`, `Reader.streamAll`.
 - `src/flate/`: raw deflate (RFC 1951). `encode.zig` ports the klauspost
@@ -24,7 +24,7 @@ it before you change a kernel or make a performance claim.
   bit reader, and the canonical Huffman-table construction and §3.2.5 code
   tables shared by both sides; `Writer.zig` + `Reader.zig` are the streaming
   `Io` layer over raw deflate (BFINAL self-delimits; there is no in-package
-  framing — see `src/flate/README.md`, "Streaming"); `golden.zig` shares the
+  framing; see `src/flate/README.md`); `golden.zig` shares the
   Go flate fixtures and the corpus shapes across every layer's tests;
   `bench.zig` is the local benchmark;
   `oracle.zig` is the external-oracle harness behind `just flate-oracle`.
@@ -34,7 +34,7 @@ it before you change a kernel or make a performance claim.
   trailer; `decode.zig` carries the header parser both layers share and the
   trailer check; `Writer.zig` + `Reader.zig` are the streaming `Io` layer
   (the lazy header, the member boundary, the multi-member `streamAll` walk —
-  see `src/gzip/README.md`, "Streaming"); `crc32.zig` is the slice-by-16
+  see `src/gzip/README.md`); `crc32.zig` is the slice-by-16
   CRC-32 kernel behind the container's checksum state; `golden.zig` shares
   the Go gzip fixtures across every layer's tests; `bench.zig` is the local
   benchmark; `oracle.zig` is the external-oracle harness behind `just
@@ -44,7 +44,7 @@ it before you change a kernel or make a performance claim.
   one-shot stream — the CMF/FLG header, the Adler-32 trailer; `decode.zig`
   carries the header check, the trailer reader, and the trailer check both
   layers share; `Writer.zig` + `Reader.zig` are the streaming `Io` layer —
-  see `src/zlib/README.md`, "Streaming"; `adler32.zig` is the vectorized
+  see `src/zlib/README.md`; `adler32.zig` is the vectorized
   Adler-32 kernel behind the container's checksum state; `golden.zig` shares
   the Go zlib fixtures across every layer's tests; `bench.zig` is the local
   benchmark; `oracle.zig` is the external-oracle harness behind `just
@@ -61,12 +61,12 @@ it before you change a kernel or make a performance claim.
   kernel (std's wraps at usize); `probe32.zig` the 32-bit proof probe
   (`just check-32`); `Reader.zig` the
   streaming `Io` layer (one frame per reader with the exact boundary visible,
-  the multi-frame `streamAll` walk — see `src/zstd/README.md`, "Streaming");
+  the multi-frame `streamAll` walk — see `src/zstd/README.md`);
   `golden.zig` shares the reference fixtures across every layer's tests.
-  Decoder-only at M4 — the namespace is `{Reader, decode}`, and
-  `encode.zig`/`Writer.zig` are M5 — so there is no `bench.zig` yet: the
-  zstd rows live in the fleet driver (`bench/zig/bench_zcompress.zig`, `just
-  bench-run`). Fuzz targets land in `fuzz.zig` (fuzz-engineer lane).
+  Decoder-only: the namespace is `{Reader, decode}`; `encode.zig` and
+  `Writer.zig` do not exist yet. `bench.zig` is the local decode benchmark; the
+  fleet rows live in `bench/zig/bench_zcompress.zig` (`just bench-run`). Fuzz
+  targets are in `fuzz.zig`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
   sentinel test machinery, the reader lifecycle + generated reader vtable
   entries, the shared writer machinery (the generated `Io.Writer` entries
@@ -77,13 +77,13 @@ it before you change a kernel or make a performance claim.
   re-exported by the barrel; a codec that uses it lifts with it in tow,
   under a module root above both directories (relative imports cannot
   escape the module root's directory).
-  `src/internal/README.md` is the Io codec pattern book every new codec's
-  README-first sketch cites.
+  `src/internal/AGENTS.md` is the Io codec pattern book every new codec
+  follows.
 - `docs/research/specs/`: vendored specs (RFC 1950/1951/1952, RFC 8878, the
   snappy format description) with provenance.
 - `examples/`: one CLI per codec, thin streaming pumps (`encode`/`decode`)
   over a file or stdin on shared scaffolding (`examples/cli.zig`). The codec
-  package owns the framing (snappy's: `src/snappy/README.md`, "Streaming").
+  package owns the framing (snappy's: `src/snappy/README.md`).
 - `docs/results/`: fleet results, one file per measurement (on demand).
 - `.pi/agents/`: the roster. The parent orchestrates; agents own lanes.
 
@@ -211,10 +211,21 @@ Deviations, on purpose:
 - README-first: each codec directory carries its own `README.md` documenting
   the public API. Write it before the implementation — it is the API sketch
   Matt reviews. An API change updates the module README in the same commit.
+- Docs split by reader. A `README.md` is for a human deciding whether and how
+  to use the code: what it is, usage, the API, behavior a caller needs,
+  limitations. No milestone labels (M3), research-row ids (OQ7, T10), process
+  words (lane, wave, fleet, pattern book), review history, or pointers to
+  other documents' section names. Planning and agent material goes in the
+  `AGENTS.md` beside the code (`src/<codec>/AGENTS.md`): design decisions,
+  errata, test inventories, oracles, provenance. Doc comments (`///`, `//!`)
+  surface as function docs, so they are written for a caller: what it does,
+  arguments, errors, preconditions, costs. A why that only a maintainer needs
+  is a plain `//` comment next to the code. Short spec cites
+  (`RFC 1951 §3.2.5`) belong everywhere.
 - A codec imports only `std` and `fastmem`, plus in-repo relative imports:
   the codec-agnostic `src/internal/` shares when a second codec needs the
-  shape (`src/internal/README.md`), and the codec it wraps (gzip/zlib over
-  flate, M3). Shared primitives go to `src/internal/` only when two codecs
+  shape (`src/internal/AGENTS.md`), and the codec it wraps (gzip/zlib over
+  flate). Shared primitives go to `src/internal/` only when two codecs
   need them.
 - Minimal heap allocation on codec hot paths — the codecs as built
   allocate nothing there, which their READMEs state as fact, not as a
@@ -280,3 +291,35 @@ from the model guide; they are never copied from another repo's roster.
   and add a new file by its path after you read `git status --short`.
   Untracked files can hold secrets: core dumps (`*.core`) contain the whole
   process environment.
+
+## Commit messages
+
+A commit message is for a reviewer reading `git log` a year from now. It is not
+a lab notebook and not a status report. The planning vocabulary that this repo
+scrubbed from its docs (milestones, waves, lanes, research-row ids) does not
+belong here either.
+
+- Subject: `area: what changed`, imperative, 72 characters or fewer. The area is
+  the codec or directory (`zstd`, `flate`, `bench`, `docs`, `build`). No em
+  dash, no diff stats, no planning labels. A subject that needs a clause after
+  a dash is two ideas; pick one.
+- Body: optional, wrapped at 72. Say why the change exists and anything the diff
+  does not show: a constraint, a tradeoff, a rejected alternative. One to three
+  short paragraphs of plain prose. No narrative of the investigation, no "the
+  honest story", no process history, no restating the diff.
+- Measurements and long write-ups go in `docs/results/`. The commit names the
+  file by path and gives the headline number in one sentence.
+- One logical change per commit. A prose-only cleanup and a code change are
+  separate commits. Do not describe an earlier commit as wrong in prose; fix it
+  in a new commit and say what was fixed.
+
+Good (illustrative):
+
+    zstd: hoist the source-word load out of the literal copy loop
+
+    The backward reader reloaded the word for every symbol. Hoisting it keeps
+    the hot loop to one load per refill. Fleet numbers are in
+    docs/results/<run>.md.
+
+Bad: `zstd perf wave 2: the lean backward reader, the corpus revision, the X2
+answer`. It names a plan, not a change.

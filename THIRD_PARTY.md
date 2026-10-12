@@ -57,14 +57,6 @@ and dependency with a license that is not ours.
   Zig std's `std.compress.flate.Decompress.zig` (MIT, in-tree, studied).
   Reimplemented in this package's shape — wire-bit orientation, table
   packing, chain layout, and the completeness rules are ours; no code copied.
-
-## Vendored specs (`docs/research/specs/`)
-
-Verbatim spec text, fetched once with provenance recorded in the directory
-`README.md`. IETF RFCs are freely distributed. The Snappy format description
-comes from google/snappy (BSD-3-Clause).
-
-- std.compress.flate `Lookup`/persistent-chain design (Zig std, MIT): studied for `src/flate/encode.zig`'s persistent `FinderTable` (absolute wrapping positions, flate-notes.md §8). Studied, not copied.
 - `src/zstd/xxh64.zig`: a port of the XXH64 algorithm following Zig std's
   `std/hash/xxhash.zig` (MIT; itself the xxHash reference, public domain at
   github.com/Cyan4973/xxHash) with one deliberate change: the running byte
@@ -72,6 +64,41 @@ comes from google/snappy (BSD-3-Clause).
   targets. The algorithm is ported with the change; the attribution covers
   the reference. std's `XxHash64` stays in the tests as the differential
   oracle.
+- `src/flate/encode.zig` persistent `FinderTable`: the `Lookup`/persistent-chain
+  design in Zig std's `std.compress.flate` (MIT) is studied, not copied
+  (absolute wrapping positions; `docs/research/flate-notes.md` §8).
+
+## Vendored specs (`docs/research/specs/`)
+
+Verbatim spec text, fetched once with provenance recorded in the directory
+`README.md`. IETF RFCs are freely distributed. The Snappy format description
+comes from google/snappy (BSD-3-Clause).
+
+## Studied, not copied
+
+Reference implementations read or run to settle behavior. No code is copied from
+them; the rows are here so the debt is visible.
+
+- `src/gzip/`, `src/zlib/`: klauspost/compress (BSD-3-Clause) `gzip/` and `zlib/`,
+  the Go stdlib containers over the klauspost flate engine, for the header and
+  trailer emission policy and where the checksum is computed.
+- `src/gzip/crc32.zig`, `src/zlib/adler32.zig`: ebiggers/libdeflate (MIT)
+  `lib/crc32.c`, `lib/adler32.c`, `lib/gzip_compress.c`, `lib/gzip_decompress.c`,
+  for the checksum function shape and the single-member boundary reported to the
+  caller. zlib-ng (zlib license) `crc32.c`, `adler32.c`, `arch/**`, `zutil.h` for
+  the kernel dispatch landscape and the gzip OS byte survey.
+- `src/gzip/`, `src/zlib/`: Zig std's container handling in
+  `std.compress.flate` (MIT), studied for its decoder laxness (no trailer or
+  FCHECK verification, no reserved-bit check), which the tests pin as
+  divergences.
+- `src/zstd/`: the reference zstd C library and CLI v1.5.7 (BSD-3-Clause or
+  GPLv2) as a behavior oracle, run through the CLI rather than read; klauspost/compress
+  (BSD-3-Clause) `zstd/` for its error vocabulary and the decisions it makes
+  differently (it supports dictionaries); Zig std's zstd decoder (MIT) for its
+  `ReverseBitReader`, and for the unverified checksum and rejected dictionary
+  frames that the tests pin as divergences.
+- madler/zlib's emission rules were verified through python3's `zlib` and `gzip`
+  modules (PSF) used as a CLI oracle. Nothing is vendored.
 
 ## Dependencies
 

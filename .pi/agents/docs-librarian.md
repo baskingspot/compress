@@ -49,7 +49,8 @@ The plan is the only place that asserts milestone/decision status. Module README
 
 ## Structure hygiene
 
-- Every module README follows the established shape: title + what it is/is not, `## API`, contracts, format, encoder, decoder, streaming, benchmarks, testing, licensing — mirror `src/snappy/README.md`'s section order unless the format forces deviation (flate's deviations are the README's own stated three).
+- Module READMEs are for human readers: what the codec is, usage, `## API`, the behavior a caller needs, limitations, testing/benchmark pointers, licensing. Target 60-200 lines. Design rationale, errata registers, decision tables, test inventories, file maps, and research-note citations belong in the `AGENTS.md` beside the code (`src/<codec>/AGENTS.md`). A README carrying milestone labels (M3), research-row ids (OQ7, T10), process words (lane, wave, fleet, pattern book), review history, or pointers to another document's section names is a finding; move the material to AGENTS.md.
+- Doc comments (`///`, `//!`) render as function docs and are for callers: what it does, arguments, errors, preconditions, costs. Planning ids, README-section pointers, and review history in them are findings.
 - `## API` code blocks are valid-Zig-shaped and match the actual exports in the module's `root.zig` barrel (`{Reader, Writer, encode, decode}` + `streamAll` where landed + `Options`/`Level` where knobs exist). A README API block naming an export that root.zig does not carry (or vice versa) is a bug.
 - Duplicate `## ` headings across files render colliding in a TOC — surface.
 - Em-dash separators between heading and marker are brittle; prefer parentheticals.

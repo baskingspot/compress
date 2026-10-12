@@ -1,6 +1,6 @@
 # ec2bench
 
-`ec2bench` manages a tag-scoped EC2 fleet. A project adapter supplies benchmark commands.
+`ec2bench` manages a set of tag-scoped EC2 instances. A project adapter supplies benchmark commands.
 The package contains no benchmark-specific build or analysis code.
 
 ## Adoption procedure
@@ -140,7 +140,7 @@ The launch template must set shutdown behavior to `terminate`.
 An external reaper must enforce the earlier of `ExpiresAt` and `LaunchTime + 24h`.
 The external reaper remains necessary when first-boot setup fails or the harness disappears.
 
-The harness calls `reap` at the start of `up` and the fastmem `run` command.
+`up` calls `reap` first, and so does the zcompress adapter's `run` command.
 The harness reaper treats absent or malformed expiration tags as expired.
 A failed EC2 or image readiness wait triggers termination of that instance.
 A failed target does not prevent measurements on other targets with `run --up`.
@@ -157,7 +157,7 @@ The next run refuses that box. It does not share its CPU.
 3. Restore the original cpuset properties, or reboot the instance.
 4. Remove `/run/ec2bench-isolation.lock` if it remains after recovery.
 
-## Current limits
+## Limits
 
 Concurrent `up` commands for the same target are unsupported. EC2 tags do not provide an atomic launch claim.
 After launch, the harness selects the earliest instance and terminates duplicates that it discovers.
