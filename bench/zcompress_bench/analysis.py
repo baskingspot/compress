@@ -1,4 +1,4 @@
-"""Robust round-level ratios and exact rank intervals for codec rows.
+"""Round-level ratios and exact rank intervals for codec rows.
 
 Ported from the fastmem harness (fastmem_bench/analysis.py); the estimator
 core is verbatim. One round is one process run, and the round is the unit of
@@ -7,11 +7,12 @@ its samples. A ratio compares the round medians of two cells on the log
 scale. Cells of two arms come from separate processes: a two-sample
 comparison (A/A and competitor arms against the zc arm). Cells of one arm
 come from the same processes: a paired comparison (zc against the in-binary
-std rows, and each container against its paired flate row — the honest
-reference, since cross-binary code-layout interference inflates cross-binary
-comparisons on latency-bound shapes). Outlier rounds are reported only. They
-never leave an estimate or interval. Ratios below 1 indicate a faster
-candidate; throughput is over uncompressed bytes.
+std rows, and each container against its paired flate row, which is the
+reference for container overhead because cross-binary code-layout
+interference inflates cross-binary comparisons on latency-bound shapes).
+Outlier rounds are reported only. They never leave an estimate or interval.
+Ratios below 1 indicate a faster candidate; throughput is over uncompressed
+bytes.
 """
 
 import logging

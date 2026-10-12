@@ -1,9 +1,9 @@
 //! Snappy block codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
 //!
-//! Covers compress and decompress across several data shapes (repetitive text,
-//! random, html-like, a single-byte run, and the 32 KiB block size).
-//! Throughput is reported as MB/s over the *uncompressed* input size so compress
-//! and decompress are directly comparable.
+//! Covers compress and decompress, plus the compression ratio, across five
+//! input shapes (text, random, html, rle, mixed; see `Shape`) at a fixed 32 KiB
+//! block. Throughput is reported as MB/s over the *uncompressed* input size so
+//! compress and decompress are directly comparable.
 //!
 //! Output is benchstat-friendly:
 //! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
@@ -16,8 +16,7 @@ const fastmem = @import("fastmem");
 const bench = @import("benchmark");
 const snappy = @import("zcompress").snappy;
 
-/// Input corpus shapes. Each returns a freshly-allocated buffer the benchmark
-/// is responsible for freeing (once, in setup — not in the timed loop).
+/// Input corpus shapes; `makeShape` builds one.
 const Shape = enum {
     text, // repetitive English-ish text (highly compressible)
     random, // PRNG bytes (incompressible -> bail to literal)
@@ -26,6 +25,8 @@ const Shape = enum {
     mixed, // structured + random (realistic-ish record batch)
 };
 
+/// A freshly allocated `len`-byte buffer of the given shape. The caller frees
+/// it, in setup rather than in the timed loop.
 fn makeShape(allocator: Allocator, shape: Shape, len: usize) ![]u8 {
     const buf = try allocator.alloc(u8, len);
     switch (shape) {
@@ -121,8 +122,8 @@ pub fn benchmarkDecompress(b: *bench.B) !void {
 }
 
 /// Compression ratio (compressed / uncompressed) per shape, reported as a
-/// custom metric so the benchmark table shows how much the match-finder helps.
-/// Not a timed loop — it runs once to print the ratio alongside the throughput.
+/// custom metric so the benchmark table shows how much the match finder helps.
+/// The timed loop does no work; the metric is the result.
 pub fn benchmarkRatio(b: *bench.B) !void {
     inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
         _ = try b.run(shapeName(shape), struct {
@@ -135,7 +136,7 @@ pub fn benchmarkRatio(b: *bench.B) !void {
                 const clen = try snappy.encode.compressBlock(input, comp);
                 const ratio = @as(f64, @floatFromInt(clen)) / @as(f64, @floatFromInt(input.len));
                 try bb.reportMetric(ratio, "ratio");
-                // One iteration so the harness is happy; the metric is the point.
+                // The harness expects a timed loop; it does no work here.
                 while (try bb.loop()) {
                     bb.keepAlive(clen);
                 }

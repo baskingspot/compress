@@ -1,16 +1,14 @@
-//! gzip.decode: the one-shot member decoder, the header parser both layers
-//! share, and the trailer check (README.md, "API" and "The member format").
+//! gzip.decode: the one-shot member decoder, plus the header parser and the
+//! trailer check that it shares with the streaming `Reader`.
 //!
-//! The header parse is a byte-fed state machine (`HeaderParser`): the one-shot
-//! drives it over the whole source, the streaming `Reader` over the input's
-//! buffered chunks, and neither stages an optional field — the extra field
-//! and the name/comment scans fold the bytes into the header CRC as they
-//! pass, so a 65,535-byte XLEN cannot amplify memory (T7, OQ6). The trailer
-//! check is one function, so both layers report the same specific errors
-//! (`WrongChecksum`, `WrongSize`, T4). The one-shot driver — the
-//! streaming-Reader route and the error mapping — is
-//! `src/internal/container.zig`'s `DecodeHooks`, instantiated over this
-//! module's framing (`framing.zig`).
+//! `decompress` decodes one member into a caller-provided buffer. It runs the
+//! member through the streaming `Reader` over a fixed input, so it needs no
+//! allocator. `HeaderParser` is a byte-fed state machine that skips the
+//! optional header fields as they stream past instead of storing them, so a
+//! header declaring a 65,535-byte extra field costs no memory. `checkTrailer`
+//! is the one place the CRC-32 and size are compared.
+//!
+//! Format: docs/research/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const mem = std.mem;
@@ -27,27 +25,31 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const crc32 = @import("crc32.zig");
 const encode = @import("encode.zig");
-/// The framing lengths, defined with the emitter (`encode.zig`) and
-/// re-exported here: the decoder side reads them without reaching across
-/// namespaces. RFC 1952 §2.3 — the fixed header's 10 bytes (`§2.3.1`) and
-/// the trailer's CRC32 + ISIZE (`§2.3.1`).
+/// The fixed header's length, 10 bytes (RFC 1952 §2.3.1). Defined in
+/// `encode.zig` and re-exported so decoder-side code need not reach across
+/// namespaces.
 pub const header_len = encode.header_len;
+/// The trailer's length, 8 bytes: CRC32 and ISIZE (RFC 1952 §2.3.1).
 pub const trailer_len = encode.trailer_len;
 const framing = @import("framing.zig");
-/// The one-shot decoder's error set (README, "API"; `framing.zig` defines
-/// it): flate's decode detail set plus this module's header and trailer
-/// entries — `BadHeader` (ID1/ID2/CM wrong, or a reserved FLG bit,
-/// §2.3.1.2), `HeaderTooLong` (FNAME/FCOMMENT past the 512-byte cap, T7),
-/// `WrongHeaderChecksum` (§2.3.1), `WrongChecksum` and `WrongSize`
-/// (§2.3.1). `BufferTooSmall` is flate's (a member that does not fit the
-/// caller's cap).
+/// The errors `decompress` can return: flate's `DecompressError` (a malformed
+/// or truncated deflate body, or `BufferTooSmall` when the decoded member does
+/// not fit `target`) plus these:
+///
+/// - `BadHeader`: ID1, ID2, or CM is wrong, or a reserved FLG bit is set
+///   (§2.3.1.2).
+/// - `HeaderTooLong`: FNAME or FCOMMENT is longer than `name_comment_cap`.
+/// - `WrongHeaderChecksum`: the FHCRC field does not match the header (§2.3.1).
+/// - `WrongChecksum`: the CRC32 in the trailer does not match the decoded data.
+/// - `WrongSize`: the ISIZE in the trailer does not match the decoded length
+///   mod 2^32.
 pub const DecompressError = framing.DecompressError;
 const golden = @import("golden.zig");
 const Reader = @import("Reader.zig");
 
-/// The FNAME/FCOMMENT NUL-scan cap (T7): Go's house rule (`gunzip.go:145`),
-/// not a spec rule — the RFC bounds nothing. At most this many bytes are
-/// scanned for the terminator; none found is `HeaderTooLong`.
+/// The longest FNAME or FCOMMENT the parser accepts, in bytes including the
+/// NUL terminator. RFC 1952 sets no limit; 512 is the limit Go's reader uses.
+/// A field with no terminator within this many bytes is `HeaderTooLong`.
 pub const name_comment_cap = 512;
 
 /// The header parser's own failures; the drivers add `Truncated` when the
@@ -68,11 +70,10 @@ pub const flg_fcomment = 0x10;
 pub const flg_reserved = 0xe0;
 
 /// The member header parser (`§2.3.1`): a byte-fed state machine over the
-/// field order of `§2.3` — the 10 fixed bytes, FEXTRA, FNAME, FCOMMENT,
-/// FHCRC. Bytes are folded into the header CRC-32 as they are consumed
-/// (FHCRC is its low 16 bits, `§2.3.1`), and the optional fields are never
-/// staged: a hostile XLEN or an unterminated name costs bounded work and no
-/// memory (T7, OQ6).
+/// field order of `§2.3` (the 10 fixed bytes, FEXTRA, FNAME, FCOMMENT,
+/// FHCRC). Bytes are folded into the header CRC-32 as they are consumed (FHCRC
+/// is its low 16 bits, `§2.3.1`). Optional fields are skipped, never stored:
+/// a large XLEN or an unterminated name costs bounded work and no memory.
 pub const HeaderParser = struct {
     /// The field being consumed, in `§2.3`'s order.
     stage: Stage = .fixed,
@@ -101,11 +102,12 @@ pub const HeaderParser = struct {
         return parser.stage == .done;
     }
 
-    /// Feed `bytes` to the parser and return the bytes consumed. The parser
+    /// Feed `bytes` to the parser and return the number consumed. The parser
     /// consumes as much as the current field needs; a caller with more input
     /// feeds again (the streaming route), and a caller with the whole member
     /// feeds once. Every non-`done` stage consumes at least one byte of a
-    /// non-empty slice, so a driver always makes progress.
+    /// non-empty slice, so a driver always makes progress. A `HeaderError` is
+    /// returned as soon as the bytes show the header is invalid.
     pub fn feed(parser: *HeaderParser, bytes: []const u8) HeaderError!usize {
         var consumed: usize = 0;
         while (consumed < bytes.len and parser.stage != .done) {
@@ -170,8 +172,8 @@ pub const HeaderParser = struct {
         return 1;
     }
 
-    /// The extra field's bytes, skipped streaming from the input and folded
-    /// into the header CRC: never staged (T7, OQ6).
+    /// The extra field's bytes, skipped as they stream past and folded into
+    /// the header CRC, never stored.
     fn stepExtra(parser: *HeaderParser, bytes: []const u8) HeaderError!usize {
         const remaining = @as(usize, parser.extra_len) - parser.skipped;
         const take = @min(remaining, bytes.len);
@@ -182,10 +184,9 @@ pub const HeaderParser = struct {
     }
 
     /// FNAME and FCOMMENT (`§2.3.1`): NUL-terminated Latin-1, scanned for
-    /// the terminator with the 512-byte cap (T7). The bytes, terminator
-    /// included, are header bytes for FHCRC (`§2.3.1`). A name or comment
-    /// longer than the cap is `HeaderTooLong`; the strings' contents are not
-    /// the container's business.
+    /// the terminator within `name_comment_cap` bytes. The bytes, terminator
+    /// included, are header bytes for FHCRC (`§2.3.1`). A longer name or
+    /// comment is `HeaderTooLong`; the contents are not interpreted.
     fn stepString(parser: *HeaderParser, bytes: []const u8) HeaderError!usize {
         const room = name_comment_cap - parser.scanned;
         const chunk = bytes[0..@min(room, bytes.len)];
@@ -207,7 +208,7 @@ pub const HeaderParser = struct {
     /// FHCRC (`§2.3.1`): "the two least significant bytes of the CRC32 for
     /// all bytes of the gzip header up to and not including the CRC16",
     /// u16 little-endian. RFC 1952 requires only that the field be skippable
-    /// (`§2.3.1.2`); we verify it (T3), and the header is complete here.
+    /// (`§2.3.1.2`); this parser verifies it. The header is complete here.
     fn stepFhcrc(parser: *HeaderParser, bytes: []const u8) HeaderError!usize {
         const byte = bytes[0];
         if (parser.taken == 0) {
@@ -262,10 +263,11 @@ pub const HeaderParser = struct {
     }
 };
 
-/// Verify the 8-byte trailer against the folded checksum state (`§2.3.1`):
-/// CRC-32 (ISO 3309) and ISIZE, the input size mod 2^32, both u32
-/// little-endian (`§2.1`). The two are kept separate — Go collapses both
-/// into `ErrChecksum` (`gunzip.go:267`); ours report which half failed (T4).
+/// Check the 8-byte `trailer` against `crc` and `len`, the CRC-32 and the
+/// length mod 2^32 of the decoded data. Both trailer fields are u32
+/// little-endian (`§2.1`, `§2.3.1`). Returns `error.WrongChecksum` if the
+/// CRC-32 differs, else `error.WrongSize` if ISIZE differs, so the caller
+/// learns which half failed (Go reports both as one error).
 pub fn checkTrailer(
     trailer: *const [trailer_len]u8,
     crc: u32,
@@ -279,16 +281,20 @@ pub fn checkTrailer(
 /// reader (`src/internal/container.zig`).
 const Hooks = container.DecodeHooks(framing, Reader);
 
-/// Decode one complete gzip member from `source` into `target`. `target` is
-/// a cap; the return is the decoded length. The member is located by exact
-/// consumption (OQ2): the body runs through the streaming `Reader` over the
-/// fixed input, whose position after the clean end is the trailer — and the
-/// trailer is verified against the bytes the decode produced. Bytes after
-/// the trailer are ignored: the one-shot reports no consumed count, so a
-/// boundary-aware caller uses the streaming reader (README, "Contracts").
+/// Decode one gzip member from `source` into `target` and return the decoded
+/// length. `target` is a cap, not a size hint: a member that decodes to more
+/// than `target.len` bytes returns `error.BufferTooSmall` before the
+/// overflowing write.
 ///
-/// Zero heap allocation: the streaming reader's 64-KiB window is a stack
-/// local. `error.BufferTooSmall` is reported before the overflowing write.
+/// The header, the deflate body, and the trailer are all checked (see
+/// `DecompressError`). After an error the contents of `target` are
+/// unspecified. Bytes after the member's trailer are ignored and the end of
+/// the member is not reported, so use `Reader` where the boundary matters,
+/// for example to walk concatenated members. An empty `source` is
+/// `error.Truncated`.
+///
+/// Allocates nothing. The stack holds the decoder's 64 KiB window and about
+/// 4 KiB of reader state.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     return Hooks.decompress(source, target);
 }
@@ -331,7 +337,7 @@ test "decode: the fixed header parses, and its fields are ignorable" {
     _ = try parseHeader(&ignorable);
 }
 
-test "decode: the magic, CM, and reserved FLG bits fail closed" {
+test "decode: the magic, CM, and reserved FLG bits fail" {
     // RFC 1952 §2.3.1.2 — "must check ID1, ID2, and CM, and provide an error
     // indication"; a non-zero reserved FLG bit "could indicate the presence
     // of a new field that would cause subsequent data to be interpreted
@@ -352,7 +358,7 @@ test "decode: the extra field is skipped with the XLEN bound" {
     // RFC 1952 §2.3.1.1 — XLEN is a u16 little-endian length; the subfields
     // are skipped, not interpreted (§2.3.1.2 examines them only "so it can
     // skip over the optional fields"). A 65,535-byte XLEN costs bounded
-    // work: the bytes are consumed streaming, never staged (T7, OQ6).
+    // work: the bytes are consumed as they stream past, never stored.
     const extra = "z" ** 0xffff;
     const header = try testing.allocator.alloc(u8, header_len + 2 + extra.len);
     defer testing.allocator.free(header);
@@ -380,10 +386,10 @@ test "decode: the extra field is skipped with the XLEN bound" {
 }
 
 test "decode: FNAME and FCOMMENT are NUL-scanned with the 512-byte cap" {
-    // RFC 1952 §2.3.1 — the fields are NUL-terminated; the cap is the house
-    // rule (T7, Go's `gunzip.go:145`). The terminator counts as a header
-    // byte for FHCRC, and 511 bytes of name plus the terminator is inside
-    // the cap while 512 without one is `HeaderTooLong`.
+    // RFC 1952 §2.3.1 — the fields are NUL-terminated; the cap is not in the
+    // RFC, it matches Go's reader (`gunzip.go:145`). The terminator counts as
+    // a header byte for FHCRC, and 511 bytes of name plus the terminator is
+    // inside the cap while 512 without one is `HeaderTooLong`.
     const name = "n" ** 511;
     const header = try testing.allocator.alloc(u8, header_len + name.len + 1);
     defer testing.allocator.free(header);
@@ -417,7 +423,8 @@ test "decode: FHCRC is verified" {
     // RFC 1952 §2.3.1 — FHCRC is "the two least significant bytes of the
     // CRC32 for all bytes of the gzip header up to and not including the
     // CRC16". A right value completes the header; a wrong one is
-    // `WrongHeaderChecksum` (T3: the RFC requires only a skip, we verify).
+    // `WrongHeaderChecksum` (the RFC requires only a skip; this parser
+    // verifies).
     var header: [header_len + 2]u8 = undefined;
     fastmem.copy(u8, header[0..header_len], &empty_header);
     header[3] = flg_fhcrc;
@@ -453,10 +460,9 @@ test "decode: the parser is feed-boundary independent" {
 }
 
 test "decode: the one-shot decodes the golden table's trailing-byte cases" {
-    // README, "Contracts" — "Bytes after the trailer are ignored by the
-    // one-shot": the member decodes identically with garbage, a truncated
-    // next header, or a whole second member behind it (§2.2's boundary,
-    // T2/OQ3).
+    // Bytes after the trailer are ignored by the one-shot decoder: the member
+    // decodes identically with garbage, a truncated next header, or a whole
+    // second member behind it (§2.2).
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 128 + sentinel.len);
     defer gpa.free(window);
@@ -474,17 +480,17 @@ test "decode: the one-shot decodes the golden table's trailing-byte cases" {
 }
 
 test "decode: a zero-byte input is Truncated" {
-    // T2/OQ3 — the fail-closed reading: no member began. (Go accepts an
-    // empty file as a zero-member stream, CPython accepts it, the gzip CLI
-    // errors; ours is the CLI's reading, recorded in the research.)
+    // No member began, so the one-shot decoder reports `Truncated`. (Go and
+    // CPython accept an empty file as a stream of zero members; the gzip CLI
+    // errors, as this decoder does.)
     try testing.expectError(error.Truncated, decompress("", &.{}));
     try testing.expectError(error.Truncated, decompress(&[_]u8{0x1f}, &.{}));
 }
 
 test "decode: the trailer checks are specific" {
     // RFC 1952 §2.3.1 — CRC32 and ISIZE. A corrupt CRC byte is
-    // `WrongChecksum`, a corrupt ISIZE byte is `WrongSize` (T4: Go collapses
-    // both into ErrChecksum; ours keep which half failed).
+    // `WrongChecksum`, a corrupt ISIZE byte is `WrongSize` (Go reports both
+    // as ErrChecksum; here the caller learns which half failed).
     var member: [golden_max]u8 = undefined;
     const source = "hello world\n";
     const len = try encode.compress(source, &member, .{});
@@ -519,7 +525,7 @@ test "decode: the all-fields member's header is skipped, not interpreted" {
     try testing.expectEqual(@as(usize, 0), try decompress(source, &empty));
 }
 
-test "decode: a corrupt body fails closed with flate's detail" {
+test "decode: a corrupt body fails with flate's detail" {
     // RFC 1952 §2.3.1.2 — CM=8's method is "documented elsewhere": the body
     // is flate's rules unchanged, and its failures are the module's own
     // (`Truncated`, `InvalidBlockType`, ...).
@@ -534,15 +540,15 @@ test "decode: a corrupt body fails closed with flate's detail" {
 }
 
 test "decode: the empty target is a valid cap for an empty member" {
-    // README, "Sizing": `target` is a cap; an empty member needs none.
+    // `target` is a cap; an empty member needs no room.
     var member: [32]u8 = undefined;
     const len = try encode.compress("", &member, .{});
     try testing.expectEqual(@as(usize, 0), try decompress(member[0..len], &.{}));
 }
 
 test "decode: a bomb member is capped, never an overrun" {
-    // README, "Sizing": a member that does not fit is `BufferTooSmall`,
-    // reported before the overflowing write; the bytes past the cap hold.
+    // A member that does not fit is `BufferTooSmall`, reported before the
+    // overflowing write; the bytes past the cap are untouched.
     var member: [512]u8 = undefined;
     const source = "A" ** 4096;
     const len = try encode.compress(source, &member, .{});

@@ -1,25 +1,21 @@
 //! zstd example CLI: `zstd decode [FILE|-] > out`. Shared scaffolding in
 //! `examples/cli.zig`.
 //!
-//! Decode-only until M5 adds the encoder direction (README, "API"): the CLI
-//! leaves `encode` null and reports the direction as usage, and `decode` is
-//! the frame walk the codec owns — `Reader.streamAll`, RFC 8878 §3.1: the
-//! output of the decompression is the concatenation of the frames, one unit
-//! per iteration at the boundary contract's exact position (skippable frames
-//! consumed and ignored, `§3.1.2`; a unit that is not present is the file's
-//! clean end; garbage where a frame unit should start fails `BadMagic`,
-//! never silently skipped; the zero-byte input is the clean end).
+//! There is no zstd encoder, so the CLI leaves `encode` null and reports that
+//! direction as usage. `decode` runs the input through
+//! `zstd.Reader.streamAllAlloc`, which decodes every frame in turn (RFC 8878
+//! §3.1: the decompressed output is the concatenation of the frames).
+//! Skippable frames are consumed and ignored (§3.1.2), and empty input is a
+//! clean end. Bytes where a frame should start must be a valid frame magic,
+//! or the decode fails (`BadMagic` in the reader, surfaced by the pump as
+//! `error.ReadFailed`).
 //!
-//! The buffer is the codec's default — an 8 MiB window (`§3.1.1.1.2`'s
-//! recommendation, the pin from the CLI's level-19 frames) plus the serving
-//! block room and the block staging room, 8 MiB + 256 KiB in all — and 8.25
-//! MiB cannot be a portable stack local (an 8 MiB stack limit is the common
-//! case), which is why the pumps take a caller-owned buffer. `decode` is the
-//! convenience: `Reader.streamAllAlloc` allocates that buffer from the run's
-//! arena for the call and frees it before returning (an arena's free is a
-//! no-op — the run owns the memory). Every other codec's example sizes its
-//! window on the stack; zstd's is the divergence. The codec still allocates
-//! nothing — the example, as its caller, does.
+//! The default window buffer is 8 MiB + 256 KiB: the 8 MiB window that
+//! §3.1.1.1.2 recommends decoders support, plus block room. That is too large
+//! for a stack local under the usual 8 MiB stack limit, so `streamAllAlloc`
+//! allocates it from the run's arena for the call. The other examples buffer
+//! on the stack. The codec itself does not allocate; the allocator is this
+//! example's.
 
 const std = @import("std");
 const Io = std.Io;
@@ -30,22 +26,20 @@ const cli = @import("cli");
 const zstd = @import("zcompress").zstd;
 
 pub fn main(init: std.process.Init) !u8 {
-    // No `encode`: M5 adds the fast encoder, and `cli.run` reports the
-    // missing direction as usage until then.
+    // No `encode`: there is no zstd encoder, so `cli.run` reports that
+    // direction as usage.
     return cli.run(.{ .name = "zstd", .decode = decode }, init);
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
-    // The convenience owns the default-window buffer for the call: the
-    // run's arena hands it 8 MiB + 256 KiB and the pump frees it before
-    // returning. `Reader.streamAll`'s multi-frame walk, RFC 8878 §3.1 — the
-    // one-call shape, with the codec itself allocating nothing.
+    // `streamAllAlloc` takes the default window (8 MiB + 256 KiB) from the
+    // arena for the call, then decodes every frame (RFC 8878 §3.1).
     _ = try zstd.Reader.streamAllAlloc(arena, in, out);
 }
 
 test "example: the decode pump walks a multi-frame file" {
     // RFC 8878 §3.1 — frames concatenate: the CLI decodes every frame, and
-    // trailing bytes that are not a frame unit fail closed.
+    // trailing bytes that do not start a frame are an error.
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -61,7 +55,7 @@ test "example: the decode pump walks a multi-frame file" {
     try decode(arena, &z, &plain.writer);
     try testing.expectEqualStrings("zstd rawzstd raw", plain.written());
 
-    // Trailing garbage: the walk's next unit fails its classify.
+    // Trailing garbage: the next frame's magic check fails.
     try frames.writer.writeByte(0x00);
     var bad: Io.Writer.Allocating = .init(testing.allocator);
     defer bad.deinit();
@@ -70,10 +64,10 @@ test "example: the decode pump walks a multi-frame file" {
 }
 
 test "example: the pump stops at the frame's end" {
-    // The frame's boundary is exact: one unit's pump consumes through the
-    // frame's last byte — the checksum trailer's when the flag is set
-    // (RFC 8878 §3.1.1) — and the marker bytes behind it are not the
-    // decoder's to consume, which is where the walk's next unit starts.
+    // A frame's end is exact: decoding one frame consumes through its last
+    // byte, the checksum's when the frame has one (RFC 8878 §3.1.1), and
+    // leaves the marker bytes behind it unread, where the next frame would
+    // start.
     var arena_state: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();

@@ -1,7 +1,7 @@
-/* The zlib-ng fleet arm (bench/README.md): the streaming zlib API (the
- * pinned competitor shape) at level 1, over the three containers as
- * windowBits -15/15/31 (raw/zlib/gzip). Streams reset per iteration
- * (deflateReset/inflateReset), so the timed loop is the codec alone.
+/* The zlib-ng arm (bench/README.md): the streaming zlib API at level 1, over
+ * the three containers as windowBits -15/15/31 (raw/zlib/gzip). Streams reset
+ * per iteration (deflateReset/inflateReset), so the timed loop is the codec
+ * alone.
  *
  * Built against zlib-ng in ZLIB_COMPAT mode (the zlib.h API). Build defines:
  * CBENCH_TARGET (triple string), CBENCH_CPU, ZIG_VERSION, COMPETITOR_VERSION.

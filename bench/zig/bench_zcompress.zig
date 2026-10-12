@@ -1,16 +1,16 @@
-//! The fleet benchmark driver for the zcompress arms (bench/README.md).
+//! The benchmark driver for the `zc` arm (bench/README.md).
 //!
-//! One process run is one round of one arm. The binary reads the fleet
-//! corpus (generated into `bench/corpus-gen/`, verified against the
-//! committed hashes, and uploaded to the box by the harness), measures
-//! each (case, implementation) cell for `--samples` time-boxed samples of
-//! `--sample-ms` milliseconds each, and writes schema-v1 JSONL on stdout: a
-//! meta record, one sample record per measurement, and an end record.
+//! One process run is one round of one arm. The binary reads the benchmark
+//! corpus (generated into `bench/corpus-gen/`, verified against the committed
+//! hashes, and uploaded to the box by the harness), measures each (case,
+//! implementation) cell for `--samples` time-boxed samples of `--sample-ms`
+//! milliseconds each, and writes schema-v1 JSONL on stdout: a meta record,
+//! one sample record per measurement, and an end record.
 //!
 //! Implementations in this binary:
 //!   - `zc`  — the zcompress one-shots: flate/gzip/zlib at level .fast and
 //!     the snappy raw block codec, both directions, plus the zstd one-shot
-//!     decode (M4 is decode-only: no zstd compress row).
+//!     decode (zstd has no encoder, so there is no zstd compress row).
 //!   - `std` — std.compress.flate with Container raw/gzip/zlib at level_1
 //!     (the fast class), both directions, plus std.compress.zstd decode.
 //!     The in-binary competitor: its rows pair with the `zc` rows inside
@@ -58,9 +58,9 @@ fn blobExt(codec: []const u8) []const u8 {
     return codec;
 }
 
-/// zstd is decode-only until M5 (there is no zcompress zstd encoder, and
-/// std.compress.zstd has no compressor either): its rows are decompress
-/// only, decoding the pinned CLI's reference frames (bench/zig/corpus.zig).
+/// zstd rows are decompress only: there is no zcompress zstd encoder, and
+/// std.compress.zstd has no compressor either. They decode the pinned CLI's
+/// reference frames (bench/zig/corpus.zig).
 fn codecDirections(codec: []const u8) []const []const u8 {
     if (mem.eql(u8, codec, "zstd")) return &decode_only;
     return &directions;
@@ -332,7 +332,7 @@ fn checkCase(bench: *Bench, case: Case) !?[]const u8 {
             if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "snappy")) continue;
             if (!bench.anyRow(case, codec)) continue;
             bench.cases += 1;
-            // Decode-only codecs (zstd until M5) have no round trip: the
+            // Decode-only codecs (zstd) have no round trip: the
             // reference-blob decode below is the whole check.
             if (codecDirections(codec).len == 2) {
                 const n = compressOne(bench, impl, codec, case.raw) catch |err| {

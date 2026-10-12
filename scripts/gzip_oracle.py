@@ -1,12 +1,12 @@
-"""The gzip external-oracle conformance lane.
+"""Check gzip against independent implementations.
 
-Python's zlib (the C reference, via `wbits` 31) and the CPython `gzip`
-module are the point: independent gzip implementations verifying ours in
-both directions (our encode -> its decode, its encode -> our decode), over
-generated shapes and the CLI rows; the gzip/gunzip 1.14 CLIs join as the
-reference file-tool pair. Run via `just gzip-oracle`; python3 comes from the
-flake. Incantations verified in docs/research/containers-notes.md §5.5;
-shared plumbing: scripts/oracle_common.py.
+Python's zlib (the C reference, via `wbits` 31) and the CPython `gzip` module
+verify ours in both directions (our encode -> its decode, its encode -> our
+decode) over generated shapes and the example CLI. The gzip/gunzip 1.14 CLIs
+join as the reference file-tool pair. Run it with `just gzip-oracle`; python3
+comes from the flake. The harness is built from src/gzip/oracle.zig. The
+reference incantations are in docs/research/containers-notes.md §5.5, and the
+shared plumbing is in scripts/oracle_common.py.
 """
 
 import gzip
@@ -18,10 +18,9 @@ import oracle_common as common
 root = common.ROOT
 harness = root / "zig-out/bin/gzip-oracle"
 
-# Our emitted-header policy (README, "The member format", OQ7): FLG=0,
-# MTIME=0, OS=255 (T1); XFL is informational and follows the level bands
-# (containers-notes.md §5.5: {0,1}->4, 9->2, else 0).
-# The full band: {fast, 0, 1} -> 4, 9 -> 2, 2-8 -> 0 (encode.xflFor).
+# Our emitted header: FLG=0, MTIME=0, OS=255. XFL is informational and follows
+# the level bands ({fast, 0, 1} -> 4, 9 -> 2, 2-8 -> 0; see encode.xflFor and
+# containers-notes.md §5.5).
 XFL_BY_LEVEL = {str(n): 4 if n <= 1 else 2 if n == 9 else 0 for n in range(10)} | {"fast": 4}
 
 
@@ -58,13 +57,13 @@ def example(args, data: bytes) -> subprocess.CompletedProcess:
 def check_header(member: bytes, level: str) -> None:
     assert member[0] == 0x1F and member[1] == 0x8B and member[2] == 8, "magic/CM"
     assert member[3] == 0, f"FLG {member[3]:#x}: no optional fields, reserved bits clear"
-    assert int.from_bytes(member[4:8], "little") == 0, "MTIME must be 0 (OQ7)"
+    assert int.from_bytes(member[4:8], "little") == 0, "MTIME must be 0 (deterministic header)"
     assert member[8] == XFL_BY_LEVEL[level], f"XFL {member[8]} for level {level}"
-    assert member[9] == 255, f"OS {member[9]} (T1: 255)"
+    assert member[9] == 255, f"OS {member[9]} (unknown OS = 255)"
 
 
 # The generated conformance shapes (oracle_common.SHAPES): the same bytes in
-# every lane.
+# every script.
 shapes = common.SHAPES
 text = shapes["text"]
 long_text = shapes["long text (multi-block)"]
@@ -100,17 +99,17 @@ for desc, data in shapes.items():
 
 # 3. The single-member boundary: the second member lands in the reference's
 #    `unused_data`, and our one-shot ignores everything after the trailer
-#    (README, "Contracts" — a boundary-aware caller uses the streaming
-#    reader, which the CLI rows below exercise).
+#    (a caller that needs the boundary uses the streaming reader, which the
+#    CLI rows below exercise).
 two = zlib_member(text, 6) * 2
 do = zlib.decompressobj(31)
 assert do.decompress(two) + do.flush() == text
 assert do.unused_data == zlib_member(text, 6), "the reference leaves the second member"
 assert our_decompress(two, len(text) + 1) == text, "our one-shot decodes the first member"
 
-# 4. FHCRC (T3): a hand-built member with a correct CRC16 decodes; a
-#    corrupted one fails closed. The value is the low 16 bits of the header
-#    CRC-32 (§2.3.1).
+# 4. FHCRC: a hand-built member with a correct CRC16 decodes; a corrupted
+#    one is rejected. The value is the low 16 bits of the header CRC-32
+#    (§2.3.1).
 raw = zlib.compressobj(6, zlib.DEFLATED, -15)
 body = raw.compress(text) + raw.flush()
 head = bytes([0x1F, 0x8B, 8, 0x02]) + (0).to_bytes(4, "little") + bytes([0, 255])
@@ -123,12 +122,12 @@ corrupt[len(head) - 2] ^= 0x01
 assert our_decompress_fails(bytes(corrupt), len(text) + 1), "a wrong FHCRC must fail closed"
 rows += 2
 
-# 5. The gzip/gunzip 1.14 CLI lane: the reference file tools both directions.
+# 5. The gzip/gunzip 1.14 CLIs, the reference file tools, in both directions.
 for desc, data in shapes.items():
     p = subprocess.run(["gzip", "-c"], input=data, capture_output=True, check=False)
     assert p.returncode == 0, f"gzip -c ({desc})"
     cli_member = p.stdout
-    assert cli_member[9] == 3, "the gzip CLI emits OS=3 (T1)"
+    assert cli_member[9] == 3, "the gzip CLI emits OS=3 (Unix)"
     assert our_decompress(cli_member, len(data) + 1) == data, f"gzip CLI -> our decode ({desc})"
     member = our_compress(data)
     p = subprocess.run(["gunzip", "-c"], input=member, capture_output=True, check=False)
@@ -136,9 +135,8 @@ for desc, data in shapes.items():
     assert p.stdout == data, f"our encode -> gunzip ({desc})"
     rows += 2
 
-# 6. Trailing bytes, the recorded boundary divergence (T2/OQ3): our one-shot
-#    decodes the member and ignores the garbage; the CLI's caller loop fails
-#    closed on the next header parse.
+# 6. Trailing bytes: our one-shot decodes the member and ignores the garbage,
+#    while the CLI's member loop fails on the next header parse.
 member = our_compress(text)
 garbage = member + b"garbage!!!"
 assert our_decompress(garbage, len(text) + 1) == text, "the one-shot ignores trailing bytes"
@@ -147,7 +145,7 @@ assert p.returncode != 0, "the CLI fails closed on trailing garbage"
 
 # 7. The streaming rows through the example CLI (flate.Writer/flate.Reader
 #    underneath, the container framing on top): its own round trip, the C
-#    reference's decode of its stream, and the multi-member caller loop.
+#    reference's decode of its stream, and the multi-member walk.
 for desc, data in (("streaming text", text), ("streaming multi-block", long_text)):
     p = example(["encode", "-"], data)
     assert p.returncode == 0, f"example encode ({desc}): {p.stderr.decode().strip()}"

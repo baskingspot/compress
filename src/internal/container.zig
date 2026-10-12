@@ -1,65 +1,55 @@
-//! The container driver: the framing-agnostic machinery a container codec
-//! over an inner codec shares (README.md, "The Io codec pattern book"). gzip
-//! and zlib over flate are the two instantiations; a second container family
-//! (a frame over a raw stream) rides the same driver.
+//! The driver shared by container codecs that wrap an inner codec: gzip and
+//! zlib over flate. A container supplies its framing (header, trailer,
+//! checksum, error sets) as a comptime type `F`; everything else lives here,
+//! so this file holds no codec-specific state.
 //!
-//! The framing arrives as a comptime `Framing` type the container spells
-//! out, so this file imports only `std` and holds no codec-specific state:
-//! the header, the trailer, the checksum, and the error sets stay in the
-//! codec's own directory. What lives here, once, is everything that is not
-//! framing: the inner-window position sync (`commit`/`adopt`, the fill
-//! hand-off), the lazy header emission, the trailer read at the body's clean
-//! end, the checksum hook arming, the lifecycle funnel, the poison check,
-//! the stack-buffered one-call pumps, and the one-shot compress/decompress
-//! drivers. The pattern book's "A wrapper's rebase routes the inner end
-//! through the same ending as fill" entry is `ReaderHooks.rebase` below.
+//! Entry points: `ReaderHooks(F, Host)` and `WriterHooks(F, Host)` for
+//! streaming, `EncodeHooks(F)` and `DecodeHooks(F, Host)` for the one-shot
+//! functions, and `readExact`. The container's `Reader` and `Writer` are the
+//! `Host` types: they declare the fields listed at the end of this header and
+//! delegate their `init`, `finish`, and one-call pumps to the hooks.
 //!
-//! The `Framing` contract, in full. Every function and constant is
-//! referenced from here, so a missing or misspelled member fails the
-//! container's instantiation, not a runtime call. The type-only members
-//! (`Level`, `Header`, `HeaderError`, `InnerReader`, `InnerWriter`) are
-//! structural: the driver names their values, not their types, so they are
-//! checked where the value flows (a `HeaderError` must coerce into
-//! `Error`, an `initReader` result into the `inner` field):
+//! `F` must declare the members below. The hooks reference every function and
+//! constant, so a missing or misspelled member is a compile error where the
+//! container instantiates them. The type-only members (`Level`, `Header`,
+//! `HeaderError`, `InnerReader`, `InnerWriter`) are not named by the driver;
+//! they are checked where their values flow: a `HeaderError` must coerce into
+//! `Error`, and an `initReader` result must fit the `inner` field.
 //!
-//! - `Level`, `Options` — the public encoder knobs (`Options.level` is a
-//!   `Level`, and `Level` has a `.ratio` seat).
-//! - `Error` — the streaming reader's detail set; it contains the inner
-//!   codec's reader error set, `EndOfStream`, and the framing's own entries.
-//! - `DecompressError` — the one-shot decoder's detail set; it contains
-//!   `Error`'s non-interface entries and `BufferTooSmall`.
-//! - `HeaderError` — the header's own failures, plus `Truncated` and
-//!   `ReadFailed` for the input route.
-//! - `TrailerError` — the trailer's own failures, plus `Truncated` and
-//!   `ReadFailed` for the input route.
-//! - `Checksum` — the container's checksum state, with `.{}` its initial
-//!   value, `hook()` the flate checksum hook over it, and `fold(bytes)` the
-//!   direct one-shot fold.
-//! - `Header` — the header parse state; the reader carries one.
-//! - `ReaderBuffer`, `WriterBuffer` — the caller-owned buffers the container
-//!   re-exports from the inner codec.
-//! - `InnerReader`, `InnerWriter` — the inner codec's streaming types; the
-//!   driver reads `inner.reader` (the embedded `Io.Reader`), `inner.writer`,
+//! - `Level`, `Options`: the public encoder knobs. `Options.level` is a
+//!   `Level`, which has a `.ratio` member (reserved, not implemented).
+//! - `Error`: the streaming reader's detail errors: the inner codec's reader
+//!   errors, `EndOfStream`, and the framing's own.
+//! - `DecompressError`: the one-shot decoder's errors: `Error` minus
+//!   `StreamTooLong`, `ReadFailed`, and `EndOfStream`, plus `BufferTooSmall`.
+//! - `HeaderError`, `TrailerError`: the header's and trailer's own failures,
+//!   plus `Truncated` and `ReadFailed` for the input route.
+//! - `Checksum`: the checksum state. `.{}` is its initial value, `hook()`
+//!   returns the inner codec's checksum hook over it, and `fold(bytes)` folds
+//!   a whole buffer for the one-shot path.
+//! - `Header`: the header parse state; the reader carries one.
+//! - `ReaderBuffer`, `WriterBuffer`: the caller-owned buffers, re-exported
+//!   from the inner codec.
+//! - `InnerReader`, `InnerWriter`: the inner codec's streaming types. The
+//!   driver uses `inner.reader` (the embedded `Io.Reader`), `inner.writer`,
 //!   `inner.err`, and `inner.checksum`.
-//! - `header_len`, `trailer_len`, `writer_region_len` — the framing lengths
-//!   and the writer's serving region (`max_block_size`).
-//! - `initReader(input, buffer)`, `initWriter(output, buffer, options)` —
-//!   the inner codec's streaming constructors.
-//! - `headerDone(header)`, `readHeader(header, input)` — the header parse:
-//!   `readHeader` runs only while `headerDone` is false and consumes at
-//!   least one byte per call.
-//! - `checkTrailer(trailer, checksum)` — the trailer verification.
-//! - `writeHeader(target, level)`, `writeTrailer(target, checksum)` — the
-//!   deterministic emissions.
+//! - `header_len`, `trailer_len`, `writer_region_len`: the framing lengths and
+//!   the writer's serving region (the inner codec's `max_block_size`).
+//! - `initReader(input, buffer)`, `initWriter(output, buffer, options)`: the
+//!   inner codec's streaming constructors.
+//! - `headerDone(header)`, `readHeader(header, input)`: the header parse.
+//!   `readHeader` runs only while `headerDone` is false and consumes at least
+//!   one byte per call.
+//! - `checkTrailer(trailer, checksum)`: the trailer verification.
+//! - `writeHeader(target, level)`, `writeTrailer(target, checksum)`: write
+//!   the deterministic header and trailer bytes.
 //! - `bodyCompress(source, target, options)`,
-//!   `bodyMaxCompressedLength(input_len)` — the inner codec's one-shot
-//!   body.
+//!   `bodyMaxCompressedLength(input_len)`: the inner codec's one-shot
+//!   compress and its length bound.
 //!
-//! The `Host` type each hooks namespace is instantiated over carries the
-//! fields the driver names: the reader has `reader`, `inner`, `input`,
-//! `header`, `checksum`, `state`, `err`; the writer has `writer`, `output`,
-//! `inner`, `options`, `checksum`, `header`. The container declares them —
-//! they are its public state — and delegates its `init`/`finish`/pumps here.
+//! Fields the driver names on `Host`. Reader: `reader`, `inner`, `input`,
+//! `header`, `checksum`, `state`, `err`. Writer: `writer`, `output`, `inner`,
+//! `options`, `checksum`, `header`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -67,16 +57,16 @@ const assert = std.debug.assert;
 
 const lifecycle = @import("reader.zig");
 
-/// Whether the container's fixed header has reached the output: the header
-/// is lazy, so the first entry that can emit a byte — a write that drains, a
-/// flush, a rebase, or `finish` — writes it first. Both containers' writers
-/// carry this field.
+/// Whether a container writer has written its header. The header is written
+/// lazily, by the first entry that can emit a byte: a write that drains, a
+/// flush, a rebase, or `finish`. A container's `Writer` keeps one in its
+/// `header` field (the reader's header parse state is `F.Header`).
 pub const Header = enum { pending, written };
 
-/// Read exactly `target.len` bytes from `input`, consuming them: the header
-/// and trailer route, one refill at a time (the input's buffer may deliver
-/// one byte). A short input is `Truncated`; the input's own failure is
-/// `ReadFailed`.
+/// Reads exactly `target.len` bytes from `input` into `target`, consuming
+/// them. Works with an input that delivers one byte per refill. Returns
+/// `error.Truncated` if the input ends first and `error.ReadFailed` if the
+/// input itself fails.
 pub fn readExact(input: *Io.Reader, target: []u8) error{ Truncated, ReadFailed }!void {
     for (target) |*byte| {
         input.fill(1) catch |err| switch (err) {
@@ -88,17 +78,20 @@ pub fn readExact(input: *Io.Reader, target: []u8) error{ Truncated, ReadFailed }
     }
 }
 
-/// The streaming reader machinery for a container reader `Host`: `init`, the
-/// generated `Io.Reader` vtable entries, the fill funnel (the header once,
-/// then the inner codec's window, then the trailer at the body's clean end),
-/// and the stack-buffered one-call pump. The container's public `init`
-/// delegates here; the vtable entries are private to the driver.
+/// The streaming reader machinery for a container reader `Host`. `init`
+/// builds a `Host` over an input; `streamOne` decodes one whole container. The
+/// `Io.Reader` vtable entries are private to the driver. Each fill reads the
+/// header once, then decodes through the inner codec's window, then reads and
+/// verifies the trailer when the body ends cleanly. The container's own `init`
+/// and one-call pump delegate here.
 pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
     return struct {
         const Self = @This();
 
         const vtable: Io.Reader.VTable = lifecycle.VTable(Host, pump, rebase).vtable;
 
+        /// Returns a `Host` that decodes one container from `input`, with
+        /// `buffer` as the decoded window. `buffer` must outlive the `Host`.
         pub fn init(input: *Io.Reader, buffer: *F.ReaderBuffer) Host {
             return .{
                 .reader = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &vtable },
@@ -107,16 +100,16 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
             };
         }
 
-        /// The generated entries' fill: the detailed errors through `record`
-        /// (the pattern book's funnel), so the interface sees
-        /// `error.ReadFailed` with the detail sticky in `err`, or the clean
-        /// `error.EndOfStream` once the trailer is verified.
+        /// The fill the generated entries call. Failures go through `record`,
+        /// so the interface sees `error.ReadFailed` with the detail kept in
+        /// `err`, or the clean `error.EndOfStream` once the trailer is
+        /// verified.
         fn pump(r: *Host) Io.Reader.Error!usize {
             return record(r, fill(r));
         }
 
         /// The one place a detailed failure becomes the interface's coarse
-        /// error.
+        /// error: the clean end passes through, anything else goes to `fail`.
         fn record(r: *Host, result: F.Error!usize) Io.Reader.Error!usize {
             return result catch |err| switch (err) {
                 error.EndOfStream => return error.EndOfStream,
@@ -124,8 +117,8 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
             };
         }
 
-        /// Fail closed, stickily: the detail is recorded beside the state and
-        /// the interface's coarse `error.ReadFailed` is returned.
+        /// Records `err` as the sticky failure detail and returns the
+        /// interface's coarse `error.ReadFailed`.
         fn fail(r: *Host, err: F.Error) Io.Reader.Error {
             return lifecycle.fail(F.Error, &r.state, &r.err, err);
         }
@@ -141,22 +134,21 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
                 r.inner.checksum = r.checksum.hook();
             }
             // The window is the inner codec's: hand it the consumer's
-            // position, fill, and take the (possibly slid) position back —
-            // one region, one position, no staging copy.
+            // position, fill, and take the (possibly slid) position back.
+            // One region, one position, no staging copy.
             r.inner.reader.seek = r.reader.seek;
             r.inner.reader.end = r.reader.end;
             r.inner.reader.fillMore() catch |err| switch (err) {
                 // The inner codec's clean end: the body is complete, and its
                 // bit reader consumed the input exactly through the last
-                // byte — the trailer is next (the exact-consumption
-                // contract). `record` owns the failing: the specific trailer
-                // error propagates to it, so the detail lands beside the
-                // state, not the coarse error over it.
+                // byte, so the trailer is next. A trailer error propagates to
+                // `record`, which stores the specific error as the failure
+                // detail.
                 error.EndOfStream => {
                     try readTrailer(r);
                     return error.EndOfStream;
                 },
-                // The detail is recorded by `record`'s funnel, once.
+                // `record` stores the detail, once.
                 error.ReadFailed => return r.inner.err.?,
             };
             r.reader.seek = r.inner.reader.seek;
@@ -165,9 +157,10 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
             return r.reader.end - r.reader.seek;
         }
 
-        /// Read and verify the trailer at the body's clean end, exactly once,
-        /// then the reader is `done` (sticky); a mismatch is the framing's
-        /// specific error, a short trailer `Truncated`.
+        /// Reads and verifies the trailer after the body's clean end, once,
+        /// then sets the state to `done`. A mismatch is the framing's own
+        /// error and a short trailer is `error.Truncated`. It does not return
+        /// `error.EndOfStream`; each caller reports the clean end itself.
         fn readTrailer(r: *Host) F.TrailerError!void {
             var trailer: [F.trailer_len]u8 = undefined;
             try readExact(r.input, &trailer);
@@ -175,22 +168,19 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
             r.state = .done;
         }
 
-        /// The generated entries' rebase hook: make room for `capacity` more
-        /// contiguous bytes by sliding the inner codec's window, with the
-        /// consumer's position synced in. A request the window cannot hold at
-        /// the consumer's position fails closed with `error.ReadFailed`
-        /// (`err == .StreamTooLong`), never an assert (the pattern book's
-        /// contiguity rule).
+        /// The rebase hook for the generated entries: makes room for
+        /// `capacity` more contiguous bytes by sliding the inner codec's
+        /// window, with the consumer's position synced in. A request the
+        /// window cannot hold at that position returns `error.ReadFailed` with
+        /// `err == .StreamTooLong`; it never asserts.
         ///
-        /// The pattern book's wrapper-rebase rule lives here, once: the inner
-        /// codec's sticky end is the body's clean end, so the trailer check
-        /// runs before the clean end is reported — the same ending `fill`
-        /// runs. The input stands exactly at the trailer's first byte (the
-        /// exact-consumption contract), so the check consumes exactly through
-        /// the container's last byte. A `readTrailer` that only ends the
-        /// stream is `TrailerError!void` in truth: no trailing
-        /// `return error.EndOfStream`, and both call sites report the clean
-        /// end themselves.
+        /// When the inner codec reports its clean end during the slide, that
+        /// end is the body's end, so the trailer check runs before the clean
+        /// end is reported: the same ending `fill` runs. Passing the inner end
+        /// straight through would end the stream cleanly with the trailer
+        /// unread and the state still `streaming`. The input stands exactly at
+        /// the trailer's first byte, so the check consumes through the
+        /// container's last byte.
         fn rebase(r: *Host, capacity: usize) Io.Reader.RebaseError!void {
             r.inner.reader.seek = r.reader.seek;
             r.inner.reader.end = r.reader.end;
@@ -206,11 +196,13 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
             assert(r.reader.buffer.len - r.reader.seek >= capacity);
         }
 
-        /// Stream one complete container from `in` through a stack-buffered
-        /// `Host` into `out`, returning the decoded bytes served. Consumes
-        /// `in` exactly through the container's last trailer byte; bytes
-        /// after it are left unconsumed. Zero allocation: the window is a
-        /// stack local.
+        /// Decodes one complete container from `in` into `out` and returns the
+        /// number of decoded bytes written. Consumes `in` through the
+        /// container's last trailer byte; later bytes are left unconsumed. A
+        /// malformed container or a failing `in` returns `error.ReadFailed`
+        /// (the detail is not reported); a failing `out` returns
+        /// `error.WriteFailed`. The window is a stack local of
+        /// `@sizeOf(F.ReaderBuffer)` bytes; nothing is allocated.
         pub fn streamOne(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
             var buffer: F.ReaderBuffer = undefined;
             var rr: Host = init(in, &buffer);
@@ -219,11 +211,13 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
     };
 }
 
-/// The streaming writer machinery for a container writer `Host`: `init` (the
-/// `.ratio` poison seat included), the `Io.Writer` vtable entries, the
-/// position sync between the interface's serving region and the inner
-/// codec's block region, the lazy header emission, the checksum hook arming,
-/// `finish`, and the stack-buffered one-call pump.
+/// The streaming writer machinery for a container writer `Host`. `init`
+/// builds a `Host` over an output, `finish` completes the container, and
+/// `streamOne` encodes a whole input. The `Io.Writer` vtable entries are
+/// private to the driver: they write the header before the first compressed
+/// byte, set the checksum hook, and hand the data to the inner codec's writer,
+/// which shares the interface's buffer. The container's own `init`, `finish`,
+/// and one-call pump delegate here.
 pub fn WriterHooks(comptime F: type, comptime Host: type) type {
     return struct {
         const Self = @This();
@@ -234,11 +228,12 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             .rebase = rebase,
         };
 
-        /// Wrap `output` with `buffer` as the compression window and
-        /// `options` fixed for the container's lifetime. A `.ratio` level
-        /// poisons the interface (every write and `finish` reports
-        /// `error.WriteFailed`), matching `streamOne`'s upfront rejection —
-        /// the inner codec's reserved seat, never silent aliasing.
+        /// Returns a `Host` that writes one container to `output`, with
+        /// `buffer` as the compression window and `options` fixed for the
+        /// writer's lifetime. The `.ratio` level is reserved and not
+        /// implemented: it returns a poisoned writer whose every write and
+        /// `finish` returns `error.WriteFailed`, matching `streamOne`, which
+        /// rejects it before reading.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
             if (options.level == .ratio) {
                 return .{
@@ -260,12 +255,12 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             };
         }
 
-        /// Complete the container: emit the header if it is still pending,
-        /// complete the deflate stream through the inner codec, write the
-        /// trailer from the checksum state the hook accumulated, and flush
-        /// `output`. Terminal: the writer is poisoned afterwards, and a
-        /// failed or finished writer reports `error.WriteFailed` instead of a
-        /// false success (the pattern book's poison check).
+        /// Completes the container: writes the header if it is still pending,
+        /// finishes the inner codec's stream, writes the trailer from the
+        /// accumulated checksum, and flushes `output`. Terminal: the writer is
+        /// poisoned afterwards, so later writes and `finish` calls return
+        /// `error.WriteFailed`. A writer that already failed or finished
+        /// returns `error.WriteFailed` here too, never a false success.
         pub fn finish(w: *Host) Io.Writer.Error!void {
             if (w.writer.vtable != &vtable) return error.WriteFailed;
             defer w.writer = .failing;
@@ -279,9 +274,9 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             try w.output.flush();
         }
 
-        /// The lazily written header: the first entry that can emit writes
-        /// the container's deterministic header before any compressed byte
-        /// reaches `output`.
+        /// Writes the container's header to `output` unless it is already
+        /// written. Every entry that can emit a byte calls it first, so the
+        /// header precedes any compressed byte.
         fn emitHeader(w: *Host) Io.Writer.Error!void {
             if (w.header == .written) return;
             var header: [F.header_len]u8 = undefined;
@@ -290,35 +285,39 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             w.header = .written;
         }
 
-        /// Arm the checksum hook before the first byte is emitted: a hook set
-        /// mid-stream would see only later blocks. The state's address is
-        /// stable once the caller's writer is placed, so arming happens at
-        /// the first entry, not in `init` (which cannot take its own
-        /// address).
+        /// Sets the inner codec's checksum hook if it is not set yet. It must
+        /// be set before the first byte is emitted: a hook set mid-stream
+        /// would see only later blocks. The hook points at this writer's
+        /// checksum state, whose address is stable only once the caller has
+        /// placed the writer, so it is set at the first entry, not in `init`
+        /// (which returns the `Host` by value).
         fn arm(w: *Host) void {
             if (w.inner.checksum == null) w.inner.checksum = w.checksum.hook();
         }
 
-        /// Hand the front's buffer position to the codec: the two share one
-        /// region, and `std.Io.Writer`'s fast paths move only the front's
-        /// `end`.
+        /// Copies the interface's `end` to the inner codec's writer. The two
+        /// share one buffer region, and `std.Io.Writer`'s fast paths advance
+        /// only the interface's `end`, so the inner writer must be told before
+        /// it runs.
         fn commit(w: *Host) void {
             assert(w.writer.buffer.ptr == w.inner.writer.buffer.ptr);
             assert(w.writer.buffer.len == w.inner.writer.buffer.len);
             w.inner.writer.end = w.writer.end;
         }
 
-        /// Take the codec's (possibly rebased) region back as the front's.
+        /// Copies the inner codec's buffer and `end` back to the interface
+        /// after the inner codec ran, which may have emitted and slid the
+        /// buffered bytes.
         fn adopt(w: *Host) void {
             w.writer.buffer = w.inner.writer.buffer;
             w.writer.end = w.inner.writer.end;
         }
 
-        /// The block region is full: emit the header if pending and let the
-        /// inner codec's `drain` consume from `data` (it tops up the block,
-        /// emits it, and slides the window). The returned count is the bytes
-        /// consumed from `data`, excluding the buffered ones
-        /// (`std/Io/Writer.zig`'s drain contract).
+        /// Called when `data` does not fit in the block region. Writes the
+        /// header if it is pending, then lets the inner codec's `drain`
+        /// consume from `data`: it tops up the block, emits it, and slides the
+        /// window. Returns the bytes consumed from `data`, not counting the
+        /// already buffered ones (the `std.Io.Writer.VTable.drain` contract).
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
             errdefer w.* = .failing;
             const self: *Host = @alignCast(@fieldParentPtr("writer", w));
@@ -330,10 +329,10 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             return consumed;
         }
 
-        /// Emit the buffered partial block and flush `output`, keeping the
-        /// writer usable: no data block carries BFINAL, so a mid-stream flush
-        /// is always safe (`rfc1951-deflate.txt §3.2.3`). The trailer is
-        /// never written before `finish`.
+        /// Emits the buffered partial block and flushes `output`. The writer
+        /// stays usable: no data block carries BFINAL, so a mid-stream flush
+        /// is always safe (RFC 1951 §3.2.3). The trailer is written only by
+        /// `finish`.
         fn flush(w: *Io.Writer) Io.Writer.Error!void {
             errdefer w.* = .failing;
             const self: *Host = @alignCast(@fieldParentPtr("writer", w));
@@ -344,13 +343,12 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             adopt(self);
         }
 
-        /// Make room for `capacity` more bytes in the region, keeping the
-        /// most recent `preserve` buffered: the inner codec's `rebase` emits
-        /// the front of the partly written block and slides the tail to the
-        /// front, never discarding input (the pattern book's rebase rule). A
-        /// consumer can ask for a direct writable slice into the region via
-        /// `writableSliceGreedy`; when the region is full, that call lands
-        /// here.
+        /// Makes room for `capacity` more bytes in the region, keeping the
+        /// most recent `preserve` buffered. The inner codec's `rebase` emits
+        /// the front of the partly written block and slides the preserved tail
+        /// to the front; it never discards input. A consumer that asks for a
+        /// direct writable slice (`writableSliceGreedy`) on a full region
+        /// lands here.
         fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
             errdefer w.* = .failing;
             const self: *Host = @alignCast(@fieldParentPtr("writer", w));
@@ -361,11 +359,13 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             adopt(self);
         }
 
-        /// Stream everything from `in` through a stack-buffered `Host` into
-        /// `out`, returning the bytes consumed and encoded. Consumes `in`
-        /// exactly through its end, then finishes the container (the deflate
-        /// ending and the trailer are load-bearing). `.ratio` lands as
-        /// `error.ReadFailed` upfront. Zero allocation.
+        /// Reads `in` to its end, writes it to `out` as one complete container
+        /// (the stream ending and the trailer included), and returns the
+        /// number of input bytes consumed. A `.ratio` level returns
+        /// `error.ReadFailed` before any input is read; a failing `in` returns
+        /// `error.ReadFailed` and a failing `out` returns `error.WriteFailed`.
+        /// The window is a stack local of `@sizeOf(F.WriterBuffer)` bytes;
+        /// nothing is allocated.
         pub fn streamOne(
             in: *Io.Reader,
             out: *Io.Writer,
@@ -381,23 +381,26 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
     };
 }
 
-/// The one-shot encoder driver for a container `Framing`: the worst-case
-/// bound and `compress` — the framing header, the inner codec's body, the
-/// trailer from a direct fold over `source`. Zero heap allocation.
+/// The one-shot encoder for a container `F`: `maxCompressedLength` and
+/// `compress`. `compress` writes the header, the inner codec's body, and a
+/// trailer computed by folding the checksum directly over `source`. No heap
+/// allocation.
 pub fn EncodeHooks(comptime F: type) type {
     return struct {
-        /// The worst-case container length: the fixed header, the inner
-        /// codec's worst-case body, and the fixed trailer.
+        /// The worst-case container length for `input_len` source bytes: the
+        /// fixed header, the inner codec's worst-case body, and the fixed
+        /// trailer.
         pub fn maxCompressedLength(input_len: usize) usize {
             return F.header_len + F.bodyMaxCompressedLength(input_len) + F.trailer_len;
         }
 
-        /// Compress `source` as one complete container into `target` and
-        /// return its length. `error.BufferTooSmall` when `target` cannot
-        /// hold it (size `target` with `maxCompressedLength`; a smaller
-        /// target may still fit when the body compresses under the bound,
-        /// and its contents are unspecified on failure).
-        /// `error.Unimplemented` for the reserved `.ratio` level.
+        /// Compresses `source` into `target` as one complete container and
+        /// returns its length. Returns `error.BufferTooSmall` when `target`
+        /// cannot hold the result: `maxCompressedLength(source.len)` is always
+        /// enough, a smaller target may still fit when the body compresses
+        /// under the bound, and `target`'s contents are unspecified after a
+        /// failure. Returns `error.Unimplemented` for the reserved `.ratio`
+        /// level.
         pub fn compress(
             source: []const u8,
             target: []u8,
@@ -424,21 +427,22 @@ pub fn EncodeHooks(comptime F: type) type {
     };
 }
 
-/// The one-shot decoder driver for a container reader `Host`: `decompress`
-/// routes the whole container through the streaming reader over
+/// The one-shot decoder for a container reader `Host`. `decompress` runs the
+/// whole container through the streaming reader over
 /// `Io.Reader.fixed(source)` and maps the interface's coarse errors back to
-/// the framing's detail set. Zero heap allocation: the streaming reader's
-/// window is a stack local.
+/// the framing's detail set. No heap allocation: the reader's window is a
+/// stack local. `Host` must have the `init(input, buffer)` that `ReaderHooks`
+/// provides.
 pub fn DecodeHooks(comptime F: type, comptime Host: type) type {
     return struct {
-        /// Decode one complete container from `source` into `target`.
-        /// `target` is a cap; the return is the decoded length. The
-        /// container is located by exact consumption: the body runs through
-        /// the streaming `Host`, whose position after the clean end is the
-        /// trailer — verified against the bytes the decode produced. Bytes
-        /// after the trailer are ignored: the one-shot reports no consumed
-        /// count, so a boundary-aware caller uses the streaming reader.
-        /// `error.BufferTooSmall` is reported before the overflowing write.
+        /// Decodes one complete container from `source` into `target` and
+        /// returns the decoded length. `target` is a cap, not an exact size.
+        /// The trailer is verified against the bytes the decode produced.
+        /// Bytes after the trailer are ignored: the call does not report how
+        /// much of `source` it consumed, so a caller that needs the container
+        /// boundary uses the streaming reader. Returns `error.BufferTooSmall`
+        /// before writing past `target`; a corrupt or truncated container
+        /// returns the framing's own error.
         pub fn decompress(source: []const u8, target: []u8) F.DecompressError!usize {
             var input: Io.Reader = .fixed(source);
             var output: Io.Writer = .fixed(target);
@@ -456,12 +460,11 @@ pub fn DecodeHooks(comptime F: type, comptime Host: type) type {
             return output.end;
         }
 
-        /// The one-shot's view of a streaming failure: the detail recorded
-        /// in `err`. Three interface entries cannot occur on this path — the
-        /// one-shot's consumer never asks for contiguous bytes (no
-        /// `StreamTooLong`), its input is a fixed slice (no input
-        /// `ReadFailed`), and `streamRemaining` consumes the clean end
-        /// itself (no `EndOfStream`) — so they are unreachable here.
+        /// The detail recorded in `err` for a streaming failure. Three entries
+        /// cannot occur on this path, so they are unreachable here:
+        /// `StreamTooLong` (the one-shot consumer never asks for contiguous
+        /// bytes), `ReadFailed` (the input is a fixed slice), and
+        /// `EndOfStream` (`streamRemaining` consumes the clean end itself).
         fn detail(reader: *const Host) F.DecompressError {
             const recorded = reader.err.?;
             return switch (recorded) {

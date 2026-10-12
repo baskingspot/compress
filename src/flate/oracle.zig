@@ -1,16 +1,16 @@
-//! External-oracle-lane harness: the driver behind `just flate-oracle`, which
-//! cross-checks this module against python3's `zlib` in both directions
-//! (docs/research/flate-notes.md §4.3). It is a test tool, not part of the
-//! codec's surface: the codec itself (src/flate/README.md) has no allocator
-//! anywhere.
+//! The command-line harness behind `just flate-oracle`, which checks this codec
+//! against python3's `zlib` (raw deflate) in both directions
+//! (docs/research/flate-notes.md §4.3; the driver is scripts/flate_oracle.py).
+//! A test tool, not part of the codec: it allocates freely, from an arena.
 //!
 //! Usage:
 //!   flate-oracle decode <stream-file> <cap-bytes> > out
 //!   flate-oracle encode <input-file> > stream
 //!
-//! `decode` writes the decoded bytes of one raw deflate stream to stdout;
-//! `encode` writes our raw deflate stream for the input file. Exit 1 on a
-//! codec error, with the error name on stderr.
+//! `decode` writes the decoded bytes of one raw deflate stream to stdout, with
+//! the output capped at `cap-bytes`. `encode` writes our raw deflate stream for
+//! the input file. Exits 1 on a usage or codec error and prints the error name
+//! to stderr.
 
 const std = @import("std");
 const Io = std.Io;

@@ -1,17 +1,18 @@
-//! snappy.Writer: a compressing `Io.Writer` producing the framed snappy
-//! stream (README.md, "Streaming").
+//! snappy.Writer: a compressing `Io.Writer` that produces the framed snappy
+//! stream. Write through `&w.writer`, then call `finish`.
 //!
 //! Uncompressed writes accumulate in the caller-provided `Buffer` (one full
 //! block). As the buffer fills, `drain` compresses whole `max_block_size`
-//! blocks and emits them; `flush`/`finish` emit the partial tail. The
-//! compressed-output scratch is a comptime-sized stack local, so the full
-//! encode path allocates nothing.
+//! blocks and emits them; `flush` and `finish` emit the partial tail. Each
+//! emitted block compresses into a `scratch_len` stack buffer, so nothing is
+//! allocated.
 //!
-//! Framing (the package's canonical stream format):
+//! Framing:
 //! ```text
 //! stream := block*
 //! block  := u32-le compressed_length, raw-snappy-block
 //! ```
+//! There is no magic number, end marker, or checksum.
 
 const std = @import("std");
 const Io = std.Io;
@@ -34,7 +35,9 @@ const Reader = @import("Reader.zig");
 /// The caller-provided uncompressed accumulation buffer: one full block.
 pub const Buffer = [encode.max_block_size]u8;
 
-/// The compressed-output scratch size: the exact worst case for one block.
+/// The largest compressed block this framing allows: `maxCompressedLength` of
+/// a full block. The writer compresses each block into a stack buffer of this
+/// size, and the reader stages incoming blocks in one.
 pub const scratch_len = encode.maxCompressedLength(encode.max_block_size);
 
 const Writer = @This();
@@ -63,10 +66,9 @@ pub fn init(output: *Io.Writer, buffer: *Buffer) Writer {
 }
 
 /// Complete the stream: emit the final partial block, then flush `output`.
-/// Terminal — the writer is poisoned afterwards, and a failed or finished
-/// writer reports `error.WriteFailed` instead of a false success. The shared
-/// machinery (`src/internal/writer.zig`) owns the poison check, the final
-/// block emission, and the flush.
+/// Without it the buffered tail never reaches `output`. Terminal: afterwards,
+/// and after any failed write to `output`, writes and `finish` return
+/// `error.WriteFailed` rather than reporting a truncated stream as complete.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
     return Hooks.finish(w);
 }
@@ -77,7 +79,8 @@ fn emit(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
     if (bytes.len == 0) return;
     assert(bytes.len <= encode.max_block_size);
     var scratch: [scratch_len]u8 = undefined;
-    // `scratch` is sized to the exact worst case for any block.
+    // `scratch` holds `maxCompressedLength` of a full block, so `compressBlock`
+    // cannot run out of room.
     const n = encode.compressBlock(bytes, &scratch) catch unreachable;
     var prefix: [frame_prefix_len]u8 = undefined;
     writeInt(u32, &prefix, @intCast(n));
@@ -85,11 +88,11 @@ fn emit(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
     try w.output.writeAll(scratch[0..n]);
 }
 
-/// Emit the first `emit_len` bytes of the buffered block, then leave the
-/// unemitted tail at the front of the buffer — the shared writer machinery's
-/// contract (`src/internal/writer.zig`): `drain`/`flush`/`finish` emit the
-/// whole block, `rebase` the front, and the preserved tail is the block
-/// afterwards.
+/// Emit the first `emit_len` bytes of the buffered block, then slide the
+/// unemitted tail to the front of the buffer. This is the hook the shared
+/// writer machinery (`src/internal/writer.zig`) calls: `drain`, `flush`, and
+/// `finish` emit the whole block, `rebase` emits the front, and the tail it
+/// preserves becomes the new block.
 fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     assert(emit_len <= w.writer.end);
     if (emit_len == 0) return;
@@ -137,9 +140,9 @@ test "Writer: writes past one block split into full blocks" {
 test "Writer: writableSliceGreedy on a full buffer emits, never drops" {
     // The File.Reader simple-mode stream feeds a Writer through
     // `writableSliceGreedy` + `advance` (a direct write into the buffer),
-    // which lands on `rebase` when the buffer is full. A regression: rebase
-    // once freed space by discarding the buffered block instead of
-    // emitting it, silently dropping a whole block of input.
+    // which lands on `rebase` when the buffer is full. `rebase` must emit the
+    // buffered block to free the space; discarding it would silently drop a
+    // whole block of input.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -339,16 +342,17 @@ fn countBlocks(stream: []const u8) usize {
     return n;
 }
 
-/// Stream everything from `in` through one snappy `Writer` into `out`,
-/// returning the bytes consumed and encoded. Consumes `in` exactly through
-/// its end, then finishes the stream (the final partial block + flush). The
-/// writer and its buffer live on this stack frame; zero allocation.
+/// Compress everything `in` yields into `out` as one framed snappy stream and
+/// finish it (the last partial block is written and `out` is flushed).
+/// Returns the number of uncompressed bytes read from `in`. Errors are
+/// `error.ReadFailed` (`in` failing) and `error.WriteFailed` (`out` failing).
+/// The `Writer` and its 64 KiB `Buffer` live on this function's stack frame,
+/// and compressing a block uses about 97 KiB more; nothing is allocated.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
     var buf: Buffer = undefined;
     var ww: Writer = .init(out, &buf);
     const n = try in.streamRemaining(&ww.writer);
-    // The stream is not done until finish: the final partial block and the
-    // framing's end are load-bearing (README, "Streaming").
+    // The stream is not complete until `finish` writes the final partial block.
     try ww.finish();
     return n;
 }

@@ -1,85 +1,17 @@
-//! zstd.Reader: a decompressing `Io.Reader` over one Zstandard frame
-//! (README.md, "Streaming").
+//! `zstd.Reader`: a decompressing `Io.Reader` over one Zstandard frame
+//! (RFC 8878). `streamFrame` and `streamAll` decode in one call.
 //!
-//! One frame per reader, with the exact boundary visible: the reader consumes
-//! `input` through the frame's last byte — the Content_Checksum trailer's
-//! last byte when the flag is set, the last block's last byte otherwise
-//! (`§3.1.1`) — and stops there, so the input's position at the clean end is
-//! the next frame unit's first byte. Multi-frame is `Reader.streamAll`'s walk
-//! at that boundary (the gzip member walk, `src/gzip/README.md`, "The
-//! wrapping design"): the walk resumes there until a unit is not present (the
-//! file's clean end, zero frames served), and garbage in a unit's place fails
-//! `BadMagic` — fail closed at interpretation, never silently skipped.
-//! Skippable frames (`§3.1.2`) are consumed and ignored in every layer — all
-//! 16 magics, before a frame and between frames — and their User_Data is
-//! skipped by streaming through the input, never staged: a 4 GiB Frame_Size
-//! costs the walk and no memory (the gzip XLEN rule).
+//! A `Reader` decodes one frame and stops at its exact end: the last byte of
+//! the checksum trailer if the frame has one, else the last block's last
+//! byte. Skippable frames before the frame are consumed and ignored. Later
+//! bytes stay unread, so the caller can start another `Reader` there;
+//! `streamAll` does this for a whole input.
 //!
-//! The machinery is the pattern book's (`src/internal/README.md`, "The Io
-//! codec pattern book"): the generated vtable quartet, the fill-and-return-0
-//! contract, the zero-length poll, the sticky lifecycle (`State` + the detail
-//! in `err`), the contiguity failure, and the wrapper-rebase funnel. What
-//! this module adds is the framing.
-//!
-//! ## The buffer is the cap
-//!
-//! `Reader.Buffer(window_len)` is `[window_len + max_block_size + staging]u8`
-//! (`staging = min(window_len, max_block_size)`): the retained history — "all
-//! offsets leading to previously decoded data must be smaller than
-//! Window_Size" (`§3.1.1.4`), capped by the caller — the largest decoded
-//! block (`§3.1.1.2.4`'s Block_Maximum_Size ≤ 128 KB) as the serving region,
-//! and the block staging room (each block's whole content: both backwards
-//! bitstreams need its end first, `§3.1.1.3.2.1.2`). `init` takes the exact
-//! pointer to it and derives the authorized window from the buffer's type, so
-//! the cap and the buffer cannot disagree; a frame declaring a larger
-//! Window_Size fails `WindowTooLarge` before any block byte (`§3.1.1.1.2`:
-//! "a decoder is allowed to reject a compressed frame that requests a memory
-//! size beyond the decoder's authorized range"), never a silent truncation,
-//! and `window_len` is at least 1 KiB (`§3.1.1.1.2`'s minimum — a comptime
-//! assert). The serving region slides forward as it fills, keeping the
-//! consumer's unconsumed bytes and the retained history: any contiguous
-//! request (the `peek`/`take` family) of at most Block_Maximum_Size — 128 KiB
-//! — is served, and a request beyond what the window can hold at the
-//! consumer's position fails closed with `error.ReadFailed`
-//! (`err == .StreamTooLong`), never an assert.
-//!
-//! Zero allocation on every decode path: the caller owns the buffer — window,
-//! serving region, and staging alike — and the literals scratch is the one
-//! comptime stack local (≤ 128 KiB per compressed block, README, "Stack").
-//! The `streamFrameAlloc`/`streamAllAlloc` conveniences take a caller
-//! allocator to allocate the default buffer for one call and free it; the
-//! codec itself still allocates nothing (README, "Allocation").
-//!
-//! ## The frame state machine
-//!
-//! `phase` is the resume point across pump calls, and each phase drives one
-//! step of the frame layer's composition hand-off (`frame.zig`, "The
-//! composition, and what the streaming reader drives"):
-//!
-//! - `.start` / `.magic`: the 4-byte Magic_Number (`§3.1`), classified by
-//!   `frame.classify`; a skippable magic leads to `.skip`. The input's end
-//!   before the *first* unit is `Truncated` (no frame unit began, T10); after
-//!   a skippable unit it is the clean end — a stream of only skippable frames
-//!   decodes to zero bytes (T10, the CLI's own verified behavior).
-//! - `.header`: the Frame_Header fed to `frame.HeaderParser` (`§3.1.1.1`),
-//!   which consumes as much as its current field needs — so the 2-14 byte
-//!   header parses across fills even when the input buffers only the magic's
-//!   four bytes — then `frame.checkWindow` against the buffer's window.
-//! - `.blocks`: one block per iteration — the 3-byte Block_Header off the
-//!   input (`block.parseHeader`), the Block_Content staged (the backwards
-//!   bitstreams need the block's end first), `block.decodeContent` with the
-//!   *retained* count of frame output in the serving region (the frame total
-//!   and the serving region are different numbers), and `State.recordBlock` —
-//!   the one funnel — with exactly the bytes the block wrote (OQ7: every
-//!   decoded byte hashed once, in order, no second pass).
-//! - `.trailer`: the frame end — `State.checkContentSize` and the XXH64
-//!   Content_Checksum trailer, read and verified exactly once (`§3.1.1`,
-//!   T8) — reached from the pump and from `rebase`, the M3 B1 shape
-//!   (`src/internal/README.md`, "A wrapper's rebase routes the inner end
-//!   through the same ending as fill"): an over-the-end peek or record
-//!   request at a frame's tail must read and verify the trailer before the
-//!   reader reports its clean end, never pass the frame's end through with
-//!   the trailer unread.
+//! The caller owns the decode buffer, `Buffer(window_len)`. A frame whose
+//! Window_Size exceeds `window_len` fails with `WindowTooLarge` before any
+//! block is read. A contiguous `peek` or `take` of up to 128 KiB is always
+//! served. A failed read returns `error.ReadFailed` and the detail is in
+//! `err`. Decoding a compressed block uses a 128 KiB buffer on the stack.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -104,42 +36,45 @@ const State = internal.reader.State;
 const VTable = internal.reader.VTable;
 
 /// The block staging room `Buffer(window_len)` adds on top of the serving
-/// region: one block's whole content, which both backwards bitstreams need
-/// staged before the first symbol (`§3.1.1.3.2.1.2`, README "The block and
-/// entropy layers"). A frame the buffer admits declares Window_Size ≤
-/// `window_len` (`checkWindow`), so its Block_Maximum_Size — "the smallest
-/// of: Window_Size, 128 KB" (`§3.1.1.2.4`) — is at most
-/// `min(window_len, max_block_size)`.
+/// region: one block's whole content, staged because both backwards
+/// bitstreams need the block's end first (`§3.1.1.3.2.1.2`). A frame the
+/// buffer admits declares Window_Size ≤ `window_len` (`checkWindow`), so its
+/// Block_Maximum_Size, "the smallest of: Window_Size, 128 KB"
+/// (`§3.1.1.2.4`), is at most `min(window_len, max_block_size)`.
 fn stagingLength(comptime window_len: usize) usize {
     return @min(window_len, block.max_block_size);
 }
 
-/// The caller-owned buffer (`§3.1.1.1.2`): `window_len` bytes of retained
-/// history plus the largest decoded block (`§3.1.1.2.4`'s Block_Maximum_Size
-/// ≤ 128 KB) as the serving region, then one block's staging room
-/// (`stagingLength`). The buffer *is* the cap: `init` takes the exact pointer
-/// to it and derives the authorized window from its type, so the two cannot
-/// disagree (README, "Streaming"). `window_len` is at least `§3.1.1.1.2`'s
-/// 1-KB minimum — a comptime assert, so `Buffer(0)` does not compile.
+/// The caller-owned decode buffer for frames whose Window_Size is at most
+/// `window_len` (`§3.1.1.1.2`). It holds `window_len` bytes of retained
+/// history plus one maximum-size block (128 KiB, `§3.1.1.2.4`) as the
+/// serving region, then room to stage one block's content (`stagingLength`):
+/// `window_len + 128 KiB + min(window_len, 128 KiB)` bytes in all. `init`
+/// takes a pointer to this exact type and reads the window cap from it, so
+/// the buffer and the cap cannot disagree. `window_len` must be at least
+/// 1 KiB, the smallest window the format allows; `Buffer(0)` does not
+/// compile.
 pub fn Buffer(comptime window_len: usize) type {
     comptime assert(window_len >= 1024);
     return [window_len + block.max_block_size + stagingLength(window_len)]u8;
 }
 
-/// `§3.1.1.1.2` — "It is recommended to support Window_Size up to 8 MB": the
-/// default cap, and the pin from the CLI's level-19 frames (`windowLog` 23).
+/// The default window cap, 8 MiB. `§3.1.1.1.2` recommends that decoders
+/// support Window_Size up to 8 MB, and `zstd -19` writes windowLog 23 (8 MiB)
+/// for large inputs.
 pub const default_window_len: usize = 8 * 1024 * 1024;
 
-/// `Reader.Buffer(default_window_len)` — 8 MiB + 128 KiB serving + 128 KiB
-/// staging.
+/// `Buffer(default_window_len)`: 8 MiB of window, 128 KiB serving, and
+/// 128 KiB staging. That is larger than a typical 8 MiB thread stack, so
+/// allocate it, as `streamFrameAlloc` does.
 pub const DefaultBuffer = Buffer(default_window_len);
 
-/// The detailed error recorded once `state == .failed` (README, "API"):
-/// `frame.Error` — the one-shot's `DecompressError`, name for name — minus
+/// The reader's error set; `err` holds one of these once `state == .failed`.
+/// It is the one-shot decoder's `DecompressError` (`frame.Error`) without
 /// `BufferTooSmall` (the window is the caller's buffer, not a target cap, so
-/// no decode can outgrow it), plus this layer's own names. The interface
-/// reports the coarse `error.ReadFailed`/`error.EndOfStream`; the detail
-/// lives beside it in `err`.
+/// no decode can outgrow it), plus `WindowTooLarge`, `StreamTooLong`, and the
+/// interface's `ReadFailed` and `EndOfStream`. The `Io.Reader` interface
+/// itself reports only `error.ReadFailed` or `error.EndOfStream`.
 pub const Error = error{
     BadMagic,
     ReservedBitSet,
@@ -162,16 +97,21 @@ pub const Error = error{
     ContentSizeMismatch,
     WrongChecksum,
     Truncated,
-    /// `§3.1.1.1.2` — the frame's Window_Size exceeds the buffer's window
-    /// (the caller's "authorized range"): fail closed, never truncate.
+    /// The frame declares a Window_Size larger than the buffer's `window_len`
+    /// (`§3.1.1.1.2`: a decoder may reject a frame that "requests a memory
+    /// size beyond the decoder's authorized range"). Reported once the header
+    /// is parsed, before any block byte is read; the output is never
+    /// truncated instead.
     WindowTooLarge,
-    /// The serving region cannot hold a contiguous request at the consumer's
-    /// position: fail closed, never assert (the pattern book's contiguity
-    /// rule).
+    /// A contiguous request (`peek`, `take`, ...) is larger than the serving
+    /// region can hold at the consumer's position. Requests of up to 128 KiB
+    /// never hit this. A consumer can trigger it, so it is an error and not
+    /// an assert.
     StreamTooLong,
-    /// The interface's coarse pair (`src/internal/README.md`, "Sticky
-    /// lifecycle"): the detail is recorded in `err`.
+    /// The input reader failed with `error.ReadFailed`.
     ReadFailed,
+    /// The clean end of the frame. The interface reports it as
+    /// `error.EndOfStream`; it is never recorded in `err`.
     EndOfStream,
 };
 
@@ -207,42 +147,42 @@ comptime {
 /// The frame's phase: the resume point across pump calls.
 const Phase = union(enum) {
     /// The first frame unit's Magic_Number. The input's end here is
-    /// `Truncated`: no frame unit began (T10 — the zero-byte input; the gzip
-    /// decision mapped over).
+    /// `Truncated`: no frame unit began, so a zero-byte input is an error for a
+    /// single reader. (`streamAll` checks for the input's end itself before it
+    /// starts a reader, so for the walk an empty input is the clean end.)
     start,
     /// A skippable frame's User_Data (`§3.1.2`): `left` bytes still to skip,
     /// then the next unit's magic.
     skip: usize,
     /// The next frame unit's Magic_Number, after a skippable frame was
     /// consumed. The input's end here is the clean end: a stream of only
-    /// skippable frames decodes to zero bytes (T10).
+    /// skippable frames decodes to zero bytes.
     magic,
     /// The Frame_Header (`§3.1.1.1`), fed to the byte-fed parser.
     header,
     /// The block chain (`§3.1.1.2`).
     blocks,
-    /// The last block has landed; the frame end — Frame_Content_Size and the
-    /// Content_Checksum trailer (`§3.1.1.1.4`, `§3.1.1`) — is next.
+    /// The last block is decoded; the frame end, meaning the Frame_Content_Size
+    /// check and the Content_Checksum trailer (`§3.1.1.1.4`, `§3.1.1`), is next.
     trailer,
 };
 
 const Reader = @This();
 
 reader: Io.Reader,
-/// The frame's input: the magic, the block headers, the staged Block_Content,
-/// and the trailer are read from it, at the frame's exact positions. Its
-/// buffer must hold the frame layer's largest fixed-size read — four bytes
-/// (the magic, the skippable Frame_Size, the trailer; the 3-byte Block_Header
-/// fits inside) — or the input must end before then (README, "Streaming";
-/// std's decoder names the same class `InputBufferUndersize`).
+/// The frame's input, consumed exactly through the frame's last byte. Its
+/// buffer must hold at least four bytes, the frame layer's largest fixed-size
+/// read (the magic, a skippable frame's Frame_Size, or the checksum trailer;
+/// the 3-byte Block_Header fits inside), unless the input ends sooner. A
+/// smaller buffer trips the assert in `Io.Reader.fill`. std's decoder names
+/// the same class of failure `InputBufferUndersize`.
 input: *Io.Reader,
-/// The block staging room: the caller's buffer's trailing
-/// `stagingLength(window_len)` bytes, where each block's content is staged
-/// before it is decoded (`§3.1.1.3.2.1.2`). A slice of the caller's buffer,
-/// never a stack local (README, "Stack").
+/// The block staging room: the last `stagingLength(window_len)` bytes of the
+/// caller's buffer, where each block's content is staged before it is
+/// decoded (`§3.1.1.3.2.1.2`). It lives in the caller's buffer so that the
+/// reader needs no large stack local.
 staging: []u8,
-/// The authorized window: the buffer's type less the block room, derived
-/// once at `init`.
+/// The window cap: the buffer type's `window_len`, stored at `init`.
 window_len: usize,
 /// The Frame_Header parse (`§3.1.1.1`), run across fills.
 header: frame.HeaderParser = .{},
@@ -259,25 +199,27 @@ state: State = .streaming,
 /// `error.ReadFailed`.
 err: ?Error = null,
 
-/// The generated `Io.Reader` entries (the pattern book): the sticky guard,
-/// the zero-length poll, and the fill-and-return-0 count are structural.
-/// `pump` is the frame's fill; `rebase` owns the window's capacity policy.
+/// The `Io.Reader` entries, generated by `internal.reader.VTable`. `pump` is
+/// this reader's fill and `rebase` its capacity policy; the generator supplies
+/// the sticky-failure guard and the zero-length poll.
 const vtable = VTable(Reader, pump, rebase).vtable;
 
-/// Wrap `input` (one Zstandard frame, skippable frames allowed before it)
-/// with `buffer` as the decoded window: the exact pointer to a
-/// `Buffer(window_len)`, the comptime parameter and the buffer's type
-/// agreeing at the call site — the compiler is the check, so the window cap
-/// and the buffer cannot disagree (README, "Streaming"; AGENTS.md, "Rules").
-/// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
-/// frame ends cleanly with `error.EndOfStream` once the trailer is verified
-/// and fails closed with `error.ReadFailed` (sticky, details in `err`) on
-/// any malformed frame or input failure. The reader consumes `input` exactly
-/// through the frame's last byte; bytes after it are left unconsumed
-/// (README, "Streaming").
+/// Read one Zstandard frame from `input`, decoding through `buffer`.
+/// Skippable frames before the frame are skipped. `window_len` is the largest
+/// Window_Size the reader accepts, and `buffer` must be a
+/// `Buffer(window_len)`, which the compiler checks at the call. `input` needs
+/// a buffer of at least four bytes. `init` reads nothing from `input` and
+/// allocates nothing.
+///
+/// Read through `&r.reader` (`stream`, the `read` family, the `peek` family).
+/// Once the trailer is verified, reads return `error.EndOfStream`. A
+/// malformed frame or a failing `input` returns `error.ReadFailed`, and so
+/// does every later read, with the detail in `err`. The reader consumes
+/// `input` exactly through the frame's last byte and leaves any later bytes
+/// unread.
 pub fn init(comptime window_len: usize, input: *Io.Reader, buffer: *Buffer(window_len)) Reader {
     // The serving region is the buffer's front `window_len + max_block_size`
-    // bytes; the staging room is its tail (README, "Stack").
+    // bytes; the staging room is its tail.
     const serving_len = window_len + block.max_block_size;
     return .{
         .reader = .{
@@ -292,14 +234,15 @@ pub fn init(comptime window_len: usize, input: *Io.Reader, buffer: *Buffer(windo
     };
 }
 
-/// Stream one complete frame unit from `in` through a `Reader` over `buffer`
-/// into `out`, returning the decoded bytes served. Leading skippable frames
-/// are consumed and ignored (`§3.1.2`); the unit is consumed exactly through
-/// the frame's last byte — the trailer's when the flag is set — and bytes
-/// after it are left unconsumed (README, "Streaming"). A zero-byte input is
-/// a failure: no frame unit began. The pump reports the coarse
-/// `error.ReadFailed`; a caller who needs a failure's detail drives a
-/// `Reader` directly. Zero allocation: the window is the caller's buffer.
+/// Decode one frame from `in` into `out` through `buffer`, and return the
+/// number of bytes written. Skippable frames before the frame are skipped
+/// (`§3.1.2`). `in` is consumed exactly through the frame's last byte (the
+/// checksum trailer's, when the frame has one) and later bytes are left
+/// unread. An empty `in` is an error, because it holds no frame. `in` needs a
+/// buffer of at least four bytes. Failures are reported as `error.ReadFailed`
+/// (a malformed frame or a failing `in`) or `error.WriteFailed` (a failing
+/// `out`); a caller who needs the detail drives a `Reader` directly and reads
+/// `err`. Does not allocate.
 pub fn streamFrame(
     comptime window_len: usize,
     in: *Io.Reader,
@@ -310,16 +253,15 @@ pub fn streamFrame(
     return rr.reader.streamRemaining(out);
 }
 
-/// Stream every frame unit `in` holds into `out`, returning the total decoded
-/// bytes served. `§3.1` — "The output of the decompression is the
-/// concatenation of all the frames": the walk is `streamFrame`'s semantics
-/// per unit, at the boundary it leaves (one unit per iteration; a unit that
-/// is not present is the file's clean end, zero frames served). A stream of
-/// only skippable frames is the clean end with zero bytes served, the
-/// zero-byte input the clean end with zero frames served, and garbage where a
-/// unit should start fails `BadMagic` (T10). The pump reports the coarse
-/// `error.ReadFailed`; a caller who needs a failure's detail drives a
-/// `Reader` directly. Zero allocation: the window is the caller's buffer.
+/// Decode every frame in `in` into `out` through `buffer`, and return the
+/// total number of bytes written. The output is the concatenation of the
+/// frames (`§3.1`). Each frame is decoded as in `streamFrame`, starting where
+/// the previous one ended. Skippable frames are skipped, so an input that
+/// holds only skippable frames, or nothing at all, decodes to zero bytes. Any
+/// other bytes where a frame should start are `BadMagic`, reported as
+/// `error.ReadFailed`; they are not skipped. `in` needs a buffer of at least
+/// four bytes. Other failures are reported as in `streamFrame`. Does not
+/// allocate.
 pub fn streamAll(
     comptime window_len: usize,
     in: *Io.Reader,
@@ -330,7 +272,7 @@ pub fn streamAll(
     var served: usize = 0;
     while (true) {
         // A clean end between units is the file's end; any byte where a unit
-        // should start is parsed as one, so garbage fails closed.
+        // should start is parsed as one, so garbage returns an error.
         _ = in.peekByte() catch |err| switch (err) {
             error.EndOfStream => return served,
             else => |e| return e,
@@ -340,19 +282,17 @@ pub fn streamAll(
     }
 }
 
-/// The allocator conveniences' error set: the pumps' interface pair
-/// (`error.ReadFailed`/`error.WriteFailed`) plus the buffer allocation's own
-/// `error.OutOfMemory`.
+/// The error set of `streamFrameAlloc` and `streamAllAlloc`: `streamFrame`'s
+/// (`error.ReadFailed`, `error.WriteFailed`) plus `error.OutOfMemory` from the
+/// buffer allocation.
 pub const StreamAllocError = Io.Reader.StreamRemainingError || error{OutOfMemory};
 
-/// `streamFrame` with the default window: the convenience allocates the
-/// buffer — `Reader.DefaultBuffer`, `default_window_len` plus its serving and
-/// staging rooms, 8 MiB + 256 KiB — from `allocator`, drives the
-/// caller-buffered pump, and frees it before returning (README, "Allocation").
-/// The codec still allocates nothing on any decode path: the allocator is the
-/// caller's, and the buffer is setup for one call. A caller who wants a
-/// smaller window (or no allocation at all) uses `streamFrame` with its own
-/// `Reader.Buffer(window_len)`.
+/// `streamFrame` with the default 8 MiB window. Allocates a `DefaultBuffer`
+/// (8 MiB + 256 KiB) from `allocator` for the call and frees it before
+/// returning; the decoder itself allocates nothing. Returns
+/// `error.OutOfMemory`, before reading any input, if the allocation fails. A
+/// caller who wants a smaller window, or no allocation, uses `streamFrame`
+/// with its own `Buffer(window_len)`.
 pub fn streamFrameAlloc(
     allocator: mem.Allocator,
     in: *Io.Reader,
@@ -363,12 +303,10 @@ pub fn streamFrameAlloc(
     return streamFrame(default_window_len, in, out, buffer);
 }
 
-/// `streamAll` with the default window: the convenience allocates the buffer
-/// (`Reader.DefaultBuffer`, 8 MiB + 256 KiB) from `allocator`, drives the
-/// caller-buffered walk, and frees it before returning (README,
-/// "Allocation"). The walk's semantics are `streamAll`'s — the one-call
-/// multi-frame shape — and the codec still allocates nothing on any decode
-/// path: the allocator is the caller's, and the buffer is setup for one call.
+/// `streamAll` with the default 8 MiB window. Allocates a `DefaultBuffer`
+/// (8 MiB + 256 KiB) from `allocator` for the call and frees it before
+/// returning; the decoder itself allocates nothing. Returns
+/// `error.OutOfMemory`, before reading any input, if the allocation fails.
 pub fn streamAllAlloc(
     allocator: mem.Allocator,
     in: *Io.Reader,
@@ -379,10 +317,9 @@ pub fn streamAllAlloc(
     return streamAll(default_window_len, in, out, buffer);
 }
 
-/// The generated entries' fill: the frame's detailed errors through `record`
-/// (the pattern book's funnel), so the interface sees `error.ReadFailed` with
-/// the detail sticky in `err`, or the clean `error.EndOfStream` once the
-/// trailer is verified.
+/// The vtable's fill. Passes `fillFrame`'s detailed errors through `record`,
+/// so the interface sees `error.ReadFailed` (detail in `err`) or, once the
+/// trailer is verified, the clean `error.EndOfStream`.
 fn pump(r: *Reader) Io.Reader.Error!usize {
     return r.record(r.fillFrame());
 }
@@ -398,10 +335,10 @@ fn record(r: *Reader, result: Error!usize) Io.Reader.Error!usize {
     };
 }
 
-/// Fail closed, stickily: the detail is recorded beside the state and the
-/// interface's coarse `error.ReadFailed` is returned. The serving region's
-/// unconsumed bytes are dropped — no partial output is trusted past the
-/// error (README, "Corruption"; the flate reader's rule).
+/// Record `err` as the sticky failure and return the interface's
+/// `error.ReadFailed`. The serving region's unconsumed bytes are dropped, so
+/// no partial output is trusted past an error (the flate reader does the
+/// same).
 fn fail(r: *Reader, err: Error) Io.Reader.Error {
     r.reader.seek = r.reader.end;
     return internal.reader.fail(Error, &r.state, &r.err, err);
@@ -417,14 +354,14 @@ fn fillFrame(r: *Reader) Error!usize {
     while (r.state == .streaming) {
         switch (r.phase) {
             .start => {
-                // The input ended before any frame unit began: `Truncated`
-                // (T10 — the zero-byte input; the gzip decision mapped over).
+                // The input ended before any frame unit began: a zero-byte
+                // input is `Truncated`.
                 const kind = (try r.readMagic()) orelse return error.Truncated;
                 try r.beginUnit(kind);
             },
             .magic => {
-                // A stream of only skippable frames: the clean end with zero
-                // bytes served (T10, `§3.1.2`).
+                // The input ended after a skippable frame: the clean end, so a
+                // stream of only skippable frames serves zero bytes (`§3.1.2`).
                 const kind = (try r.readMagic()) orelse return error.EndOfStream;
                 try r.beginUnit(kind);
             },
@@ -436,10 +373,11 @@ fn fillFrame(r: *Reader) Error!usize {
             .blocks => {
                 // Room for the next block's output: the frame's
                 // Block_Maximum_Size (`§3.1.1.2.4`). A full serving region
-                // slides — the consumer's unconsumed bytes and the retained
-                // history stay, the rest is dropped — and a slide that cannot
-                // make room is the contiguity cap: fail closed, never an
-                // assert (the pattern book's rule).
+                // slides, keeping the consumer's unconsumed bytes and the
+                // retained history. If the slide cannot make room, return
+                // what this fill has added so far, or `StreamTooLong` when
+                // that is nothing. A consumer can cause this with a large
+                // contiguous request, so it is an error and not an assert.
                 const room_needed = r.blockRoom();
                 if (r.reader.buffer.len - r.reader.end < room_needed) {
                     const room = r.slide();
@@ -449,13 +387,14 @@ fn fillFrame(r: *Reader) Error!usize {
                     }
                 }
                 added += try r.decodeBlock();
-                // The block chain is complete. The frame end — the
-                // Frame_Content_Size check and the checksum trailer — is
-                // next; it runs when the consumer next needs bytes, or from
-                // `rebase` for an over-the-end request at the frame's tail
-                // (the B1 shape). Returning the block's bytes now keeps the
-                // boundary honest: the trailer is read exactly once, by the
-                // first call that finds nothing more to add.
+                // After the last block, return its bytes before running the
+                // frame end (the Frame_Content_Size check and the checksum
+                // trailer). A mismatch found at the frame end is then
+                // reported by the next fill, after the frame's output has
+                // been served, and the trailer is read exactly once, by the
+                // first call that finds nothing more to add. `rebase` runs
+                // the same frame end for a request that reaches past the
+                // frame's tail.
                 if (r.phase == .trailer) return added;
             },
             .trailer => try r.endFrame(),
@@ -507,8 +446,8 @@ fn beginUnit(r: *Reader, kind: frame.Kind) Error!void {
 /// buffers only the magic's four bytes parses the 2-14 byte header across
 /// fills. The input's end inside it is `Truncated`; the parser's own
 /// refusals (the reserved bit, a Dictionary_ID) land where the frame layer
-/// raises them. Once done, the header is checked against the buffer's window
-/// (OQ1) and the block chain begins.
+/// raises them. Once parsed, the header is checked against the buffer's
+/// window (`WindowTooLarge`) and the block chain begins.
 fn readHeader(r: *Reader) Error!void {
     while (!r.header.done()) {
         r.input.fill(1) catch |err| switch (err) {
@@ -517,11 +456,11 @@ fn readHeader(r: *Reader) Error!void {
         };
         const buffered = r.input.buffer[r.input.seek..r.input.end];
         const consumed = r.header.feed(buffered) catch |err| switch (err) {
-            // The parser raises the header's own refusals — the reserved bit,
-            // a Dictionary_ID — and nothing else; a block-layer name cannot
-            // come out of a header feed, and the reader's error set does not
-            // carry `BufferTooSmall` (README, "API"). Fail closed rather
-            // than turn a broken invariant into undefined behavior.
+            // The parser raises the header's own refusals (the reserved bit,
+            // a Dictionary_ID) and nothing else, so `BufferTooSmall`, which
+            // the reader's error set does not carry, cannot occur here.
+            // Return an error rather than turn a broken invariant into
+            // undefined behavior.
             error.BufferTooSmall => {
                 assert(false);
                 return error.Truncated;
@@ -537,7 +476,7 @@ fn readHeader(r: *Reader) Error!void {
     // §3.1.1.1.2 — "a decoder is allowed to reject a compressed frame that
     // requests a memory size beyond the decoder's authorized range": the
     // caller's buffer is the authorization, checked once, before any block
-    // byte is read (OQ1).
+    // byte is read.
     try frame.checkWindow(header, r.window_len);
     // In place through the optional's payload: the layer states' ~10 KiB of
     // table payload stays undefined until a block builds it (frame.State.init).
@@ -548,8 +487,7 @@ fn readHeader(r: *Reader) Error!void {
 
 /// Skip a skippable frame's User_Data (`§3.1.2`): the bytes are skipped by
 /// streaming through the input, never staged, so a 4 GiB Frame_Size costs the
-/// walk and no memory (the gzip XLEN rule). The input's end inside the
-/// User_Data is `Truncated`.
+/// walk and no memory. The input's end inside the User_Data is `Truncated`.
 fn skipUserData(r: *Reader, count: usize) Error!void {
     var left = count;
     while (left > 0) {
@@ -569,10 +507,9 @@ fn skipUserData(r: *Reader, count: usize) Error!void {
 /// Block_Content staged (both backwards bitstreams read from the block's end
 /// toward its beginning, so the whole block is staged first — `§3.1.1.3.2.1.2`
 /// "it is necessary to know the offset of the last byte"), then
-/// `block.decodeContent` with the *retained* count of frame output in the
-/// serving region, and `State.recordBlock` — the one funnel — with exactly
-/// the bytes the block wrote. Returns the bytes written; moves the phase to
-/// `.trailer` when the block is the frame's last (`§3.1.1.2.1`).
+/// `block.decodeContent`, and `State.recordBlock` with exactly the bytes the
+/// block wrote. Returns the bytes written; moves the phase to `.trailer` when
+/// the block is the frame's last (`§3.1.1.2.1`).
 fn decodeBlock(r: *Reader) Error!usize {
     const header_bytes = try r.readFixed(block.block_header_len);
     const header = block.parseHeader(&header_bytes) catch |err| {
@@ -586,12 +523,11 @@ fn decodeBlock(r: *Reader) Error!usize {
     // §3.1.1.2.4 — Block_Maximum_Size bounds "both the decompressed size and
     // the compressed size of any block in the frame": the *declared*
     // Block_Size is checked against it before any content byte is read, so an
-    // oversized RLE block — whose Block_Size is the repeat count, not the
-    // content length — reports `BlockOversize` here exactly as the one-shot's
-    // declared-size check does (the M4 closing review's N1; the reader used
-    // to stage the one content byte first and report the input's end
-    // instead). The check also bounds the staging read below:
-    // content_len <= block_size <= blockRoom() <= staging.len.
+    // oversized RLE block (its Block_Size is the repeat count, not the
+    // content length) reports `BlockOversize` here, as the one-shot's
+    // declared-size check does. Staging the one content byte first would
+    // report the input's end instead. The check also bounds the staging read
+    // below: content_len <= block_size <= blockRoom() <= staging.len.
     if (header.block_size > r.blockRoom()) return error.BlockOversize;
     const content_len = block.contentLength(header);
     assert(content_len <= r.staging.len);
@@ -600,6 +536,9 @@ fn decodeBlock(r: *Reader) Error!usize {
     // the one this block decodes through.
     assert(r.frame_state != null);
     const state = &r.frame_state.?;
+    // What `decodeContent` can reach back into is what the serving region
+    // still holds. That is not the frame's decoded total
+    // (`state.decoded_len`), which keeps growing after the window slides.
     const retained_len = r.reader.end;
     const written = block.decodeContent(
         header,
@@ -610,35 +549,36 @@ fn decodeBlock(r: *Reader) Error!usize {
         &state.literals,
         &state.sequences,
     ) catch |err| switch (err) {
-        // The block phase guarantees the serving region's room — it slides
-        // until Block_Maximum_Size is free (`§3.1.1.2.4`) — so no decode can
+        // The block phase guarantees the serving region's room (it slides
+        // until Block_Maximum_Size is free, `§3.1.1.2.4`), so no decode can
         // outgrow it, which is why the reader's error set does not carry
-        // this name (README, "API"). The failure is structurally
-        // impossible: report it loudly where assertions are live, and fail
-        // closed rather than trust it where they are not.
+        // this name. The failure is structurally impossible: assert where
+        // assertions are live, and return an error rather than trust it
+        // where they are not.
         error.BufferTooSmall => {
             assert(false);
             return error.BlockOversize;
         },
         else => |e| return e,
     };
-    // The one funnel (OQ7): exactly the bytes this block wrote, in order,
-    // folded into the checksum and the frame's running total.
+    // Exactly the bytes this block wrote, in order, go into the checksum and
+    // the frame's running total, so every decoded byte is hashed once, with
+    // no second pass.
     try state.recordBlock(r.reader.buffer[retained_len..][0..written]);
     r.reader.end += written;
     if (header.last_block) r.phase = .trailer;
     return written;
 }
 
-/// The frame end, one place (`§3.1.1.1.4`, `§3.1.1`): Frame_Content_Size
-/// against the frame's decoded total — "It's allowed to represent a small
+/// The frame end, in one place (`§3.1.1.1.4`, `§3.1.1`): Frame_Content_Size
+/// against the frame's decoded total ("It's allowed to represent a small
 /// size (for example, 18) using any compatible variant", so the declaration
-/// is a check on the decode, never a sizing hint — then the Content_Checksum
-/// trailer, read and verified exactly once, advancing the input through the
-/// frame's last byte. Reached from `fill` (the block chain is complete and
-/// the consumer needs bytes) and from `rebase` (an over-the-end request at
-/// the frame's tail), the M3 B1 shape (`src/internal/README.md`, "A
-/// wrapper's rebase routes the inner end through the same ending as fill").
+/// is a check on the decode, never a sizing hint), then the Content_Checksum
+/// trailer, read and verified exactly once, which advances the input through
+/// the frame's last byte. Reached from `fillFrame` (the block chain is
+/// complete and the consumer needs bytes) and from `rebase` (a request that
+/// reaches past the frame's tail). Both paths must come through here, or a
+/// request at the tail could report the end with the trailer unread.
 fn endFrame(r: *Reader) Error!void {
     assert(r.state == .streaming);
     assert(r.phase == .trailer);
@@ -702,8 +642,7 @@ fn blockRoom(r: *const Reader) usize {
 /// The history the window retains: the frame's Window_Size, capped by the
 /// caller's window (`checkWindow` enforced the cap) — `§3.1.1.4`'s "all
 /// offsets leading to previously decoded data must be smaller than
-/// Window_Size" is the match reach, so retaining that much is enough. Before
-/// a frame is parsed nothing is buffered; the authorized window is the bound.
+/// Window_Size" is the match reach, so retaining that much is enough.
 fn historyLength(r: *const Reader) usize {
     // Before a frame is parsed nothing is buffered, so the window itself is
     // the bound; `rebase` can run at that phase.
@@ -714,8 +653,7 @@ fn historyLength(r: *const Reader) usize {
 /// Slide the serving region forward: keep the consumer's unconsumed bytes and
 /// the retained history (`§3.1.1.4`'s window), drop the rest. Returns the free
 /// room afterwards, which is at least Block_Maximum_Size once the history is
-/// within the window — the guaranteed contiguous request (README,
-/// "Streaming").
+/// within the window; that is what guarantees a contiguous request of 128 KiB.
 fn slide(r: *Reader) usize {
     const seek = r.reader.seek;
     const end = r.reader.end;
@@ -727,14 +665,14 @@ fn slide(r: *Reader) usize {
     return r.reader.buffer.len - keep;
 }
 
-/// The generated entries' rebase hook: make room for `capacity` more
-/// contiguous bytes by sliding the window, with the consumer's position kept.
-/// A request the window cannot hold at the consumer's position fails closed —
-/// unless the frame is at its tail, where the request is answered by the
-/// frame end instead: the trailer step runs (once), and only then the clean
-/// end is reported. An over-the-end request must never pass the frame's end
-/// through with the trailer unread (the pattern book's B1 entry; the
-/// regression tests drive both the good and the corrupted trailer).
+/// The vtable's rebase hook: make room for `capacity` more contiguous bytes
+/// by sliding the window, keeping the consumer's position. A request the
+/// window cannot hold at the consumer's position fails with `StreamTooLong`,
+/// unless the frame is at its tail. Then the frame end runs, once, and only
+/// after it is the clean end reported: a request that reaches past the
+/// frame's last byte must not report the end of the stream while the checksum
+/// trailer is still unread. (The over-the-end tests drive both a good and a
+/// corrupted trailer.)
 fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
     _ = r.slide();
     if (r.reader.buffer.len - r.reader.seek >= capacity) return;
@@ -749,9 +687,8 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 // Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1 (frames), §3.1.1
 // (the frame and its checksum), §3.1.1.1 (the header), §3.1.1.2 (the block
 // chain), §3.1.1.4 (offsets and the window), §3.1.2 (skippable frames). The
-// fixtures are `golden.zig`'s, each verified with the pinned zstd v1.5.7.
-// Every decode is sentinel-checked: the target is pre-filled and the bytes
-// past the served length must be untouched.
+// fixtures are `golden.zig`'s. Every decode is sentinel-checked: the target
+// is pre-filled and the bytes past the served length must be untouched.
 // ---------------------------------------------------------------------------
 
 /// The fixtures' window: their standard Frame_Header_Descriptor declares a
@@ -783,11 +720,11 @@ const stream_cases = [_]Case{
     .{ .desc = "frame_raw_empty", .source = &golden.frame_raw_empty, .expected = "" },
     .{ .desc = "frame_rle", .source = &golden.frame_rle, .expected = "AAAAAAAAAA" },
     .{ .desc = "frame_multi", .source = &golden.frame_multi, .expected = "abcdefghIIIIII" },
-    .{ .desc = "frame_t1", .source = &golden.frame_t1, .expected = &golden.t1_literals },
+    .{ .desc = "frame_pair", .source = &golden.frame_pair, .expected = &golden.pair_literals },
     .{
-        .desc = "frame_t1_errata",
-        .source = &golden.frame_t1_errata,
-        .expected = &golden.t1_errata_literals,
+        .desc = "frame_pair_errata",
+        .source = &golden.frame_pair_errata,
+        .expected = &golden.pair_errata_literals,
     },
     .{
         .desc = "frame_treeless",
@@ -892,10 +829,10 @@ test "Reader: the buffer type is the documented window, block, and staging" {
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
-    // README, "API" — `err`'s type is the `DecompressError` set minus
-    // `BufferTooSmall` (the window is the caller's buffer, not a target cap),
-    // plus the interface's `ReadFailed`/`EndOfStream` and this layer's
-    // `WindowTooLarge`/`StreamTooLong`.
+    // `err`'s type is the `DecompressError` set minus `BufferTooSmall` (the
+    // window is the caller's buffer, not a target cap), plus the interface's
+    // `ReadFailed`/`EndOfStream` and this layer's `WindowTooLarge` and
+    // `StreamTooLong`.
     const mine = @typeInfo(Error).error_set.?;
     for (@typeInfo(frame.Error).error_set.?) |want| {
         if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
@@ -912,11 +849,11 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     try testing.expect(!has_buffer_too_small);
 }
 
-test "Reader: the landed fixtures decode through the streaming layer" {
-    // The same fixtures the one-shot decoder is judged against, through the
-    // streaming interface: each decodes to the golden output and consumes
-    // exactly its own bytes (`§3.1.1` — the frame ends at the last block's
-    // last byte, or at the trailer's when the flag is set).
+test "Reader: the golden fixtures decode through the streaming layer" {
+    // The one-shot decoder's fixtures, through the streaming interface: each
+    // decodes to the golden output and consumes exactly its own bytes
+    // (`§3.1.1`: the frame ends at the last block's last byte, or at the
+    // trailer's when the flag is set).
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var target: [300 * 1024]u8 = undefined;
     for (stream_cases) |tc| {
@@ -946,18 +883,18 @@ test "Reader: the landed fixtures decode through the streaming layer" {
     try testing.expectEqual(State.done, big.state);
 }
 
-test "Reader: the negative corners fail closed with the detail in err" {
+test "Reader: the negative corners fail with the detail in err" {
     // The frame layer's negative corners through the streaming layer: every
-    // one is `error.ReadFailed` with the specific detail beside it, and
-    // sticky. `written` is what the frame serves before the failure: the
-    // frame-end checks — Frame_Content_Size and the checksum trailer — land
+    // one is `error.ReadFailed` with the specific detail in `err`, and
+    // sticky. `written` is what the frame serves before the failure. The
+    // frame-end checks (Frame_Content_Size and the checksum trailer) run
     // after the frame's output is complete (`§3.1.1.1.4`, `§3.1.1`), so a
-    // frame whose declared size is short or whose trailer is corrupt still
-    // serves its bytes before the failure (the one-shot's tests pin the same
-    // counts). Every other corner fails before or inside the pump call that
-    // would serve, and the reader drops what it buffered — no partial output
-    // is trusted past the error (the flate reader's rule) — so the sentinel
-    // past `written` holds.
+    // frame whose output falls short of its declared size, or whose trailer
+    // is corrupt, still serves its bytes before the failure; the one-shot's
+    // tests pin the same counts. Every other corner fails before or inside
+    // the pump call that would serve, and the reader drops what it buffered
+    // (no partial output is trusted past an error, as in the flate reader),
+    // so the sentinel past `written` holds.
     const CaseNeg = struct { desc: []const u8, source: []const u8, want: Error, written: usize };
     const cases = [_]CaseNeg{
         // §3.1.1.1.1.4 — descriptor bit 3.
@@ -1092,14 +1029,14 @@ test "Reader: the negative corners fail closed with the detail in err" {
             .want = error.ContentSizeMismatch,
             .written = 4,
         },
-        // §3.1.1.4 — the declared window bound (T12).
+        // §3.1.1.4 — the declared window bound.
         .{
             .desc = "frame_window_1k_over",
             .source = &golden.frame_window_1k_over,
             .want = error.OffsetTooFar,
             .written = 0,
         },
-        // §3.1.1 — the XXH64 trailer (T8).
+        // §3.1.1 — the XXH64 trailer.
         .{
             .desc = "frame_checksum_corrupt",
             .source = &golden.frame_checksum_corrupt,
@@ -1158,10 +1095,10 @@ test "Reader: the negative corners fail closed with the detail in err" {
 }
 
 test "Reader: the frame boundary is exact at the frame's last byte" {
-    // README, "Streaming": the reader consumes `input` exactly through the
-    // frame's last byte — the checksum trailer's last byte when the flag is
-    // set (`§3.1.1`), the last block's last byte otherwise — and stops there.
-    // Marker bytes behind the frame are not the reader's to consume.
+    // The reader consumes `input` exactly through the frame's last byte (the
+    // checksum trailer's last byte when the flag is set, `§3.1.1`, the last
+    // block's last byte otherwise) and stops there. Marker bytes behind the
+    // frame are not the reader's to consume.
     const cases = [_]struct { desc: []const u8, source: []const u8, expected: []const u8 }{
         .{ .desc = "checksummed", .source = &golden.frame_checksum, .expected = "abcd" },
         .{ .desc = "unchecksummed", .source = &golden.frame_raw, .expected = "zstd raw" },
@@ -1248,11 +1185,11 @@ test "Reader: streamAll walks every frame to the input's end" {
 }
 
 test "Reader: the allocator conveniences own the default buffer" {
-    // README, "Allocation": `streamFrameAlloc`/`streamAllAlloc` allocate the
-    // default window from the caller's allocator, drive the caller-buffered
-    // pumps, and free the buffer before returning. `testing.allocator` makes
-    // the allocation visible: a buffer the convenience forgot to free fails
-    // this test at its end.
+    // `streamFrameAlloc`/`streamAllAlloc` allocate the default window from
+    // the caller's allocator, drive the caller-buffered pumps, and free the
+    // buffer before returning. `testing.allocator` makes the allocation
+    // visible: a buffer the convenience forgot to free fails this test at its
+    // end.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -1271,7 +1208,7 @@ test "Reader: the allocator conveniences own the default buffer" {
     try testing.expectEqual(@as(usize, golden.frame_raw.len), one_in.seek);
 
     // A small-window frame through the convenience's default window: the
-    // buffer is the cap, not a floor — `frame_window_1k` declares 1 KB and
+    // buffer is the cap, not a floor: `frame_window_1k` declares 1 KB and
     // decodes through the 8 MiB default unchanged.
     var small_in: Io.Reader = .fixed(&golden.frame_window_1k);
     out.clearRetainingCapacity();
@@ -1282,8 +1219,8 @@ test "Reader: the allocator conveniences own the default buffer" {
     try testing.expectEqual(golden.frame_window_1k.len, small_in.seek);
 
     // The walk's cardinality rules ride the convenience: the empty input is
-    // the clean end with zero frames served (T10), while one frame's pump
-    // over a zero-byte input is `ReadFailed` (no frame unit began).
+    // the clean end with zero frames served, while one frame's pump over a
+    // zero-byte input is `ReadFailed` (no frame unit began).
     var empty_in: Io.Reader = .fixed("");
     out.clearRetainingCapacity();
     try testing.expectEqual(@as(usize, 0), try streamAllAlloc(gpa, &empty_in, &out.writer));
@@ -1354,9 +1291,9 @@ test "Reader: skippable frames are skipped in every layer" {
         try testing.expectEqual(golden.skippable_around.len, walk_in.seek);
     }
 
-    // §3.1.2 + T10 — a stream of only skippable frames is the clean end with
-    // zero bytes served (the CLI decodes all sixteen to zero bytes cleanly),
-    // for the walk and for a reader driven directly.
+    // §3.1.2 — a stream of only skippable frames is the clean end with zero
+    // bytes served (the CLI decodes all sixteen to zero bytes cleanly), for
+    // the walk and for a reader driven directly.
     var only_in: Io.Reader = .fixed(&golden.skippable_sixteen);
     var only_out: Io.Writer.Allocating = .init(gpa);
     defer only_out.deinit();
@@ -1381,9 +1318,9 @@ test "Reader: skippable frames are skipped in every layer" {
 }
 
 test "Reader: the cardinality rules for the empty input" {
-    // T10 — the gzip decision mapped over: a zero-byte input is `Truncated`
-    // (no frame unit began — the CLI fails "unexpected end of file"), and the
-    // walk's clean end (zero frames served).
+    // A zero-byte input is `Truncated` for one reader (no frame unit began;
+    // the CLI fails with "unexpected end of file") and the clean end, with
+    // zero frames served, for the walk.
     const gpa = testing.allocator;
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var fixed_in: Io.Reader = .fixed("");
@@ -1409,9 +1346,9 @@ test "Reader: the cardinality rules for the empty input" {
     try testing.expectEqual(@as(usize, 0), out.written().len);
 }
 
-test "Reader: trailing garbage fails closed at the next unit's classify" {
-    // T10 — the walk: any byte where a frame unit should start is parsed as
-    // one, so trailing garbage fails `BadMagic` instead of being skipped.
+test "Reader: trailing garbage fails at the next unit's classify" {
+    // The walk: any byte where a frame unit should start is parsed as one,
+    // so trailing garbage is `BadMagic` and is not skipped.
     const gpa = testing.allocator;
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_trailing_garbage);
@@ -1464,9 +1401,9 @@ test "Reader: a truncated frame is Truncated at every prefix" {
 test "Reader: the window cap is the buffer's" {
     // RFC 8878 §3.1.1.1.2 — "a decoder is allowed to reject a compressed
     // frame that requests a memory size beyond the decoder's authorized
-    // range": the caller's buffer type is the authorization (OQ1), and the
-    // cap is exact. `frame_window_1152` declares 1152 bytes (1024 + 128, the
-    // first window above the 1-KB minimum); `frame_window_1k` declares 1024.
+    // range": the caller's buffer type is the authorization, and the cap is
+    // exact. `frame_window_1152` declares 1152 bytes (1024 + 128, the first
+    // window above the 1-KB minimum); `frame_window_1k` declares 1024.
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
 
@@ -1503,9 +1440,9 @@ test "Reader: the window cap is the buffer's" {
         try testing.expectEqualSlices(u8, "BBB", out.written()[2048..2051]);
     }
     {
-        // The addressable-span precision (T12): ten literals move the match
-        // position past the window, and offset 1025 is inside the span — the
-        // reader accepts it exactly as the one-shot and the pinned CLI do.
+        // The addressable-span rule: ten literals move the match position
+        // past the window, and offset 1025 is inside the span, so the reader
+        // accepts it, as the one-shot and the CLI do.
         out.clearRetainingCapacity();
         var rbuf: Buffer(1024) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_window_1k_span);
@@ -1559,12 +1496,11 @@ test "Reader: the window slides to serve a frame larger than the buffer" {
     try sentinel.expect(&guarded.after, 0);
 }
 
-test "Reader: a contiguous request past the window fails closed" {
-    // README, "Streaming" — "any contiguous request of at most 128 KiB is
-    // served" (the slide always frees Block_Maximum_Size, §3.1.1.2.4), and "a
-    // request beyond what the window can hold at the consumer's position
-    // fails closed with `error.ReadFailed` (`err == .StreamTooLong`), never
-    // an assert".
+test "Reader: a contiguous request past the window fails" {
+    // Any contiguous request of at most 128 KiB is served (the slide always
+    // frees Block_Maximum_Size, §3.1.1.2.4). A request beyond what the window
+    // can hold at the consumer's position returns `error.ReadFailed` with
+    // `err == .StreamTooLong`, never an assert.
     var rbuf: Buffer(128 * 1024) = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_window_128k);
     var r: Reader = .init(128 * 1024, &fixed_in, &rbuf);
@@ -1581,13 +1517,13 @@ test "Reader: a contiguous request past the window fails closed" {
     try testing.expectError(error.ReadFailed, r.reader.peek(1));
 }
 
-/// The closing review's RLE-only frame: 32,770 four-byte blocks, each one
-/// RLE block of 128 KiB — a 131 KB input decoding to 4,295,229,440 bytes
-/// (262,144 past 2^32), the shape that found both 32-bit wraps. The
-/// `checksum` switch adds the Content_Checksum_Flag (the descriptor's 0x04)
-/// and the four trailer bytes (the low 32 bits of XXH64 over the decoded
-/// 0x5A bytes, little-endian — 0xB7494A5E, the value the pinned CLI's own
-/// checksum of the same bytes produces).
+/// An RLE-only frame: 32,770 four-byte blocks, each one RLE block of
+/// 128 KiB. A 131 KB input decodes to 4,295,229,440 bytes (262,144 past
+/// 2^32), which exposes 32-bit wraps in the decoded-length and checksum byte
+/// counts. The `checksum` switch adds the Content_Checksum_Flag (the
+/// descriptor's 0x04) and the four trailer bytes (the low 32 bits of XXH64
+/// over the decoded 0x5A bytes, little-endian: 0xB7494A5E, the value the
+/// CLI's own checksum of the same bytes produces).
 fn buildHugeRleFrame(target: []u8, checksum: bool) usize {
     const block_count = 32_770;
     const block_size = 128 * 1024;
@@ -1615,10 +1551,10 @@ fn buildHugeRleFrame(target: []u8, checksum: bool) usize {
 
 /// Drive the reader's pump directly, accumulating the served count in a
 /// u64: `streamAll` routes through std's `streamRemaining`, whose own
-/// offset accumulation is a usize that wraps past 2^32 — a std-side limit a
-/// 32-bit caller cannot route around, so the boundary tests drive the pump
-/// themselves (the review's direct-drive shape). The per-call counts are
-/// small on every target; only the total needs the width.
+/// offset accumulation is a usize that wraps past 2^32. A 32-bit caller
+/// cannot route around that std limit, so the boundary tests drive the pump
+/// themselves. The per-call counts are small on every target; only the
+/// total needs the width.
 fn drainU64(r: *Reader, served: *u64) !void {
     var sink: Io.Writer.Discarding = .init(&.{});
     while (true) {
@@ -1631,15 +1567,13 @@ fn drainU64(r: *Reader, served: *u64) !void {
 }
 
 test "Reader: the frame total runs past 2^32 without wrapping" {
-    // The M4 closing review's blocker (B1): the frame's running decoded total
-    // was usize, so this hostile RLE-only frame (4 input bytes per 128 KiB
-    // block, the probe decoding 4.29 GB in under a second) drove the total
-    // past 2^32 on the streaming path — a panic in Debug/ReleaseSafe and UB
-    // in ReleaseFast on every 32-bit target. `frame.State.decoded_len` is
-    // u64 now; the direct-drive shape below runs on the 32-bit targets
-    // themselves (`just check-32`), where the wrap is observable — this
-    // aarch64 host cannot see a revert (usize is u64 here), and the comptime
-    // type pin below catches the literal revert on every host.
+    // The frame's decoded total must be a u64. An RLE-only frame (4 input
+    // bytes per 128 KiB block) decodes past 2^32 bytes from a 131 KB input,
+    // so a usize total would panic in Debug/ReleaseSafe and be undefined
+    // behavior in ReleaseFast on every 32-bit target. The direct drive below
+    // runs on the 32-bit targets themselves (`just check-32`), where the wrap
+    // is observable. On a 64-bit host `usize` is `u64` and cannot show a
+    // revert, so the comptime type pin catches one on every host.
     comptime {
         assert(@FieldType(frame.State, "decoded_len") == u64);
     }
@@ -1660,15 +1594,13 @@ test "Reader: the frame total runs past 2^32 without wrapping" {
 }
 
 test "Reader: the checksum fold runs past 2^32 without wrapping" {
-    // The closing re-review's B1-prime: the same frame with the
-    // Content_Checksum_Flag set — a legitimate frame the pinned CLI writes
-    // by default and `zstd -t` accepts — where the checksum fold's byte
-    // count was the last usize on the path (std's XxHash64 counts internally
-    // in a usize): a ReleaseSafe panic and a ReleaseFast false
-    // WrongChecksum on the 32-bit targets. The kernel is ours now
-    // (`xxh64.zig`: the u64 byte count, the differential sweep against
-    // std's kernel as the oracle), so this frame verifies its checksum on
-    // every target. The comptime pin catches the literal revert everywhere.
+    // The same frame with the Content_Checksum_Flag set, which is a
+    // legitimate frame: the CLI writes the checksum by default and `zstd -t`
+    // accepts it. std's XxHash64 counts bytes in a usize, so on the 32-bit
+    // targets it would panic in ReleaseSafe and report a false
+    // `WrongChecksum` in ReleaseFast. `xxh64.zig` has its own kernel with a
+    // u64 byte count, so this frame verifies its checksum on every target.
+    // The comptime pin catches a revert on every host.
     comptime {
         assert(@FieldType(xxh64.State, "byte_count") == u64);
     }
@@ -1690,15 +1622,13 @@ test "Reader: the checksum fold runs past 2^32 without wrapping" {
 }
 
 test "Reader: an over-the-end request still checks the trailer" {
-    // The rebase path, the M3 B1 shape (`src/internal/README.md`, "A
-    // wrapper's rebase routes the inner end through the same ending as
-    // fill"): an over-the-end peek at a frame's tail routes through
-    // `rebase`, where the frame end — `§3.1.1`'s trailer, read and verified
-    // exactly once — must run before the clean end is reported, never pass
-    // the frame's end through with the trailer unread. RFC 8878 §3.1.1: "the
-    // result of the XXH64() hash function digesting the original (decoded)
-    // data as input, and a seed of zero. The low 4 bytes of the checksum are
-    // stored in little-endian format."
+    // The rebase path: an over-the-end peek at a frame's tail goes through
+    // `rebase`, where the frame end (`§3.1.1`'s trailer, read and verified
+    // exactly once) must run before the clean end is reported. Reporting the
+    // end with the trailer unread would accept a corrupted checksum. RFC 8878
+    // §3.1.1: "the result of the XXH64() hash function digesting the original
+    // (decoded) data as input, and a seed of zero. The low 4 bytes of the
+    // checksum are stored in little-endian format."
     //
     // `frame_checksum_multi` is 135000 bytes with a 135000-byte window
     // (single-segment), so the buffer is window + Block_Maximum_Size; the
@@ -1738,12 +1668,12 @@ test "Reader: an over-the-end request still checks the trailer" {
 }
 
 test "Reader: a chunked input refills across the header and a block" {
-    // README, "Streaming": "The reader's input must buffer at least 4 bytes —
-    // the magic, the frame layer's largest fixed-size read (the 3-byte block
-    // header and the 4-byte checksum fit inside it)". A 4-byte input buffer
-    // is therefore the minimum, and the header parse, the block staging, and
-    // the trailer read all run on refills. The marker bytes behind the frame
-    // must never reach the decoder.
+    // The reader's input must buffer at least 4 bytes, the frame layer's
+    // largest fixed-size read (the magic, a skippable frame's Frame_Size, or
+    // the checksum; the 3-byte block header fits inside it). A 4-byte input
+    // buffer is therefore the minimum, and the header parse, the block
+    // staging, and the trailer read all run on refills. The marker bytes
+    // behind the frame must never reach the decoder.
     const gpa = testing.allocator;
     const markers = 8;
     const framed = try gpa.alloc(u8, golden.frame_checksum_multi.len + markers);
@@ -1768,9 +1698,9 @@ test "Reader: a chunked input refills across the header and a block" {
 }
 
 test "Reader: a zero-length poll does not fail the stream" {
-    // The pattern book's zero-length poll: std calls `vtable.stream` at
-    // limit 0 when the buffer is nonempty, and the poll must answer 0 without
-    // filling (a fill could fail `StreamTooLong` on a valid stream).
+    // The zero-length poll: std calls `vtable.stream` at limit 0 when the
+    // buffer is nonempty, and the poll must answer 0 without filling (a fill
+    // could fail `StreamTooLong` on a valid stream).
     const gpa = testing.allocator;
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_checksum_multi);

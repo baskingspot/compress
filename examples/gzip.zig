@@ -1,16 +1,14 @@
 //! gzip example CLI: `gzip encode [FILE|-] > out`,
 //! `gzip decode [FILE|-] > out`. Shared scaffolding in `examples/cli.zig`.
 //!
-//! This is the thin-pump shape the streaming layer enables: `encode` wraps
-//! stdout in a `gzip.Writer` and pumps the input into it (one member);
-//! `decode` is the member walk the container owns (`Reader.streamAll`,
-//! RFC 1952 §2.2: a gzip file is a sequence of members — one member per
-//! iteration at the boundary contract's exact position; a member that is
-//! not present is the file's clean end; garbage in a next member's place
-//! fails `BadHeader`, never silently ignored).
-//!
-//! Both pumps are stack-buffered end to end: the whole encode/decode path
-//! allocates nothing.
+//! `encode` runs the input through `gzip.Writer.streamAll`, which writes one
+//! member. `decode` runs it through `gzip.Reader.streamAll`, which decodes
+//! every member in turn (RFC 1952 §2.2: a gzip file is a sequence of members).
+//! Input that ends after a member's trailer is a clean end. Any other bytes
+//! where a member should start must be a valid member header, or the decode
+//! fails (`BadHeader` in the reader, surfaced by the pump as
+//! `error.ReadFailed`). Both directions use stack buffers and allocate
+//! nothing.
 
 const std = @import("std");
 const Io = std.Io;
@@ -47,7 +45,7 @@ test "example: streaming round-trip" {
 
 test "example: the decode loop walks a multi-member file" {
     // RFC 1952 §2.2 — members appear one after another: the CLI decodes all
-    // of them, and a trailing byte that is not a member fails closed.
+    // of them, and a trailing byte that is not a member header is an error.
     var members: Io.Writer.Allocating = .init(testing.allocator);
     defer members.deinit();
     inline for (.{ "first ", "second" }) |part| {

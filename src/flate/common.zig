@@ -1,10 +1,10 @@
-//! Shared helpers for the flate codec: little-endian integer access. Every
-//! byte-aligned integer access in this package is little-endian — the
-//! encoder's hash loads, the stored-block headers, and the bit reader's
-//! window (deflate packs bits into bytes LSB-first, RFC 1951 §3.1.1, and
-//! stores multi-byte numbers least-significant byte first, §3.1) — so the
-//! helpers bake the endianness in and call sites carry no endian argument.
-//! The `readInt`/`writeInt` bodies are `internal.int`'s, bound here.
+//! Little-endian integer access for the flate codec. Deflate stores multi-byte
+//! numbers least-significant byte first (RFC 1951 §3.1) and packs bits into
+//! bytes LSB-first (§3.1.1), so every byte-aligned integer access in this
+//! package (the encoder's hash loads, the stored-block headers, the bit
+//! reader's window) is little-endian. These helpers fix the endianness so call
+//! sites pass no endian argument. `readInt` and `writeInt` are
+//! `internal.int.little`'s, bound here.
 
 const mem = @import("std").mem;
 const internal = @import("../internal/root.zig");

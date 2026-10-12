@@ -1,40 +1,14 @@
-//! Fuzz targets for the flate module, one per layer of the decode surface:
+//! Fuzz targets for the flate module, one per layer; each target's doc
+//! comment states its property. Run with `just fuzz <budget>` (ReleaseSafe
+//! only: a Debug-mode fuzz run hits ziglang/zig#30655).
 //!
-//!   - `fuzzBlockDecode`: arbitrary bytes into `decode.decompress` against a
-//!     few window shapes, with the sentinel overrun check and a re-encode
-//!     round trip (the oracle-within-process property) on every success.
-//!   - `fuzzRoundTrip`: structured shapes (runs, repeated phrases, mixed
-//!     text+random, the block-boundary sizes) through `encode.compress` ->
-//!     `decode.decompress`: identity, the `maxCompressedLength` bound on every
-//!     emission, and the T4 ending.
-//!   - `fuzzStreamRoundTrip`: `Writer` -> `Reader` identity over raw streams,
-//!     through both `streamAll` pairs and the manual init/write/finish and
-//!     consume paths, plus the exact-boundary property: a stream followed by
-//!     marker bytes consumes the input exactly through the stream's last byte
-//!     — markers never read.
-//!   - `fuzzStreamMachinery`: Smith-chosen `Io.Writer` operation sequences
-//!     (writeAll/writeSplatAll/writeVecAll/splatBytesAll/writableSliceGreedy +
-//!     advance/writeByte/flush) against an expected-bytes model, then decoded
-//!     through `Reader` and compared.
-//!   - `fuzzCorruption`: valid (and committed invalid) streams with Smith
-//!     mutations — truncation at byte and bit boundaries, byte and bit flips,
-//!     poked LEN/NLEN, poked tree headers — against an independent walk of the
-//!     same bytes; the `Reader` must fail closed (stickily, `err` set) or serve
-//!     exactly what the walk says, and never write outside its window.
-//!   - `fuzzAmplification`: bomb-shaped streams decoded into caps below, at,
-//!     and above their decoded length: the cap is exact, the guard bytes stay
-//!     untouched, and a small stream never buys output past the cap.
-//!   - `fuzzReaderMachinery`: Smith-chosen consumer op sequences
-//!     (peek/take/discardAll/readSliceAll/stream) over known streams, with the
-//!     contiguous-read cap probed past `history_len`.
-//!
-//! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run hits
-//! ziglang/zig#30655). Every target caps its per-iteration input
-//! (`source_max`, `roundtrip_max`, `stream_max`, `corrupt_source_max`,
-//! `reader_source_max`) and its per-iteration work (`corrupt_out_max`,
-//! `write_budget`) so a budget run finishes. The codec allocates nothing; the
-//! only allocation is the harness's `Io.Writer.Allocating`/`ArrayList`, which
-//! the runner's per-input leak check covers.
+//!   - `fuzzBlockDecode`: arbitrary bytes into `decode.decompress`
+//!   - `fuzzRoundTrip`: structured inputs through `encode.compress` and back
+//!   - `fuzzStreamRoundTrip`: `Writer` to `Reader` identity, exact boundary
+//!   - `fuzzStreamMachinery`: random `Io.Writer` operations against a model
+//!   - `fuzzCorruption`: mutated streams, `Reader` against a reference walk
+//!   - `fuzzAmplification`: bomb-shaped streams against caps of every size
+//!   - `fuzzReaderMachinery`: random `Io.Reader` consumer operations
 //!
 //! Spec: docs/research/specs/rfc1951-deflate.txt (§3.1.1 bit packing, §3.2.3
 //! block format, §3.2.4 stored blocks, §3.2.5 length/distance codes, §3.2.6
@@ -63,6 +37,11 @@ const Writer = @import("Writer.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
+//
+// Every target caps its per-iteration input and work (the `*_max` constants
+// and `write_budget`) so a budget run finishes. The codec allocates nothing;
+// the only allocation is the harness's (`Io.Writer.Allocating`, `ArrayList`),
+// which the runner's per-input leak check covers.
 // ---------------------------------------------------------------------------
 
 /// Bytes past the decoded length checked on every decode: an out-of-bounds
@@ -78,22 +57,22 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked implemented level: `fast` or the stored-only `@"0"`, or one
-/// of the numeric aliases that tune to `fast` today (encode.Level's contract).
-/// `ratio` is never returned — it is `error.Unimplemented`, exercised
-/// explicitly by the round-trip target.
+/// A Smith-picked level the encoder implements: `fast`, the stored-only
+/// `@"0"`, or one of `@"1"` to `@"9"` (which behave like `fast`). `ratio` is
+/// never returned: it is `error.Unimplemented`, which `fuzzRoundTrip` checks
+/// explicitly.
 fn implementedLevel(smith: *Smith) encode.Level {
     const pick = rangeAtMost(smith, 0, 10);
     if (pick == 0) return .fast;
     return @enumFromInt(@as(u8, @intCast(pick + 1)));
 }
 
-/// README "Divergences" T4, `§3.2.3` — every stream ends with the final empty
-/// fixed block: BFINAL=1, BTYPE=01, end-of-block. `golden.expectFinalEmptyBlock`
-/// pins the ten ending bits; when the ending lands byte-aligned (every stored
-/// block, and any fixed block whose payload ends on a byte) those ten bits are
-/// the literal last two bytes, `03 00`.
-fn expectT4Ending(stream: []const u8) !void {
+/// Every stream this codec writes ends with the final empty fixed block:
+/// BFINAL=1, BTYPE=01, end-of-block (`§3.2.3`). `golden.expectFinalEmptyBlock`
+/// checks the ten ending bits. When the ending lands byte-aligned (after any
+/// stored block, and after any fixed block whose payload ends on a byte) those
+/// bits are the last two bytes, `03 00`, which this also checks.
+fn expectFinalEmptyBlockEnding(stream: []const u8) !void {
     try golden.expectFinalEmptyBlock(stream);
     const total_bits = stream.len * 8;
     var bit = total_bits;
@@ -120,9 +99,9 @@ fn pumpLimit(plain_len: usize) usize {
     return 16 + 2 * plain_len;
 }
 
-/// Pump `r` into `w` until the clean end of stream (the shape of Reader.zig's
-/// own `pump` driver), bounded: a reader that neither serves bytes nor fails
-/// is a hang, not a timeout.
+/// Pump `r` into `w` until the clean end of stream, in at most `limit` calls.
+/// A reader that neither serves bytes nor fails is a hang, which this reports
+/// as `error.PumpStalled` instead of timing out.
 fn pump(r: *Io.Reader, w: *Io.Writer, limit: usize) !void {
     var calls: usize = 0;
     while (true) {
@@ -143,9 +122,9 @@ fn u64Le(comptime value: u64) [8]u8 {
     return out;
 }
 
-/// A target-1 seed in Smith's serialized form: the `u32-le` length plus the
-/// bytes `smith.slice` consumes, then the little-endian u64 that selects the
-/// full 64-KiB window shape (3).
+/// A `fuzzBlockDecode` seed in Smith's serialized form: the `u32-le` length
+/// plus the bytes `smith.slice` consumes, then the little-endian u64 that
+/// selects the full 64-KiB window shape (3).
 fn decodeSeed(comptime block: []const u8) [4 + block.len + 8]u8 {
     var seed: [4 + block.len + 8]u8 = undefined;
     mem.writeInt(u32, seed[0..4], @intCast(block.len), .little);
@@ -155,8 +134,8 @@ fn decodeSeed(comptime block: []const u8) [4 + block.len + 8]u8 {
     return seed;
 }
 
-/// A target-5 seed in Smith's serialized form: the u64 that selects the raw
-/// slice source (1), then the `u32-le` length plus bytes `smith.slice`
+/// A `fuzzCorruption` seed in Smith's serialized form: the u64 that selects
+/// the raw slice source (1), then the `u32-le` length plus bytes `smith.slice`
 /// consumes. An empty mutation stream follows, so the seed itself is the
 /// stream under test.
 fn streamSeed(comptime stream: []const u8) [8 + 4 + stream.len]u8 {
@@ -167,9 +146,9 @@ fn streamSeed(comptime stream: []const u8) [8 + 4 + stream.len]u8 {
     return seed;
 }
 
-/// A target-3/target-6 seed in Smith's serialized form: the little-endian
-/// level `smith.value(encode.Level)` consumes, then the `u32-le` length plus
-/// bytes `smith.slice` consumes.
+/// A `fuzzStreamRoundTrip` or `fuzzReaderMachinery` seed in Smith's
+/// serialized form: the little-endian level `smith.value(encode.Level)`
+/// consumes, then the `u32-le` length plus bytes `smith.slice` consumes.
 fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8 {
     @setEvalBranchQuota(10_000);
     var seed: [12 + bytes.len]u8 = undefined;
@@ -180,7 +159,7 @@ fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8
 }
 
 // ---------------------------------------------------------------------------
-// Target 1: arbitrary bytes into the one-shot decoder
+// Block decode: arbitrary bytes into the one-shot decoder
 // ---------------------------------------------------------------------------
 
 /// The block-decode source cap. A hostile stream expands at most ~1032x (a
@@ -188,14 +167,15 @@ fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8
 /// small and the window is what bounds the work.
 const source_max: usize = 4 * 1024;
 
-/// The widest decode window target 1 sizes: `Reader.Buffer`'s own 64 KiB, so a
-/// decoded stream can exceed one block and still be re-encoded in full.
+/// The widest decode window `fuzzBlockDecode` uses: `Reader.Buffer`'s own
+/// 64 KiB, so a decoded stream can exceed one block and still be re-encoded in
+/// full.
 const decode_window_len: usize = 2 * encode.history_len;
 
-/// The window shapes target 1 draws: empty, tiny, one block's worth, and the
-/// full window. The full shape is the "larger cap" the sentinel check needs;
-/// the short ones exercise the size gate (`error.BufferTooSmall`) on streams
-/// that decode to more than they hold.
+/// The window shapes `fuzzBlockDecode` draws: empty, tiny, one block's worth,
+/// and the full window. The full shape is the "larger cap" the sentinel check
+/// needs; the short ones exercise the size gate (`error.BufferTooSmall`) on
+/// streams that decode to more than they hold.
 fn windowShape(smith: *Smith) usize {
     return switch (rangeAtMost(smith, 0, 3)) {
         0 => 0,
@@ -205,10 +185,10 @@ fn windowShape(smith: *Smith) usize {
     };
 }
 
-/// Re-encode `bytes` with a Smith-picked implemented level and decode it back:
-/// whatever a hostile input decoded to must survive a full compress/decompress
-/// cycle (the oracle-within-process property — our encoder is checked by our
-/// decoder on bytes the fuzzer chose, not on bytes we chose).
+/// Re-encode `bytes` with a Smith-picked implemented level and decode it back.
+/// Whatever a hostile input decoded to must survive a full compress/decompress
+/// cycle. This checks our encoder against our decoder on bytes the fuzzer
+/// chose, not on bytes we chose.
 fn reencodeRoundTrip(bytes: []const u8, smith: *Smith) !void {
     assert(bytes.len <= decode_window_len);
     const level = implementedLevel(smith);
@@ -224,16 +204,16 @@ fn reencodeRoundTrip(bytes: []const u8, smith: *Smith) !void {
     try sentinel.expect(&plain, n);
 }
 
-/// Target 1: arbitrary bytes into the one-shot decoder.
+/// Arbitrary bytes into the one-shot decoder.
 ///
-/// Attacks the bit reader's `take` gate (a truncated stream must never decode a
-/// symbol out of zero padding), the block-header dispatch, the stored LEN/NLEN
-/// path, the fixed and dynamic tables, the length/distance extra bits, the
-/// match copy (including overlapping and distance-1 runs), the
+/// Exercises the bit reader's `take` gate (a truncated stream must never
+/// decode a symbol out of zero padding), the block-header dispatch, the stored
+/// LEN/NLEN path, the fixed and dynamic tables, the length/distance extra bits,
+/// the match copy (including overlapping and distance-1 runs), the
 /// distance-past-the-start check, and the target-as-cap size gate. The
-/// property: decode either fails closed with a `DecompressError` or is exact —
-/// the bytes it produced re-encode to a stream that decodes back to the same
-/// bytes — and no byte past the window's length is ever touched.
+/// property: decode either returns a `DecompressError` or is exact (the bytes
+/// it produced re-encode to a stream that decodes back to the same bytes), and
+/// no byte past the window's length is ever touched.
 fn fuzzBlockDecode(_: void, smith: *Smith) anyerror!void {
     var source_buf: [source_max]u8 = undefined;
     const source = source_buf[0..smith.slice(&source_buf)];
@@ -258,10 +238,10 @@ fn fuzzBlockDecode(_: void, smith: *Smith) anyerror!void {
     try sentinel.expect(window[0 .. window_len + guard_len], window_len);
 }
 
-/// Seed corpus for target 1: the committed micro-streams (one per block kind),
-/// the RFC §3.2.3 overlap example, and a few pre-corrupt streams, so the
-/// fuzzer starts from real bit patterns instead of discovering the format from
-/// scratch.
+/// Seed corpus for `fuzzBlockDecode`: the committed micro-streams (one per
+/// block kind), the RFC §3.2.3 overlap example, and a few pre-corrupt streams,
+/// so the fuzzer starts from real bit patterns instead of discovering the
+/// format from scratch.
 const block_decode_corpus: []const []const u8 = &.{
     &decodeSeed(""),
     &decodeSeed("\x03\x00"),
@@ -284,7 +264,7 @@ test "flate fuzz: block decode" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 2: the one-shot round trip
+// One-shot round trip
 // ---------------------------------------------------------------------------
 
 /// The round-trip source cap: the widest boundary case (131070) rounded up to
@@ -298,8 +278,8 @@ const roundtrip_max: usize = 131_072;
 const Shape = enum(u8) { random, run, phrase, mixed, boundary };
 
 /// The block-boundary sizes the `.boundary` shape pins: one below, at, and
-/// above `max_block_size` (65535), and a two-block length (README, "Encoder":
-/// the encoder splits at 65535).
+/// above `max_block_size` (65535), and a two-block length. The encoder splits
+/// input at `max_block_size`.
 const boundary_sizes = [_]usize{ 65534, 65535, 65536, 131070 };
 
 /// Fill `buf` with the Smith-chosen shape and return the used length. The
@@ -361,9 +341,10 @@ fn buildShape(smith: *Smith, buf: []u8) usize {
     return used;
 }
 
-/// A target-2 seed in Smith's serialized form: the level, the shape, and the
-/// length `buildShape` reads, then `content` — the bytes the shape's own
-/// `smith.value`/`smith.bytes` calls consume.
+/// A `fuzzRoundTrip` seed in Smith's serialized form: the level, the shape,
+/// and the length `buildShape` reads, then `content`, the bytes the shape's own
+/// `smith.value`/`smith.bytes` calls consume. `fuzzAmplification`'s corpus
+/// uses the same layout.
 fn shapeSeed(
     comptime level: u64,
     comptime shape: Shape,
@@ -378,8 +359,8 @@ fn shapeSeed(
     return seed;
 }
 
-/// Seeds for target 2: the Smith values the shape builder reads, so each seed
-/// pins a structure instead of relying on the fuzzer to grow one. `0` is
+/// Seeds for `fuzzRoundTrip`: the Smith values the shape builder reads, so each
+/// seed pins a structure instead of relying on the fuzzer to grow one. `0` is
 /// `fast`, `1` is `ratio`, `2` is `@"0"` (stored-only).
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
@@ -398,16 +379,16 @@ const roundtrip_corpus: []const []const u8 = &.{
     &shapeSeed(1, .random, 0, ""),
 };
 
-/// Target 2: the whole one-shot codec, on the shapes a compressor is worst at.
+/// The whole one-shot codec, on the shapes a compressor handles worst.
 ///
-/// Attacks the match finder (hash hits, the 4-byte confirm, backward
+/// Exercises the match finder (hash hits, the 4-byte confirm, backward
 /// extension, the accelerating skip, the 258/255 long-match split), the
 /// fixed-vs-stored bail threshold, the block split at `max_block_size`, the
 /// cross-block match reach, and the final empty fixed block. The property:
-/// `compress` -> `decompress` is the identity, the compressed size stays
-/// within `maxCompressedLength` on every emission, the stream ends with the T4
-/// ending (`03 00` where byte-aligned), and the decode writes nothing past the
-/// decoded length.
+/// `compress` then `decompress` is the identity, the compressed size stays
+/// within `maxCompressedLength` on every emission, the stream ends with the
+/// final empty fixed block (`03 00` where byte-aligned), and the decode writes
+/// nothing past the decoded length.
 fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
     const level = smith.value(encode.Level);
     var source_buf: [roundtrip_max]u8 = undefined;
@@ -435,9 +416,9 @@ fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
     const compressed = compressed_buf[0..c_len];
 
     // The documented bound, on every emission: `maxCompressedLength` is a
-    // promise, not a guess (README, "Contracts").
+    // promise, not an estimate.
     try testing.expect(c_len <= encode.maxCompressedLength(source.len));
-    try expectT4Ending(compressed);
+    try expectFinalEmptyBlockEnding(compressed);
 
     var plain_buf: [roundtrip_max + guard_len]u8 = undefined;
     // Exact cap first: a decoder that writes past the decoded length lands in
@@ -462,7 +443,7 @@ test "flate fuzz: one-shot round trip" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 3: the streaming round trip
+// Stream round trip
 // ---------------------------------------------------------------------------
 
 /// The stream source cap: two `Reader.Buffer` windows' worth, so the reader
@@ -472,25 +453,25 @@ const stream_max: usize = 128 * 1024;
 /// The mid-stream flush budget: how many Smith-chosen flushes the stream
 /// target's writer loop may take. Every flush ends the current block and
 /// every block costs at most 5 stored-header bytes beyond its input (the
-/// stored-block fallback, README "Encoder"), so each flushed block grows
-/// the stream past the no-flush `maxCompressedLength` bound by at most 5
-/// bytes — `framed` below carries `5 * flush_budget` of headroom for
-/// exactly this (the bound itself budgets only the unflushed block count).
+/// stored-block fallback), so each flushed block grows the stream past the
+/// no-flush `maxCompressedLength` bound by at most 5 bytes. `framed` below
+/// carries `5 * flush_budget` of headroom for exactly this (the bound itself
+/// budgets only the unflushed block count).
 const flush_budget: usize = 16;
 
 /// Marker bytes appended after a stream to prove the reader stops at the
-/// stream's last byte (README, "Streaming"): the format is self-delimiting, so
-/// bytes after BFINAL are not the reader's to consume.
+/// stream's last byte: the format is self-delimiting, so bytes after BFINAL
+/// are not the reader's to consume.
 const marker_len: usize = 8;
 const marker_byte: u8 = 0xa5;
 
-/// Target 3: `Writer` -> `Reader` identity over raw deflate streams.
+/// `Writer` to `Reader` identity over raw deflate streams.
 ///
-/// Attacks the streaming encoder's block accumulation and flush path, the
+/// Exercises the streaming encoder's block accumulation and flush path, the
 /// final empty fixed block, the decoder's window slide and refill, and the
 /// exact-boundary rule: the reader consumes its input through the stream's
 /// last byte (the final block's partial byte included) and never reads a byte
-/// past it — the property M3's gzip/zlib readers depend on to find a footer.
+/// past it. The gzip and zlib readers depend on this to find their trailer.
 /// Both `streamAll` pairs and the manual init/write/finish and consume paths
 /// are driven, with Smith-chosen write chunking and mid-stream flushes.
 fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
@@ -508,7 +489,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqual(input.len, consumed);
     try testing.expectEqual(input.len, source_in.seek);
     const stream = compressed.written();
-    try expectT4Ending(stream);
+    try expectFinalEmptyBlockEnding(stream);
 
     // The exact-boundary property: the stream followed by marker bytes.
     var framed: [
@@ -528,7 +509,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
 
     // Path B — manual init/write/finish, then a manual consume: Smith-chosen
     // write chunks and mid-stream flushes, so the block split follows the
-    // caller's calls (README, "Encoder": the split follows writes and flushes).
+    // caller's calls.
     var compressed2: Io.Writer.Allocating = .init(gpa);
     defer compressed2.deinit();
     var wbuf: Writer.Buffer = undefined;
@@ -546,7 +527,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     }
     try w.finish();
     const stream2 = compressed2.written();
-    try expectT4Ending(stream2);
+    try expectFinalEmptyBlockEnding(stream2);
 
     var rbuf: Reader.Buffer = undefined;
     var in2: Io.Reader = .fixed(stream2);
@@ -564,9 +545,9 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqual(@as(?Reader.Error, null), r.err);
 }
 
-/// Seeds for target 3: the level, then the `u32-le` length plus bytes
-/// `smith.slice` consumes — a repeated phrase, which the encoder turns into
-/// matches across blocks.
+/// Seeds for `fuzzStreamRoundTrip`: the level, then the `u32-le` length plus
+/// bytes `smith.slice` consumes. The first is a repeated phrase, which the
+/// encoder turns into matches across blocks.
 const stream_corpus: []const []const u8 = &.{
     &sliceSeed(0, "the quick brown fox " ** 8),
     // implementedLevel maps pick 1 to the stored-only .@"0" (pick+1 is the
@@ -579,12 +560,12 @@ test "flate fuzz: stream round trip" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 4: the writer's machinery
+// Stream machinery: the writer under random operation sequences
 // ---------------------------------------------------------------------------
 
-/// The `Io.Writer` operations the machinery target mixes, ported from the unit
-/// test at Writer.zig:"random write machinery sequences stay correct": the
-/// vtable contract under multi-slice splats, partial takes, direct-slice
+/// The `Io.Writer` operations `fuzzStreamMachinery` mixes. They are the same
+/// set as Writer.zig's "random write machinery sequences stay correct" test:
+/// the vtable contract under multi-slice splats, partial takes, direct-slice
 /// writes onto a full buffer, and mid-stream flushes.
 const Op = enum(u8) {
     write_splat_all,
@@ -594,15 +575,16 @@ const Op = enum(u8) {
     byte_and_flush,
 };
 
-/// Target 4: the writer's machinery, Smith-driven, against a model.
+/// Smith-chosen `Io.Writer` operation sequences against a model of the bytes
+/// written.
 ///
-/// Attacks `drain`/`rebase`/`compact` accounting under the full `Io.Writer`
-/// contract — `writeSplatAll` with a splat count, `writeVecAll`,
+/// Exercises `drain`/`rebase`/`compact` accounting under the full `Io.Writer`
+/// contract: `writeSplatAll` with a splat count, `writeVecAll`,
 /// `splatBytesAll`, `writableSliceGreedy` + `advance` (which lands on `rebase`
-/// when the accumulation buffer is full), `writeByte`, and mid-stream `flush`
-/// — by decoding the produced stream through `Reader` and comparing it against
-/// the bytes the model says were written. The unit test is the PRNG version;
-/// here the fuzzer drives the operation sequence and the sizes.
+/// when the accumulation buffer is full), `writeByte`, and mid-stream `flush`.
+/// The produced stream is decoded through `Reader` and compared with the bytes
+/// the model says were written. Writer.zig has the same check driven by a
+/// fixed PRNG; here the fuzzer picks the operations and the sizes.
 fn fuzzStreamMachinery(_: void, smith: *Smith) anyerror!void {
     const gpa = testing.allocator;
     var compressed: Io.Writer.Allocating = .init(gpa);
@@ -679,7 +661,7 @@ fn fuzzStreamMachinery(_: void, smith: *Smith) anyerror!void {
         }
     }
     try w.finish();
-    try expectT4Ending(compressed.written());
+    try expectFinalEmptyBlockEnding(compressed.written());
 
     // Decode through the streaming Reader and compare against the model.
     var plain: Io.Writer.Allocating = .init(gpa);
@@ -695,7 +677,7 @@ test "flate fuzz: stream machinery" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 5: corruption, against an independent walk
+// Corruption: mutated streams against an independent walk
 // ---------------------------------------------------------------------------
 
 /// The corruption source cap: the valid stream is built from at most this much
@@ -704,15 +686,15 @@ const corrupt_source_max: usize = 2048;
 
 /// The corruption output cap: the walk's target and the reader's fixed output.
 /// A hostile stream can expand ~1032x from its input (a dynamic tree can code
-/// 258-byte matches in two bits), so a 2-KiB mutation can out-expand this cap —
-/// the cap branch below is the honest way to bound the work, and the reader's
-/// own window is what bounds *its* memory (README, "Amplification").
+/// 258-byte matches in two bits), so a 2-KiB mutation can out-expand this cap.
+/// The cap branch in `fuzzCorruption` bounds the work, and the reader's own
+/// window bounds its memory.
 const corrupt_out_max: usize = 192 * 1024;
 
-/// Every committed stream the corruption target can seed from: the micro
-/// streams (one per block kind), Go's `deflateTests` streams, the `.ok`
-/// `TestStreams` rows, and the truncated/reject vectors — a pre-corrupted
-/// stream is a mutation the fuzzer would otherwise have to find.
+/// Every committed stream `fuzzCorruption` can start from: the micro streams
+/// (one per block kind), Go's `deflateTests` streams, the truncated vectors,
+/// and every `TestStreams` row, accepted or rejected. A pre-corrupted stream is
+/// a mutation the fuzzer would otherwise have to find.
 const seed_streams: []const []const u8 = blk: {
     @setEvalBranchQuota(10_000);
     var out: []const []const u8 = &.{};
@@ -828,12 +810,12 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) void {
 }
 
 /// An LSB-first bit reader over the mutated stream. decode.zig's `BitReader`
-/// is private to that file, so the reference walk carries its own (the snappy
-/// `referenceDecode` pattern): it exposes the `peek`/`take`/`ErrorSet` surface
-/// decode.zig's tree machinery is generic over, so the tables and the length
-/// arithmetic are shared while the bit source and the block loop are not.
-/// `peek` reads zeros past the end of the input; `take` is the gate that turns
-/// that into `error.Truncated` (`§3.1.1`).
+/// is private to that file, so the reference walk carries its own. It exposes
+/// the `peek`/`take`/`ErrorSet` surface decode.zig's tree machinery is generic
+/// over, so the tables and the length arithmetic are shared while the bit
+/// source and the block loop are not. `peek` reads zeros past the end of the
+/// input; `take` is the gate that turns that into `error.Truncated`
+/// (`§3.1.1`).
 const RefBits = struct {
     pub const ErrorSet = decode.DecompressError;
 
@@ -864,16 +846,16 @@ const RefBits = struct {
 
 /// Where the reference walk stopped: `err == null` is a clean decode to the
 /// final block, `produced` the bytes written; otherwise the specific
-/// `DecompressError` and the bytes produced before it — the same
-/// "prefix then fail closed" shape `decompress` documents.
+/// `DecompressError` and the bytes produced before it (the one-shot decoder
+/// likewise leaves the decoded prefix in `target`).
 const Walk = struct { err: ?decode.DecompressError, produced: usize };
 
 /// Walk `source` block by block, independently of `Reader`: decode each block
 /// into `target` (a cap, `error.BufferTooSmall` past it) until BFINAL. The
-/// rules are README.md's decoder contract, and the tree machinery
-/// (`readDynamicHeader`, the tables, `decodeLength`/`decodeDistance`,
-/// `copyMatch`) is decode.zig's — shared with the one-shot decoder, which
-/// `checkWalkAgrees` cross-checks on every stream both can decode.
+/// tree machinery (`readDynamicHeader`, the tables, `decodeLength` and
+/// `decodeDistance`, `copyMatch`) is decode.zig's, shared with the one-shot
+/// decoder, which `checkWalkAgrees` cross-checks on every stream both can
+/// decode. The bit source and the block loop are this file's own.
 fn referenceWalk(source: []const u8, target: []u8) Walk {
     var br: RefBits = .{ .source = source };
     var out_pos: usize = 0;
@@ -915,7 +897,8 @@ fn referenceWalk(source: []const u8, target: []u8) Walk {
 
 /// `§3.2.4` — a stored block: byte-aligned, LEN and NLEN (u16 LE, NLEN the
 /// one's complement of LEN), then LEN raw bytes. A payload cut short copies
-/// what is there and then fails closed, as the one-shot decoder does.
+/// what is there and then returns `error.Truncated`, as the one-shot decoder
+/// does.
 fn walkStored(br: *RefBits, target: []u8, out_pos: *usize) decode.DecompressError!void {
     const header_pos: usize = @intCast((br.bit_pos + 7) / 8);
     if (br.source.len - header_pos < 4) return error.Truncated;
@@ -968,10 +951,10 @@ fn walkHuffman(
 /// and skipped above it (a bomb would otherwise be decoded twice per input).
 const walk_check_max: usize = 8 * 1024;
 
-/// The walk and the landed one-shot decoder must agree on the same bytes: same
-/// error, same produced length, same bytes. This is the differential that
-/// keeps the reference honest — a bug in the walk shows up as a mismatch
-/// against `decode.decompress`, not as a false finding against `Reader`.
+/// The walk and the one-shot decoder must agree on the same bytes: same error,
+/// same produced length, same bytes. This differential keeps the reference
+/// honest: a bug in the walk shows up as a mismatch against
+/// `decode.decompress`, not as a spurious failure attributed to `Reader`.
 fn checkWalkAgrees(source: []const u8, reference: []const u8, walked: Walk) !void {
     if (walked.produced > walk_check_max - 258) return;
     var target: [walk_check_max]u8 = undefined;
@@ -983,7 +966,7 @@ fn checkWalkAgrees(source: []const u8, reference: []const u8, walked: Walk) !voi
         };
         // The walk failed but the one-shot decoder decoded: with the walk's
         // output inside the check window, the decoder's own cap is not the
-        // explanation — a real divergence.
+        // explanation, so this is a real divergence.
         try testing.expectEqual(walked.produced, got);
     } else {
         const n = try result;
@@ -992,8 +975,8 @@ fn checkWalkAgrees(source: []const u8, reference: []const u8, walked: Walk) !voi
     }
 }
 
-/// How a corruption-lane pump stopped. `output_full` is the harness's own cap
-/// (a fixed writer), not a codec failure.
+/// How a `pumpCapped` run stopped. `output_full` is the harness's own cap (a
+/// fixed writer), not a codec failure.
 const Stop = enum { end_of_stream, read_failed, output_full };
 
 const Pumped = struct { served: usize, stop: Stop };
@@ -1015,19 +998,21 @@ fn pumpCapped(r: *Io.Reader, w: *Io.Writer, limit: usize) !Pumped {
     }
 }
 
-/// Target 5: corruption of valid streams, against an independent walk.
+/// Mutated valid streams, with the `Reader` checked against an independent walk
+/// of the same bytes.
 ///
-/// Attacks truncation at byte and bit boundaries (mid-dynamic-tree, mid-match,
-/// mid-stored-payload), single-bit and whole-byte flips inside headers and
-/// payloads, declared LEN/NLEN pairs that are consistent lies or inconsistent,
-/// forced BTYPEs (including the reserved 11), and trailing bytes the stream's
-/// BFINAL must make the reader ignore. The property: the `Reader` either fails
-/// closed — `error.ReadFailed`, stickily, with the walk's own error in `err` —
-/// or serves exactly what the walk says, always as a prefix of the walk's
-/// output, and never writes outside its window.
+/// Exercises truncation at byte and bit boundaries (mid-dynamic-tree,
+/// mid-match, mid-stored-payload), single-bit and whole-byte flips inside
+/// headers and payloads, declared LEN/NLEN pairs that are consistent lies or
+/// inconsistent, forced BTYPEs (including the reserved 11), and trailing bytes
+/// the stream's BFINAL must make the reader ignore. The property: the `Reader`
+/// either returns `error.ReadFailed`, stickily, with the walk's own error in
+/// `err`, or serves exactly what the walk says (always a prefix of the walk's
+/// output), and never writes outside its window.
 fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     // A stream to corrupt: our encoder's output for a Smith shape (the shapes
-    // target 2 drives), a raw Smith byte string, or a committed golden stream.
+    // `fuzzRoundTrip` drives), a raw Smith byte string, or a committed golden
+    // stream.
     var valid_buf: [corrupt_mut_max]u8 = undefined;
     var valid_len: usize = 0;
     switch (rangeAtMost(smith, 0, 2)) {
@@ -1051,7 +1036,7 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     mutateStream(smith, &mut_buf, &mut_len);
     const mutated = mut_buf[0..mut_len];
 
-    // The oracle: what an independent walk of these bytes produces.
+    // The reference: what an independent walk of these bytes produces.
     var reference: [corrupt_out_max]u8 = undefined;
     const walked = referenceWalk(mutated, &reference);
     try checkWalkAgrees(mutated, &reference, walked);
@@ -1102,9 +1087,10 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     }
 }
 
-/// Seed corpus for target 5: raw committed streams (the micro streams, the
-/// truncated vectors, the `TestStreams` rows) with no mutations, so the
-/// non-fuzz smoke run walks every one of them against the reader.
+/// Seed corpus for `fuzzCorruption`: raw committed streams (the empty input,
+/// the empty final block, one stream per block kind, the two-block truncation
+/// stream, and the reserved BTYPE) with no mutations, so the non-fuzz smoke
+/// run walks each of them against the reader.
 const corruption_corpus: []const []const u8 = &.{
     &streamSeed(""),
     &streamSeed("\x03\x00"),
@@ -1112,8 +1098,9 @@ const corruption_corpus: []const []const u8 = &.{
     &streamSeed("\xf3\x48\xcd\xc9\xc9\x57\x28\xcf\x2f\xca\x49\xe1\x02\x00"),
     &streamSeed("\x3d\xc6\x39\x11\x00\x00\x0c\x02\x30\x2b\xb5\x52\x1e\xff\x96\x38" ++
         "\x16\x96\x5c\x1e\x94\xcb\x6d\x01"),
-    // Truncated mid-match: the 22-byte two-block stream Go's
-    // `TestTruncatedStreams` walks prefix by prefix.
+    // The 22-byte two-block stream Go's `TestTruncatedStreams` cuts prefix by
+    // prefix; here it is the complete stream, and the truncate mutation
+    // produces its prefixes.
     &streamSeed(golden.truncated_streams_data),
     &streamSeed("\x07"), // BTYPE = 11, the reserved type
 };
@@ -1123,7 +1110,7 @@ test "flate fuzz: corruption" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 7: the amplification caps
+// Amplification caps
 // ---------------------------------------------------------------------------
 
 /// The amplification source cap: a run this long compresses to a few hundred
@@ -1150,15 +1137,14 @@ fn buildBomb(smith: *Smith, shape: Shape, buf: []u8) usize {
     return len;
 }
 
-/// Target 7: the amplification caps.
+/// Decode caps against bomb-shaped streams.
 ///
-/// Attacks the two amplification rules the README states ("Amplification"):
-/// `decompress` writes only into `target`, and a small stream cannot buy
-/// output past what the caller offered. A bomb-shaped stream is decoded into a
-/// cap below its decoded length — any cap, including the exact boundary
-/// `len - 1` — which must fail closed with `BufferTooSmall` and leave every
+/// Two rules: `decompress` writes only into `target`, and a small stream
+/// cannot buy output past what the caller offered. A bomb-shaped stream is
+/// decoded into a cap below its decoded length (any cap, including the exact
+/// boundary `len - 1`), which must return `BufferTooSmall` and leave every
 /// byte past the cap untouched, then at the exact length (identity) and with
-/// slack (the guard region untouched). A stored-only level decodes the same
+/// slack (the guard region untouched). The stored-only level decodes the same
 /// source through the passthrough path, so the cap rule is not a property of
 /// the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
@@ -1182,7 +1168,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
 
     var window: [bomb_source_max + guard_len]u8 = undefined;
 
-    // Below the decoded length: fail closed, nothing past the cap written.
+    // Below the decoded length: `BufferTooSmall`, nothing written past the cap.
     if (source.len > 0) {
         const caps = [_]usize{ source.len - 1, rangeAtMost(smith, 0, source.len - 1) };
         for (caps) |cap| {
@@ -1207,8 +1193,9 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     try sentinel.expect(&window, m);
 }
 
-/// Seeds for target 7: a run and a phrase, at the fast and stored-only levels,
-/// so the cap boundary runs over a match-heavy and a passthrough stream.
+/// Seeds for `fuzzAmplification`: a run and a phrase, at the fast and
+/// stored-only levels, so the cap boundary runs over a match-heavy and a
+/// passthrough stream.
 const amplification_corpus: []const []const u8 = &.{
     &shapeSeed(0, .run, 8192, &u64Le(0x41)),
     &shapeSeed(0, .phrase, 4096, &u64Le(16) ++ "0123456789abcdef"),
@@ -1220,15 +1207,15 @@ test "flate fuzz: amplification caps" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 6: the reader's consumer machinery
+// Reader machinery: the reader's consumer operations
 // ---------------------------------------------------------------------------
 
 /// The reader-machinery source cap: 96 KiB is one and a half windows, so every
 /// iteration slides the window and crosses blocks.
 const reader_source_max: usize = 96 * 1024;
 
-/// The consumer ops target 6 mixes: the `Io.Reader` surface the README's
-/// "Streaming" section contracts on.
+/// The consumer operations `fuzzReaderMachinery` mixes, covering the
+/// `Io.Reader` calls a consumer makes.
 const ReadOp = enum(u8) {
     peek,
     take,
@@ -1236,24 +1223,24 @@ const ReadOp = enum(u8) {
     read_slice_all,
     stream_fixed,
     /// The interface's zero-length request (a poll): `Io.Reader.fixed` reports
-    /// `EndOfStream` for one even with bytes buffered — its vtable is reached
-    /// with an empty slice — and a done flate reader does the same. Mid-stream
+    /// `EndOfStream` for one even with bytes buffered (its vtable is reached
+    /// with an empty slice), and a done flate reader does the same. Mid-stream
     /// it is a zero-byte serve. Both are legal; nothing may be lost either way.
     poll,
     /// A request past the contiguous-read cap (`history_len`): served when the
-    /// window has room, `StreamTooLong` when it does not — never an assert.
+    /// window has room, `StreamTooLong` when it does not, never an assert.
     over_cap_take,
 };
 
-/// Target 6: the reader's consumer machinery, Smith-driven.
+/// Smith-chosen consumer operations over known streams.
 ///
-/// Attacks the vtable surface (`peek`/`take`/`discardAll`/`readSliceAll`/
+/// Exercises the vtable surface (`peek`/`take`/`discardAll`/`readSliceAll`/
 /// `stream`), the window slide and its retained 32-KiB tail, the
 /// contiguous-read cap, and the clean sticky end, over streams written in
-/// Smith-chosen chunks with mid-stream flushes. The unit test is the PRNG
-/// version; here the fuzzer drives the op sequence, the sizes, and the input
-/// chunking (a small `Io.Reader.Limited` buffer makes the bit reader refill
-/// mid-symbol, and its lookahead must not read past the stream).
+/// Smith-chosen chunks with mid-stream flushes. Reader.zig has the same check
+/// driven by a fixed PRNG; here the fuzzer picks the operations, the sizes, and
+/// the input chunking (a small `Io.Reader.Limited` buffer makes the bit reader
+/// refill mid-symbol, and its lookahead must not read past the stream).
 fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     const gpa = testing.allocator;
     const level = implementedLevel(smith);
@@ -1275,7 +1262,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     try w.finish();
 
     // The input side: sometimes a chunked reader whose buffer is as small as
-    // the README allows (3 bytes: a stored block's LEN/NLEN plus the partial
+    // the reader allows (3 bytes: a stored block's LEN/NLEN plus the partial
     // byte already consumed).
     var chunk_buf: [64]u8 = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
@@ -1296,9 +1283,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
         const left = input.len - pos;
         switch (smith.value(ReadOp)) {
             .peek => {
-                // README, "Streaming": any contiguous request of at most
-                // `history_len` is served, so a failure here is the contiguity
-                // stop, not a decode error.
+                // Any contiguous request of at most `history_len` is served,
+                // so a failure here is the contiguity stop, not a decode
+                // error.
                 const n = @min(left, rangeAtMost(smith, 1, encode.history_len));
                 if (r.reader.peek(n)) |served| {
                     try testing.expectEqualSlices(u8, input[pos..][0..n], served);
@@ -1373,13 +1360,12 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
             },
             .poll => {
                 // A zero-length request: the interface's own poll. Mid-stream
-                // it is a zero-byte serve; on a done reader `Io.Reader.fixed`
-                // reports `EndOfStream` for one even with bytes buffered (its
-                // vtable is reached with an empty slice), and so does this
-                // reader. The flate vtable ignores the limit and fills the
-                // window, so a poll on a nearly full window is the contiguity
-                // stop — the `expectContiguityStop` path documents that a
-                // zero-byte request can fail the reader.
+                // the reader answers 0 without filling the window; on a done
+                // reader `Io.Reader.fixed` reports `EndOfStream` for one even
+                // with bytes buffered (its vtable is reached with an empty
+                // slice), and so does this reader. A poll never fills, so it
+                // cannot fail a healthy reader; any failure seen here must
+                // still be the contiguity stop.
                 if (smith.boolWeighted(3, 1)) continue;
                 var sink: Io.Writer.Discarding = .init(&.{});
                 if (r.reader.stream(&sink.writer, .limited(0))) |served| {
@@ -1401,7 +1387,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
                     pos += n;
                 } else |err| {
                     // Past what the window can hold at the consumer's position:
-                    // fail closed, stickily, with the contiguity detail.
+                    // `error.ReadFailed`, stickily, with the contiguity detail.
                     try expectContiguityStop(&r, err);
                     dead = true;
                     break;
@@ -1428,9 +1414,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
 }
 
 /// The only legal failure of a *valid* stream: the window cannot hold what the
-/// consumer asked for (README, "Streaming": the contiguous-read cap). Anything
-/// else is a finding. The failure is sticky and reports the detail beside the
-/// interface's coarse error.
+/// consumer asked for (the contiguous-read cap). Anything else is a bug. The
+/// failure is sticky and reports the detail beside the interface's coarse
+/// error.
 fn expectContiguityStop(r: *Reader, err: anyerror) !void {
     try testing.expectEqual(error.ReadFailed, err);
     try testing.expectEqual(Reader.Error.StreamTooLong, r.err.?);
@@ -1438,9 +1424,9 @@ fn expectContiguityStop(r: *Reader, err: anyerror) !void {
     try testing.expectError(error.ReadFailed, r.reader.stream(&sink.writer, .unlimited));
 }
 
-/// Seeds for target 6: the level, then the `u32-le` length plus bytes
-/// `smith.slice` consumes — one repetitive and one incompressible body, so the
-/// op mix runs over both a match-heavy and a stored-block stream.
+/// Seeds for `fuzzReaderMachinery`: the level, then the `u32-le` length plus
+/// bytes `smith.slice` consumes. A short repetitive body and an empty one; the
+/// fuzzer grows the rest.
 const reader_corpus: []const []const u8 = &.{
     &sliceSeed(0, "abcabcabcabcabcabcabcabcabcabcabcabcabcd"),
     &sliceSeed(0, ""),

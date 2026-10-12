@@ -1,12 +1,13 @@
-"""The zlib external-oracle conformance lane.
+"""Check zlib against python3's zlib.
 
-Python's zlib (the C reference, via `wbits` 15) is the point: an independent
-zlib implementation verifying ours in both directions (our encode -> its
-decode, its encode -> our decode), over generated shapes and the CLI
-streaming rows, plus the FDICT refusal cases, the FLEVEL/FCHECK emissions,
-and the exact stream boundary. Run via `just zlib-oracle`; python3 comes from
-the flake. Incantations verified in docs/research/containers-notes.md §5.5;
-shared plumbing: scripts/oracle_common.py.
+Python's zlib (the C reference, via `wbits` 15) is an independent zlib
+implementation. It verifies ours in both directions (our encode -> its decode,
+its encode -> our decode) over generated shapes and the example CLI, plus the
+FDICT refusal, the FLEVEL/FCHECK header bytes, and the exact stream boundary.
+Run it with `just zlib-oracle`; python3 comes from the flake. The harness is
+built from src/zlib/oracle.zig. The reference incantations are in
+docs/research/containers-notes.md §5.5, and the shared plumbing is in
+scripts/oracle_common.py.
 """
 
 import subprocess
@@ -17,10 +18,9 @@ import oracle_common as common
 root = common.ROOT
 harness = root / "zig-out/bin/zlib-oracle"
 
-# Our emitted-header policy (README, "The stream format", OQ7): CMF 0x78
-# (CM=8, CINFO=7); FLG carries only the level's FLEVEL band and the minimal
-# FCHECK, FDICT clear. The bands follow the C reference (containers-notes.md
-# §5.5: {0,1}->0, {2-5}->1, {6,-1}->2, {7-9}->3).
+# Our emitted header: CMF 0x78 (CM=8, CINFO=7); FLG carries only the level's
+# FLEVEL band and the minimal FCHECK, FDICT clear. The bands follow the C
+# reference (containers-notes.md §5.5: {0,1}->0, {2-5}->1, {6,-1}->2, {7-9}->3).
 FLEVEL_BY_LEVEL = {"fast": 2, "0": 0, "1": 0, "2": 1, "5": 1, "6": 2, "9": 3}
 
 
@@ -57,7 +57,7 @@ def check_trailer(stream: bytes, data: bytes) -> None:
 
 
 # The generated conformance shapes (oracle_common.SHAPES): the same bytes in
-# every lane.
+# every script.
 shapes = common.SHAPES
 text = shapes["text"]
 long_text = shapes["long text (multi-block)"]
@@ -89,8 +89,8 @@ for desc, data in shapes.items():
 
 # 3. The stream boundary: the second stream lands in the reference's
 #    `unused_data`, and our one-shot ignores everything after ADLER32
-#    (README, "Contracts": bytes after the trailer are not part of the
-#    stream). The CLI rows below exercise the streaming reader's boundary.
+#    (RFC 1950 §2.2: bytes after the trailer are not part of the stream).
+#    The CLI rows below exercise the streaming reader's boundary.
 two = zlib.compress(text, 6) * 2
 do = zlib.decompressobj(15)
 assert do.decompress(two) + do.flush() == text
@@ -98,12 +98,11 @@ assert do.unused_data == zlib.compress(text, 6), "the reference leaves the secon
 assert our_decompress(two, len(text) + 1) == text, "our one-shot decodes the first stream"
 rows += 1
 
-# 4. FDICT (ZD3/ZD4, T5): the C reference emits a dictionary stream with
-#    header 78 bb + the dictionary's big-endian Adler-32; ours refuses it
-#    before any body byte — with the right dictionary or a wrong one, since
-#    the API has no dictionary registry at all. The dict + FLEVEL-0 corner
-#    emits 78 3f (FCHECK = 31, conformant and must not be rejected as a bad
-#    header).
+# 4. FDICT: the C reference emits a dictionary stream with header 78 bb plus
+#    the dictionary's big-endian Adler-32. Ours refuses it before any body
+#    byte, since the API has no way to supply a dictionary. The dictionary +
+#    FLEVEL-0 case emits 78 3f (FCHECK = 31), a conformant header that must
+#    not be rejected as bad.
 dictionary = b"she sells seashells by the seashore\n"
 dict_stream = None
 for level, expected_flg in ((6, 0xBB), (0, 0x3F)):
@@ -111,7 +110,7 @@ for level, expected_flg in ((6, 0xBB), (0, 0x3F)):
     stream = co.compress(text) + co.flush()
     assert stream[0] == 0x78 and stream[1] == expected_flg, f"dict header {stream[:2].hex()}"
     assert int.from_bytes(stream[2:6], "big") == zlib.adler32(dictionary), "DICTID"
-    assert (stream[0] << 8 | stream[1]) % 31 == 0, "FCHECK=31 is 0 mod 31 (T5)"
+    assert (stream[0] << 8 | stream[1]) % 31 == 0, "FCHECK=31 is 0 mod 31"
     assert zlib.decompressobj(15, dictionary).decompress(stream) == text, "the reference decodes"
     assert our_decompress_error(stream, len(text) + 1) == "DictionaryRequired", (
         f"our FDICT refusal (level {level}, FCHECK corner)"
@@ -123,13 +122,13 @@ assert dict_stream is not None
 rows += 1  # the dict_stream reuse below
 
 # The FDICT refusal through the streaming CLI: the input is a real dictionary
-# stream, and the decode fails closed instead of misreading the DICTID as
-# deflate data (std's T6 behavior).
+# stream, and the decode fails instead of misreading the DICTID as deflate
+# data, which is what std's zlib reader does.
 p = example(["decode", "-"], dict_stream)
 assert p.returncode != 0, "the CLI fails closed on an FDICT stream"
 
-# 5. The FLEVEL/FCHECK emissions the research verified: 78 9c at level 6,
-#    78 01 at levels 0/1, 78 da at level 9.
+# 5. The C reference's FLEVEL/FCHECK header bytes: 78 9c at level 6, 78 01 at
+#    levels 0/1, 78 da at level 9.
 assert zlib.compress(text, 6)[:2] == b"\x78\x9c", "78 9c at level 6"
 assert zlib.compress(text, 0)[:2] == b"\x78\x01", "78 01 at level 0"
 assert zlib.compress(text, 1)[:2] == b"\x78\x01", "78 01 at level 1"
@@ -169,6 +168,6 @@ for desc, data in (("streaming text", text), ("streaming multi-block", long_text
 print(
     "zlib-oracle: "
     f"{rows} container rows (our encode -> zlib decode, zlib/compressobj -> our decode), "
-    "both directions, + the FDICT/T5 refusal + the FLEVEL/FCHECK emissions + the boundary "
+    "both directions, + the FDICT refusal + the FCHECK=31 corner + the FLEVEL/FCHECK emissions + the boundary "
     "pins + 6 streaming rows through the CLI: OK"
 )

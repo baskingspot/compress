@@ -1,26 +1,26 @@
-//! gzip (RFC 1952) container over the flate module: the member framing, the
-//! CRC-32 trailer, and the `std.Io` streaming layer. Imports `std` and
-//! `fastmem`, plus `flate` by relative path (the container-over-codec import
-//! the plan sanctions); no heap allocation on any codec path. The
-//! `zcompress.gzip` namespace of the zcompress module.
+//! gzip (RFC 1952) over the flate module: the member framing, the CRC-32 and
+//! size trailer, and the `std.Io` streaming layer. This is the
+//! `zcompress.gzip` namespace. It imports `std`, `fastmem`, and flate (by
+//! relative path), and it never allocates.
 //!
-//! The public surface is four namespaces — everything else composes through
-//! them: `gzip.encode` (one-shot encode), `gzip.decode` (one-shot decode),
-//! `gzip.Writer` (streaming encode), `gzip.Reader` (streaming decode).
-//! Contracts: README.md; format: docs/research/specs/rfc1952-gzip.txt.
+//! The public surface is four namespaces: `encode` (one-shot compress),
+//! `decode` (one-shot decompress), `Writer` (streaming compress), and `Reader`
+//! (streaming decompress). Usage and contracts: README.md.
+//!
+//! Format: docs/research/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 
 pub const encode = @import("encode.zig");
 pub const decode = @import("decode.zig");
-/// A decompressing `Io.Reader` over one gzip member (README.md,
-/// "Streaming"). Consume through `&r.reader`; ends cleanly with
-/// `error.EndOfStream` once the trailer is verified, details in `r.err`.
-/// Zero heap allocation; the caller provides `Reader.Buffer`.
+/// A decompressing `Io.Reader` over one gzip member. Read through
+/// `&r.reader`; it returns `error.EndOfStream` once the trailer is verified,
+/// and after a failure `r.err` holds the specific error. It allocates
+/// nothing; the caller provides `Reader.Buffer`.
 pub const Reader = @import("Reader.zig");
-/// A compressing `Io.Writer` producing one gzip member (README.md,
-/// "Streaming"). Write through `&w.writer`; complete the member with
-/// `finish`. Zero heap allocation; the caller provides `Writer.Buffer`.
+/// A compressing `Io.Writer` that produces one gzip member. Write through
+/// `&w.writer` and end the member with `finish`. It allocates nothing; the
+/// caller provides `Writer.Buffer`.
 pub const Writer = @import("Writer.zig");
 
 test {

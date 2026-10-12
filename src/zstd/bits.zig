@@ -1,30 +1,17 @@
-//! The two bitstream readers the zstd entropy layers share.
+//! Bitstream readers for the zstd entropy layers.
 //!
-//! The **forward** reader is the one zstd bitstream read forward: the FSE
-//! table description of `§4.1.1` ("A bitstream is read forward, in
-//! little-endian fashion"), where the first bit of the first byte is the
-//! least significant bit of the first field.
+//! `ForwardReader` reads the FSE table description, the one zstd bitstream that
+//! runs forward, from the first byte's least significant bit (`§4.1.1`).
+//! `BackwardReader` (FSE-coded streams) and `BackwardFastReader` (Huffman-coded
+//! streams) read the others from the last byte toward the first (`§4.1`,
+//! `§4.2.2`). The last byte's highest set bit is a marker, not data; the stream
+//! is the bits below it, read most significant bit first.
 //!
-//! The **backward** reader is every other bitstream — the FSE data streams
-//! (`§4.1`) and the Huffman-coded streams (`§4.2.2`): "all FSE bitstreams are
-//! read from end to beginning. Note that the order of the bits in the stream
-//! is not reversed; they are simply read in the reverse order from which they
-//! were written." The last byte's highest set bit is the final 1 bit that
-//! marks where the useful bits end (`§4.2.2`: "a last byte of 0 is not
-//! possible. And the final-bit-flag itself is not part of the useful
-//! bitstream"); above it is zero padding, below it the stream runs backward,
-//! most significant bit of each field first.
-//!
-//! The backward reader keeps an exact bit position: `remainingBits` counts
-//! the bits not yet consumed, and a read that runs past the stream's start
-//! drives it negative with the missing bits reading as zero. That is the
-//! state the callers need, because the two consumption contracts differ:
-//! the sequences stream and the Huffman streams must be "entirely and
-//! exactly consumed" (`§4.2.2`, `§3.1.1.3.2.1.2`), while the FSE-compressed
-//! Huffman weights terminate *on* the overflow — "if updating state after
-//! decoding a symbol would require more bits than remain in the stream, it
-//! is assumed that extra bits are zero. Then, symbols for each of the final
-//! states are decoded and the process is complete" (`§4.2.1.2`).
+//! The backward readers keep an exact bit position. A read past the start of the
+//! stream returns zeros and leaves `remainingBits` negative instead of failing,
+//! because callers differ: sequence and Huffman streams must end at exactly zero
+//! (`§4.2.2`, `§3.1.1.3.2.1.2`), while a Huffman weight series ends on the
+//! overflow (`§4.2.1.2`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -82,9 +69,8 @@ pub const ForwardReader = struct {
         return value;
     }
 
-    /// Consume `count` bits a `peekBits` proved are there. Consumption may
-    /// run past the source's end — `bytesConsumed` is what the caller
-    /// validates — so this only adds.
+    /// Consume `count` bits. Consuming past the end of `source` is allowed; the
+    /// caller validates `bytesConsumed`.
     pub fn skipBits(self: *ForwardReader, count: u5) void {
         self.consumed_bits += count;
     }
@@ -104,18 +90,21 @@ pub const ForwardReader = struct {
     }
 };
 
-/// The backward reader (`§4.1`, `§4.2.2`).
+/// The backward reader for FSE-coded streams (`§4.1`, `§4.2.2`): bits come out
+/// most significant first, from the end of `source` toward its start.
 ///
-/// The bit window is cached: `container` holds the stream bits
-/// `[remaining_bits - held, remaining_bits - 1]` with the next bit to read
-/// top-aligned at bit 63 and zeros below the held bits, so a peek is a shift
-/// and `skipBits` a shift-and-subtract; `refill`'s one 8-byte load
-/// amortizes over the 57+ bits it covers. Reloading per read instead — the
-/// same load with no cache — serializes every symbol's load address on the
-/// previous read's consume; the cache is the reference's `BIT_DStream`
-/// container shape (reload-per-read measured against it on the
-/// sequence-heavy corpus: 98 µs vs 83 µs per 64 KiB frame at level 19).
+/// `init` finds the final 1 bit. Reads never fail: past the start of the stream
+/// they return zeros, and `overran` reports that this happened. Callers use
+/// `isConsumed` where the stream must end exactly.
 pub const BackwardReader = struct {
+    // The bit window is cached. `container` holds the stream bits
+    // `[remaining_bits - held, remaining_bits - 1]` with the next bit to read
+    // top-aligned at bit 63 and zeros below the held bits, so a peek is a shift
+    // and `skipBits` is a shift and a subtract. One 8-byte load in `refill`
+    // covers 57 or more bits. Loading on every read instead serializes each
+    // symbol's load address behind the previous read's consume, which measured
+    // 98 µs against 83 µs per 64 KiB frame at level 19 on the sequence-heavy
+    // corpus. The cache is the shape of the reference's `BIT_DStream` container.
     source: []const u8,
     /// The write-order index one past the next bit to read — the number of
     /// bits not yet consumed. It goes negative when a read runs past the
@@ -126,8 +115,9 @@ pub const BackwardReader = struct {
     /// How many container bits are real stream bits (0-64).
     held: u7,
 
-    /// The last byte's highest set bit is the final 1 bit (`§4.2.2`); a last
-    /// byte of zero has no start bit at all.
+    /// Start reading `source` from its end. The last byte's highest set bit is
+    /// the final 1 bit, which is not data (`§4.2.2`). Returns `MissingStartBit`
+    /// if `source` is empty or its last byte is zero.
     pub fn init(source: []const u8) error{MissingStartBit}!BackwardReader {
         if (source.len == 0) return error.MissingStartBit;
         const last = source[source.len - 1];
@@ -249,23 +239,24 @@ pub const BackwardReader = struct {
     }
 };
 
-/// The lean backward reader for the Huffman streams (`§4.2.2`): the same
-/// exact-position contract as `BackwardReader`, in the reference's
-/// `BIT_DStream` shape — the container is the window's bytes *unshifted*
-/// and `used` counts the window bits already consumed, so a peek is two
-/// shifts and a skip is one add; the reload walks the window toward the
-/// stream's start and is the caller's cadence, not a per-peek branch.
+/// A leaner backward reader for the Huffman-coded streams (`§4.2.2`), with the
+/// same exact-position contract as `BackwardReader`.
 ///
-/// The Huffman loops reload once per batch of five symbols (five 11-bit
-/// codes = 55 bits, always under a fresh window's 57-64), so the batch's
-/// peeks and skips carry no checks at all. The measured difference against
-/// `BackwardReader`'s top-aligned container (whose skip shifts the
-/// container, serializing the next peek behind it): 0.93 vs 1.34 ns/symbol
-/// on the level-19 literals streams (neoverse_v3, the corpus's `skewlit`
-/// shape's streams). The FSE layers keep
-/// `BackwardReader` (its wide peeks and auto-refill are the shape the
-/// sequences loop is tuned around).
+/// The caller decides when the window reloads. Call `reload` once per batch,
+/// while at least `batch_bits` bits remain, then use `peekFast` and `skipFast`
+/// for reads totalling at most `batch_bits`; they do no checks. `peekBits` and
+/// `skipBits` check and reload as needed, for the last partial batch of a stream.
 pub const BackwardFastReader = struct {
+    // The container holds the window's bytes unshifted and `used` counts the
+    // window bits already consumed, so a peek is two shifts and a skip is one
+    // add. The Huffman loops reload once per batch of five symbols (five 11-bit
+    // codes are 55 bits, under the 57-64 a fresh window holds), so reads inside a
+    // batch need no checks. Against `BackwardReader`'s top-aligned container,
+    // whose skip shifts the container and serializes the next peek behind it,
+    // this measured 0.93 vs 1.34 ns/symbol on the level-19 literals streams
+    // (neoverse_v3, the corpus's `skewlit` shape). The FSE layers keep
+    // `BackwardReader`: its wide peeks and auto-refill are what the sequences
+    // loop is tuned around. The shape follows the reference's `BIT_DStream`.
     source: []const u8,
     /// The window's lowest byte in the stream; the container holds
     /// `source[pos..][0..8]` little-endian, zero-padded past the stream's
@@ -282,8 +273,9 @@ pub const BackwardFastReader = struct {
     /// stream's start. The exact end contract's counter.
     remaining_bits: i32,
 
-    /// The last byte's highest set bit is the final 1 bit (`§4.2.2`); a
-    /// last byte of zero has no start bit at all.
+    /// Start reading `source` from its end. The last byte's highest set bit is
+    /// the final 1 bit, which is not data (`§4.2.2`). Returns `MissingStartBit`
+    /// if `source` is empty or its last byte is zero.
     pub fn init(source: []const u8) error{MissingStartBit}!BackwardFastReader {
         if (source.len == 0) return error.MissingStartBit;
         const last = source[source.len - 1];
@@ -432,9 +424,9 @@ test "ForwardReader rounds its byte count up: a description consumes whole bytes
 }
 
 test "BackwardReader skips the padding and the final 1 bit, then reads MSB first" {
-    // RFC 8878 §4.2.2 — the hand-built T1 pair's `01 0D` stream
-    // (docs/research/zstd-notes.md §5.4): the last byte 0x0d has its final 1
-    // bit at bit 3, and the useful bits run down from bit 2.
+    // RFC 8878 §4.2.2 — the hand-built stream `01 0D` (`golden.pair_stream`):
+    // the last byte 0x0d has its final 1 bit at bit 3, and the useful bits run
+    // down from bit 2.
     var reader = try BackwardReader.init(&.{ 0x01, 0x0d });
     try testing.expectEqual(@as(i32, 11), reader.remainingBits());
     // 1 | 01 | 0000 | 0001 — the Table 25 codes for 0, 1, 4, 5 read in

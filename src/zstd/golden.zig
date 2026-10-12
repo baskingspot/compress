@@ -1,65 +1,11 @@
-//! The zstd golden fixtures every layer's tests read: `§3.1.1.3.2.2`'s
-//! predefined distributions, Appendix A's decoding tables, the real frames'
-//! table descriptions the kernels were validated against, and the whole
-//! frames the block and frame layers walk. Shared by every layer's tests (the
-//! flate/gzip `golden.zig` shape).
-//!
-//! Provenance, so every fixture can be re-derived:
-//!
-//! - **The predefined distributions** (`§3.1.1.3.2.2`'s three
-//!   `*_defaultDistribution` arrays) live where they are used:
-//!   `sequences.zig`, whose Predefined_Mode builds its tables from them and
-//!   whose tests cross-check them against the Appendix A rows below (the
-//!   slice-1 note's direction — production data in production code).
-//! - **The Appendix A tables** are the spec's A.1, A.2, and A.3 rows, minus
-//!   each table's first data row — errata 6441's all-zero state-0 duplicate
-//!   (`docs/research/zstd-notes.md` §4 T2). 64 + 64 + 32 real rows.
-//! - **`literals_length_description` and `offset_description`** are the
-//!   literals length and offset table descriptions of the first compressed
-//!   block of a `zstd -1` frame of a synthetic mixed corpus (a table of
-//!   `zstd` v1.5.7, the reference encoder's own `FSE_writeNCount` output).
-//!   They pin the `§4.1.1` description reader against real encoder output,
-//!   zero runs and all: the counts are what the reader must recover, and the
-//!   description's byte count is what the section's next structure depends
-//!   on. The same vectors were cross-checked by decoding the whole frame's
-//!   sequences section to exact bitstream consumption.
-//! - **`t1_*`** are the hand-built T1 pair (`docs/research/zstd-notes.md`
-//!   §5.4): a 19-byte frame whose literals stream is `01 0D` or `10 0D` and
-//!   which decodes to `00 01 04 05` and `00 01 05 04` respectively on both
-//!   the C CLI v1.5.7 and Zig std. `t1_tree` is the direct-weights tree
-//!   description, `t1_stream` the Table-25 stream, `t1_errata_stream` the
-//!   Table 26 (errata 8195) stream that no conformant decoder follows.
-//! - **`weights_description`** is the Huffman_Tree_Description of the first
-//!   compressed block of a `zstd -3` frame of synthetic text — the reference
-//!   encoder's `HUF_compressWeights` output: the header byte 19, then the
-//!   19-byte FSE-compressed series. `weights_expected` is the 122-weight
-//!   series it decodes to under `§4.2.1.2`'s two-state,
-//!   overflow-terminated decode (total 192, so the implied last weight is 7
-//!   and `Max_Number_of_Bits` is 8).
-//! - **The `literals_*` sections** are the literals sections of real `zstd`
-//!   v1.5.7 frames (`docs/research/zstd-notes.md` §5's golden corpus row),
-//!   each a single compressed block whose sequences section is the
-//!   zero-sequence byte (`§3.1.1.3.2.1`), so the frame's decoded output is
-//!   exactly its literals and both the CLI's `zstd -d` and CPython 3.14's
-//!   `compression.zstd` pin the expected bytes. The input in each case is
-//!   the research harness's skewed-random corpus (a geometric byte
-//!   distribution: Huffman-compressible, effectively match-free), recorded
-//!   per fixture; the sizes are `§3.1.1.3.1.1`'s compressed Size_Formats as
-//!   the encoder chose them. `literals_fse_tree_section` is hand-built
-//!   around the real FSE-compressed weight series above (its streams decode
-//!   ten `0x62` symbols through `§4.2.1.3`'s assignment), verified the same
-//!   way.
-//! - **The `sequences_*` fixtures** are real `zstd` v1.5.7 frames' sequences
-//!   sections and their literals sections, with the CLI's own `zstd -d`
-//!   output as the expected block bytes (`sequences.zig`'s tests compose the
-//!   two landed layers over them). The hand-built multi-block fixtures
-//!   (`docs/research/zstd-notes.md` §5.4) live here too: their sections and
-//!   their frames are the same data, so the frames are *built* from the
-//!   sections by `buildFrame` — the shared fixture-builder — rather than
-//!   transcribed beside them.
-//!
-//! This module also carries the shared decode-check helper every layer's
-//! tests run (`expectDecoded`).
+//! Fixtures shared by every zstd layer's tests: the Appendix A FSE tables,
+//! table descriptions and Huffman weights from real encoder output, literals
+//! and sequences sections from real frames, and whole frames, good and
+//! corrupt, for the block, frame, and streaming layers. Provenance is noted
+//! beside each group. Helpers: `hex` (comptime hex literals), `buildFrame`
+//! (assembles a frame from block contents), and `expectDecoded` (the shared
+//! decode check). "The CLI" in the comments below is the zstd CLI v1.5.7,
+//! the reference decoder the fixtures were generated and checked with.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -69,9 +15,9 @@ const testing = std.testing;
 
 const internal = @import("../internal/root.zig");
 
-/// Comptime hex decoding, so the ported vectors keep their source spelling
-/// (the CLI's own hex output, the research harness's dumps) instead of a
-/// byte-list transcription (the flate/gzip golden shape).
+/// Comptime hex decoding, so the vectors keep the spelling of their source
+/// (the CLI's own hex output, the research harness's dumps) instead of being
+/// transcribed into byte lists.
 fn hex(comptime text: []const u8) [text.len / 2]u8 {
     @setEvalBranchQuota(100_000);
     comptime assert(text.len % 2 == 0);
@@ -82,11 +28,11 @@ fn hex(comptime text: []const u8) [text.len / 2]u8 {
     return bytes;
 }
 
-/// Check a decode's result against the expectation: the served length, the
-/// bytes, and the untouched sentinel past them (AGENTS.md, "Rules": every
-/// decode test proves no write past the decoded length). The shared tail of
-/// the layers' decode-into-target helpers; each caller owns its target's
-/// sizing and its sentinel fill.
+/// Check a decode's result against the expectation: `written` equals
+/// `expected.len`, the bytes match, and the sentinel past them is untouched,
+/// so a write past `written` is caught. The caller sizes `target` and must
+/// have sentinel-filled it before the decode. This is the shared tail of the
+/// layers' decode-into-target helpers.
 pub fn expectDecoded(target: []const u8, written: usize, expected: []const u8) !void {
     try testing.expectEqual(expected.len, written);
     try testing.expectEqualSlices(u8, expected, target[0..written]);
@@ -100,28 +46,41 @@ pub const TableRow = struct {
     baseline: u16,
 };
 
-/// RFC 8878 §4.2.2 — the T1 pair's Huffman tree description: the direct
+// The `pair_*` fixtures are the RFC's Huffman worked example (`§4.2.2`),
+// hand-built (`docs/research/zstd-notes.md` §5.4): a 19-byte frame whose
+// literals stream is `01 0D` or `10 0D`, decoding to `00 01 04 05` and
+// `00 01 05 04` respectively on both the CLI and Zig std. `pair_tree` is the
+// direct-weights tree description, `pair_stream` the Table 25 stream, and
+// `pair_errata_stream` the Table 26 stream (errata 8195), which no conformant
+// decoder follows.
+/// RFC 8878 §4.2.2 — the example's Huffman tree description: the direct
 /// mode, `Number_of_Symbols = 5`, weights 4, 3, 2, 0, 1 (`§4.2.1.1`).
-pub const t1_tree = [_]u8{ 0x84, 0x43, 0x20, 0x10 };
-/// RFC 8878 §4.2.1.3 Table 25 — the codes of `t1_tree`: 4 -> 0000,
-/// 5 -> 0001 (the RFC's §4.2.2 example swaps them; errata 8195, T1).
-pub const t1_stream = [_]u8{ 0x01, 0x0d };
-/// The literals `t1_stream` decodes to: "0145" = symbols 0, 1, 4, 5.
-pub const t1_literals = [_]u8{ 0, 1, 4, 5 };
+pub const pair_tree = [_]u8{ 0x84, 0x43, 0x20, 0x10 };
+/// RFC 8878 §4.2.1.3 Table 25 — the codes of `pair_tree`: 4 -> 0000,
+/// 5 -> 0001 (the RFC's §4.2.2 example swaps them; errata 8195).
+pub const pair_stream = [_]u8{ 0x01, 0x0d };
+/// The literals `pair_stream` decodes to: "0145" = symbols 0, 1, 4, 5.
+pub const pair_literals = [_]u8{ 0, 1, 4, 5 };
 /// The §4.2.2 example's own bytes (errata 8195): they decode to 0, 1, 5, 4
 /// — the swapped assignment no decoder follows.
-pub const t1_errata_stream = [_]u8{ 0x10, 0x0d };
-pub const t1_errata_literals = [_]u8{ 0, 1, 5, 4 };
-/// `t1_tree`'s `Max_Number_of_Bits` (`§4.2.1`: the completion lands on 16).
-pub const t1_max_bits: u5 = 4;
-/// The T1 pair's whole literals sections (`§3.1.1.3.1.1` Size_Format 00,
-/// one stream; Compressed_Size = 6 covers the 4-byte tree and the stream):
-/// the 3-byte header, the tree, and the stream. Decoding the section must
-/// give `t1_literals` / `t1_errata_literals`.
-pub const t1_literals_section: [9]u8 = [3]u8{ 0x42, 0x80, 0x01 } ++ t1_tree ++ t1_stream;
-pub const t1_errata_literals_section: [9]u8 =
-    [3]u8{ 0x42, 0x80, 0x01 } ++ t1_tree ++ t1_errata_stream;
+pub const pair_errata_stream = [_]u8{ 0x10, 0x0d };
+pub const pair_errata_literals = [_]u8{ 0, 1, 5, 4 };
+/// `pair_tree`'s `Max_Number_of_Bits` (`§4.2.1`: the completion lands on 16).
+pub const pair_max_bits: u5 = 4;
+/// The whole literals sections of the example and its errata variant
+/// (`§3.1.1.3.1.1` Size_Format 00, one stream; Compressed_Size = 6 covers the
+/// 4-byte tree and the stream): the 3-byte header, the tree, and the stream.
+/// Decoding the section must give `pair_literals` / `pair_errata_literals`.
+pub const pair_literals_section: [9]u8 = [3]u8{ 0x42, 0x80, 0x01 } ++ pair_tree ++ pair_stream;
+pub const pair_errata_literals_section: [9]u8 =
+    [3]u8{ 0x42, 0x80, 0x01 } ++ pair_tree ++ pair_errata_stream;
 
+// The Appendix A tables below are the spec's A.1, A.2, and A.3 rows, minus
+// each table's first data row, which is errata 6441's all-zero state-0
+// duplicate (`docs/research/zstd-notes.md` §4): 64 + 64 + 32 real rows. The
+// three `*_defaultDistribution` arrays of `§3.1.1.3.2.2` are not here. They
+// live in `sequences.zig`, whose Predefined_Mode builds its tables from them
+// and whose tests cross-check them against these rows.
 pub const literals_length_table = [_]TableRow{
     .{ .symbol = 0, .num_bits = 4, .baseline = 0 },
     .{ .symbol = 0, .num_bits = 4, .baseline = 16 },
@@ -288,6 +247,12 @@ pub const offset_table = [_]TableRow{
     .{ .symbol = 25, .num_bits = 5, .baseline = 0 },
     .{ .symbol = 24, .num_bits = 5, .baseline = 0 },
 };
+// The two table descriptions below are the literals-length and offset
+// descriptions from the first compressed block of a `zstd -1` frame of a
+// synthetic mixed corpus: `zstd` v1.5.7's own `FSE_writeNCount` output. They
+// pin the `§4.1.1` description reader against real encoder output, zero runs
+// included. The `*_counts` arrays are what the reader must recover, and the
+// description's byte count is what the section's next structure depends on.
 pub const literals_length_description = [_]u8{
     0x14, 0x1f, 0x01, 0x20, 0x10, 0xb4, 0xd0, 0xbf, 0x00,
 };
@@ -303,11 +268,26 @@ pub const offset_description_counts = [_]i16{
     6,  0, -1, 13, 25, 41, 57, 51, 26, 18, 12, 3,
     -1, 0, 0,  2,
 };
+// `weights_description` is the Huffman_Tree_Description of the first
+// compressed block of a `zstd -3` frame of synthetic text, the reference
+// encoder's `HUF_compressWeights` output: the header byte 19, then the 19-byte
+// FSE-compressed series. `weights_expected` is the 122-weight series it
+// decodes to under `§4.2.1.2`'s two-state, overflow-terminated decode (total
+// 192, so the implied last weight is 7 and `Max_Number_of_Bits` is 8).
 pub const weights_description = [_]u8{
     0x13, 0xb0, 0xa5, 0x99, 0x03, 0x0e, 0x89, 0x98, 0x90, 0x65, 0xde, 0x6a,
     0x21, 0x49, 0x93, 0x19, 0x06, 0x1f, 0x03, 0x60,
 };
 pub const weights_description_counts = [_]i16{ 26, 1, 1, 2, 1, 0, 0, 0, 1 };
+// The `literals_*` sections are the literals sections of real `zstd` v1.5.7
+// frames (`docs/research/zstd-notes.md` §5). Each is a single compressed block
+// whose sequences section is the zero-sequence byte (`§3.1.1.3.2.1`), so the
+// frame's decoded output is exactly its literals, and both the CLI's `zstd -d`
+// and CPython 3.14's `compression.zstd` produce the expected bytes. The input
+// in each case is the research harness's skewed-random corpus (a geometric
+// byte distribution: Huffman-compressible, effectively match-free), recorded
+// per fixture. The sizes are `§3.1.1.3.1.1`'s compressed Size_Formats as the
+// encoder chose them.
 /// A real `zstd -1` frame of the skewed-random corpus (120 bytes, seed 9):
 /// Size_Format 00, one stream, rs = 120, cs = 37 — the 1-stream layout with
 /// a real direct-weights tree.
@@ -392,10 +372,12 @@ pub const literals_4stream_sf2_expected = hex(
         "040001020001",
 );
 
-/// A hand-built section around the real FSE-compressed weight series below:
-/// Size_Format 01, four streams, rs = 10, cs = 30 (the 20-byte description
-/// plus the 6-byte Jump_Table and four 1-byte streams). Its streams decode
-/// `weights_expected`'s weight-8 symbol (98, the shortest code) ten times.
+/// A hand-built section around the real FSE-compressed weight series of
+/// `weights_description`: Size_Format 01, four streams, rs = 10, cs = 30 (the
+/// 20-byte description plus the 6-byte Jump_Table and four 1-byte streams).
+/// Its streams decode `weights_expected`'s weight-8 symbol (98, `0x62`, the
+/// shortest code) ten times through `§4.2.1.3`'s assignment; the CLI and
+/// CPython agree.
 pub const literals_fse_tree_section = hex(
     "a6800713b0a599030e89989065de6a21499319061f03600100010001000f0f0f03",
 );
@@ -415,16 +397,15 @@ pub const weights_expected = [_]u8{
     0, 1,
 };
 
-/// The sequences sections of four real `zstd` v1.5.7 frames, each the first
-/// (and only) compressed block of its frame, so the CLI's own `zstd -d`
-/// output is exactly the block's output. The corpora are the literals
-/// slice's synthetic shape (short words, a low-entropy byte mix), the level
-/// is the CLI's, and the fixture bytes are the record: `_literals` is the
-/// block's literals section (`§3.1.1.3.1`), `_section` its sequences section
-/// (`§3.1.1.3.2`), `_expected` the block's decoded output. Between them the
-/// four cover all four Symbol_Compression_Modes across the three alphabets
-/// (Repeat is the sequences layer's hand-built pair, `src/zstd/sequences.zig`).
-///
+// The `sequences_*` fixtures are sections of four real `zstd` v1.5.7 frames,
+// each the first (and only) compressed block of its frame, so the CLI's own
+// `zstd -d` output is exactly the block's output. The corpora are short words
+// and a low-entropy byte mix; the fixture bytes are the record. `_literals` is
+// the block's literals section (`§3.1.1.3.1`), `_section` its sequences
+// section (`§3.1.1.3.2`), and `_expected` the block's decoded output. The four
+// cover the Predefined, RLE, and FSE_Compressed modes; the hand-built
+// `first_block_*` / `repeat_1_*` pair below covers Repeat. `sequences.zig`'s
+// tests run the literals and sequences layers over them.
 /// A `zstd -5` frame of a 77-byte words corpus: a Literals_Block_Type 0
 /// literals section (Size_Format 1, rs = 43) and 6 sequences, all three
 /// alphabets Predefined; the output is 77 bytes.
@@ -494,40 +475,37 @@ pub const sequences_fse_all_expected = hex(
         "20746865207a7374642073657175656e6365207a737464206a756d7073207468" ++
         "6520646f67206d617463682077696e646f77206f6666736574",
 );
-/// The block layer's whole frames: hand-built zstandard frames around the blocks every landed
-/// slice verified, each decoded with the pinned zstd CLI v1.5.7 (`zstd -d`, the oracle every
-/// fixture below was checked against). The shape is the landed slices' hand-built one —
-/// `§3.1`'s Magic_Number, `§3.1.1.1.1`'s Frame_Header_Descriptor 0x00 (no Frame_Content_Size,
-/// no checksum, no dictionary, not Single_Segment), `§3.1.1.1.2`'s Window_Descriptor, then the
-/// blocks of `§3.1.1.2` — so the block tests walk them with nothing but this module, and
-/// `block.zig`'s fixture helper reads each frame's declared window back out of its descriptor.
-///
-/// Four groups, with the CLI's verdict for each:
-///
-/// - **The fast paths** (`frame_raw*`, `frame_rle*`, `frame_multi`): Raw and RLE blocks, a
-///   zero-size Raw block, and an RLE block at exactly Block_Maximum_Size. The CLI decodes each
-///   to the bytes the tests expect.
-/// - **The window fixtures** (`frame_window_*`): two 128 KB RLE blocks and a compressed block
-///   whose match reaches exactly Window_Size back — the 1 KB and 128 KB variants, so the decoded
-///   length passes both Window_Size and Block_Maximum_Size. The CLI decodes all of them, the
-///   `*_over` siblings included: its whole-buffer decoder checks the bytes it still has, not the
-///   declared window. Ours enforces the addressable-span reading of `§3.1.1.4` — the history
-///   region plus the block's own writes (T12, stated precisely in `block.zig`'s module doc) —
-///   so the `*_over` pair is `OffsetTooFar` while `frame_window_1k_span` (an offset past the
-///   declared window at ten literals in, still inside the addressable span) is accepted, as the
-///   CLI accepts it.
-/// - **The landed fixture blocks, framed** (`frame_sequences_*`, `frame_literals_*`, `frame_t1*`,
-///   `frame_treeless`, `frame_repeat`, `frame_temp_offset`, `frame_two_byte`, `frame_corner`,
-///   `frame_zero_seq*`): each carries a landed fixture block or pair as its block content, and
-///   the CLI decodes each to the landed expectation.
-/// - **The negative corners** (`frame_reserved`, `frame_oversize_*`, `frame_short_*`,
-///   `frame_truncated_header`, `frame_treeless_first`, `frame_repeat_first`,
-///   `frame_no_sequences`, `frame_short_sequences`, `frame_empty_compressed`): the CLI exits 1
-///   on every one but the last, which it reads as a no-op where ours fails closed.
-///
-/// The fixture bytes are the record; the generator that produced and verified them mirrors the
-/// landed slices' Python harness (a frame is the prefix above, then each block's 3-byte
-/// little-endian Block_Header and its Block_Content).
+// Whole frames for the block layer: hand-built Zstandard frames around the blocks above, each
+// decoded with the CLI (`zstd -d`). Each is `§3.1`'s Magic_Number, `§3.1.1.1.1`'s
+// Frame_Header_Descriptor 0x00 (no Frame_Content_Size, no checksum, no dictionary, not
+// Single_Segment), `§3.1.1.1.2`'s Window_Descriptor, then the blocks of `§3.1.1.2`, each as a
+// 3-byte little-endian Block_Header and its Block_Content. The block tests walk them with
+// nothing but this module, and `block.zig`'s fixture helper reads each frame's declared window
+// back out of its descriptor. The bytes below are the record.
+//
+// Four groups, with the CLI's verdict for each:
+//
+// - **The fast paths** (`frame_raw*`, `frame_rle*`, `frame_multi`): Raw and RLE blocks, a
+//   zero-size Raw block, and an RLE block at exactly Block_Maximum_Size. The CLI decodes each
+//   to the bytes the tests expect.
+// - **The window fixtures** (`frame_window_*`): two RLE blocks and a compressed block whose
+//   match reaches exactly Window_Size back, in 1 KB and 128 KB variants, so the decoded length
+//   passes both Window_Size and Block_Maximum_Size. The CLI decodes all of them, the `*_over`
+//   siblings included: its whole-buffer decoder checks the bytes it still has, not the declared
+//   window. This decoder enforces the addressable-span reading of `§3.1.1.4`, the history
+//   region plus the block's own writes (stated precisely in `block.zig`'s module doc), so the
+//   `*_over` pair is `OffsetTooFar` while `frame_window_1k_span` (an offset past the declared
+//   window at ten literals in, still inside the addressable span) is accepted, as the CLI
+//   accepts it.
+// - **The section fixtures, framed** (`frame_sequences_*`, `frame_literals_*`, `frame_pair*`,
+//   `frame_treeless`, `frame_repeat`, `frame_temp_offset`, `frame_two_byte`, `frame_corner`,
+//   `frame_zero_seq*`): each carries a section fixture or pair from above as its block
+//   content, and the CLI decodes each to the matching expectation.
+// - **The negative corners** (`frame_reserved`, `frame_oversize_*`, `frame_short_*`,
+//   `frame_truncated_header`, `frame_treeless_first`, `frame_repeat_first`,
+//   `frame_no_sequences`, `frame_short_sequences`, `frame_empty_compressed`): the CLI exits 1
+//   on every one but the last. It reads `frame_empty_compressed` as a no-op; this decoder
+//   returns `MalformedLiteralsHeader`.
 /// `§3.1` — "The Magic_Number is 0xFD2FB528", stored little-endian.
 pub const frame_magic = [4]u8{ 0x28, 0xb5, 0x2f, 0xfd };
 /// `§3.1.1.1.1` — the fixture frames' Frame_Header_Descriptor: no Frame_Content_Size,
@@ -628,7 +606,7 @@ pub const frame_window_1k_over = hex("28b52ffd0000022000410220004245000000015400
 /// declared 1 KB Window_Size, but inside the bytes addressable at the match: the block's
 /// 1024-byte history region plus its own ten literals. The CLI decodes it to 1024 + 1024 +
 /// 10 + 3 bytes (`... BBB 0123456789 BBB`, exit 0); ours accepts it too, because the bound is
-/// the addressable span, not the declared window (T12).
+/// the addressable span, not the declared window.
 pub const frame_window_1k_span = hex("28b52ffd00000220004102200042950000503031323334353637383901" ++
     "540a0a000404");
 
@@ -657,28 +635,26 @@ pub const frame_amplify_match = hex("28b52ffd00008000003031323334353637383961626
 pub const frame_oversize_literals = hex("28b52ffd00002d00000d00017800");
 
 /// Block 2's literals section is Treeless (`§3.1.1.3.1.1`) and decodes five symbol-0 bytes
-/// through block 1's T1 tree.
+/// through the Huffman tree of block 1 (the `pair_*` example).
 pub const frame_treeless = hex("28b52ffd004854000042800184432010010d002d00005340" ++
     "003f00");
 
-/// The T1 pair's Table-25 frame (`docs/research/zstd-notes.md` §5.4): the literals section,
-/// then the decoded-zero sequences section.
-pub const frame_t1 = hex("28b52ffd004855000042800184432010010d00");
+/// The Table 25 frame of the `pair_*` Huffman example: the literals section, then a zero-count
+/// sequences section.
+pub const frame_pair = hex("28b52ffd004855000042800184432010010d00");
 
-/// The T1 pair's errata-8195 frame: the §4.2.2 example's swapped stream, decoding to `00 01 05
-/// 04`.
-pub const frame_t1_errata = hex("28b52ffd004855000042800184432010100d00");
+/// The errata-8195 variant of `frame_pair`: the §4.2.2 example's swapped stream, decoding to
+/// `00 01 05 04`.
+pub const frame_pair_errata = hex("28b52ffd004855000042800184432010100d00");
 
-/// The hand-built fixtures below are whole frames verified with the pinned
-/// zstd CLI v1.5.7: each frame is the magic, a descriptor 0x00 (no
-/// Frame_Content_Size, no checksum), a 512 KB window descriptor, then one or
-/// more compressed blocks of raw literals and the sequences section in
-/// question. `zstd -d` decodes every one of them to the bytes the tests
-/// expect, so the fixtures are conformant frames rather than self-consistent
-/// guesses (the literals slice's hand-built-section pattern, one layer up).
-/// The sections and the frames are the same data: `buildFrame` derives each
-/// frame from its sections, so the two spellings cannot drift.
-///
+// The hand-built multi-block fixtures below are whole frames
+// (`docs/research/zstd-notes.md` §5.4): each is the magic, a descriptor 0x00
+// (no Frame_Content_Size, no checksum), a 512 KB window descriptor, then one
+// or more compressed blocks of raw literals and the sequences section in
+// question. `zstd -d` decodes every one of them to the bytes the tests
+// expect, so the fixtures are conformant frames and not self-consistent
+// guesses. The sections and the frames are the same data: `buildFrame`
+// derives each frame from its sections.
 /// The shared first block of the three multi-block fixtures
 /// (`frame_repeat`, `frame_temp_offset`, `frame_two_byte`): 17 raw literals
 /// and the six-sequence RLE-mode section (`§3.1.1.3.2`), decoding to 22
@@ -813,8 +789,8 @@ pub const frame_two_byte_expected = hex("202122232420212225262728292225262a2b2c2
     "323334353637");
 
 /// The zero-count fixture: the 1-byte zero (the section stops after the
-/// count) and the 2-byte `80 00` that decodes to zero — the corner the
-/// reference accepts and std rejects (T5).
+/// count) and the 2-byte `80 00` that decodes to zero, a corner the reference
+/// accepts and std rejects.
 pub const zero_literals: [9]u8 = hex("402021222324252627");
 pub const zero_section: [1]u8 = hex("00");
 pub const zero_two_byte_section: [2]u8 = hex("8000");
@@ -828,13 +804,13 @@ pub const frame_zero_seq = buildFrame(0x48, &.{
 /// The decoded output of `frame_zero_seq`: the CLI's own `zstd -d` bytes.
 pub const frame_zero_seq_expected = hex("2021222324252627");
 
-/// The 2-byte `80 00` decoded-zero count — T5's corner, which std rejects.
+/// The 2-byte `80 00` count that decodes to zero: the CLI accepts it and std rejects it.
 pub const frame_zero_seq_2b = buildFrame(0x48, &.{
     .{ .block_type = .compressed, .content = &(zero_literals ++ zero_two_byte_section) },
 });
 
-/// The landed `sequences_predefined` pair as one compressed block (`§3.1.1.3`); the CLI
-/// decodes it to `sequences_predefined_expected`.
+/// The `sequences_predefined` literals and sequences sections as one compressed block
+/// (`§3.1.1.3`); the CLI decodes it to `sequences_predefined_expected`.
 pub const frame_sequences_predefined = buildFrame(0x48, &.{
     .{
         .block_type = .compressed,
@@ -842,8 +818,8 @@ pub const frame_sequences_predefined = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `sequences_rle_match_lengths` pair as one compressed block; the CLI decodes it to
-/// `sequences_rle_match_lengths_expected`.
+/// The `sequences_rle_match_lengths` literals and sequences sections as one compressed block;
+/// the CLI decodes it to `sequences_rle_match_lengths_expected`.
 pub const frame_sequences_rle_match_lengths = buildFrame(0x48, &.{
     .{
         .block_type = .compressed,
@@ -851,8 +827,8 @@ pub const frame_sequences_rle_match_lengths = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `sequences_fse_offsets` pair as one compressed block; the CLI decodes it to
-/// `sequences_fse_offsets_expected`.
+/// The `sequences_fse_offsets` literals and sequences sections as one compressed block; the CLI
+/// decodes it to `sequences_fse_offsets_expected`.
 pub const frame_sequences_fse_offsets = buildFrame(0x48, &.{
     .{
         .block_type = .compressed,
@@ -860,8 +836,8 @@ pub const frame_sequences_fse_offsets = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `sequences_fse_all` pair as one compressed block; the CLI decodes it to
-/// `sequences_fse_all_expected`.
+/// The `sequences_fse_all` literals and sequences sections as one compressed block; the CLI
+/// decodes it to `sequences_fse_all_expected`.
 pub const frame_sequences_fse_all = buildFrame(0x48, &.{
     .{
         .block_type = .compressed,
@@ -869,7 +845,7 @@ pub const frame_sequences_fse_all = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `literals_1stream` section with a zero-count sequences section (`§3.1.1.3.2.1`);
+/// The `literals_1stream` section followed by a zero-count sequences section (`§3.1.1.3.2.1`);
 /// the CLI decodes it to `literals_1stream_expected`.
 pub const frame_literals_1stream = buildFrame(0x48, &.{
     .{
@@ -878,7 +854,7 @@ pub const frame_literals_1stream = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `literals_4stream_sf1` section with a zero-count sequences section; the CLI
+/// The `literals_4stream_sf1` section followed by a zero-count sequences section; the CLI
 /// decodes it to `literals_4stream_sf1_expected`.
 pub const frame_literals_4stream_sf1 = buildFrame(0x48, &.{
     .{
@@ -887,7 +863,7 @@ pub const frame_literals_4stream_sf1 = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `literals_4stream_sf2` section with a zero-count sequences section; the CLI
+/// The `literals_4stream_sf2` section followed by a zero-count sequences section; the CLI
 /// decodes it to `literals_4stream_sf2_expected`.
 pub const frame_literals_4stream_sf2 = buildFrame(0x48, &.{
     .{
@@ -896,7 +872,7 @@ pub const frame_literals_4stream_sf2 = buildFrame(0x48, &.{
     },
 });
 
-/// The landed `literals_fse_tree` section with a zero-count sequences section; the CLI decodes
+/// The `literals_fse_tree` section followed by a zero-count sequences section; the CLI decodes
 /// it to `literals_fse_tree_expected`.
 pub const frame_literals_fse_tree = buildFrame(0x48, &.{
     .{
@@ -937,54 +913,54 @@ pub const frame_short_raw = hex("28b52ffd00485100006162636465");
 /// A compressed block declaring 10 bytes with 5 present: the CLI exits 1.
 pub const frame_short_compressed = hex("28b52ffd00485500006162636465");
 
-/// A zero-size compressed block (`§3.1.1.2.3`): the CLI reads it as a no-op, ours fails closed
-/// on the missing literals header.
+/// A zero-size compressed block (`§3.1.1.2.3`): the CLI reads it as a no-op, ours returns
+/// `MalformedLiteralsHeader` for the missing literals header.
 pub const frame_empty_compressed = hex("28b52ffd0048050000");
 
 /// A 1-byte Block_Header — the input ends inside the frame (`§3.1.1.2`), the CLI exits 1.
 pub const frame_truncated_header = hex("28b52ffd004801");
 
-/// The frame layer's fixtures: hand-built frames for every Frame_Header corner of
-/// `§3.1.1.1`, the checksum trailer of `§3.1.1`, skippable frames of `§3.1.2`, and one real
-/// multi-block frame from the pinned CLI. Each was run through the pinned zstd CLI v1.5.7 and
-/// its verdict recorded: `zstd -d -c` decodes the good ones byte-exact, `zstd -t` verifies the
-/// checksummed ones (the C's XXH64 against std's, through the trailer), and `zstd -d` exits 1
-/// on every negative corner. The generator is the block fixtures' Python harness extended with
-/// the `§3.1.1.1` descriptor forms; the bytes below are its output, not a hand transcription.
-///
-/// The groups:
-///
-/// - **The descriptor forms** (`frame_fcs1`/`frame_fcs2`/`frame_fcs2_single_segment`/`frame_fcs4`/
-///   `frame_fcs8`): FCS_Field_Size 1/2/4/8 (`§3.1.1.1.1.1`, Table 4), the 2-byte form's +256
-///   offset (`§3.1.1.1.4`), and Single_Segment_Flag's Window_Size = Frame_Content_Size
-///   (`§3.1.1.1.1.2`). Each carries the smallest block its declared window allows.
-/// - **The flag corners** (`frame_unused_bit`, `frame_reserved_bit`, `frame_dictionary_id*`):
-///   descriptor bit 4 accepted and never interpreted (`§3.1.1.1.1.3`; the CLI exits 0), bit 3
-///   refused (`§3.1.1.1.1.4`; the CLI exits 1 "Unsupported frame parameter"), and
-///   Dictionary_ID_Flag refused at the first ID byte (`§3.1.1.1.3`; the CLI exits 1 "Dictionary
-///   mismatch" — with the ID byte present and, in `frame_dictionary_id_truncated`, without it).
-/// - **The checksum trailer** (`frame_checksum`, `frame_checksum_empty`, `frame_checksum_corrupt`,
-///   `frame_checksum_truncated`, `frame_checksum_multi`): the low 4 bytes of `XXH64(decoded, 0)`,
-///   little-endian (`§3.1.1`). The trailers are the C library's own values — `zstd -t` verifies
-///   each good one and fails the corrupt one with "Restored data doesn't match checksum".
-///   `frame_checksum_multi` is the CLI's `zstd -3` of `frame_checksum_multi_text` repeated 3000
-///   times: 135000 bytes over two compressed blocks, single-segment, FCS 135000, trailer
-///   `23 6b a1 cc`.
-/// - **Frame_Content_Size as a check** (`frame_fcs_short`, `frame_fcs_long`, `frame_fcs_max`):
-///   the same 8-byte block with a 4- and a 12-byte declaration, and the 8-byte form's maximum
-///   (`§3.1.1.1.4`; the CLI exits 1 on the first two and accepts the last as its
-///   `ZSTD_CONTENTSIZE_UNKNOWN` sentinel — the recorded divergence beside the fixture).
-/// - **The window/block coupling** (`frame_single_segment_oversize`): a single-segment frame
-///   whose FCS — hence Window_Size — is smaller than its block (`§3.1.1.2.4`, T7; the CLI
-///   exits 1 "Src size is incorrect").
-/// - **The boundary set** (`frame_trailing_garbage`, `frame_two_frames`): bytes after a complete
-///   frame. The CLI fails the first ("unsupported format") and decodes both frames of the
-///   second; the one-shot's rule is the M3 member boundary — one frame by exact consumption,
-///   trailing bytes ignored (T10).
-/// - **The skippable set** (`skippable_*`): `§3.1.2`'s 16 magics, a frame between skippables,
-///   the out-of-range 0x184D2A60 magic (the CLI exits 1 "unsupported format"), a truncated
-///   User_Data, and a 4 GiB Frame_Size — the amplification rule: the bytes are skipped by
-///   arithmetic, never staged.
+// The frame layer's fixtures: hand-built frames for every Frame_Header corner of `§3.1.1.1`,
+// the checksum trailer of `§3.1.1`, the skippable frames of `§3.1.2`, and one real multi-block
+// frame from the CLI. Each was run through the CLI and its verdict recorded: `zstd -d -c`
+// decodes the good ones byte-exact, `zstd -t` verifies the checksummed ones (the C library's
+// XXH64 against std's, through the trailer), and `zstd -d` exits 1 on every negative corner.
+// The bytes below are generator output, not hand transcriptions. The research behind these
+// fixtures is in `docs/research/zstd-notes.md` §3 (the checksum) and §5.4 (the corruption set).
+//
+// The groups:
+//
+// - **The descriptor forms** (`frame_fcs1`/`frame_fcs2`/`frame_fcs2_single_segment`/`frame_fcs4`/
+//   `frame_fcs8`): FCS_Field_Size 1/2/4/8 (`§3.1.1.1.1.1`, Table 4), the 2-byte form's +256
+//   offset (`§3.1.1.1.4`), and Single_Segment_Flag's Window_Size = Frame_Content_Size
+//   (`§3.1.1.1.1.2`). Each carries the smallest block its declared window allows.
+// - **The flag corners** (`frame_unused_bit`, `frame_reserved_bit`, `frame_dictionary_id*`):
+//   descriptor bit 4 accepted and never interpreted (`§3.1.1.1.1.3`; the CLI exits 0), bit 3
+//   refused (`§3.1.1.1.1.4`; the CLI exits 1 "Unsupported frame parameter"), and
+//   Dictionary_ID_Flag refused at the first ID byte (`§3.1.1.1.3`; the CLI exits 1 "Dictionary
+//   mismatch", with the ID byte present and, in `frame_dictionary_id_truncated`, without it).
+// - **The checksum trailer** (`frame_checksum`, `frame_checksum_empty`, `frame_checksum_corrupt`,
+//   `frame_checksum_truncated`, `frame_checksum_multi`): the low 4 bytes of `XXH64(decoded, 0)`,
+//   little-endian (`§3.1.1`). The trailers are the C library's own values: `zstd -t` verifies
+//   each good one and fails the corrupt one with "Restored data doesn't match checksum".
+//   `frame_checksum_multi` is the CLI's `zstd -3` of `frame_checksum_multi_text` repeated 3000
+//   times: 135000 bytes over two compressed blocks, single-segment, FCS 135000, trailer
+//   `23 6b a1 cc`.
+// - **Frame_Content_Size as a check** (`frame_fcs_short`, `frame_fcs_long`, `frame_fcs_max`):
+//   the same 8-byte block with a 4- and a 12-byte declaration, and the 8-byte form's maximum
+//   (`§3.1.1.1.4`; the CLI exits 1 on the first two and accepts the last as its
+//   `ZSTD_CONTENTSIZE_UNKNOWN` sentinel, a divergence recorded beside the fixture).
+// - **The window/block coupling** (`frame_single_segment_oversize`): a single-segment frame
+//   whose FCS, hence Window_Size, is smaller than its block (`§3.1.1.2.4`; the CLI exits 1
+//   "Src size is incorrect").
+// - **The boundary set** (`frame_trailing_garbage`, `frame_two_frames`): bytes after a complete
+//   frame. The CLI fails the first ("unsupported format") and decodes both frames of the
+//   second; the one-shot's rule is one frame by exact consumption, with trailing bytes
+//   ignored.
+// - **The skippable set** (`skippable_*`): `§3.1.2`'s 16 magics, a frame between skippables,
+//   the out-of-range 0x184D2A60 magic (the CLI exits 1 "unsupported format"), a truncated
+//   User_Data, and a 4 GiB Frame_Size, which checks that the bytes are skipped by arithmetic
+//   and never staged.
 /// `§3.1.1.1.1.1` — FCS_Field_Size 1, Single_Segment_Flag set: descriptor 0x20, FCS 8, one Raw
 /// block of 8 (Window_Size 8 is Block_Maximum_Size, `§3.1.1.2.4`).
 pub const frame_fcs1 = hex("28b52ffd20084100003031323334353637");
@@ -1027,14 +1003,14 @@ pub const frame_checksum = hex("28b52ffd040021000061626364cc925dd2");
 /// The empty payload's checksum: the low 4 bytes of `XXH64("", 0)`.
 pub const frame_checksum_empty = hex("28b52ffd040001000099e9d851");
 
-/// `frame_checksum` with the Content_Checksum_Flag clear and no trailer: the
-/// notes' byte-identity pin (`docs/research/zstd-notes.md` §3 — the CLI's
-/// checksum-on and `--no-check` frames differ only in descriptor bit 2 and the
-/// four trailer bytes), reduced to the fixture pair. Both decode to "abcd".
+/// `frame_checksum` with the Content_Checksum_Flag clear and no trailer. The
+/// CLI's checksum-on and `--no-check` frames differ only in descriptor bit 2
+/// and the four trailer bytes, and this pair is that comparison. Both decode
+/// to "abcd".
 pub const frame_checksum_off = hex("28b52ffd000021000061626364");
 
 /// The same trailer with its last byte flipped: `WrongChecksum`; the CLI exits 1 "Restored data
-/// doesn't match checksum" (T8).
+/// doesn't match checksum".
 pub const frame_checksum_corrupt = hex("28b52ffd040021000061626364cc925dd3");
 
 /// The trailer's last byte missing: the input ends inside the frame (`Truncated`).
@@ -1062,20 +1038,19 @@ pub const frame_fcs_long = hex("28b52ffd80000c0000004100003031323334353637");
 /// writes nothing past the block. The C accepts this one frame shape: it reserves
 /// 2^64-1 as `ZSTD_CONTENTSIZE_UNKNOWN` and skips the check — a sentinel the RFC does not
 /// have (Table 7's 8-byte range is "0 - 2^(64) - 1"), recorded here as the divergence the
-/// fixture pins. Verified: `zstd -d -c` exits 0 and decodes "abcd".
+/// fixture pins. `zstd -d -c` exits 0 and decodes it to "abcd".
 pub const frame_fcs_max = hex("28b52ffdc000ffffffffffffffff21000061626364");
 
 /// `§3.1.1.2.4` — a single-segment frame whose FCS (hence Window_Size) is 4 carrying a 5-byte
-/// Raw block: `BlockOversize`; the CLI exits 1 "Src size is incorrect" (T7).
+/// Raw block: `BlockOversize`; the CLI exits 1 "Src size is incorrect".
 pub const frame_single_segment_oversize = hex("28b52ffd20042900006162636465");
 
 /// `frame_raw`'s magic with its first byte flipped: neither magic family, `BadMagic` (the
-/// CLI exits 1 "unsupported format"). The research's corruption set's flipped-magic row
-/// (`docs/research/zstd-notes.md` §5.4).
+/// CLI exits 1 "unsupported format").
 pub const frame_bad_magic = hex("29b52ffd00484100007a73746420726177");
 
-/// `frame_raw` plus `zzzz`: the frame decodes and the tail is ignored (T10 — the one-shot's
-/// boundary rule; the CLI exits 1 "unsupported format" on the tail).
+/// `frame_raw` plus `zzzz`: the frame decodes and the tail is ignored (the one-shot's boundary
+/// rule; the CLI exits 1 "unsupported format" on the tail).
 pub const frame_trailing_garbage = hex("28b52ffd00484100007a737464207261777a7a7a7a");
 
 /// Two complete frames back to back: the one-shot decodes the first and ignores the second (a
@@ -1088,7 +1063,7 @@ pub const skippable_prefix = hex("532a4d18040000006d65746128b52ffd00484100007a73
     "77");
 
 /// `§3.1.2` — sixteen skippable frames, all 16 magics: "All 16 values are valid"; the CLI
-/// decodes to zero bytes cleanly (T10's only-skippable clean end).
+/// decodes to zero bytes cleanly, since an input of only skippable frames is a clean end.
 pub const skippable_sixteen = hex("502a4d1803000000404040512a4d1803000000414141522a4d180300" ++
     "0000424242532a4d1803000000434343542a4d180300000044444455" ++
     "2a4d1803000000454545562a4d1803000000464646572a4d18030000" ++

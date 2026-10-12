@@ -1,16 +1,16 @@
-//! gzip.encode: the one-shot member encoder (README.md, "API").
+//! gzip.encode: the one-shot member encoder.
 //!
-//! One complete member into a caller-provided target: the deterministic
-//! 10-byte fixed header (OQ7), the deflate body through flate's one-shot
-//! encoder, and the 8-byte trailer — CRC-32 of `source` per ISO 3309 and
-//! ISIZE, the input length mod 2^32 (`rfc1952-gzip.txt §2.3.1`). The CRC-32
-//! is hashed directly over `source` (OQ1's one-shot shape: the container
-//! holds the bytes, so one pass, no flate involvement). Zero heap
-//! allocation; the member is byte-identical for the same input and options.
-//! The driver — the framing/body/trailer order and the bound — is
-//! `src/internal/container.zig`'s `EncodeHooks`, instantiated over this
-//! module's framing (`framing.zig`); the header and trailer emissions below
-//! are the framing's own.
+//! `compress` writes one complete member into a caller-provided buffer: a
+//! fixed 10-byte header, flate's one-shot deflate body, and the 8-byte
+//! trailer (the CRC-32 of the input and its length mod 2^32, RFC 1952
+//! §2.3.1). Size the buffer with `maxCompressedLength`. The same input and
+//! options always produce the same bytes, and nothing is allocated.
+//!
+//! `writeHeader`, `writeTrailer`, and `xflFor` are public because the streaming
+//! `Writer` is built from them. The order of header, body, and trailer is the
+//! shared container driver's (`src/internal/container.zig`).
+//!
+//! Format: docs/research/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const testing = std.testing;
@@ -25,9 +25,8 @@ const writeInt = common.writeInt;
 const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
-/// The flate level type, re-exported: the container adds no levels of its own
-/// (README, "API"). `.ratio` is flate's reserved seat — `error.Unimplemented`
-/// here, never silent aliasing.
+/// Compression level: flate's `encode.Level`, re-exported. `.fast` is the
+/// default. `.ratio` is not implemented and selects `error.Unimplemented`.
 pub const Level = framing.Level;
 /// Encoder configuration. `.{}` is the default: the fast level.
 pub const Options = framing.Options;
@@ -41,17 +40,19 @@ const golden = @import("golden.zig");
 /// (`src/internal/container.zig`).
 const Hooks = internal.container.EncodeHooks(framing);
 
-/// The worst-case member length: the fixed header, flate's worst-case body,
-/// and the fixed trailer (README, "API").
+/// The largest member `compress` can produce for `input_len` bytes: the
+/// 10-byte header, flate's worst-case deflate body, and the 8-byte trailer. A
+/// `target` of this size always fits the member.
 pub fn maxCompressedLength(input_len: usize) usize {
     return Hooks.maxCompressedLength(input_len);
 }
 
-/// Emit the deterministic 10-byte header (OQ7): ID1/ID2/CM fixed, FLG=0 (no
-/// optional fields, reserved bits clear — `§2.3.1.2`), MTIME=0 ("no time
-/// stamp is available", `§2.3.1`), XFL by level band, OS=255 (`§2.3.1.2`'s
-/// "255 for OS" default; T1). All multi-byte numbers little-endian
-/// (`§2.1`).
+/// Write the 10-byte member header into `target`: ID1/ID2/CM fixed, FLG=0 (no
+/// optional fields, reserved bits clear, `§2.3.1.2`), MTIME=0 ("no time stamp
+/// is available", `§2.3.1`), XFL from `level` (see `xflFor`), and OS=255
+/// (unknown; `§2.3.1.2` suggests "255 for OS"). For a given level the header
+/// is the same every time: nothing in it depends on the clock or the
+/// environment. Multi-byte fields are little-endian (`§2.1`).
 pub fn writeHeader(target: *[header_len]u8, level: Level) void {
     target[0] = 0x1f; // ID1
     target[1] = 0x8b; // ID2
@@ -62,19 +63,19 @@ pub fn writeHeader(target: *[header_len]u8, level: Level) void {
     target[9] = 255; // OS: unknown
 }
 
-/// Emit the 8-byte trailer: CRC-32 of the uncompressed data per ISO 3309,
-/// then ISIZE, the input length mod 2^32; both u32 little-endian
-/// (`§2.1`, `§2.3.1`).
+/// Write the 8-byte trailer into `target`: `crc`, the CRC-32 of the
+/// uncompressed data (ISO 3309), then `len`, its length mod 2^32 (ISIZE); both
+/// u32 little-endian (`§2.1`, `§2.3.1`).
 pub fn writeTrailer(target: *[trailer_len]u8, crc: u32, len: u32) void {
     writeInt(u32, target[0..4], crc);
     writeInt(u32, target[4..8], len);
 }
 
-/// XFL by level (`§2.3.1`: 2 = "maximum compression", 4 = "fastest
-/// algorithm"): 4 for the levels that select the fast fixed-Huffman encoder
-/// (`.fast`, `.@"0"`, `.@"1"`), 2 for level 9, 0 otherwise — the reference
-/// lineage's bands, oracle-verified (containers-notes.md §5.5). The field is
-/// informational; a decoder need not examine it (`§2.3.1.2`).
+/// The XFL byte for `level` (`§2.3.1`: 2 means "maximum compression", 4
+/// means "fastest algorithm"): 4 for `.fast`, `.@"0"`, and `.@"1"`, 2 for
+/// `.@"9"`, and 0 for the rest. These are the bands C zlib and Go use. The
+/// field is informational (`§2.3.1.2`) and reflects the requested level, not
+/// what the encoder did with it.
 pub fn xflFor(level: Level) u8 {
     return switch (level) {
         .fast, .@"0", .@"1" => 4,
@@ -83,12 +84,14 @@ pub fn xflFor(level: Level) u8 {
     };
 }
 
-/// Compress `source` as one complete gzip member into `target` and return the
-/// member's length. `error.BufferTooSmall` when `target` cannot hold it (size
-/// `target` with `maxCompressedLength`; a smaller target may still fit when
-/// the body compresses under the bound, and its contents are unspecified on
-/// failure). `error.Unimplemented` for the reserved `.ratio` level. Zero heap
-/// allocation.
+/// Compress `source` into `target` as one complete gzip member and return the
+/// member's length. Returns `error.BufferTooSmall` when `target` cannot hold
+/// it: size `target` with `maxCompressedLength`, though a smaller `target` can
+/// still fit when the data compresses well. `target`'s contents are
+/// unspecified after an error. Returns `error.Unimplemented` for `.ratio`.
+///
+/// Allocates nothing. Uses about 128 KiB of stack (flate's match-finder
+/// table).
 pub fn compress(
     source: []const u8,
     target: []u8,
@@ -104,7 +107,7 @@ pub fn compress(
 
 test "encode: the emitted member is the deterministic one" {
     // RFC 1952 §2.3.1 — ID1/ID2/CM fixed, FLG=0 (no optional fields,
-    // reserved bits clear), MTIME=0, OS=255 (T1/OQ7); XFL is informational.
+    // reserved bits clear), MTIME=0, OS=255; XFL is informational.
     var target: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
     const len = try compress(source, &target, .{});
@@ -134,8 +137,8 @@ test "encode: the emitted member is the deterministic one" {
 
 test "encode: the empty member is the golden bytes" {
     // RFC 1952 §2.3.1 — an empty payload is a valid member: the fixed header,
-    // the final empty fixed block (`03 00`, flate's uniform ending), and the
-    // zero CRC-32 and ISIZE. The fuzz lane's hostile-header pins carry the
+    // the final empty fixed block (`03 00`, how flate ends every stream), and
+    // the zero CRC-32 and ISIZE. The hostile-header pins in fuzz.zig use the
     // same bytes.
     var target: [maxCompressedLength(0)]u8 = undefined;
     const len = try compress("", &target, .{});
@@ -149,8 +152,8 @@ test "encode: the empty member is the golden bytes" {
 
 test "encode: XFL follows the level bands" {
     // RFC 1952 §2.3.1 — XFL 4 is "compressor used fastest algorithm", 2
-    // "maximum compression"; the bands follow the reference lineage
-    // (containers-notes.md §5.5). `.ratio` never emits a member.
+    // "maximum compression"; the bands are C zlib's and Go's. `.ratio` never
+    // emits a member.
     const cases = [_]struct { level: Level, xfl: u8 }{
         .{ .level = .fast, .xfl = 4 },
         .{ .level = .@"0", .xfl = 4 },
@@ -168,18 +171,18 @@ test "encode: XFL follows the level bands" {
 }
 
 test "encode: the ratio seat is unimplemented, never aliased" {
-    // flate's reserved seat (README, "API"): `error.Unimplemented`, and no
-    // member bytes are claimed.
+    // `.ratio` is not implemented: `error.Unimplemented`, and nothing is
+    // written to `target`.
     var target: [64]u8 = undefined;
     sentinel.fill(&target);
     try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = .ratio }));
     try sentinel.expect(&target, 0);
 }
 
-test "encode: a small target fails closed, an exact one fits" {
-    // README, "Contracts": a target smaller than `maxCompressedLength` may
-    // still fit; when it does not, `error.BufferTooSmall` and `target`'s
-    // contents are unspecified. Nothing is ever written past the target.
+test "encode: a small target fails, an exact one fits" {
+    // A target smaller than `maxCompressedLength` may still fit; when it does
+    // not, the result is `error.BufferTooSmall` and `target`'s contents are
+    // unspecified. Nothing is ever written past the target.
     const source = "hello world\n";
     var member: [maxCompressedLength(source.len)]u8 = undefined;
     const len = try compress(source, &member, .{});
@@ -207,7 +210,7 @@ test "encode: a small target fails closed, an exact one fits" {
 }
 
 test "encode: the bound holds for every shape" {
-    // README, "API": `compress` never expands past `maxCompressedLength`.
+    // `compress` never produces more than `maxCompressedLength` bytes.
     // Random bytes take the stored fallback, runs the match finder.
     const cases = [_][]const u8{
         "",
@@ -236,9 +239,8 @@ test "encode: the bound holds for every shape" {
 }
 
 test "encode: the golden outputs re-encode to decodable members" {
-    // The ported golang/go `gunzipTests` payloads: each must round-trip
-    // through this module's own two halves — the container's framing must
-    // not disturb the body flate's fixtures pin.
+    // The ported golang/go `gunzipTests` payloads must round-trip through
+    // this module's own encoder and decoder.
     var member: [512]u8 = undefined;
     var plain: [512]u8 = undefined;
     for (golden.gunzip_cases) |tc| {

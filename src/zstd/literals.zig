@@ -1,52 +1,17 @@
 //! The literals section of a compressed block (`§3.1.1.3.1`): the 1-5 byte
-//! header, the four Literals_Block_Types (`§3.1.1.3.1.1`, Table 13), the
-//! Huffman streams, and the cross-block table a Treeless_Literals_Block
-//! reuses.
+//! header, the four Literals_Block_Types (`§3.1.1.3.1.1`, Table 13), the Huffman
+//! streams, and the cross-block table a Treeless_Literals_Block reuses.
 //!
-//! The literals section is the first part of a compressed block; the rest is
-//! the sequences section, whose size is derived from this one
-//! (`§3.1.1.3.2`: "Sequences_Section_Size = Block_Size -
-//! Literals_Section_Header - Literals_Section_Content"), so `decode` returns
-//! the decoded literals *and* the block bytes the section consumed. That is
-//! the whole hand-off to the block slice: it passes the block's remaining
-//! content, the literals scratch, and the frame's `State`; it takes back the
-//! literals and `bytes_consumed`, and the sequences section is the content
-//! from there.
+//! `decode` reads one section from the front of a compressed block and returns
+//! the literals and the bytes the section consumed; the sequences section is
+//! whatever follows (`§3.1.1.3.2`). Raw and RLE sections copy or repeat bytes.
+//! A Compressed section carries a Huffman_Tree_Description and 1 or 4 streams
+//! (`§3.1.1.3.1.6`), and its table is saved in `State`. A Treeless section
+//! carries streams only and uses the saved table, or returns
+//! `TreelessLiteralsFirst` if the frame has none.
 //!
-//! The four types (`§3.1.1.3.1.1`):
-//!
-//! - **Raw** (0): "Literals are stored uncompressed"; the content is
-//!   Regenerated_Size bytes (`§3.1.1.3.1.2`) — one `fastmem.copy`.
-//! - **RLE** (1): "Literals consist of a single-byte value repeated
-//!   Regenerated_Size times" (`§3.1.1.3.1.3`) — one `fastmem.set`, bounded
-//!   by the declared size and by the target.
-//! - **Compressed** (2): a Huffman_Tree_Description (`§3.1.1.3.1.5`,
-//!   `§4.2.1`) followed by 1 or 4 Huffman-coded streams (`§3.1.1.3.1.6`).
-//!   The tree's decode table becomes the frame's literals state.
-//! - **Treeless** (3): the streams only; the tree is the previous
-//!   Compressed_Literals_Block's ("The Huffman tree comes from the previous
-//!   Compressed_Literals_Block", `§3.1.1.3`). Without one it "should be
-//!   treated as data corruption" (`§3.1.1.3.1.1`) — `TreelessLiteralsFirst`.
-//!
-//! The stream layout is `§3.1.1.3.1.6`: one stream occupies the entire
-//! remaining content; four streams carry a 6-byte Jump_Table of u16-LE
-//! compressed sizes for the first three, with `Stream4_Size =
-//! Total_Streams_Size - 6 - Stream1_Size - Stream2_Size - Stream3_Size`, and
-//! each stream's decompressed size is `(Regenerated_Size+3)/4` "except for
-//! the last stream, which may be up to 3 bytes smaller". 4-stream mode needs
-//! >= 6 regenerated literals — errata 7297 (`docs/research/zstd-notes.md`
-//! §4 T4); below 6 the fourth stream's share underflows, so the section is
-//! `LiteralsTooLarge` whatever the streams say.
-//!
-//! The header (`§3.1.1.3.1.1`, Table 12) is "a byte-aligned variable-size
-//! bit field, ranging from 1 to 5 bytes, using little-endian convention":
-//! the 2-bit block type, a 1-2 bit Size_Format, Regenerated_Size (5-20 bits),
-//! and for the compressed family Compressed_Size (10-18 bits, which
-//! "includes the size of the Huffman_Tree_Description when it is present").
-//! In the 5-byte format the Compressed_Size's top 8 bits live in the fifth
-//! byte — a corner the slice-1 Python mirror caught before this port
-//! (`parseHeader` reads all five bytes, and the parse test pins a
-//! Compressed_Size above 1023).
+//! Four-stream mode needs at least 6 regenerated literals (errata 7297); below
+//! that the fourth stream's size can underflow.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -89,10 +54,10 @@ pub const BlockType = enum(u2) {
 /// 2-byte little-endian fields".
 pub const jump_table_len = 6;
 
-/// Errata 7297 (`§3.1.1.3.1.6`; `docs/research/zstd-notes.md` §4 T4) — the
-/// 4-stream size ranges are 6-1023 / 6-16383 / 6-262143, not 0-based: below
-/// 6 the fourth stream's `(Regenerated_Size+3)/4` share underflows. The C
-/// enforces it as `MIN_LITERALS_FOR_4_STREAMS`.
+/// Errata 7297 (`§3.1.1.3.1.6`): the 4-stream size ranges are 6-1023,
+/// 6-16383, and 6-262143, not 0-based. Below 6 the fourth stream's size,
+/// `Regenerated_Size - 3 * ((Regenerated_Size+3)/4)`, can underflow. The C
+/// reference enforces it as `MIN_LITERALS_FOR_4_STREAMS`.
 pub const min_literals_for_4streams = 6;
 
 /// A parsed Literals_Section_Header (`§3.1.1.3.1.1`, Table 12).
@@ -296,10 +261,9 @@ fn decodeRaw(header: Header, content: []const u8, target: []u8) Error!Section {
 /// `§3.1.1.3.1.3`: "Stream_1 consists of a single byte that should be
 /// repeated Regenerated_Size times to generate the decoded literals."
 ///
-/// The amplification limit: Regenerated_Size is a declared size (up to
-/// 2^20 - 1), and the splat is bounded by it *and* by the caller's target —
-/// a declared size the target cannot hold fails closed with
-/// `LiteralsTooLarge` and writes nothing.
+/// Regenerated_Size is a declared size (up to 2^20 - 1), so the repeat is
+/// bounded by the room in `target`: a size the target cannot hold is
+/// `LiteralsTooLarge`, raised before any write.
 fn decodeRle(header: Header, content: []const u8, target: []u8) Error!Section {
     const regenerated_size: usize = header.regenerated_size;
     if (content.len < 1) return error.LiteralsTooLarge;
@@ -382,7 +346,7 @@ fn decodeStreams(
         return huff0.decodeStream(table, streams, target[0..regenerated_size]);
     }
     // Errata 7297: 4-stream mode needs >= 6 regenerated literals; below that
-    // the fourth stream's share would underflow.
+    // the fourth stream's share can underflow.
     if (regenerated_size < min_literals_for_4streams) return error.LiteralsTooLarge;
     return decodeFourStreams(streams, target[0..regenerated_size], table);
 }
@@ -409,6 +373,8 @@ fn decodeFourStreams(
     const stream1_start = jump_table_len;
     const stream2_start = stream1_start + stream1_len;
     const stream3_start = stream2_start + stream2_len;
+    // Stream4_Size is the rest of the streams region: Total_Streams_Size - 6 -
+    // Stream1_Size - Stream2_Size - Stream3_Size.
     const stream4_start = stream3_start + stream3_len;
     // "The decompressed size of each stream is equal to
     // (Regenerated_Size+3)/4, except for the last stream, which may be up to
@@ -433,14 +399,14 @@ fn decodeFourStreams(
     );
 }
 
-/// Hand-built literals sections over the T1 tree (`golden.t1_tree`), each
-/// verified end-to-end with the zstd CLI v1.5.7: the section sits in a
-/// one-block frame (magic, descriptor 0x00, a 1 KB window descriptor, the
-/// compressed block, then the zero-sequence byte) whose decoded output is
-/// exactly the expected literals. The streams carry symbols 0-5 of the T1
-/// tree, whose codes are 1, 01, 001, 0000, 0001 (`§4.2.1.3`, Table 25).
+/// Hand-built literals sections over `golden.pair_tree`, each verified
+/// end-to-end with the zstd CLI v1.5.7: the section sits in a one-block frame
+/// (magic, descriptor 0x00, a 1 KB window descriptor, the compressed block,
+/// then the zero-sequence byte) whose decoded output is exactly the expected
+/// literals. The streams carry symbols 0-5 of that tree, whose codes are 1,
+/// 01, 001, 0000, 0001 (`§4.2.1.3`, Table 25).
 const four_stream_body: [16]u8 = .{
-    0x84, 0x43, 0x20, 0x10, // the T1 tree
+    0x84, 0x43, 0x20, 0x10, // the tree (`golden.pair_tree`)
     0x01, 0x00, 0x02, 0x00, 0x02, 0x00, // Jump_Table: 1, 2, 2
     0x69, // stream 1: 0, 1, 2
     0x03, 0x02, // stream 2: 4, 5, 0
@@ -457,7 +423,7 @@ const four_stream_expected = [_]u8{ 0, 1, 2, 4, 5, 0, 2, 2, 2, 0 };
 /// The last-stream padding corner: rs = 7 splits as 2/2/2/1 (the fourth
 /// stream decodes one symbol); rs = 6 as 2/2/2/0, the fourth stream being
 /// the end marker alone (`§4.2.2`'s final 1 bit with no useful bits). Both
-/// carry the T1 tree, a Jump_Table of (1, 2, 1), and the streams for
+/// carry the same tree, a Jump_Table of (1, 2, 1), and the streams for
 /// [0, 1] [4, 5] [2, 0] plus the fourth's one symbol (0x10) or end
 /// marker (0x01).
 const four_stream_rs7: [18]u8 = .{
@@ -487,14 +453,14 @@ const jump_table_truncated: [11]u8 = .{
     0xa6, 0x00, 0x02, 0x84, 0x43, 0x20, 0x10, 0x01, 0x00, 0x02, 0x00,
 };
 
-/// A Treeless section reusing the T1 tree: Size_Format 00, rs = 4, cs = 2
-/// (the T1 stream alone). Hand-built and CLI-verified as one frame with a
+/// A Treeless section reusing `golden.pair_tree`: Size_Format 00, rs = 4, cs = 2
+/// (`golden.pair_stream` alone). Hand-built and CLI-verified as one frame with a
 /// preceding Compressed block.
 const treeless_section: [5]u8 = .{ 0x43, 0x80, 0x00, 0x01, 0x0d };
 
 /// Decode one hand-built section with a sentinel-filled target and check the
-/// literals, the consumed count, and the untouched tail (AGENTS.md,
-/// "Rules": every decode test proves no write past the decoded length).
+/// literals, the consumed count, and the untouched tail past the decoded
+/// length.
 fn expectDecode(section: []const u8, expected: []const u8) !void {
     var target: [1280]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -539,8 +505,7 @@ test "parseHeader reads the compressed size formats, the fifth byte included" {
     // 3-byte header with four (10-bit fields); 10 is 4 bytes (14 bits); 11
     // is 5 bytes (18 bits). The sizes are adjacent little-endian fields, so
     // in the 5-byte form the Compressed_Size's top 8 bits are the *fifth*
-    // byte — the corner the slice-1 mirror caught (docs/research/
-    // zstd-notes.md, the slice-1 report).
+    // byte.
     const t1 = try parseHeader(&.{ 0x42, 0x80, 0x01 });
     try testing.expectEqual(BlockType.compressed, t1.block_type);
     try testing.expectEqual(@as(u2, 0), t1.size_format);
@@ -615,7 +580,7 @@ test "decodeRaw copies Regenerated_Size bytes and stops there" {
     }
 }
 
-test "decodeRaw fails closed when the declared size exceeds the block" {
+test "decodeRaw fails when the declared size exceeds the block" {
     // RFC 8878 §3.1.1.3.1.2 + §8 — the declared size is bounded by the block
     // content and by the caller's target; both failures write nothing.
     var target: [16]u8 = undefined;
@@ -661,7 +626,7 @@ test "decodeRle repeats the single content byte Regenerated_Size times" {
 test "decodeRle's declared size is an amplification limit" {
     // RFC 8878 §3.1.1.3.1.3 + §8 — a 20-bit Regenerated_Size (up to 1 MiB)
     // is a declared size, not a license: a splat that would overflow the
-    // target fails closed and writes nothing.
+    // target returns an error and writes nothing.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
@@ -671,7 +636,7 @@ test "decodeRle's declared size is an amplification limit" {
         decode(&.{ 0xfd, 0xff, 0xff, 0x41 }, &target, &state),
     );
     try internal.sentinel.expect(&target, 0);
-    // The same declared size with no content byte at all: still closed.
+    // The same declared size with no content byte at all: still an error.
     try testing.expectError(
         error.LiteralsTooLarge,
         decode(&.{ 0xfd, 0xff, 0xff }, &target, &state),
@@ -679,7 +644,7 @@ test "decodeRle's declared size is an amplification limit" {
     try internal.sentinel.expect(&target, 0);
 }
 
-test "a compressed section's Regenerated_Size beyond the target fails closed" {
+test "a compressed section's Regenerated_Size beyond the target fails" {
     // RFC 8878 §3.1.1.3.1.1 + §8 — the same amplification bound as Raw and
     // RLE: Regenerated_Size is the header's declaration, and a target that
     // cannot hold it fails `LiteralsTooLarge` before any stream is decoded
@@ -687,26 +652,26 @@ test "a compressed section's Regenerated_Size beyond the target fails closed" {
     var small: [3]u8 = undefined;
     internal.sentinel.fill(&small);
     var state: State = .{};
-    // The T1 section decodes four literals.
+    // `golden.pair_literals_section` decodes four literals.
     try testing.expectError(
         error.LiteralsTooLarge,
-        decode(&golden.t1_literals_section, &small, &state),
+        decode(&golden.pair_literals_section, &small, &state),
     );
     try internal.sentinel.expect(&small, 0);
     try testing.expect(!state.has_table);
 }
 
-test "decodeCompressed decodes the T1 pair's one-stream sections" {
-    // RFC 8878 §3.1.1.3.1.4 + §4.2.2 — the hand-built T1 pair
-    // (docs/research/zstd-notes.md §5.4): a direct-weights tree and one
-    // stream, decoding to 0, 1, 4, 5. The second section carries the §4.2.2
-    // example's own bytes (errata 8195, T1) and decodes to 0, 1, 5, 4.
+test "decodeCompressed decodes the hand-built one-stream sections" {
+    // RFC 8878 §3.1.1.3.1.4 + §4.2.2 — the hand-built pair
+    // (`golden.pair_literals_section`): a direct-weights tree and one stream,
+    // decoding to 0, 1, 4, 5. The second section carries the §4.2.2
+    // example's own bytes (errata 8195) and decodes to 0, 1, 5, 4.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
-    const section = try decode(&golden.t1_literals_section, &target, &state);
-    try testing.expectEqualSlices(u8, &golden.t1_literals, section.bytes);
-    try testing.expectEqual(golden.t1_literals_section.len, section.bytes_consumed);
+    const section = try decode(&golden.pair_literals_section, &target, &state);
+    try testing.expectEqualSlices(u8, &golden.pair_literals, section.bytes);
+    try testing.expectEqual(golden.pair_literals_section.len, section.bytes_consumed);
     try internal.sentinel.expect(&target, section.bytes.len);
     // The Compressed block's tree is the state the next block sees.
     try testing.expect(state.has_table);
@@ -714,8 +679,8 @@ test "decodeCompressed decodes the T1 pair's one-stream sections" {
     var errata_target: [16]u8 = undefined;
     internal.sentinel.fill(&errata_target);
     var errata_state: State = .{};
-    const errata = try decode(&golden.t1_errata_literals_section, &errata_target, &errata_state);
-    try testing.expectEqualSlices(u8, &golden.t1_errata_literals, errata.bytes);
+    const errata = try decode(&golden.pair_errata_literals_section, &errata_target, &errata_state);
+    try testing.expectEqualSlices(u8, &golden.pair_errata_literals, errata.bytes);
     try internal.sentinel.expect(&errata_target, errata.bytes.len);
 }
 
@@ -793,10 +758,10 @@ test "the jump table's last stream may be up to 3 bytes smaller" {
 }
 
 test "four-stream mode below 6 regenerated literals is LiteralsTooLarge" {
-    // RFC 8878 §3.1.1.3.1.6 + errata 7297 (docs/research/zstd-notes.md §4
-    // T4) — the 4-stream ranges start at 6, not 0: below 6 the fourth
-    // stream's share underflows. The CLI v1.5.7 rejects this frame at the
-    // literals header; the check here runs before any stream is decoded.
+    // RFC 8878 §3.1.1.3.1.6 + errata 7297 — the 4-stream ranges start at 6,
+    // not 0: below 6 the fourth stream's share can underflow. The CLI v1.5.7
+    // rejects this frame at the literals header; the check here runs before
+    // any stream is decoded.
     var target: [1280]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
@@ -861,19 +826,19 @@ test "decodeTreeless reuses the previous Compressed block's table" {
     // RFC 8878 §3.1.1.3.1.1 — Treeless "us[es] the Huffman tree from the
     // previous Compressed_Literals_Block ... Huffman_Tree_Description will
     // be skipped". The pair is hand-built and verified as one frame with
-    // the CLI v1.5.7: a Compressed block (the T1 section), then a Treeless
-    // block whose stream is the T1 stream.
+    // the CLI v1.5.7: a Compressed block (`golden.pair_literals_section`), then
+    // a Treeless block whose stream is `golden.pair_stream`.
     var target: [16]u8 = undefined;
     var state: State = .{};
     internal.sentinel.fill(&target);
-    const first = try decode(&golden.t1_literals_section, &target, &state);
-    try testing.expectEqualSlices(u8, &golden.t1_literals, first.bytes);
+    const first = try decode(&golden.pair_literals_section, &target, &state);
+    try testing.expectEqualSlices(u8, &golden.pair_literals, first.bytes);
     try internal.sentinel.expect(&target, first.bytes.len);
 
     var treeless_target: [16]u8 = undefined;
     internal.sentinel.fill(&treeless_target);
     const second = try decode(&treeless_section, &treeless_target, &state);
-    try testing.expectEqualSlices(u8, &golden.t1_literals, second.bytes);
+    try testing.expectEqualSlices(u8, &golden.pair_literals, second.bytes);
     try testing.expectEqual(treeless_section.len, second.bytes_consumed);
     try internal.sentinel.expect(&treeless_target, second.bytes.len);
 }
@@ -898,7 +863,7 @@ test "the treeless table survives intervening Raw and RLE blocks" {
     // update it, and a Treeless block after either still decodes.
     var target: [16]u8 = undefined;
     var state: State = .{};
-    _ = try decode(&golden.t1_literals_section, &target, &state);
+    _ = try decode(&golden.pair_literals_section, &target, &state);
 
     internal.sentinel.fill(&target);
     const raw = try decode(&.{ 0x28, 0xde, 0xad, 0xbe, 0xef, 0x00 }, &target, &state);
@@ -913,6 +878,6 @@ test "the treeless table survives intervening Raw and RLE blocks" {
 
     internal.sentinel.fill(&target);
     const treeless = try decode(&treeless_section, &target, &state);
-    try testing.expectEqualSlices(u8, &golden.t1_literals, treeless.bytes);
+    try testing.expectEqualSlices(u8, &golden.pair_literals, treeless.bytes);
     try internal.sentinel.expect(&target, treeless.bytes.len);
 }

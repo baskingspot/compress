@@ -4,7 +4,7 @@
 //! codec and provides streaming `encode`/`decode` pumps. This file owns
 //! everything the codecs share: argument parsing, input (a file, or stdin
 //! via `-` or no argument) as an `Io.File.Reader`, stdout, and error
-//! handling. A codec with no encoder yet leaves `encode` null and the CLI
+//! handling. A codec with no encoder leaves `encode` null and the CLI
 //! reports the direction as usage.
 //!
 //! Usage (per codec): `<codec> encode [FILE|-] > out`, `<codec> decode [FILE|-] > out`.
@@ -25,8 +25,7 @@ pub const StreamFn = *const fn (arena: Allocator, in: *Io.Reader, out: *Io.Write
 pub const Codec = struct {
     name: []const u8,
     /// Encode the whole input and write the encoded stream to `out`. Null for
-    /// a codec with no encoder yet (zstd until M5): the CLI reports the
-    /// direction as usage, and the codec's error surface never carries it.
+    /// a codec with no encoder (zstd): the CLI reports the direction as usage.
     encode: ?StreamFn = null,
     /// Decode a stream produced by `encode` and write the decoded bytes.
     decode: StreamFn,
@@ -78,9 +77,8 @@ pub fn run(codec: Codec, init: process.Init) !u8 {
     return 0;
 }
 
-/// The round trip every codec's example test drives: `text` through the
-/// codec's own pumps, decoded back, bytes required. A codec without an
-/// encoder (zstd) cannot call it.
+/// Encode `text` with the codec's pumps, decode the result, and expect the
+/// original bytes. Returns `error.NoEncoder` for a codec without an encoder.
 pub fn expectRoundTrip(codec: Codec, text: []const u8) !void {
     const encode = codec.encode orelse return error.NoEncoder;
     const testing = std.testing;

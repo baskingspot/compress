@@ -1,22 +1,19 @@
-//! gzip container benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! gzip benchmarks: `zig build bench -Doptimize=ReleaseFast`, or for benchstat
+//! input `... -- --count=10 > bench.txt`. Throughput is MB/s over the
+//! *uncompressed* size, so compress and decompress rows compare directly.
 //!
-//! Covers the one-shot container path (compress, decompress, ratio) over the
-//! same shapes as flate's bench, plus the paired raw-flate rows over the same
-//! corpus and level: the container story is that the flate core dominates and
-//! the framing must be noise — the delta between the gzip and raw rows is the
-//! 10-byte header, the 8-byte trailer, and the CRC-32 pass, measured, not
-//! assumed (README, "Benchmarks"). The container's own rows carry a `Gzip`
-//! prefix (`BenchmarkGzipCompress/...`) because each bench root builds its own
-//! binary: an unprefixed `BenchmarkCompress/32K/text` collides with flate's
-//! own bench rows in a combined report, and the rows are not interchangeable —
-//! cross-binary, flate.encode.compress codegen flips with unrelated binary
-//! composition (LLVM's inlining of the bit-writer state; the random shape
-//! swings ~2x). Compare container rows to the paired rows in the SAME binary,
-//! never to flate's own bench binary. Throughput is reported as MB/s over the
-//! *uncompressed* size so compress and decompress are directly comparable.
+//! The rows cover the one-shot path (`BenchmarkGzipCompress`,
+//! `BenchmarkGzipDecompress`, `BenchmarkGzipRatio`) over the same shapes as
+//! flate's bench, plus paired raw-flate rows (`BenchmarkFlateCompress`,
+//! `BenchmarkFlateDecompress`) over the same corpus and level. The difference
+//! between a gzip row and its flate row is the container's cost: the 18 bytes
+//! of framing and the CRC-32 pass.
 //!
-//! Output is benchstat-friendly:
-//! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! Compare a gzip row only with the flate row from this same binary. The `Gzip`
+//! prefix keeps these rows from colliding with flate's own bench rows in a
+//! combined report, and flate's own bench binary is not comparable: its
+//! encoder's code generation changes with the rest of the binary (LLVM's
+//! inlining of the bit-writer state moves the `random` shape by about 2x).
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;

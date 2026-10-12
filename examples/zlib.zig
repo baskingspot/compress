@@ -1,17 +1,13 @@
 //! zlib example CLI: `zlib encode [FILE|-] > out`,
 //! `zlib decode [FILE|-] > out`. Shared scaffolding in `examples/cli.zig`.
 //!
-//! This is the thin-pump shape the streaming layer enables: `encode` wraps
-//! stdout in a `zlib.Writer` and pumps the input into it (one stream);
-//! `decode` wraps the input in a `zlib.Reader` and pumps it into stdout (one
-//! stream — zlib's format is a single stream, `§2.2`: "Any data which may
-//! appear after ADLER32 are not part of the zlib stream", so a caller that
-//! wants to walk concatenated streams loops at the boundary the reader's
-//! exact consumption exposes; the CLI does not, and nothing is silently
-//! skipped).
-//!
-//! Both pumps are stack-buffered end to end: the whole encode/decode path
-//! allocates nothing.
+//! `encode` runs the input through `zlib.Writer.streamAll`, which writes one
+//! stream. `decode` runs it through `zlib.Reader.streamAll`, which decodes one
+//! stream and stops after its Adler-32 trailer. Whatever follows is left
+//! unread: RFC 1950 §2.2 says "Any data which may appear after ADLER32 are
+//! not part of the zlib stream". A caller that wants concatenated streams can
+//! repeat the call, since the reader consumes exactly through the trailer.
+//! Both directions use stack buffers and allocate nothing.
 
 const std = @import("std");
 const Io = std.Io;

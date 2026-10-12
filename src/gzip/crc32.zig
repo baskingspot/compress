@@ -1,31 +1,18 @@
-//! The gzip checksum state over a slice-by-16 CRC-32 kernel.
+//! The gzip checksum: a slice-by-16 CRC-32 kernel and the `Checksum` state the
+//! container folds payload bytes into.
 //!
-//! RFC 1952 §2.3.1 names "the CRC-32 algorithm used in the ISO 3309 standard"
-//! (reflected polynomial 0xEDB88320, with the full pre/post-conditioning;
-//! §8 is the appendix's sample code, "not part of the specification per se").
-//! The kernel here is the slice-by-16 table method — sixteen interleaved
-//! 256-entry tables, sixteen independent table loads per sixteen bytes — the
-//! portable table shape (slice-by-8 is libdeflate's scalar default,
-//! `lib/crc32.c crc32_slice8`; `containers-notes.md` §3.3) taken one step
-//! wider. It replaces the day-one `std.hash.crc.Crc32` bytewise loop, whose
-//! table-load address depends on the previous byte's CRC (a serialized ~4-5
-//! cycle/byte chain: ~2.1 ns/byte measured, 23x the flate core's cost on
-//! text). Slicing breaks that chain into independent loads, but one chain
-//! remains per slice step (the state's own four bytes feed four of the
-//! loads); at sixteen bytes per step that chain costs half of slice-by-8's
-//! per byte. The boundary is unchanged —
-//! `crc32(crc, bytes)` with the conditioning inside and the `Checksum`
-//! state's `final()` — so a braided or folded-vector/PCLMULQDQ kernel can
-//! still swap in behind it (the plan's deferred decision,
-//! `containers-notes.md` §3.3).
-//! std's `Crc32.hash` stays in the tests as the reference oracle
-//! (0xCBF43926, the golang golden trailer, a differential length sweep).
+//! The CRC-32 is the one RFC 1952 §2.3.1 specifies: ISO 3309, reflected
+//! polynomial 0xEDB88320, with pre- and post-conditioning (§8 is the RFC's
+//! sample code). `crc32(crc, bytes)` is the whole interface: the conditioning
+//! is inside, so `crc32(0, bytes)` equals `std.hash.crc.Crc32.hash(bytes)` and
+//! an empty input returns `crc` unchanged. `Checksum` holds the raw running
+//! CRC and the byte count mod 2^32 (the trailer's ISIZE). The container folds
+//! it through flate's checksum hook as bytes cross the codec boundary, so
+//! each payload byte is hashed once, in stream order, with no copy and no
+//! second pass. Any faster kernel can replace the one here behind `crc32` and
+//! `Checksum`.
 //!
-//! The container keeps only the state: the raw running CRC plus the payload
-//! length mod 2^32 (the trailer's ISIZE, `§2.3.1`), folded through flate's
-//! checksum hook as bytes cross the codec boundary — every payload byte
-//! exactly once, in stream order, with no copy and no second pass
-//! (README.md, "The checksums"; OQ1).
+//! std's `Crc32` stays in the tests as the reference.
 
 const std = @import("std");
 const testing = std.testing;
@@ -69,13 +56,20 @@ const tables: [slice_count][256]u32 = blk: {
 
 // The table construction and the fold are pinned at comptime against the
 // check value (RFC 1952 §8). The 17-byte pin crosses one full slice plus a
-// one-byte tail: `crc32("123456789")` is 9 bytes, so the comptime check is
-// against std's oracle for the sliced path.
+// one-byte tail: `crc32("123456789")` is 9 bytes, so the comparison with
+// std's `Crc32` is what exercises the sliced path.
 comptime {
     assert(tables[0][0x01] == 0x7707_3096);
     assert(crc32(0, "123456789") == 0xCBF4_3926);
     assert(crc32(0, "123456789ABCDEFGH") == Crc32.hash("123456789ABCDEFGH"));
 }
+
+// Why sixteen slices: a bytewise table lookup's address depends on the
+// previous byte's CRC, which makes a serial chain of several cycles per byte.
+// Slicing turns most of each step into independent loads. One chain remains
+// per step (the state's own four bytes feed four of the loads); at sixteen
+// bytes per step it is paid once per sixteen bytes, half the per-byte cost of
+// slice-by-8.
 
 /// Fold `bytes` into the raw running state (the complemented-running
 /// convention: the state starts at `0xffff_ffff` and `final()` complements
@@ -108,10 +102,10 @@ fn foldRaw(raw: u32, bytes: []const u8) u32 {
     return crc;
 }
 
-/// The container's checksum state, folded through flate's checksum hook as
-/// bytes cross the codec boundary (README.md, "The checksums"; OQ1): the
-/// CRC-32 of every payload byte, exactly once, in stream order, plus the
-/// payload length mod 2^32 — the trailer's ISIZE (`§2.3.1`).
+/// The checksum state for one member: the CRC-32 of every payload byte and the
+/// payload length mod 2^32 (the trailer's ISIZE, `§2.3.1`). The container
+/// folds payload bytes in through flate's checksum hook as they cross the
+/// codec boundary, once each and in stream order.
 pub const Checksum = struct {
     /// The raw running CRC-32 (the kernel state; `final()` carries the
     /// conditioning). Starts at the complemented-running initial value.
@@ -149,11 +143,10 @@ pub const Checksum = struct {
     }
 };
 
-/// Fold `bytes` into `crc` (a `final()` digest, the initial value 0) and
-/// return the new digest: the libdeflate `crc32(crc, bytes)` shape the
-/// one-shot paths use. The conditioning is inside (a state continuation on
-/// the kernel's raw state, not a re-fold of the digest), so the identity
-/// `crc32(0, b) == Crc32.hash(b)` holds and `crc32(crc, "") == crc`.
+/// Continue a CRC-32: returns the digest of the bytes `crc` summarizes (a
+/// previous result, or 0 to start) followed by `bytes`. `crc32(0, b)` equals
+/// std's `Crc32.hash(b)`, and `crc32(crc, "")` is `crc`. The header parser uses
+/// it for FHCRC.
 pub fn crc32(crc: u32, bytes: []const u8) u32 {
     // The digest is the complemented raw state, so the raw state behind a
     // digest `d` is `d ^ 0xffff_ffff` — complement in, fold, complement out.
@@ -162,8 +155,8 @@ pub fn crc32(crc: u32, bytes: []const u8) u32 {
 
 // ---------------------------------------------------------------------------
 // Tests. Spec: docs/research/specs/rfc1952-gzip.txt §8 (the sample table and
-// update), §2.3.1 (the trailer value). std's `Crc32` is the reference oracle
-// for the slice-by-16 kernel.
+// update), §2.3.1 (the trailer value). std's `Crc32` is the reference for the
+// slice-by-16 kernel.
 // ---------------------------------------------------------------------------
 
 test "crc32: the standard check value" {
@@ -191,9 +184,9 @@ test "crc32: the empty payload is the RFC's empty-CRC value" {
 }
 
 test "crc32: incremental runs equal one pass" {
-    // The streaming layers fold runs as bytes cross the codec boundary
-    // (OQ1): the digest must be independent of where the runs are cut —
-    // including cuts inside a sixteen-byte slice.
+    // The streaming layers fold runs as bytes cross the codec boundary: the
+    // digest must be independent of where the runs are cut, including cuts
+    // inside a sixteen-byte slice.
     const bytes = "the quick brown fox jumps over the lazy dog. " ** 20;
     const whole = Crc32.hash(bytes);
     try testing.expectEqual(whole, crc32(0, bytes));

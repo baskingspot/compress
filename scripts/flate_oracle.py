@@ -1,10 +1,11 @@
-"""The flate external-oracle conformance lane.
+"""Check flate against python3's zlib.
 
-Python's zlib is the point: an independent raw-deflate implementation
-verifying ours in both directions (our encode -> its decode, its encode ->
-our decode), over the golang fixture pairs, generated shapes, and streaming
-rows through the CLI. Run via `just flate-oracle`; python3 comes from the
-flake. Shared plumbing: scripts/oracle_common.py.
+Python's zlib is an independent raw-deflate implementation, and it verifies
+ours in both directions (our encode -> its decode, its encode -> our decode)
+over the Go fixture pairs, generated shapes, and streaming rows through the
+example CLI. Run it with `just flate-oracle`; python3 comes from the flake.
+The harness is built from src/flate/oracle.zig. The shared plumbing is in
+scripts/oracle_common.py.
 """
 
 import zlib
@@ -66,25 +67,24 @@ def check(desc: str, data: bytes, cap: int) -> None:
         got = our_decompress(raw, cap)
         assert got == data, f"our decode ({desc}, {shape}): {len(got)} bytes, want {len(data)}"
 
-    # Our encode -> the oracle's decode. This is the primary gate for the
+    # Our encode -> the oracle's decode. This is the main check of the
     # bit-packing rules (`§3.1.1`): a `writeBits`/`writeCode` mix-up
     # round-trips against our own decoder and fails here.
     ours = our_compress(data)
     got = python_decompress(ours)
     assert got == data, f"our encode ({desc}): oracle decoded {len(got)} bytes, want {len(data)}"
-    # README, "Divergences" T4 — the stream ends with the empty fixed block
-    # `03 00` (byte-aligned) or that pattern shifted into the last three
-    # bytes; either way the final byte is zero and the bit before it is the
-    # ending's BTYPE bit.
+    # The stream ends with the empty fixed block `03 00` (byte-aligned) or
+    # that pattern shifted into the last three bytes; either way the final
+    # byte is zero and the bit before it is the ending's BTYPE bit.
     assert ours[-1] == 0x00, f"our encode ({desc}): final byte {ours[-1]:#x}"
 
 
 # The generated conformance shapes (oracle_common.SHAPES): the same bytes in
-# every lane.
+# every script.
 shapes = common.SHAPES
 
 # 1. The committed golang/go pairs: `.golden` is a single non-final block,
-#    so verbatim it must fail closed, and with BFINAL set on that block it
+#    so verbatim it must be rejected, and with BFINAL set on that block it
 #    must decode to `.in` (both verified against the oracle).
 pairs = 0
 for golden in sorted(testdata.glob("*.golden")):
@@ -115,9 +115,9 @@ for desc, data in shapes.items():
 
 # 4. The streaming row: the example CLI pumps through flate.Reader and
 #    flate.Writer, so this drives the streaming layer end to end through
-#    the file CLI — its own encode -> decode round trip, and the oracle's
+#    the file CLI: its own encode -> decode round trip, and the oracle's
 #    decode of the streaming encoder's stream, the same both-directions
-#    rule as the one-shot lane above.
+#    rule as the one-shot checks above.
 def example(args, data):
     result = common.run_example("flate", args, data)
     if result.returncode != 0:

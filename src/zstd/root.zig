@@ -1,24 +1,19 @@
-//! zstd (RFC 8878): a decoder in pure Zig — the frame layer, the block
-//! layer, the literals (huff0) and sequences (FSE) entropy layers, the
-//! XXH64 frame checksum, and the `std.Io` streaming layer. Imports only
-//! `std` and `fastmem`; no heap allocation on any decode path. The
-//! `zcompress.zstd` namespace of the zcompress module.
+//! zstd (RFC 8878): a decoder in pure Zig. `zstd.decode` is the one-shot
+//! decoder and `zstd.Reader` is a decompressing `std.Io.Reader` over one frame.
+//! There is no encoder. No decode path allocates, and the only imports are
+//! `std` and `fastmem`. This is the `zcompress.zstd` namespace.
 //!
-//! M4 is decoder-first and lands in slices: the entropy kernels are here
-//! first (`fse.zig`, `huff0.zig`, with `bits.zig` carrying the two
-//! bitstream readers they share), then the sections that compose them —
-//! the literals section (`literals.zig`) and the sequences section
-//! (`sequences.zig`, Sequence Execution included) — then the block layer
-//! (`block.zig`: the Block_Header, the Raw/RLE/Compressed dispatch, and the
-//! frame's cross-block state), then the frame layer (`frame.zig`: the
-//! magic, the Frame_Header, the block chain, the XXH64 trailer, skippable
-//! frames) with the one-shot decoder (`decode.zig`) on top of it, and the
-//! streaming frame decoder (`Reader.zig`: one frame per reader at the exact
-//! boundary, the caller-owned window buffer, the `streamFrame`/`streamAll`
-//! walk). The public surface is `zstd.decode` and `zstd.Reader`; M5 adds
-//! `zstd.encode` and `zstd.Writer` (README, the header).
-//! Contracts: README.md (the M4 sketch); format:
-//! docs/research/specs/rfc8878-zstd.txt.
+//! The source files, from the bottom up:
+//!
+//! - `bits.zig`: the bitstream readers.
+//! - `fse.zig` and `huff0.zig`: the two entropy decoders.
+//! - `literals.zig` and `sequences.zig`: the two sections of a compressed block.
+//! - `block.zig`: the block header and the per-block decode.
+//! - `frame.zig` and `xxh64.zig`: the frame header, the block chain, skippable
+//!   frames, and the checksum.
+//! - `decode.zig` and `Reader.zig`: the one-shot and streaming decoders.
+//!
+//! Format: docs/research/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 
@@ -32,15 +27,14 @@ const literals = @import("literals.zig");
 const sequences = @import("sequences.zig");
 const xxh64 = @import("xxh64.zig");
 
-/// The one-shot decoder: `decompress`, its error set, and the layer types
-/// it is built from (`frame`, `block`, `literals`, `sequences`, `fse`, and
-/// the `window` arithmetic). API and design: README.md, "API".
+/// The one-shot decoder: `decompress` and its error set, plus the layer
+/// namespaces it is built from (`frame`, `block`, `literals`, `sequences`,
+/// `fse`, and `window`).
 pub const decode = @import("decode.zig");
 
-/// The streaming frame decoder: the decompressing `Io.Reader` over one
-/// Zstandard frame, the caller-owned window buffer (`Reader.Buffer`), and
-/// the `streamFrame`/`streamAll` pumps. API and design: README.md,
-/// "Streaming".
+/// The streaming decoder: an `Io.Reader` that decompresses one Zstandard
+/// frame, the caller-owned window buffer `Reader.Buffer`, and the
+/// `streamFrame` and `streamAll` pumps.
 pub const Reader = @import("Reader.zig");
 
 test {

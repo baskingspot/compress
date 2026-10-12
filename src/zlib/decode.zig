@@ -1,17 +1,16 @@
-//! zlib.decode: the one-shot stream decoder, the header check both layers
-//! share, and the trailer check (README.md, "API" and "The stream format").
+//! zlib.decode: one-shot zlib decompression, plus the header and trailer
+//! checks the streaming `Reader` shares.
 //!
-//! The header is two bytes and an arithmetic check (`checkHeader`): CM, CINFO,
-//! FCHECK, and the FDICT refusal — never a silent skip of the DICTID the flag
-//! announces (`§2.3`, ZD3/ZD4). The trailer check is one function, so both
-//! layers report the same specific errors (`WrongChecksum`, T4). The one-shot
-//! drives the streaming `Reader` over the whole source, exactly as the gzip
-//! sibling does: the header parse, the body's exact end, and the trailer
-//! verification all run through one funnel, and the one-shot maps the
-//! recorded detail back to this module's error set. The one-shot driver —
-//! the streaming-Reader route and the error mapping — is
-//! `src/internal/container.zig`'s `DecodeHooks`, instantiated over this
-//! module's framing (`framing.zig`).
+//! `decompress` decodes one complete zlib stream from `source` into `target`.
+//! It runs the streaming `Reader` over the whole input and maps the recorded
+//! failure back to `DecompressError`, so the one-shot and streaming layers
+//! cannot disagree about a stream (driver: `src/internal/container.zig`,
+//! `DecodeHooks`, instantiated over `framing.zig`). `checkHeader` tests the
+//! two header bytes (CM, CINFO, FCHECK, FDICT) and `checkTrailer` compares
+//! ADLER32, so both layers report the same specific errors.
+//!
+//! Format: docs/research/specs/rfc1950-zlib.txt (§2.2 header and trailer,
+//! §2.3 decoder obligations).
 
 const std = @import("std");
 const testing = std.testing;
@@ -19,64 +18,60 @@ const testing = std.testing;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const container = internal.container;
-/// Read exactly `target.len` bytes from `input`, consuming them: the
-/// streaming route for the header and the trailer, one refill at a time (the
-/// input's buffer may deliver one byte). A short input is `Truncated`; the
-/// input's own failure is `ReadFailed`. The shared container driver's
-/// (`src/internal/container.zig`), named here because the header and trailer
-/// routes are composed from it.
+/// Read exactly `target.len` bytes from `input` and consume them, refilling
+/// as needed. Input that ends first is `error.Truncated`; a failing input is
+/// `error.ReadFailed`. This is the shared driver's `container.readExact`,
+/// re-exported because the header and trailer reads are built from it.
 pub const readExact = container.readExact;
 const common = @import("common.zig");
 const readInt = common.readInt;
 const encode = @import("encode.zig");
-/// The framing lengths, defined with the emitter (`encode.zig`) and
-/// re-exported here: the decoder side reads them without reaching across
-/// namespaces. RFC 1950 §2.2 — the header's 2 bytes (CMF and FLG) and the
-/// trailer's ADLER32.
+/// RFC 1950 §2.2 — the header is 2 bytes (CMF and FLG) and the trailer is 4
+/// (ADLER32). Defined in `encode.zig` and re-exported here so decoder-side
+/// code need not reach across namespaces.
 pub const header_len = encode.header_len;
 pub const trailer_len = encode.trailer_len;
 const framing = @import("framing.zig");
-/// The one-shot decoder's error set (README, "API"; `framing.zig` defines
-/// it): flate's decode detail set plus this module's header and trailer
-/// entries — `BadHeader` (CM != 8, CINFO > 7, or FCHECK, §2.2/§2.3),
-/// `DictionaryRequired` (FDICT set: no preset-dictionary support, §2.3), and
-/// `WrongChecksum` (ADLER32 mismatch, §2.2/§2.3). `BufferTooSmall` is
-/// flate's (a stream that does not fit the caller's cap).
+/// Everything `decompress` can return: flate's decode errors (`Truncated`,
+/// `BufferTooSmall`, `InvalidBlockType`, ...) plus three of this module's:
+/// `BadHeader` (CM is not 8, CINFO is above 7, or FCHECK is wrong; §2.2,
+/// §2.3), `DictionaryRequired` (FDICT is set, and preset dictionaries are not
+/// supported; §2.3), and `WrongChecksum` (ADLER32 does not match; §2.3).
+/// `BufferTooSmall` means the stream does not fit in `target`.
 pub const DecompressError = framing.DecompressError;
 const golden = @import("golden.zig");
 const Reader = @import("Reader.zig");
 
-/// The header check's own failures; the drivers add `Truncated` when the
-/// input ends mid-header.
+/// The failures `checkHeader` reports. Input that ends inside the header is
+/// `Truncated`, reported by the code that reads the bytes (`readExact`).
 pub const HeaderError = error{
     BadHeader,
     DictionaryRequired,
 };
 
 /// RFC 1950 §2.2 — the FLG bits: FCHECK in 0-4, FDICT is bit 5, FLEVEL in
-/// 6-7. FDICT is the one the decoder acts on (`§2.3`); FLEVEL "may [be
-/// ignored] and still be compliant" (`§2.3`).
+/// 6-7. FDICT is the one the decoder acts on (`§2.3`); a decompressor "may
+/// ignore FLEVEL and still be compliant" (`§2.3`).
 pub const flg_fdict = 0x20;
 
-/// Check the header pair (`§2.2`, `§2.3`), in the order a conformant decoder
-/// must: CM, CINFO, and FCHECK are `BadHeader`; FDICT is the dictionary
-/// refusal.
+/// Check the two header bytes (`§2.2`, `§2.3`). CM, CINFO, and FCHECK
+/// problems are `BadHeader`; a set FDICT flag is `DictionaryRequired`. The
+/// checks run in that order.
 ///
 /// - CM (CMF's low four bits) must be 8: "another value could indicate the
 ///   presence of new features that would cause subsequent data to be
 ///   interpreted incorrectly" (`§2.3`).
-/// - CINFO (CMF's high four bits) must be at most 7: "values of CINFO above
-///   7 are not allowed in this version" (`§2.2`).
-/// - FCHECK is validated as `(CMF*256 + FLG) % 31 == 0` — **never by
-///   re-deriving the value and comparing** (T5): the references emit
-///   FCHECK = 31 in the FDICT + FLEVEL-0 corner (C zlib and Go write
-///   `78 3f`), which a re-deriving validator rejects; 31 ≡ 0 mod 31 and fits
-///   the five-bit field, so it is conformant (`§2.2`).
-/// - FDICT set is `DictionaryRequired`, before any body byte: RFC 1950's
-///   compliance section makes rejecting a dictionary stream conformant when
-///   the embedding format has no dictionary registry (`§2.3`), and the four
-///   DICTID bytes are never read, never interpreted as deflate data (ZD3,
-///   ZD4, T6).
+/// - CINFO (CMF's high four bits) must be at most 7: "Values of CINFO above 7
+///   are not allowed in this version of the specification" (`§2.2`).
+/// - FCHECK is checked as `(CMF*256 + FLG) % 31 == 0`, not by recomputing the
+///   value and comparing. C zlib and Go write FCHECK = 31 when FDICT is set
+///   and FLEVEL is 0 (`78 3f`). That pair is valid (31 is 0 mod 31 and fits
+///   the five-bit field), and a check that recomputes FCHECK would reject it
+///   (`§2.2`).
+/// - FDICT set is `DictionaryRequired`. RFC 1950 lets a decoder with no
+///   dictionary registry reject such streams (`§2.3`). The four DICTID bytes
+///   behind the flag are never read, so they are never mistaken for deflate
+///   data.
 pub fn checkHeader(cmf: u8, flg: u8) HeaderError!void {
     if (cmf & 0x0f != 8) return error.BadHeader;
     if (cmf >> 4 > 7) return error.BadHeader;
@@ -84,12 +79,12 @@ pub fn checkHeader(cmf: u8, flg: u8) HeaderError!void {
     if (flg & flg_fdict != 0) return error.DictionaryRequired;
 }
 
-/// Verify the 4-byte trailer against the folded Adler-32 (`§2.2`, `§2.3`):
-/// "the Adler-32 checksum of the uncompressed data (excluding any dictionary
-/// data)", stored "in most-significant-byte first (network) order". RFC 1950
-/// makes the check a decoder MUST: "A compliant decompressor must check CMF,
-/// FLG, and ADLER32, and provide an error indication if any of these have
-/// incorrect values" (`§2.3`).
+/// Compare the 4-byte trailer with `adler`, the Adler-32 of the decoded
+/// bytes. The trailer is a big-endian u32 (`§2.2`). Returns
+/// `error.WrongChecksum` on a mismatch. RFC 1950 makes this check mandatory
+/// for a decoder: "A compliant decompressor must check CMF, FLG, and ADLER32,
+/// and provide an error indication if any of these have incorrect values"
+/// (`§2.3`).
 pub fn checkTrailer(trailer: *const [trailer_len]u8, adler: u32) error{WrongChecksum}!void {
     if (readInt(u32, trailer[0..4]) != adler) return error.WrongChecksum;
 }
@@ -98,17 +93,26 @@ pub fn checkTrailer(trailer: *const [trailer_len]u8, adler: u32) error{WrongChec
 /// reader (`src/internal/container.zig`).
 const Hooks = container.DecodeHooks(framing, Reader);
 
-/// Decode one complete zlib stream from `source` into `target`. `target` is a
-/// cap; the return is the decoded length. The stream is located by exact
-/// consumption (OQ2): the body runs through the streaming `Reader`, whose
-/// position after the clean end is the trailer — and the trailer is verified
-/// against the bytes the decode produced. Bytes after ADLER32 are ignored:
-/// "Any data which may appear after ADLER32 are not part of the zlib stream"
-/// (`§2.2`), and the one-shot reports no consumed count, so a boundary-aware
-/// caller uses the streaming reader (README, "Contracts").
+/// Decode one complete zlib stream from `source` into `target` and return the
+/// decoded length. `target` is a cap, not a size hint: the format stores no
+/// decoded length, so the caller sizes it from outside knowledge. A stream
+/// that decodes to more than `target.len` bytes returns
+/// `error.BufferTooSmall`, and nothing is written past `target`.
 ///
-/// Zero heap allocation: the streaming reader's 64-KiB window is a stack
-/// local. `error.BufferTooSmall` is reported before the overflowing write.
+/// The other errors are `DecompressError`'s: `Truncated` when `source` ends
+/// early (an empty `source` included), `BadHeader`, `DictionaryRequired`,
+/// `WrongChecksum`, and flate's errors for a malformed body. After any error,
+/// `target`'s contents are unspecified. The Adler-32 is compared after the
+/// body is decoded, so even `WrongChecksum` leaves unverified output in
+/// `target`.
+///
+/// Bytes after ADLER32 are ignored ("Any data which may appear after ADLER32
+/// are not part of the zlib stream", `§2.2`), and the return value does not
+/// say where the stream ended. Use the streaming `Reader` when the boundary
+/// matters.
+///
+/// Uses about 68 KiB of stack (the 64 KiB decode window plus 4 KiB of reader
+/// state). Allocates nothing.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     return Hooks.decompress(source, target);
 }
@@ -137,24 +141,24 @@ test "decode: the header check is the §2.2 arithmetic" {
     try checkHeader(0x78, 0xda); // CINFO 7, FLEVEL 3
     try checkHeader(0x08, 0x1d); // CINFO 0 (a 256-byte window) is legal
 
-    // FDICT set is the dictionary refusal, before any body byte (§2.3,
-    // ZD3/ZD4) — and the T5 corner: `78 3f` (FCHECK = 31, C zlib's and Go's
-    // FDICT + FLEVEL-0 emission) satisfies the arithmetic and must land on
+    // FDICT set is the dictionary refusal, before any body byte (§2.3). The
+    // FCHECK = 31 corner: `78 3f` (C zlib's and Go's FDICT + FLEVEL-0
+    // emission) satisfies the arithmetic and must land on
     // `DictionaryRequired`, never `BadHeader`.
     try testing.expectError(error.DictionaryRequired, checkHeader(0x78, 0xbb));
     try testing.expectError(error.DictionaryRequired, checkHeader(0x78, 0x3f));
 
     // The order the checks run in: a pair that is both FDICT and bad-FCHECK
-    // is `BadHeader` (the fuzz lane's `headerClass` classification).
+    // is `BadHeader` (the classification `headerClass` in `fuzz.zig` uses).
     try testing.expectError(error.BadHeader, checkHeader(0x78, 0xbf));
 }
 
 test "decode: the one-shot decodes the golden table" {
     // The ported golang/go `zlibTests` and std's in-tree zlib vectors: every
     // case through the one-shot decoder, with the pinned outcome and the
-    // sentinel overrun rule. The failing cases carry the specific errors the
-    // README decided (FDICT -> DictionaryRequired, bad FCHECK -> BadHeader,
-    // truncated -> Truncated).
+    // sentinel overrun rule. The failing cases carry the specific errors
+    // (FDICT -> DictionaryRequired, bad FCHECK -> BadHeader, truncated ->
+    // Truncated).
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 2048 + @as(usize, sentinel.len));
     defer gpa.free(window);
@@ -172,7 +176,7 @@ test "decode: the one-shot decodes the golden table" {
 
 test "decode: the std in-tree vectors and the divergence pins" {
     // Zig 0.16 std's container tests (MIT, in-tree) as decoder goldens, plus
-    // the divergence pins (T6): std checks neither FCHECK nor FDICT
+    // the divergence pins: std checks neither FCHECK nor FDICT
     // (`std/compress/flate/Decompress.zig:310-314`), so it accepts `78 9f`
     // and misparses an FDICT stream's DICTID as deflate data; ours rejects
     // both, per `§2.2` and `§2.3`.
@@ -192,10 +196,10 @@ test "decode: the std in-tree vectors and the divergence pins" {
 }
 
 test "decode: the one-shot decodes the golden table's trailing-byte cases" {
-    // README, "Contracts" — "Bytes after ADLER32 are ignored by the
-    // one-shot": the stream decodes identically with markers, a truncated
-    // next stream, or a whole second stream behind it (`§2.2`'s boundary,
-    // ZD7).
+    // Bytes after ADLER32 are ignored by the one-shot: the stream decodes
+    // identically with markers, a truncated next stream, or a whole second
+    // stream behind it (`§2.2`: "Any data which may appear after ADLER32 are
+    // not part of the zlib stream").
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 128 + @as(usize, sentinel.len));
     defer gpa.free(window);
@@ -213,10 +217,10 @@ test "decode: the one-shot decodes the golden table's trailing-byte cases" {
 }
 
 test "decode: a zero-byte input is Truncated, and so is every prefix" {
-    // T2/OQ3's fail-closed reading: no stream began. The fuzz lane's
-    // hostile-header pins carry the same expectations; Go's "truncated
-    // empty", "not enough data", and the two "amid raw/fixed-block" vectors
-    // are the ported forms.
+    // An empty input is `Truncated`: no stream began. The hostile-header pins
+    // in `fuzz.zig` carry the same expectations; Go's "truncated empty", "not
+    // enough data", and the two "amid raw/fixed-block" vectors are the ported
+    // forms.
     try testing.expectError(error.Truncated, decompress("", &.{}));
     const empty_stream = "\x78\x9c\x03\x00\x00\x00\x00\x01";
     var i: usize = 0;
@@ -251,25 +255,25 @@ test "decode: the trailer check is specific" {
     });
 }
 
-test "decode: the T5 corner stream is the reference's emission" {
-    // The oracle-emitted dictionary stream (`containers-notes.md §5.5`):
+test "decode: the FCHECK = 31 corner stream is the reference's emission" {
+    // A dictionary stream written by python3's zlib (the C reference):
     // `zlib.compressobj(0, DEFLATED, 15, 9, Z_DEFAULT_STRATEGY, dict)` with
-    // the C reference's naive FCHECK emits the header `78 3f` — FCHECK = 31,
-    // which is 0 mod 31 and fits the five-bit field. A re-deriving validator
-    // rejects the whole Go/C-zlib output family here (T5); ours lands on the
-    // dictionary refusal, never `BadHeader`.
+    // the C reference's naive FCHECK emits the header `78 3f`: FCHECK = 31,
+    // which is 0 mod 31 and fits the five-bit field. A validator that
+    // recomputes FCHECK rejects the whole Go/C-zlib output family here; ours
+    // lands on the dictionary refusal, never `BadHeader`.
     try testing.expectError(
         error.DictionaryRequired,
-        decompress(&golden.t5_corner_dict_stream, &.{}),
+        decompress(&golden.fcheck31_dict_stream, &.{}),
     );
     // The FCHECK arithmetic accepts the pair; the FDICT flag is the refusal.
     try testing.expectError(
         error.DictionaryRequired,
-        checkHeader(golden.t5_corner_dict_stream[0], golden.t5_corner_dict_stream[1]),
+        checkHeader(golden.fcheck31_dict_stream[0], golden.fcheck31_dict_stream[1]),
     );
 }
 
-test "decode: a corrupt body fails closed with flate's detail" {
+test "decode: a corrupt body fails with flate's detail" {
     // RFC 1950 §2.2 — CM=8's "deflate" method is the RFC 1951 document; the
     // body is flate's rules unchanged, and its failures are the module's own
     // (`Truncated`, `InvalidBlockType`, ...).
@@ -284,15 +288,15 @@ test "decode: a corrupt body fails closed with flate's detail" {
 }
 
 test "decode: the empty target is a valid cap for an empty stream" {
-    // README, "Sizing": `target` is a cap; an empty stream needs none.
+    // `target` is a cap; an empty stream needs no room.
     var stream: [32]u8 = undefined;
     const len = try encode.compress("", &stream, .{});
     try testing.expectEqual(@as(usize, 0), try decompress(stream[0..len], &.{}));
 }
 
 test "decode: a bomb stream is capped, never an overrun" {
-    // README, "Sizing": a stream that does not fit is `BufferTooSmall`,
-    // reported before the overflowing write; the bytes past the cap hold.
+    // A stream that does not fit is `BufferTooSmall`; the bytes past the cap
+    // are untouched.
     var stream: [512]u8 = undefined;
     const source = "A" ** 4096;
     const len = try encode.compress(source, &stream, .{});

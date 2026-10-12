@@ -1,22 +1,19 @@
-//! Golden decode fixtures ported from golang/go (BSD-3-Clause; attribution in
-//! THIRD_PARTY.md) plus RFC 1951's own micro-examples. Shared by every layer's
-//! tests, the snappy pattern: `decode.zig` owns the decoder, this module owns
-//! the reference vectors it is judged against.
+//! Golden fixtures for the flate tests: stream vectors ported from golang/go
+//! (BSD-3-Clause; attribution in THIRD_PARTY.md), RFC 1951's micro-examples,
+//! and the helpers every layer's tests share (`checkDecode`, `makeShape`,
+//! `expectFinalEmptyBlock`, `TestChecksum`). `decode.zig` owns the decoder;
+//! this file owns the reference vectors it is judged against.
 //!
 //! Sources:
 //!   - `flate_test.go` `TestStreams` (28 hex vectors) and `TestTruncatedStreams`
 //!   - `inflate_test.go` `TestReaderTruncated` (10 vectors)
 //!   - `deflate_test.go` `deflateTests` (15 rows, as decode goldens)
 //!   - `testdata/huffman-*` `.in`/`.golden` pairs (9)
-//!   - `docs/research/flate-notes.md` §3.2's two oracle-verified micro-streams
-//!     (the T1 extra-bit-order proof) and RFC 1951 §3.2.3/§3.2.4/§3.2.7
-//!     micro-examples.
+//!   - hand-built micro-streams checked against python3's zlib
+//!     (`docs/research/flate-notes.md` §3.2), RFC 1951 §3.2.3/§3.2.4/§3.2.7
+//!     examples, and three raw streams from Zig std
 //!
-//! Every decode here is checked against the sentinel overrun rule: the target
-//! is pre-filled with cycling sentinel bytes, decoded into twice — once with a
-//! target of exactly the decoded length (any overrun is then an out-of-bounds
-//! write) and once with slack (the bytes past the decoded length must still
-//! hold their sentinels).
+//! Every decode here is checked with the sentinel overrun rule (`checkDecode`).
 
 const std = @import("std");
 const testing = std.testing;
@@ -50,8 +47,9 @@ pub const Expect = union(enum) {
     ok: []const u8,
     /// Reject the stream with any `DecompressError`.
     fail,
-    /// Reject the stream with this specific error (the README's decided rules
-    /// pin these; the rest only have to fail, as in Go's own test).
+    /// Reject the stream with this specific error. Used where this decoder's
+    /// rules pin the error; the other rejected rows only have to fail, as in
+    /// Go's own test.
     fail_with: DecompressError,
 };
 
@@ -77,7 +75,7 @@ pub const DeflateCase = struct {
     want: []const u8,
 };
 
-/// One RFC 1951 or flate-notes micro-example.
+/// One micro-example: a stream and the bytes it decodes to.
 pub const MicroCase = struct {
     desc: []const u8,
     source: []const u8,
@@ -95,11 +93,13 @@ pub const HuffmanFixture = struct {
     golden: []const u8,
 };
 
-/// Decode `source` into `target` (sentinel-filled) twice: exact-cap first, so
-/// any write past the decoded length is an out-of-bounds write, then with
-/// slack, to prove the bytes past the decoded length are untouched. Public:
-/// every layer's round-trip helper runs its stream through this one shape
-/// (the sentinel rule is AGENTS.md's, and it should not be respelled).
+/// Check that `source` decodes to `want`, with the sentinel overrun rule
+/// enforced. `target` is scratch and must be at least `want.len` long. It is
+/// sentinel-filled and `source` is decoded into it twice: first into exactly
+/// `want.len` bytes, so any write past the decoded length is an out-of-bounds
+/// write, then into all of `target`, where the bytes past the decoded length
+/// must still hold their sentinels. Public so every layer's round-trip test
+/// checks its decode the same way.
 pub fn checkDecode(target: []u8, source: []const u8, want: []const u8) !void {
     try testing.expect(want.len <= target.len);
 
@@ -150,10 +150,11 @@ fn checkStreamCase(target: []u8, tc: StreamCase) !void {
 
 /// golang/go `flate_test.go` `TestStreams`, ported verbatim (BSD-3-Clause;
 /// THIRD_PARTY.md). The hex strings are Go's own. `.expect` is what the
-/// stream must do here: the `"fail"` rows carry the specific error the
-/// README's decided rules pin where they pin one (the T2/T3 corners), and
-/// plain `.fail` where any `DecompressError` is acceptable (Go asserts only
-/// that the stream is rejected).
+/// stream must do here: a rejected stream names the specific error where this
+/// decoder pins one (the degenerate-tree and alphabet-cap corners, where the
+/// RFC is silent or looser), and uses plain `.fail` where any
+/// `DecompressError` is acceptable (Go asserts only that the stream is
+/// rejected).
 pub const stream_cases: [28]StreamCase = .{
     .{
         .desc = "degenerate HCLenTree",
@@ -372,8 +373,8 @@ pub const deflate_cases: [15]DeflateCase = .{
 };
 /// golang/go `inflate_test.go` `TestReaderTruncated`, ported verbatim
 /// (BSD-3-Clause; THIRD_PARTY.md). Every vector is a truncated stream: the
-/// decoder must fail closed with `error.Truncated` and must have produced
-/// exactly `partial` bytes by then (Go asserts the same partial output).
+/// decoder must return `error.Truncated` and must have produced exactly
+/// `partial` bytes by then (Go asserts the same partial output).
 pub const truncated_cases: [10]TruncatedCase = .{
     .{
         .source = &hex("00"),
@@ -418,20 +419,22 @@ pub const truncated_cases: [10]TruncatedCase = .{
 };
 
 /// `TestTruncatedStreams`' two-block stream (a stored block with its payload,
-/// then a final empty stored block). Every strict prefix must fail closed —
-/// Go asserts `io.ErrUnexpectedEOF` for all of them.
+/// then a final empty stored block). Every strict prefix must return
+/// `error.Truncated`; Go asserts `io.ErrUnexpectedEOF` for all of them.
 pub const truncated_streams_data = "\x00\x0c\x00\xf3\xffhello, world\x01\x00\x00\xff\xff";
 
-/// `docs/research/flate-notes.md` §3.2's hand-built, oracle-verified streams
-/// plus RFC 1951's own micro-examples. These are the byte-level packing proof:
+/// Hand-built micro-streams (`docs/research/flate-notes.md` §3.2, checked
+/// against python3's zlib), RFC 1951's own micro-examples, and three raw
+/// streams from Zig std. The first two groups pin the byte-level packing
+/// rules:
 ///   - "fixed Huffman: literal 'A', match length 20 at distance 1" decodes to
 ///     21 bytes of 'A'; the same stream with the length code's two extra bits
-///     read MSB-first would be 22 bytes, so the pair pins T1 (extra bits pack
-///     LSB-of-value first).
+///     read MSB-first would be 22 bytes, so the pair pins the extra-bit order
+///     (extra bits pack LSB-of-value first).
 ///   - "70 literals 'A', then length 3 at distance 67": distance code 12's
 ///     extra bits are 2 (65 + 2 = 67); read MSB-first they would be 73, past
-///     the 70-byte history, which the reference rejects — the clean decode
-///     pins the distance extra-bit order independently.
+///     the 70-byte history, which zlib rejects. The clean decode pins the
+///     distance extra-bit order independently.
 ///   - RFC 1951 §3.2.3's <length = 5, distance = 2> overlap example.
 ///   - RFC 1951 §3.2.4: a fixed block followed by a stored block whose header
 ///     sits at a non-byte offset, so the stored block's alignment path runs.
@@ -474,7 +477,7 @@ pub const micro_cases: [9]MicroCase = .{
     },
     // Zig std's three raw micro-streams (`std/compress/flate/Decompress.zig`,
     // MIT, in-tree), one per block kind: a stored block, a fixed block, and a
-    // dynamic block (README.md, "Testing & golden vectors").
+    // dynamic block.
     .{
         .desc = "std.compress.flate micro-stream: stored block, 'Hello world'",
         .source = &hex("010c00f3ff48656c6c6f20776f726c640a"),
@@ -493,12 +496,12 @@ pub const micro_cases: [9]MicroCase = .{
 };
 
 /// The nine `testdata/huffman-*` `.in`/`.golden` pairs, embedded verbatim.
-/// `.golden` is Go's `writeBlockHuff(false, ...)` output — a *single* block
-/// with BFINAL clear, which raw deflate has no way to terminate, so verbatim
-/// it is a truncated stream. Both lanes are tested below: verbatim it must
-/// fail closed with `error.Truncated` after producing exactly `.in`, and with
-/// BFINAL set on that one block it is a complete stream that must decode to
-/// `.in` (both verified against the python3 zlib oracle, `wbits=-15`).
+/// `.golden` is Go's `writeBlockHuff(false, ...)` output: a single block with
+/// BFINAL clear, so nothing marks the end of the stream and verbatim it is a
+/// truncated stream. The tests below check both readings. Verbatim it must
+/// return `error.Truncated` after producing exactly `.in`, and with BFINAL set
+/// on that one block it is a complete stream that must decode to `.in`. Both
+/// agree with python3's zlib (`wbits=-15`).
 pub const huffman_fixtures: [9]HuffmanFixture = .{
     .{
         .name = "huffman-null-max",
@@ -547,7 +550,8 @@ pub const huffman_fixtures: [9]HuffmanFixture = .{
     },
 };
 
-/// streaming `Writer`'s tests, whose streams must end the same way.
+/// Bit `bit` of `stream`, counting from bit 0 of byte 0: the order deflate
+/// packs bits in (`§3.1.1`).
 fn bitAt(stream: []const u8, bit: usize) u1 {
     return @intCast((stream[bit / 8] >> @intCast(bit % 8)) & 1);
 }
@@ -561,11 +565,12 @@ fn readBits(stream: []const u8, bit: usize, comptime count: u6) u64 {
     return value;
 }
 
-/// The checksum hook's test double (README, "Checksum hook"): an
-/// order-sensitive synthetic fold, `value = value * 31 + byte`, that is no
-/// real checksum — it exists to witness that the hook saw every byte exactly
-/// once, in stream order. `Checksum` is the interface it stands in
-/// for; the containers bring real CRC-32/Adler-32 kernels.
+/// A test double for the checksum hook. It folds bytes with
+/// `value = value * 31 + byte`, which is order-sensitive but no real checksum:
+/// a dropped, doubled, or reordered byte changes `value`, so it witnesses that
+/// the hook saw every byte exactly once, in stream order. `hook` wraps it in
+/// the `Checksum` interface; the containers bring the real CRC-32 and Adler-32
+/// kernels.
 pub const TestChecksum = struct {
     value: u64 = 0,
 
@@ -588,6 +593,11 @@ pub const TestChecksum = struct {
     }
 };
 
+/// Check that `stream` ends with the final empty fixed block: BFINAL=1,
+/// BTYPE=01, and the seven-bit end-of-block code (`§3.2.3`, `§3.2.6`), ten
+/// bits in all, followed by at most seven zero padding bits. The ending is
+/// found from the stream's last set bit, so the check holds at any bit offset,
+/// not only when the ending is byte aligned.
 pub fn expectFinalEmptyBlock(stream: []const u8) !void {
     const total_bits = stream.len * 8;
     var last_set: ?usize = null;
@@ -608,9 +618,9 @@ pub fn expectFinalEmptyBlock(stream: []const u8) !void {
 
 test "golden decode: golang/go TestStreams" {
     // The primary conformance table: every degenerate dynamic-header corner,
-    // the T2/T3 divergence rows, a raw stored block, and the
-    // issue-10426/11030/11033 regressions. Spec: rfc1951-deflate.txt §3.2.3,
-    // §3.2.6, §3.2.7.
+    // the alphabet-cap rows (HLIT/HDIST limits, reserved symbols), a raw
+    // stored block, and the issue-10426/11030/11033 regressions. Spec:
+    // rfc1951-deflate.txt §3.2.3, §3.2.6, §3.2.7.
     var target: [512]u8 = undefined;
     for (stream_cases) |tc| try checkStreamCase(&target, tc);
 }
@@ -633,7 +643,8 @@ test "golden decode: golang/go TestStreams, exact-cap decodes" {
 
 test "golden decode: golang/go TestTruncatedStreams, every prefix" {
     // Spec: rfc1951-deflate.txt §3.2.3 — the stream ends at the first block
-    // with BFINAL=1, so a prefix that stops earlier must fail closed.
+    // with BFINAL=1, so a prefix that stops earlier must return
+    // `error.Truncated`.
     const data = truncated_streams_data;
     var target: [64]u8 = undefined;
     for (0..data.len) |prefix_len| {
@@ -655,9 +666,9 @@ test "golden decode: golang/go TestTruncatedStreams, every prefix" {
 
 test "golden decode: golang/go TestReaderTruncated" {
     // Spec: rfc1951-deflate.txt §3.2.3/§3.2.4 — truncated stored headers,
-    // partial fixed-block payloads, mid-match truncation. Every one must fail
-    // closed with the partial output Go expects, and must leave the sentinels
-    // past that partial output untouched.
+    // partial fixed-block payloads, mid-match truncation. Every one must
+    // return `error.Truncated` with the partial output Go expects, and must
+    // leave the sentinels past that partial output untouched.
     var target: [64]u8 = undefined;
     for (truncated_cases) |tc| {
         sentinel.fill(&target);
@@ -696,7 +707,7 @@ test "golden decode: RFC 1951 and flate-notes micro-streams" {
 test "golden decode: golang/go testdata huffman-* pairs" {
     // Spec: rfc1951-deflate.txt §3.2.6/§3.2.7 — real dynamic and stored
     // blocks over 242 KB of reference data. `.golden` verbatim is a non-final
-    // block (BFINAL clear), so it must fail closed as `Truncated` after
+    // block (BFINAL clear), so it must return `error.Truncated` after
     // producing exactly `.in`; with BFINAL set on that single block it is a
     // complete stream and must decode to `.in`.
     const allocator = testing.allocator;
@@ -742,9 +753,9 @@ test "golden decode: empty stream and empty non-final block" {
 }
 
 test "golden decode: BufferTooSmall leaves the cap untouched" {
-    // README, "Contracts" — `target` is a cap: a stream that does not fit is
-    // `error.BufferTooSmall`, reported before the overflowing write, and the
-    // bytes at and past the cap are untouched.
+    // `target` is a cap: a stream that does not fit is `error.BufferTooSmall`,
+    // reported before the overflowing write, and the bytes at and past the cap
+    // are untouched.
     const source = &hex("000800f7ff11111111111111110300"); // 8 bytes of 0x11
     var target: [4]u8 = undefined;
     sentinel.fill(&target);
@@ -752,14 +763,15 @@ test "golden decode: BufferTooSmall leaves the cap untouched" {
     try sentinel.expect(&target, 0);
 }
 
-/// Corpus shapes, the same set the bench and the fleet corpus build:
-/// repetitive text, PRNG bytes (incompressible, so the stored fallback runs),
-/// markup, a single-byte run, and a structured-plus-random batch. The
-/// round-trip tests in encode.zig and Writer.zig share this one builder (the
-/// bench keeps its own copy: it is a separate artifact and cannot import test
-/// code).
+/// Test-input shapes: repetitive text, PRNG bytes (incompressible, so the
+/// stored fallback runs), markup, a single-byte run, and a mix of structured
+/// and random bytes. The round-trip tests in encode.zig and Writer.zig share
+/// `makeShape`. The benchmark builds the same set with its own copy, because a
+/// bench binary cannot import test code.
 pub const Shape = enum { text, random, html, rle, mixed };
 
+/// Allocate `len` bytes of `shape` with `allocator`; the caller frees them. The
+/// content is deterministic: `.random` and `.mixed` use fixed PRNG seeds.
 pub fn makeShape(allocator: std.mem.Allocator, shape: Shape, len: usize) ![]u8 {
     const buf = try allocator.alloc(u8, len);
     switch (shape) {

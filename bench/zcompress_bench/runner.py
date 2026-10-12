@@ -75,7 +75,7 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
     sample_ms: int | None,
     minimum_effect: float | None,
 ) -> None:
-    """Cross-build the arms and measure interleaved rounds across the fleet."""
+    """Cross-build the arms and measure interleaved rounds on each box."""
     effect = (
         minimum_effect if minimum_effect is not None else config.project.get("minimum_effect", 0.0)
     )

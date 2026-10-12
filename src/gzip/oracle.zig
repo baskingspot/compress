@@ -1,9 +1,7 @@
-//! External-oracle-lane harness: the driver behind `just gzip-oracle`, which
-//! cross-checks this module against python3's `zlib` (the C reference), the
-//! CPython `gzip` module, and the gzip/gunzip CLIs in both directions
-//! (docs/research/containers-notes.md §5.5). It is a test tool, not part of
-//! the codec's surface: the codec itself (src/gzip/README.md) has no
-//! allocator anywhere.
+//! Command-line driver behind `just gzip-oracle` (scripts/gzip_oracle.py),
+//! which checks this module against python3's `zlib` (the C reference), the
+//! CPython `gzip` module, and the gzip/gunzip CLIs, in both directions. It is a
+//! test tool, not part of the codec: the harness allocates, the codec does not.
 //!
 //! Usage:
 //!   gzip-oracle decode <member-file> <cap-bytes> > out

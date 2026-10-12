@@ -1,27 +1,18 @@
-//! Golden decode fixtures ported from golang/go (BSD-3-Clause; attribution in
-//! THIRD_PARTY.md) plus Zig 0.16 std's in-tree container members and RFC 1952
-//! micro-examples. Shared by every layer's tests (the flate pattern):
-//! `decode.zig` owns the one-shot decoder, `Reader.zig` the streaming layer,
-//! and this module owns the reference vectors both are judged against.
+//! Golden vectors for the gzip layers: members ported from golang/go's gzip
+//! tests, gzip members from Zig 0.16 std's flate tests, and a few RFC 1952
+//! micro-examples. The one-shot decoder (`decode.zig`), the streaming reader
+//! (`Reader.zig`), and the writer tests are all judged against them.
 //!
-//! Sources:
-//!   - `src/compress/gzip/gunzip_test.go` `gunzipTests` (15 vectors), ported
-//!     verbatim as hex; `TestTruncatedStreams` (3 vectors, every prefix);
-//!     `TestIssue6550` (`testdata/issue6550.gz.base64`); `TestMultistreamFalse`
-//!     (the x2 vector); `TestNilStream` (the zero-member reading); and
-//!     `TestCVE202230631` (the repeated empty member).
-//!   - `src/compress/gzip/gzip_test.go` `TestEmpty` (the emitted-header
-//!     policy) and `TestWriterFlush` (the lazy header) as round-trip and
-//!     policy fixtures.
-//!   - Zig 0.16 std `std/compress/flate/Decompress.zig`'s container tests
-//!     (MIT, in-tree): the gzip stored/fixed/dynamic "Hello world\n"
-//!     members, the FNAME member, and the FHCRC member (FLG=0x12, CRC16
-//!     `99 d6`) — decoder goldens and divergence pins (std verifies neither
-//!     FHCRC nor the trailer, T3/T4; it does not check reserved bits).
+//! - `gunzip_cases`: Go's `gunzipTests` (15 members, each with its expected
+//!   outcome), including the concatenated and all-fields-header members.
+//! - `std_cases`: std's stored, fixed, dynamic, FNAME, and FHCRC members.
+//! - `truncated_streams`: Go's `TestTruncatedStreams` members, every prefix.
+//! - `cve_2022_30631_member` and `issue6550_base64`: Go's regression inputs.
+//! - `checkOneShot`, `expectHeader`, `expectTrailer`: shared assertions.
 //!
-//! Every decode here runs the sentinel overrun rule: the target is
-//! pre-filled with cycling sentinels and every byte past the decoded length
-//! must be untouched (`src/internal/README.md`, "API").
+//! Every decode runs the sentinel overrun rule (`internal.sentinel`): bytes past
+//! the decoded length must stay untouched. Attribution for the ported vectors
+//! is in THIRD_PARTY.md.
 
 const std = @import("std");
 const testing = std.testing;
@@ -52,8 +43,8 @@ pub const Expect = union(enum) {
     ok: []const u8,
     /// Reject the member with any `DecompressError`.
     fail,
-    /// Reject the member with this specific error (the README's decided rules
-    /// pin these; the rest only have to fail).
+    /// Reject the member with this specific error. Cases that only have to
+    /// fail use `.fail`.
     fail_with: decode.DecompressError,
 };
 
@@ -62,18 +53,18 @@ pub const Case = struct {
     desc: []const u8,
     source: []const u8,
     expect: Expect,
-    /// What a fresh reader at the member boundary finds in the trailing
-    /// bytes, when the vector carries any: `null` when the member is the
-    /// whole source. This is the boundary policy's pin (T2/OQ3): the member
-    /// decodes, the trailing bytes are left unconsumed, and the next header
-    /// parse in a caller loop fails closed (`BadHeader`), or succeeds when
-    /// the trailing bytes are the next member (the x2 vector).
+    /// What a fresh reader at the member boundary finds in the bytes after the
+    /// member, when the vector has any; `null` when the member is the whole
+    /// source. It pins the boundary rule: the member decodes, the trailing
+    /// bytes are left unread, and the next header parse is this outcome
+    /// (`BadHeader` for garbage, `Truncated` for a cut header, or a decoded
+    /// member when the trailing bytes are the next member, as in the x2
+    /// vector).
     trailing: ?Expect = null,
 };
 
-/// `gunzipTests` (15 vectors) plus the two writer-policy fixtures, ported
-/// verbatim. RFC 1952 §2.2 (members), §2.3 (the member), §2.3.1 (the fixed
-/// header, optional fields, the trailer).
+/// Go's `gunzipTests` (15 vectors), ported verbatim. RFC 1952 §2.2 (members),
+/// §2.3 (the member), §2.3.1 (the fixed header, optional fields, the trailer).
 pub const gunzip_cases: []const Case = &.{
     // 1. "has 1 empty fixed-huffman block", FNAME "empty.txt" (§2.3.1 FNAME).
     .{
@@ -146,7 +137,7 @@ pub const gunzip_cases: []const Case = &.{
     // 7. "has 1 non-empty fixed huffman block then garbage": Go's
     // multistream reader fails ErrHeader on the garbage; ours decodes the
     // member, leaves the garbage unconsumed, and a caller loop's next header
-    // parse is `BadHeader` (T2/OQ3, the recorded divergence).
+    // parse is `BadHeader` (a deliberate difference from Go).
     .{
         .desc = "hello.txt + garbage",
         .source = &hex("1f8b0808c858134a000368656c6c6f2e74787400cb48cdc9c95728cf2fca49e1" ++
@@ -164,8 +155,8 @@ pub const gunzip_cases: []const Case = &.{
         .expect = .{ .ok = "hello world\n" },
         .trailing = .{ .fail_with = error.Truncated },
     },
-    // 9. "but corrupt checksum": Go collapses this into ErrChecksum
-    // (`gunzip.go:267`); ours is the specific `WrongChecksum` (T4).
+    // 9. "but corrupt checksum": Go reports this as ErrChecksum
+    // (`gunzip.go:267`); ours is the specific `WrongChecksum`.
     .{
         .desc = "hello.txt + corrupt checksum",
         .source = &hex("1f8b0808c858134a000368656c6c6f2e74787400cb48cdc9c95728cf2fca49e1" ++
@@ -181,8 +172,8 @@ pub const gunzip_cases: []const Case = &.{
     },
     // 11. "header with all fields used": FLG=0x1e (FHCRC+FEXTRA+FNAME+
     // FCOMMENT), a 'zz' subfield with LEN 5, a 256-byte comment, FHCRC
-    // 0xfd92 — the low 16 bits of the header CRC-32 (§2.3.1; verified in
-    // containers-notes.md §3.1).
+    // 0xfd92 — the low 16 bits of the header CRC-32 (§2.3.1; recomputed in
+    // the FHCRC test below).
     .{
         .desc = "header with all fields used",
         .source = &hex("1f8b081e70f0f94a00aa09007a7a0500616263646566316c336e346d332e7458" ++
@@ -263,9 +254,10 @@ pub const gettysburg =
     "\n" ++
     "Abraham Lincoln, November 19, 1863, Gettysburg, Pennsylvania\n";
 
-/// Zig 0.16 std's in-tree gzip container members (MIT; divergence pins,
-/// T3/T4): stored, fixed, and dynamic "Hello world\n", the FNAME member, and
-/// the FHCRC member (FLG=0x12, CRC16 `99 d6`).
+/// gzip members from Zig 0.16 std's flate tests (MIT): stored, fixed, and
+/// dynamic "Hello world\n", the FNAME member, and the FHCRC member (FLG=0x12,
+/// CRC16 `99 d6`). std checks neither FHCRC nor the trailer, so these also
+/// show where this decoder is stricter.
 pub const std_cases: []const Case = &.{
     .{
         .desc = "std: gzip stored block (type 0)",
@@ -292,8 +284,8 @@ pub const std_cases: []const Case = &.{
     },
     // The FHCRC member: FLG=0x12 (FHCRC+FCOMMENT), the comment "Hello\0", the
     // CRC16 `99 d6`, a stored block of length 0, and the zero trailer. std
-    // discards the CRC16 unchecked (`Decompress.zig:305-307`); we verify it
-    // (T3) — the member decodes because the value is right.
+    // discards the CRC16 unchecked (`Decompress.zig:305-307`); this decoder
+    // verifies it, and the member decodes because the value is right.
     .{
         .desc = "std: gzip FHCRC member",
         .source = &hex("1f8b081200096e8800ff48656c6c6f0099d6010000ffff0000000000000000"),
@@ -301,8 +293,8 @@ pub const std_cases: []const Case = &.{
     },
 };
 
-/// `TestTruncatedStreams` (3 vectors): every prefix of each must fail closed
-/// with `Truncated`, never decode cleanly. Go's vector names swap FNAME and
+/// `TestTruncatedStreams` (3 vectors): every prefix of each must return
+/// `Truncated`, never decode cleanly. Go's vector names swap FNAME and
 /// FCOMMENT; the flag bytes are the ground truth (0x10 is FCOMMENT).
 pub const truncated_streams: []const []const u8 = &.{
     // "original": FEXTRA with a 7-byte 'foo bar' extra field, then a fixed
@@ -321,8 +313,8 @@ pub const cve_2022_30631_member = hex("1f8b0800a78f4362000303000000000000000000"
 
 /// `TestIssue6550`: the 85.3-KB base64 of a real-world member whose FLG has
 /// reserved bits set (0xa4) — Apple's notarization service and old Go
-/// inflates hung or crashed on it. Ours fails closed at the header parse
-/// (`BadHeader`, `§2.3.1.2`).
+/// inflates hung or crashed on it. This decoder returns `BadHeader` at the
+/// header parse (`§2.3.1.2`).
 pub const issue6550_base64 = @embedFile("testdata/issue6550.gz.base64");
 
 /// Decode `source` with the one-shot decoder, checking `expect` and the
@@ -352,8 +344,8 @@ pub fn checkOneShot(window: []u8, cap: usize, source: []const u8, expect: Expect
     }
 }
 
-/// Assert the deterministic 10-byte header (OQ7) on an emitted member:
-/// ID1/ID2/CM fixed, FLG=0, MTIME=0, XFL as given, OS=255.
+/// Assert the fixed 10-byte header on an emitted member: ID1/ID2/CM fixed,
+/// FLG=0, MTIME=0, XFL as given, OS=255.
 pub fn expectHeader(member: []const u8, xfl: u8) !void {
     try testing.expect(member.len >= 10 + 8);
     try testing.expectEqual(@as(u8, 0x1f), member[0]);
@@ -413,8 +405,8 @@ test "golden decode: golang/go gunzipTests" {
 
 test "golden decode: the std in-tree container members" {
     // Zig 0.16 std's container tests (MIT, in-tree): stored, fixed, dynamic,
-    // FNAME, and the FHCRC member — the FHCRC value verified (T3, a
-    // divergence from std, which discards it).
+    // FNAME, and the FHCRC member. The FHCRC value is verified here; std
+    // discards it.
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 512 + @as(usize, sentinel.len));
     defer gpa.free(window);
@@ -430,9 +422,9 @@ test "golden decode: the std in-tree container members" {
     }
 }
 
-test "golden decode: truncated streams fail closed at every prefix" {
-    // `TestTruncatedStreams`: every prefix of each vector must fail closed
-    // with `Truncated` — a truncated member never decodes cleanly.
+test "golden decode: truncated streams fail at every prefix" {
+    // `TestTruncatedStreams`: every prefix of each vector must return
+    // `Truncated`; a truncated member never decodes cleanly.
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 256 + @as(usize, sentinel.len));
     defer gpa.free(window);
@@ -455,7 +447,7 @@ test "golden decode: the FHCRC value is the header CRC's low 16 bits" {
     // CRC32 for all bytes of the gzip header up to and not including the
     // CRC16". The all-fields vector's value is 0xfd92; the std FHCRC member
     // carries the wire bytes `99 d6` (0xd699 little-endian). Recomputing
-    // both pins the arithmetic (T3).
+    // both pins the arithmetic.
     // The all-fields member ends with the 2-byte CRC16, the 5-byte stored
     // body (`01 00 00 ff ff`), and the 8-byte trailer.
     const all_fields = gunzip_cases[10].source;
@@ -470,7 +462,7 @@ test "golden decode: the FHCRC value is the header CRC's low 16 bits" {
     );
 }
 
-test "golden decode: issue6550 fails closed without hanging" {
+test "golden decode: issue6550 fails without hanging" {
     // `TestIssue6550`: the base64 fixture's FLG has reserved bits set
     // (0xa4), so the header parse is `BadHeader` (`§2.3.1.2`: a reserved bit
     // "could indicate the presence of a new field that would cause

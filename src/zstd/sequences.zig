@@ -1,82 +1,18 @@
 //! The sequences section of a compressed block (`§3.1.1.3.2`): the header
-//! (Number_of_Sequences and Symbol_Compression_Modes), the per-alphabet
-//! decoding tables, the interleaved backwards bitstream, and Sequence
-//! Execution (`§3.1.1.4`) with the repeat offsets (`§3.1.1.5`).
+//! (Number_of_Sequences and Symbol_Compression_Modes), the per-alphabet decoding
+//! tables, the interleaved backward bitstream, and Sequence Execution
+//! (`§3.1.1.4`) with the repeat offsets (`§3.1.1.5`).
 //!
-//! `Sequences_Section_Size = Block_Size - Literals_Section_Header -
-//! Literals_Section_Content` (`§3.1.1.3.2`), so `decode` takes the block's
-//! remaining bytes after the literals section, the decoded literals as the
-//! copy source, the caller's output region with its history, and the frame's
-//! `State`; it returns the block's output length and the section bytes it
-//! consumed. That is the whole hand-off from the block slice: `literals`'s
-//! `decode` hands over the literals and where they ended, this hands over the
-//! rest of the block.
-//!
-//! The section's four parts, in order:
-//!
-//! - **Number_of_Sequences** (`§3.1.1.3.2.1`): 1-3 bytes. `byte0 == 0` ends
-//!   the section — "Decompressed content is defined entirely as
-//!   Literals_Section content. The FSE tables used in Repeat_Mode are not
-//!   updated" — and the reference ends it on a *decoded* zero in any form,
-//!   which the 2-byte `80 00` count reaches; std rejects that corner, ours
-//!   is the reference's (T5, docs/research/zstd-notes.md §4). Bytes past the
-//!   count are corruption — the reference's "extraneous data present in the
-//!   Sequences section", `BitstreamNotConsumed` here, the section's
-//!   exact-consumption rule applied to a section with no bitstream.
-//! - **Symbol_Compression_Modes** (`§3.1.1.3.2.1`, Table 14): one byte, bits
-//!   7-6 literals lengths, 5-4 offsets, 3-2 match lengths, 1-0 Reserved —
-//!   "The last field, Reserved, must be all zeroes" (`ReservedModeBits`).
-//!   Each mode is Predefined / RLE / FSE_Compressed / Repeat (Table 15).
-//! - **The tables**, in the order Literals_Length, Offset, Match_Length
-//!   (`§3.1.1.3.2`). A description is read from the section's *remaining*
-//!   bytes — never an exact-size slice, because its own length is what the
-//!   `§4.1.1` reader recovers and the reference reads it through a window.
-//!   Repeat reuses the frame's previous table for that alphabet and is
-//!   corruption without one (`RepeatModeFirst`).
-//! - **The bitstream** (`§3.1.1.3.2.1.2`): read backwards from the block's
-//!   last byte, the last byte nonzero (its highest set bit is the final 1
-//!   bit), the initial states in the order Literals_Length, Offset, Match
-//!   Length, and per sequence the extra bits in the order offset, match
-//!   length, literals length. The states update — except after the last
-//!   sequence — in the order literals length, match length, offset, "and at
-//!   the end, the bitstream shall be entirely consumed".
-//!
-//! Sequence Execution (`§3.1.1.4`) copies `literals_length` bytes from the
-//! literals, then `match_length` bytes from the history at the offset, where
-//! an offset below the match length replicates the offset-byte pattern
-//! ("an offset of 6 and a match length of 3 means that 3 bytes should be
-//! copied from 6 bytes back"). The offset comes from `Offset_Value =
-//! (1 << offsetCode) + readNBits(offsetCode)`: above 3 it is `Offset_Value -
-//! 3`, and 1-3 select the repeat offsets, which rotate on use (`§3.1.1.5`).
-//! Two corners the rules carry and the tests pin: when the sequence's
-//! literals length is 0 the repeat offsets shift by one (offset_value 1 is
-//! Repeated_Offset2, 2 is Repeated_Offset3, 3 is Repeated_Offset1 - 1 byte),
-//! and an offset_value above 3 shifts the repeats whatever the offset's
-//! value — the equal-offsets rule (Table 18's cells carry errata 6442; the
-//! rules are the test source, T3). Offset 0 is `ZeroOffset` (T6: the C and
-//! std reject it, klauspost silently decodes a corrupt frame).
-//!
-//! **The bounds are the caller's slice.** A match offset may reach back into
-//! `target[0..history_len]` and no further, so the caller passes the history
-//! it authorizes — the frame's decoded bytes so far, capped at the frame's
-//! Window_Size (`§3.1.1.4`: "all offsets leading to previously decoded data
-//! must be smaller than Window_Size") — and an offset beyond it is
-//! `OffsetTooFar`. The section never writes past `target`, and never reads
-//! past the literals or the section's own bytes: every declared size is a
-//! bound, never a license (`§8`'s amplification vectors, which this layer
-//! answers for the sequences: a Number_of_Sequences past the block cannot
-//! read past the staged section, and each sequence's match writes at least
-//! 3 bytes, so the loop is bounded by the target).
-//!
-//! Zero allocation: the decoding tables are the frame state's or the
-//! section's own stack, the bitstream reads the caller's bytes.
-//!
-//! One error name here is this layer's addition to the README's public set:
-//! `MalformedSequencesHeader`, the section's fixed-size fields running past
-//! the block's remaining bytes — the literals layer's
-//! `MalformedLiteralsHeader` mirrored, the reference's `srcSize_wrong`. Every
-//! reference distinguishes the class and the sketch's list has no name for
-//! it, so the block slice carries it into `zstd.decode.DecompressError`.
+//! `decode` takes the block's bytes after the literals section (the sequences
+//! section runs to the block's end, `§3.1.1.3.2`), the decoded literals as the
+//! copy source, the output region, and the frame's `State`, and returns the
+//! bytes written and consumed. In the output region `target[0..history_len]` is
+//! history a match may read, which the caller limits to the window (`§3.1.1.4`),
+//! and the block's output follows it. An offset that reaches before `target[0]`
+//! is `OffsetTooFar`. Declared sizes are bounds, not licenses (`§8`): nothing is
+//! written past `target` or read past the literals or the section, and a huge
+//! Number_of_Sequences stops at the end of `target`, since every match writes at
+//! least 3 bytes. Nothing is allocated.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -113,7 +49,8 @@ pub const Error = error{
     BufferTooSmall,
     /// `§3.1.1.5` — the repeat-offset arithmetic reached offset 0: an
     /// offset_value of 3 with literals_length 0 means Repeated_Offset1 - 1
-    /// byte, which is 0 when Repeated_Offset1 is 1 (T6).
+    /// byte, which is 0 when Repeated_Offset1 is 1. The C reference and std
+    /// reject it too.
     ZeroOffset,
     /// `§3.1.1.4` — "all offsets leading to previously decoded data must be
     /// smaller than Window_Size": the offset reaches past the history the
@@ -448,9 +385,9 @@ pub fn parseHeader(source: []const u8) Error!Header {
         header.sequence_count = @as(u32, source[1]) + (@as(u32, source[2]) << 8) + 0x7F00;
         header.count_len = 3;
     }
-    // The reference ends the section on a *decoded* zero in any form — the
-    // 2-byte `80 00` count reaches here — and std rejects that corner (T5,
-    // docs/research/zstd-notes.md §4); ours is the reference's.
+    // The reference ends the section on a *decoded* zero in any form (the
+    // 2-byte `80 00` count reaches here), and std rejects that corner; this
+    // follows the reference.
     if (header.sequence_count == 0) return header;
     if (source.len < header.count_len + 1) return error.MalformedSequencesHeader;
     const modes_byte = source[header.count_len];
@@ -472,9 +409,9 @@ pub fn parseHeader(source: []const u8) Error!Header {
 /// and a zero-count section leaves it alone.
 pub const State = struct {
     /// Storage for the tables a block builds (the FSE_Compressed and RLE
-    /// modes); undefined until a mode writes a cell, so `init` pays for no
-    /// zeroing — the per-frame `@splat(null)` over three table payloads was
-    /// a measured ~10 KB memset per frame.
+    /// modes), about 12 KB in all. Undefined until a mode writes a cell, so a
+    /// new frame state does not pay to zero it (a per-frame memset of the
+    /// table payloads measured as a real cost).
     built: [alphabet_count]SeqTable = undefined,
     /// The table each alphabet last decoded with, `null` until the frame's
     /// first sequences section with a nonzero count. "The table used in the
@@ -485,8 +422,8 @@ pub const State = struct {
     tables: [alphabet_count]?*const SeqTable = @splat(null),
     /// Repeated_Offset1/2/3 "sorted in recency order, with Repeated_Offset1
     /// meaning 'most recent one'" (`§3.1.1.5`), seeded {1, 4, 8} "for the
-    /// first block ... unless a dictionary is used" (dictionaries are
-    /// refused: the README's OQ4).
+    /// first block ... unless a dictionary is used". Dictionaries are not
+    /// supported, so this is always the seed.
     repeat_offsets: [3]u32 = repeat_offsets_start,
 };
 
@@ -780,8 +717,8 @@ fn resolveOffset(literals_length: u32, offset_value: u32, repeat_offsets: *[3]u3
     const selected = if (literals_length == 0) offset_value else offset_value - 1;
     if (selected == 3) {
         // The "Repeated_Offset1 - 1_byte" corner: a nonzero offset is not
-        // guaranteed — Repeated_Offset1 == 1 gives 0, which no reference
-        // decodes (T6, docs/research/zstd-notes.md §4).
+        // guaranteed. Repeated_Offset1 == 1 gives 0, which the C reference and
+        // std reject (klauspost does not).
         assert(repeat_offsets[0] >= 1);
         const offset = repeat_offsets[0] - 1;
         if (offset == 0) return error.ZeroOffset;
@@ -916,25 +853,22 @@ fn appendTrailingLiterals(
     return trailing.len;
 }
 
-/// The hand-built fixtures these tests compose live in `golden.zig` (the
-/// fixture module, shared by every layer): each block's literals section and
-/// sequences section, their expected outputs, and the whole frames
-/// `buildFrame` derives from them. They are whole frames verified with the
-/// pinned zstd CLI v1.5.7 — each is a magic, a descriptor 0x00 (no
-/// Frame_Content_Size, no checksum), a 512 KB window descriptor, then one or
-/// more compressed blocks of raw literals and the sequences section in
-/// question — so they are conformant frames rather than self-consistent
-/// guesses (the literals slice's hand-built-section pattern, one layer up).
 /// One fixture block: the two sections of a compressed block (`§3.1.1.3`).
+/// The fixtures live in `golden.zig`: each block's literals and sequences
+/// sections, the expected output, and the whole frames built from them. Each
+/// frame was verified with the pinned zstd CLI v1.5.7. It is a magic, a
+/// descriptor 0x00 (no Frame_Content_Size, no checksum), a 512 KB window
+/// descriptor, then one or more compressed blocks of raw literals and the
+/// sequences section under test.
 const FixtureBlock = struct {
     literals_section: []const u8,
     sequences_section: []const u8,
 };
 
-/// Decode a fixture's blocks in order — composing the landed literals layer
-/// with this one — threading both states and the history, and check each
-/// block's output. The target is pre-filled with the sentinel and every byte
-/// past the last block's output must be untouched (AGENTS.md, "Rules").
+/// Decode a fixture's blocks in order, running the literals layer and then this
+/// one with both states and the history threaded through, and check each
+/// block's output. The target is sentinel-filled and every byte past the last
+/// block's output must be untouched.
 fn expectBlocks(blocks: []const FixtureBlock, expected: []const []const u8) !void {
     var target: [4096]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -1003,9 +937,8 @@ test "parseHeader reads the three Number_of_Sequences forms" {
 test "parseHeader ends the section on a zero count, decoded or literal" {
     // RFC 8878 §3.1.1.3.2.1 — "if (byte0 == 0): there are no sequences. The
     // sequence section stops here." The reference ends it on the *decoded*
-    // count too, so the 2-byte `80 00` is the same case (T5, docs/research/
-    // zstd-notes.md §4); std rejects that corner, ours follows the
-    // reference. No mode byte follows either form.
+    // count too, so the 2-byte `80 00` is the same case; std rejects that
+    // corner, ours follows the reference. No mode byte follows either form.
     const literal = try parseHeader(&.{0x00});
     try testing.expectEqual(@as(u32, 0), literal.sequence_count);
     try testing.expectEqual(@as(usize, 1), literal.count_len);
@@ -1032,7 +965,7 @@ test "parseHeader maps the Symbol_Compression_Modes fields" {
     try testing.expectError(error.ReservedModeBits, parseHeader(&.{ 0x01, 0b11_11_11_11 }));
 }
 
-test "parseHeader fails closed on a short section" {
+test "parseHeader fails on a short section" {
     // RFC 8878 §3.1.1.3.2.1 — the header's fields are fixed-size, so a
     // section that ends inside one is corruption, never a short read of the
     // input (the reference's `srcSize_wrong`).
@@ -1172,9 +1105,9 @@ test "resolveOffset follows §3.1.1.5's rules, never Table 18's cells" {
     // RFC 8878 §3.1.1.5 — the rules are the source: Table 18's worked
     // example carries errata 6442 (its second-to-last row's offset_value is
     // 3, not 1) and its last row's Repeated_Offset3 cell contradicts the
-    // rotation rule (docs/research/zstd-notes.md §4 T3). Every expectation
-    // below is derived from the rule text and the reference decoder's
-    // `ZSTD_decodeSequence`, not from the table's cells.
+    // rotation rule. Every expectation below is derived from the rule text
+    // and the reference decoder's `ZSTD_decodeSequence`, not from the table's
+    // cells.
     //
     // The starting values are "Repeated_Offset1 (1), Repeated_Offset2 (4),
     // and Repeated_Offset3 (8)".
@@ -1224,9 +1157,8 @@ test "resolveOffset follows §3.1.1.5's rules, never Table 18's cells" {
 
 test "resolveOffset refuses the offset-0 corner" {
     // RFC 8878 §3.1.1.5 — "an offset_value of 3 means Repeated_Offset1 -
-    // 1_byte"; with the seeded Repeated_Offset1 == 1 that is offset 0, which
-    // no reference decodes (T6, docs/research/zstd-notes.md §4: the C and
-    // std reject it, klauspost substitutes offset 1).
+    // 1_byte"; with the seeded Repeated_Offset1 == 1 that is offset 0. The C
+    // reference and std reject it; klauspost substitutes offset 1.
     var offsets: [3]u32 = repeat_offsets_start;
     try testing.expectError(error.ZeroOffset, resolveOffset(0, 3, &offsets));
     // The refusal leaves the repeats untouched; once Repeated_Offset1 is
@@ -1384,8 +1316,8 @@ test "decode ends a zero-count section on the literals" {
     // RFC 8878 §3.1.1.3.2.1 — "there are no sequences. The sequence section
     // stops here. Decompressed content is defined entirely as
     // Literals_Section content." Both the 1-byte zero and the 2-byte
-    // decoded-zero form (T5) end the same way, and neither updates the
-    // frame's tables.
+    // decoded-zero form end the same way, and neither updates the frame's
+    // tables.
     const blocks = [_]FixtureBlock{
         .{
             .literals_section = &golden.zero_literals,
@@ -1424,7 +1356,7 @@ test "decode rejects the mode corners" {
     try expectError(error.MalformedFseTable, &.{ 0x01, 0xa4, 0x10 }, &.{}, 0);
 }
 
-test "decode fails closed on the sequence bounds" {
+test "decode fails on the sequence bounds" {
     // RFC 8878 §3.1.1.4 + §8 — a match that would reach before the
     // authorized history is `OffsetTooFar`, a match that would write past
     // the target is `BufferTooSmall`, and a literals_length past the
@@ -1463,7 +1395,7 @@ test "a Number_of_Sequences past the block cannot amplify" {
     // beyond)". The count here is the 3-byte form's maximum (98047) over an
     // 8-byte section, and every sequence's match writes at least 3 bytes, so
     // the loop is bounded by the target: 21 sequences fill the 63 bytes
-    // available and the 22nd fails closed. The sentinel proves the last byte
+    // available and the 22nd is refused. The sentinel proves the last byte
     // was not written.
     const section = [_]u8{ 0xff, 0xff, 0xff, 0x54, 0x00, 0x00, 0x00, 0x01 };
     var target: [72]u8 = undefined;
@@ -1473,7 +1405,7 @@ test "a Number_of_Sequences past the block cannot amplify" {
     try internal.sentinel.expect(&target, 71);
 }
 
-test "decode fails closed on the bitstream's ends" {
+test "decode fails on the bitstream's ends" {
     // RFC 8878 §3.1.1.3.2.1.2 — "the last byte of the compressed bitstream
     // cannot be zero", the stream must hold every bit the codes ask for, and
     // "at the end, the bitstream shall be entirely consumed".

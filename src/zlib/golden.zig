@@ -1,34 +1,32 @@
-//! Golden decode fixtures ported from golang/go (BSD-3-Clause; attribution in
-//! THIRD_PARTY.md) plus Zig 0.16 std's in-tree container streams and the
-//! oracle-verified C-reference emissions. Shared by every layer's tests (the
-//! flate pattern): `decode.zig` owns the one-shot decoder, `Reader.zig` the
-//! streaming layer, and this module owns the reference vectors both are
-//! judged against.
+//! Golden fixtures for the zlib container, shared by every layer's tests:
+//! `decode.zig` runs the one-shot decoder over them, `Reader.zig` the
+//! streaming layer, and the `Writer.zig` and `encode.zig` tests reuse the
+//! payloads.
 //!
 //! Sources:
-//!   - `src/compress/zlib/reader_test.go` `zlibTests` (14 vectors, the
-//!     current tree), ported verbatim as hex; its own comment says the golden
-//!     bytes came from the C reference's `zpipe.c`. Our outcomes differ where
-//!     the README decided they must: an FDICT stream is `DictionaryRequired`
-//!     before any body byte (ZD3/ZD4), never Go's `io.ErrUnexpectedEOF` or
-//!     `ErrDictionary`, and a truncated trailer is `Truncated`.
-//!   - Zig 0.16 std `std/compress/flate/Decompress.zig`'s zlib tests (MIT,
+//!   - golang/go `src/compress/zlib/reader_test.go` `zlibTests`
+//!     (BSD-3-Clause; attribution in THIRD_PARTY.md), 14 vectors ported as
+//!     hex. Its own comment says the golden bytes came from the C reference's
+//!     `zpipe.c`. Outcomes differ from Go's where this module decided
+//!     otherwise: an FDICT stream is `DictionaryRequired` before any body
+//!     byte (never Go's `io.ErrUnexpectedEOF` or `ErrDictionary`), and a
+//!     truncated trailer is `Truncated`.
+//!   - Zig 0.16 std's zlib tests in `std/compress/flate/Decompress.zig` (MIT,
 //!     in-tree): the stored "Hello world\n" stream, "zlib should not
-//!     overshoot" (the exact-consumption case), and the bad-CM / bad-CINFO /
-//!     truncated-header / truncated-checksum failures. The fixed and dynamic
-//!     members are std's gzip vectors with the container framing swapped for
-//!     zlib's (the bodies are std's, verified against the C reference here);
-//!     std's laxness (no FCHECK check, no FDICT handling, no trailer
-//!     comparison, T4/T6) is pinned by running std's decoder in this module's
-//!     tests.
-//!   - The C-reference emissions (oracle-verified, `containers-notes.md
-//!     §5.5`): the FLEVEL/FCHECK header bands (`78 01`, `78 5e`, `78 9c`,
-//!     `78 da`) and the dictionary + FLEVEL-0 corner's `78 3f` (FCHECK = 31,
-//!     T5).
+//!     overshoot" (four bytes after the trailer stay unconsumed), and the
+//!     bad-CM, bad-CINFO, truncated-header, and truncated-checksum failures.
+//!     The fixed and dynamic streams are std's gzip vectors with zlib framing
+//!     in place of gzip's (the bodies are std's, checked against the C
+//!     reference). std accepts several streams this module rejects (no FCHECK
+//!     check, no FDICT handling, no trailer comparison); the tests pin that
+//!     by running std's decoder next to ours.
+//!   - Header and dictionary emissions of C zlib, checked through python3's
+//!     `zlib`: the FLEVEL/FCHECK header bands (`78 01`, `78 5e`, `78 9c`,
+//!     `78 da`) and the dictionary + FLEVEL-0 corner's `78 3f` (FCHECK = 31).
 //!
-//! Every decode here runs the sentinel overrun rule: the target is
-//! pre-filled with cycling sentinels and every byte past the decoded length
-//! must be untouched (`src/internal/README.md`, "API").
+//! Every decode here runs the sentinel overrun check: the target is
+//! pre-filled with a repeating sentinel pattern (`internal.sentinel`) and
+//! every byte past the decoded length must be untouched.
 
 const std = @import("std");
 const testing = std.testing;
@@ -60,8 +58,8 @@ pub const Expect = union(enum) {
     ok: []const u8,
     /// Reject the stream with any `DecompressError`.
     fail,
-    /// Reject the stream with this specific error (the README's decided rules
-    /// pin these; the rest only have to fail).
+    /// Reject the stream with this specific error (the cases that pin a rule
+    /// use this; the rest only have to fail).
     fail_with: decode.DecompressError,
 };
 
@@ -82,11 +80,12 @@ pub const Case = struct {
 /// The Go `zlibTests` dictionary vector: the FDICT header `78 bb`, the
 /// DICTID `1c 32 04 27` (the Adler-32 of the 12-byte dictionary), and a
 /// dict-compressed body. Go decodes it against the caller's dictionary; ours
-/// refuses the stream before any body byte (`DictionaryRequired`, ZD3/ZD4).
+/// refuses the stream before any body byte (`DictionaryRequired`).
 pub const dictionary_stream = hex("78bb1c320427f300b175201c452e0024120474");
 
-/// `zlibTests` (14 vectors), ported verbatim. RFC 1950 §2.2 (the header, the
-/// trailer, the stream's end), §2.3 (decoder obligations).
+/// Go's `zlibTests` (14 vectors, ported verbatim as hex) plus one case of
+/// ours, the last: two empty streams back to back. RFC 1950 §2.2 (the header,
+/// the trailer, the stream's end), §2.3 (decoder obligations).
 pub const zlib_cases: []const Case = &.{
     // 1. "truncated empty": no stream began.
     .{ .desc = "truncated empty", .source = &hex(""), .expect = .{
@@ -106,8 +105,8 @@ pub const zlib_cases: []const Case = &.{
         .source = &hex("78bb00010001ca48cdc9c9d75128cf2fca49010400" ++ "00ffff"),
         .expect = .{ .fail_with = error.DictionaryRequired },
     },
-    // 4. "empty": the C reference's empty stream — the bytes our own encoder
-    // emits at `.fast` (the fuzz lane's hostile-header pins carry them too).
+    // 4. "empty": the C reference's empty stream, the bytes our own encoder
+    // emits at `.fast` (the hostile-header pins in `fuzz.zig` carry them too).
     .{ .desc = "empty", .source = &hex("789c030000000001"), .expect = .{ .ok = "" } },
     // 5. "goodbye": the C reference's fixed-Huffman stream.
     .{
@@ -123,7 +122,7 @@ pub const zlib_cases: []const Case = &.{
         .expect = .{ .fail_with = error.BadHeader },
     },
     // 7. "bad header (FCHECK)": 78 9f breaks the (CMF*256 + FLG) % 31 == 0
-    // arithmetic (§2.2) — and is the vector std's lax parse accepts (T6).
+    // arithmetic (§2.2), and is the vector std's lax parse accepts.
     .{
         .desc = "bad header (FCHECK)",
         .source = &hex("789f030000000001"),
@@ -144,7 +143,7 @@ pub const zlib_cases: []const Case = &.{
     },
     // 10. "excess data is silently ignored": the empty stream followed by a
     // second header's first bytes and an invalid block-type byte. The
-    // one-shot ignores everything past ADLER32 (§2.2, ZD7); a fresh reader
+    // one-shot ignores everything past ADLER32 (§2.2); a fresh reader
     // at the boundary parses the second header and fails in its body.
     .{
         .desc = "excess data is silently ignored",
@@ -180,9 +179,9 @@ pub const zlib_cases: []const Case = &.{
         .source = &hex("789cf248cd"),
         .expect = .{ .fail_with = error.Truncated },
     },
-    // 15. The boundary the exact consumption exposes (README, "Streaming"):
-    // two empty streams back to back. Nothing in the format promises a
-    // second stream, but a caller loop at the boundary decodes it.
+    // 15. The boundary the exact consumption exposes: two empty streams back
+    // to back. Nothing in the format promises a second stream, but a caller
+    // loop at the boundary decodes it.
     .{
         .desc = "empty stream x2 (the boundary is exact)",
         .source = &hex("789c030000000001789c030000000001"),
@@ -244,16 +243,15 @@ pub const std_cases: []const Case = &.{
     },
 };
 
-/// The C reference's dictionary + FLEVEL-0 emission (oracle-verified,
-/// `containers-notes.md §5.5`):
-/// `zlib.compressobj(0, DEFLATED, 15, 9, Z_DEFAULT_STRATEGY, dict)` over a
-/// 225-byte payload. The header is `78 3f` — FCHECK = 31, which is 0 mod 31
+/// The C reference's dictionary + FLEVEL-0 emission, as written by python3's
+/// zlib: `zlib.compressobj(0, DEFLATED, 15, 9, Z_DEFAULT_STRATEGY, dict)` over
+/// a 225-byte payload. The header is `78 3f`: FCHECK = 31, which is 0 mod 31
 /// and fits the five-bit field, so it is conformant and must pass the FCHECK
-/// check (T5); the FDICT flag then lands on `DictionaryRequired`, never
+/// check; the FDICT flag then lands on `DictionaryRequired`, never
 /// `BadHeader`. DICTID `fa 2c 0d 48` is the Adler-32 of the dictionary
 /// ("she sells seashells by the seashore\n"); the body is a stored block of
 /// the payload; the trailer `d2 8c 50 c4` is the payload's Adler-32.
-pub const t5_corner_dict_stream = hex(
+pub const fcheck31_dict_stream = hex(
     "783ffa2c0d4801e1001eff54686520717569636b2062726f776e20666f78206a" ++
         "756d7073206f76657220746865206c617a7920646f672e205468652071756963" ++
         "6b2062726f776e20666f78206a756d7073206f76657220746865206c617a7920" ++
@@ -302,7 +300,7 @@ pub fn expectHeader(stream: []const u8, level: encode.Level) !void {
         @as(u16, 0),
         (@as(u16, stream[0]) * 256 + @as(u16, stream[1])) % 31,
     );
-    // ZE2 — the encoder never sets FDICT.
+    // The encoder never sets FDICT.
     try testing.expectEqual(@as(u8, 0), stream[1] & 0x20);
 }
 
@@ -368,30 +366,29 @@ test "golden decode: the std in-tree streams" {
     }
 }
 
-test "golden decode: the T5 corner passes FCHECK and lands on the dictionary" {
+test "golden decode: the FCHECK = 31 corner passes the check and lands on the dictionary" {
     // RFC 1950 §2.2 requires only that (CMF*256 + FLG) be a multiple of 31;
     // the C reference's naive emission writes FCHECK = 31 in the FDICT +
-    // FLEVEL-0 corner (`78 3f`), which a re-deriving validator rejects
-    // (T5). The header check must accept it — the stream is FDICT, so the
-    // contract's answer is `DictionaryRequired`.
+    // FLEVEL-0 corner (`78 3f`), which a validator that recomputes FCHECK
+    // rejects. The header check must accept it. The stream is FDICT, so the
+    // expected answer is `DictionaryRequired`.
     try testing.expectEqual(@as(u16, 0), 0x783f % 31);
     try testing.expectError(
         error.DictionaryRequired,
-        decode.checkHeader(t5_corner_dict_stream[0], t5_corner_dict_stream[1]),
+        decode.checkHeader(fcheck31_dict_stream[0], fcheck31_dict_stream[1]),
     );
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 256 + @as(usize, sentinel.len));
     defer gpa.free(window);
-    try checkOneShot(window, window.len, &t5_corner_dict_stream, .{
+    try checkOneShot(window, window.len, &fcheck31_dict_stream, .{
         .fail_with = error.DictionaryRequired,
     });
 }
 
 test "golden decode: the oracle-verified emissions" {
-    // The C-reference emissions pinned by the research (containers-notes.md
-    // §5.5, every line run and round-tripped): the level bands' FLEVEL
-    // values, the dict + FLEVEL-0 corner's `78 3f`, and the DICTID and
-    // trailer byte order (both big-endian, §2.1).
+    // The C-reference emissions, checked through python3's zlib: the level
+    // bands' FLEVEL values, the dict + FLEVEL-0 corner's `78 3f`, and the
+    // DICTID and trailer byte order (both big-endian, §2.1).
     const data = "The quick brown fox jumps over the lazy dog. " ** 5;
     // Level bands: {0,1} -> FLEVEL 0 (`78 01`), {2-5} -> 1 (`78 5e`),
     // {6,-1} -> 2 (`78 9c`), {7-9} -> 3 (`78 da`).
@@ -407,22 +404,22 @@ test "golden decode: the oracle-verified emissions" {
     const dictionary = "she sells seashells by the seashore\n";
     try testing.expectEqual(
         @as(u32, 0xFA2C0D48),
-        readInt(u32, t5_corner_dict_stream[2..6]),
+        readInt(u32, fcheck31_dict_stream[2..6]),
     );
     try testing.expectEqual(@as(u32, 0xFA2C0D48), adler32.adler32(1, dictionary));
     try testing.expectEqual(
         std.hash.Adler32.hash(data),
-        readInt(u32, t5_corner_dict_stream[t5_corner_dict_stream.len - 4 ..]),
+        readInt(u32, fcheck31_dict_stream[fcheck31_dict_stream.len - 4 ..]),
     );
     // The payload's Adler-32 is the value C zlib writes: 0xd28c50c4.
     try testing.expectEqual(@as(u32, 0xD28C50C4), std.hash.Adler32.hash(data));
 }
 
-test "golden decode: the std divergence pins (T4, T6)" {
+test "golden decode: the std divergence pins" {
     // Zig 0.16 std's zlib parse checks CM and CINFO only
     // (`std/compress/flate/Decompress.zig:310-314`): no FCHECK validation,
     // no FDICT handling, and its footer is read into `container_metadata`
-    // and never compared (T4). Running std's own decoder here pins both
+    // and never compared. Running std's own decoder here pins both
     // divergences: std accepts `78 9f`, which ours rejects `BadHeader`, and
     // it misparses an FDICT stream's DICTID as deflate data (the Go
     // dictionary vector fails `OversubscribedHuffmanTree`), where ours is

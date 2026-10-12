@@ -1,23 +1,18 @@
-//! gzip.Writer: a compressing `Io.Writer` producing one gzip member
-//! (README.md, "Streaming").
+//! gzip.Writer: a compressing `Io.Writer` that produces one gzip member.
 //!
-//! The real memory is flate's: the caller's `Writer.Buffer` is handed to the
-//! inner `flate.Writer`, and this writer's serving region is that block
-//! region — one region, one position, no staging copy (OQ6). The front's
-//! `Io.Writer` position is resynced into the codec at every entry (`commit`)
-//! and taken back after it (`adopt`), because `std.Io.Writer`'s fast paths
-//! copy into the region without calling here.
+//! `init` wraps the output `Io.Writer` and a caller-provided `Buffer`; write
+//! through `&w.writer` and end the member with `finish`. The buffer is flate's
+//! block buffer, so written bytes land where flate compresses them from, with
+//! no staging copy. The 10-byte header is written lazily, before the first
+//! compressed byte reaches `output` (`init` cannot fail, so it writes nothing).
+//! `finish` completes the deflate stream and writes the trailer from the CRC-32
+//! and length that flate's checksum hook accumulated as blocks were emitted.
 //!
-//! The framing is this module's: the 10-byte deterministic header is emitted
-//! lazily, before the first compressed byte reaches `output` (Go's shape —
-//! `init` cannot fail, so it writes nothing); `finish` completes the deflate
-//! stream through flate and writes the trailer from the checksum state the
-//! hook accumulated (CRC-32 and the input length, OQ1). Every byte is hashed
-//! exactly once, at flate's emit funnel, with no container buffer and no
-//! second pass. The driver machinery — the lazy header, the position sync,
-//! the checksum arming, the poison check, the `Io.Writer` entries — is
-//! `src/internal/container.zig`'s, instantiated over this module's framing
-//! (`framing.zig`).
+//! The `Io.Writer` entry points, the lazy header, the checksum hook setup, and
+//! the check that rejects use after `finish` are the shared container driver's
+//! (`src/internal/container.zig`); this file supplies gzip's framing.
+//!
+//! Format: docs/research/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -28,15 +23,15 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-/// The caller-provided buffer: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[max_block_size + history_len]u8`, 98303 bytes.
+/// The caller-provided buffer: flate's `Writer.Buffer`, re-exported, 98303
+/// bytes (`[max_block_size + history_len]u8`). gzip adds no buffer of its own.
 pub const Buffer = flate.Writer.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const container = internal.container;
-/// Whether the fixed header has reached `output`: the header is lazy
-/// (README, "Streaming"), so the first entry that can emit a byte — a write
-/// that drains, a flush, a rebase, or `finish` — writes it first.
+/// Whether the fixed header has reached `output`. The header is lazy: the
+/// first call that can emit a byte (a write that fills the buffer, a flush, or
+/// `finish`) writes it first.
 const Header = container.Header;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
@@ -45,42 +40,53 @@ const golden = @import("golden.zig");
 
 const Writer = @This();
 
+/// The `Io.Writer` interface: write through `&w.writer`.
 writer: Io.Writer,
+/// Where the member goes.
 output: *Io.Writer,
+/// The flate writer that compresses the body.
 inner: flate.Writer,
+/// The options given to `init`.
 options: encode.Options,
-/// The checksum state folded at flate's emit funnel: CRC-32 over the input
+/// The checksum state folded as flate emits each block: CRC-32 over the input
 /// and the input length for ISIZE (`§2.3.1`).
 checksum: framing.Checksum = .{},
+/// Whether the header has been written (see `Header`).
 header: Header = .pending,
 
 /// The shared container driver over this module's framing
-/// (`src/internal/container.zig`): the lazy header, the position sync, the
-/// checksum arming, the poison check, and the generated `Io.Writer` entries.
+/// (`src/internal/container.zig`).
 const Hooks = container.WriterHooks(framing, Writer);
 
-/// Wrap `output` (the member's sink) with `buffer` as the compression window
-/// and `options` fixed for the stream's lifetime. Write through `&w.writer`;
-/// complete the member with `finish`.
+/// Create a writer that compresses to `output` as one gzip member, using
+/// `buffer` as its working space. `options` (the level) is fixed for the
+/// member. Write through `&w.writer` and end the member with `finish`.
+///
+/// `init` writes nothing to `output`. With `.ratio`, which is not implemented,
+/// the writer is created already failed: every write and `finish` returns
+/// `error.WriteFailed`. Do not move the writer once you have started using
+/// it.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     return Hooks.init(output, buffer, options);
 }
 
-/// Complete the member: emit the header if it is still pending, complete the
-/// deflate stream through flate (the buffered partial block and the final
-/// empty fixed block), write the trailer — CRC-32 and ISIZE from the hook's
-/// state (`§2.3.1`) — and flush `output`. Terminal: the writer is poisoned
-/// afterwards, and a failed or finished writer reports `error.WriteFailed`
-/// instead of a false success (the pattern book's poison check).
+/// End the member: write the header if nothing has been written yet, write
+/// the buffered data and the final deflate block, write the trailer (CRC-32
+/// and ISIZE, `§2.3.1`), and flush `output`. Call it once; without it the
+/// output is not a complete member. After `finish`, and after any failed
+/// write, every call on the writer returns `error.WriteFailed`, so a
+/// truncated member is never reported as a success.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
     return Hooks.finish(w);
 }
 
-/// Stream everything from `in` through a stack-buffered `Writer` into `out`,
-/// returning the bytes consumed and encoded. Consumes `in` exactly through
-/// its end, then finishes the member (the deflate ending and the trailer are
-/// load-bearing). `.ratio` lands as `error.ReadFailed` upfront. Zero
-/// allocation.
+/// Compress everything from `in` into `out` as one member and return the
+/// number of bytes read from `in`. `in` is read to its end, then the member is
+/// finished. Returns `error.ReadFailed` for a failure of `in`, or at once for
+/// `.ratio` (not implemented), and `error.WriteFailed` for a failure of `out`.
+///
+/// Allocates nothing. The writer and its buffer take about 224 KiB of stack,
+/// and emitting a block needs another 64 KiB.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
@@ -95,7 +101,7 @@ pub fn streamAll(
 // sentinel-checked.
 // ---------------------------------------------------------------------------
 
-/// Decode `member` with the landed one-shot decoder and expect `want`.
+/// Decode `member` with the one-shot decoder and expect `want`.
 fn decodeMember(member: []const u8, want: []const u8) !void {
     const target = try testing.allocator.alloc(u8, want.len + sentinel.len);
     defer testing.allocator.free(target);
@@ -123,8 +129,8 @@ fn roundTrip(source: []const u8) !void {
 
 test "Writer: the emitted member is the deterministic one" {
     // RFC 1952 §2.3.1 — the header (FLG=0, MTIME=0, XFL by level, OS=255)
-    // and the trailer (CRC-32, ISIZE) are pinned; OQ7 makes them
-    // reproducible (no clock, no locale).
+    // and the trailer (CRC-32, ISIZE) are pinned, and nothing in them depends
+    // on the clock or the locale.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -146,10 +152,10 @@ test "Writer: the emitted member is the deterministic one" {
 }
 
 test "Writer: the header is lazy and written before the first byte" {
-    // README, "Streaming": "`init` cannot fail, so it writes nothing; the
-    // first write, flush, or finish emits the 10-byte header first" — and
-    // nothing but the header reaches `output` until a block is emitted
-    // (`TestWriterFlush`'s shape).
+    // `init` cannot fail, so it writes nothing; the first call that emits
+    // anything (a flush, `finish`, or a write that fills the buffer) writes
+    // the 10-byte header first, and nothing but the header reaches `output`
+    // until a block is emitted (the shape of Go's `TestWriterFlush`).
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -198,10 +204,9 @@ test "Writer: incompressible input round-trips" {
 }
 
 test "Writer: the trailer covers chunked writes with mid-stream flushes" {
-    // README, "Streaming": "The CRC-32 and the input length (for ISIZE, mod
-    // 2^32) are accumulated as the data crosses the codec boundary — no
-    // re-read of the input, no second pass." Chunked writes and flushes
-    // must not drop, double, or reorder a byte.
+    // The CRC-32 and the input length (for ISIZE, mod 2^32) are accumulated
+    // as data crosses the codec boundary, so chunked writes and flushes must
+    // not drop, double, or reorder a byte.
     const gpa = testing.allocator;
     var source: [70_000]u8 = undefined;
     var rng: DefaultPrng = .init(0x5EED);
@@ -266,9 +271,9 @@ test "Writer: the writableSliceGreedy path round-trips" {
 }
 
 test "Writer: a failed or finished writer never reports a false success" {
-    // The pattern book's poison check: `finish` after a failed write, after
-    // `finish`, and writes after `finish` all report `error.WriteFailed` — a
-    // truncated member must not be reported as complete.
+    // `finish` after a failed write, `finish` after `finish`, and writes after
+    // `finish` all report `error.WriteFailed`: a truncated member must not be
+    // reported as complete.
     const gpa = testing.allocator;
 
     // Finish after a failed write: the write buffers fine, the emit fails
@@ -294,9 +299,9 @@ test "Writer: a failed or finished writer never reports a false success" {
 }
 
 test "Writer: the ratio seat is rejected, never silently aliased" {
-    // README, "API": `Writer.init(..., .{ .level = .ratio })` poisons the
-    // interface (every write and `finish` reports `error.WriteFailed`), and
-    // `Writer.streamAll` returns `error.ReadFailed` upfront.
+    // `Writer.init(..., .{ .level = .ratio })` makes the interface fail (every
+    // write and `finish` returns `error.WriteFailed`), and `Writer.streamAll`
+    // returns `error.ReadFailed` at once.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();

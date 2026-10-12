@@ -1,9 +1,9 @@
 //! Golden decode fixtures ported from golang/snappy (BSD-3-Clause)
-//! `decode_test.go` — attribution in THIRD_PARTY.md. The fixtures and their
+//! `snappy_test.go`; attribution in THIRD_PARTY.md. The fixtures and their
 //! block-level checks live here, shared by the block-level tests (decode.zig)
-//! and the streaming-layer tests (Reader.zig/Writer.zig): the golden table,
+//! and the streaming-layer tests (Reader.zig, Writer.zig): the golden table,
 //! the copy-4 large-offset case, and the exhaustive length x offset x suffix
-//! sweep. Every layer is validated against the same reference vectors.
+//! sweep. Every layer is checked against the same reference vectors.
 
 const std = @import("std");
 const testing = std.testing;
@@ -71,7 +71,7 @@ fn checkDecodeCase(d_buf: []u8, tc: DecodeCase) !void {
 }
 
 /// The golang/snappy `TestDecode` golden vector table, ported verbatim from
-/// `decode_test.go` (attribution in THIRD_PARTY.md). Shared by the block-level
+/// `snappy_test.go` (attribution in THIRD_PARTY.md). Shared by the block-level
 /// tests here and the streaming-layer tests in `Reader.zig`/`Writer.zig`.
 pub const golden_decode_cases: [30]DecodeCase = table_blk: {
     // lit40 = 40 bytes 0..39, used by the length=40 literal case.
@@ -277,12 +277,14 @@ test "golden decode: golang/snappy TestDecode vector table" {
     }
 }
 
-/// The golang `TestDecodeCopy4` source block, built: a 4-byte literal
-/// "pqrs", a 65536-byte literal of '.', then a copy-4 of length 5, offset
-/// 65540 (back into the start). decodedLen 65545 exceeds one block, so the
-/// Reader's framing amplification test reuses it.
+/// Length of the golang `TestDecodeCopy4` source block: a 4-byte literal
+/// "pqrs", a 65536-byte literal of '.', then a copy-4 of length 5 at offset
+/// 65540 (back into the start). The block decodes to 65545 bytes, more than
+/// one block, so `Reader.zig` also uses it to check that such a block is
+/// rejected.
 pub const copy4_source_len: usize = 3 + 5 + (3 + 65536) + 5;
 
+/// Build the `TestDecodeCopy4` source block into `buf`.
 pub fn buildCopy4Source(buf: *[copy4_source_len]u8) void {
     const dots_len: usize = 65536;
     var p: usize = 0;
@@ -356,12 +358,11 @@ test "golden decode: large copy-4 offset (golang TestDecodeCopy4)" {
 }
 
 test "golden decode: literal + copy2 + literal (golang TestDecodeLengthOffset)" {
-    // Spec: snappy-format-description.txt §2.2.2 (copy-2 tag) across every
-    // small offset and length, including overlapping (offset < length) RLE.
-    // Exhaustive sweep over length, offset, suffixLen (1..18 each) of a
-    // literal(prefix) + copy2(length, offset) + literal(suffix) pattern, with
-    // the overrun check. This stresses copyMatch across every small offset
-    // and length combination, including overlapping (offset < length) RLE.
+    // Spec: snappy-format-description.txt §2.2.2 (copy-2 tag).
+    // Exhaustive sweep over length (1..18), offset (1..18), and suffixLen
+    // (0..18) of a literal(prefix) + copy2(length, offset) + [literal(suffix)]
+    // block, with the overrun check. This stresses copyMatch at every small
+    // offset and length, including overlapping (offset < length) RLE.
     const prefix = "abcdefghijklmnopqr"; // 18 bytes
     const suffix = "ABCDEFGHIJKLMNOPQR"; // 18 bytes
     var got_buf: [128]u8 = undefined;

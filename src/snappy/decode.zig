@@ -1,26 +1,18 @@
-//! Snappy block decoder with a SIMD overlapping-copy fast path.
+//! Snappy block decoder with a SIMD overlapping-copy fast path. Entry points:
+//! `decompressBlock` and `decompressedBlockLength`.
 //!
-//! The tag stream is decoded scalarly (it's inherently sequential — a copy can
-//! reference bytes just written). The win is in the copy operations:
+//! The tag stream is decoded sequentially (a copy can reference bytes just
+//! written). The speed is in how copies run:
 //!
-//!   - `offset >= length` (non-overlapping): a plain `fastmem.copy` —
-//!     straight-line vector code for small sizes, the dispatched kernel for
-//!     large ones.
-//!   - `offset < length` (overlapping / RLE): the pattern of `offset` bytes
-//!     repeats. For `offset <= 16` we load 16 bytes at `dst - offset`, permute
-//!     them into the repeating pattern with one shuffle instruction (`tbl` on
-//!     AArch64, `pshufb` on x86_64), and store 16-byte chunks — no byte loop.
-//!     For `offset > 16` the source doesn't overlap within a 16-byte window, so
-//!     a vectorized chunk copy is correct and fast.
+//!   - `offset >= length` (no overlap): a plain `fastmem.copy`.
+//!   - `offset <= 16` (overlapping, RLE-like): the `offset`-byte pattern is
+//!     replicated into a 16-byte register with one byte shuffle (`tbl` on
+//!     AArch64, `pshufb` on x86_64) and stored in 16-byte chunks.
+//!   - `offset > 16`: the 16-byte source window does not overlap the store, so
+//!     a vectorized chunk copy is correct.
 //!
-//! The shuffle masks are comptime-generated: `pattern_mask[offset-1][i] =
-//! i % offset`, which is exactly the PSHUFB/TBL control word that replicates the
-//! first `offset` bytes across 16. Index `>= 16` is impossible since each mask
-//! is for a specific `offset` in `[1, 16]` and every entry is `< offset <= 16`.
-//!
-//! Portable fallback (other arches / no asm): extend the pattern to 16 bytes
-//! with a short byte loop, then copy 16-byte chunks — the compiler vectorizes
-//! the chunks. This matches the reference snappy non-SIMD path.
+//! Targets without those instructions use the same masks with a byte-wise
+//! permute (`shuffleBytes`) and produce the same output.
 //!
 //! Format: https://github.com/google/snappy/blob/main/format_description.txt
 
@@ -37,8 +29,9 @@ const common = @import("common.zig");
 const readInt = common.readInt;
 const readUvarint = common.readUvarint;
 
-/// Error set for the decode path. Public because `decompressBlock` and
-/// `decompressedBlockLength` expose it in their signatures.
+/// Errors from `decompressBlock` and `decompressedBlockLength`.
+/// `BufferTooSmall`: `target` is shorter than the block's declared length.
+/// `DecompressionFailed`: the block is corrupt or truncated.
 pub const DecompressError = error{ BufferTooSmall, DecompressionFailed };
 
 /// 16-byte vector type for the shuffle loads/stores. PascalCase because it's
@@ -91,10 +84,10 @@ inline fn storeVec(dst: [*]u8, v: Vec16) void {
     ptr.* = v;
 }
 
-/// Shuffle `v` by the comptime-selected `mask` using the native SIMD
-/// instruction. On AArch64 this is `tbl`; on x86_64 (SSSE3+) `pshufb`. The mask
-/// is chosen at runtime from `pattern_masks`, so it is NOT comptime-known to
-/// the shuffle itself — we hand the runtime mask to the instruction directly.
+/// Shuffle `v` by `mask` using the native SIMD instruction. On AArch64 this is
+/// `tbl`; on x86_64 (SSSE3+) `pshufb`. The mask is picked at run time from
+/// `pattern_masks` by `offset`, so it is not comptime-known: it goes to the
+/// instruction as a register operand.
 inline fn shuffleBytes(v: Vec16, mask: Vec16) Vec16 {
     switch (native_arch) {
         .aarch64 => {
@@ -211,26 +204,34 @@ fn copyMatch(target: []u8, pos: usize, offset: usize, length: usize) void {
     }
 }
 
-/// Decompressed byte length of a raw snappy block (the varint at the start).
-/// `error.DecompressionFailed` if the varint is corrupt/truncated.
+/// The decompressed length a raw snappy block declares in its header. Reads
+/// only the header; the rest of the block is not checked. Returns
+/// `error.DecompressionFailed` if the header is truncated or malformed. The
+/// value comes from the block and can be up to 2^32 - 1, so limit it before
+/// allocating a buffer for untrusted input.
 pub fn decompressedBlockLength(source: []const u8) DecompressError!usize {
     var pos: usize = 0;
     return readUvarint(source, &pos);
 }
 
-/// Decompress a raw snappy block from `source` into `target`, returning bytes
-/// written. `error.BufferTooSmall` when `target` is too small (size via
-/// `decompressedBlockLength`). `error.DecompressionFailed` on corrupt source. Zero
-/// heap allocation.
-/// The tag dispatch loop: a literal or a copy per tag, until the source
-/// ends. The declared length is enforced per tag and again at the end.
-/// Pure per-tag logic lives in `decodeLiteral`/`decodeCopy` (the parent owns
-/// the control flow).
+/// Decompress a raw snappy block from `source` into `target` and return the
+/// number of bytes written, which on success is the block's declared length.
+///
+/// Returns `error.BufferTooSmall` if `target` is shorter than the declared
+/// length (see `decompressedBlockLength`), before writing anything. Returns
+/// `error.DecompressionFailed` if the block is corrupt: a bad header, an
+/// element that runs past `source`, a copy offset of zero or before the start
+/// of the output, output that overshoots or falls short of the declared
+/// length, or trailing bytes. Never writes past the declared length; after an
+/// error the contents of `target` are unspecified. Does not allocate.
 pub fn decompressBlock(source: []const u8, target: []u8) DecompressError!usize {
     var in_pos: usize = 0;
     const uncomp_len = try readUvarint(source, &in_pos);
     if (uncomp_len > target.len) return error.BufferTooSmall;
 
+    // One element per tag until `source` ends. `decodeLiteral` and `decodeCopy`
+    // enforce the declared length per element; the check after the loop
+    // catches a block that ends short.
     var out_pos: usize = 0;
     while (in_pos < source.len) {
         const tag = source[in_pos];
@@ -433,12 +434,12 @@ test "copyMatch: SIMD shuffle for small offsets round-trips" {
 }
 
 // ---------------------------------------------------------------------------
-// Note on encoder golden vectors: snappy does NOT mandate a canonical
-// compressed form ("there is more than one valid encoding of any given source",
-// per golang/snappy decode_test.go). So we do NOT assert byte-identical encoder
-// output against reference corpora — only that our output round-trips and our
-// decoder accepts any valid block. The decode vectors in golden.zig are the
-// real interop bar.
+// Note on encoder golden vectors: Snappy does not mandate a canonical
+// compressed form (golang/snappy's snappy_test.go: "There is more than one
+// valid encoding of any given input"). So encoder output is not compared byte
+// for byte against reference corpora, only round-tripped through our decoder,
+// which accepts any valid block. The decode vectors in golden.zig are the
+// interop bar.
 // ---------------------------------------------------------------------------
 
 test "golden decode: format_description.txt hand examples" {

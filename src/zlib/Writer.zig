@@ -1,23 +1,20 @@
-//! zlib.Writer: a compressing `Io.Writer` producing one zlib stream
-//! (README.md, "Streaming").
+//! zlib.Writer: a compressing `Io.Writer` that produces one zlib stream.
 //!
-//! The real memory is flate's: the caller's `Writer.Buffer` is handed to the
-//! inner `flate.Writer`, and this writer's serving region is that block
-//! region — one region, one position, no staging copy (OQ6). The front's
-//! `Io.Writer` position is resynced into the codec at every entry (`commit`)
-//! and taken back after it (`adopt`), because `std.Io.Writer`'s fast paths
-//! copy into the region without calling here.
+//! `init` takes the output writer and a caller-provided `Writer.Buffer`,
+//! which is flate's block buffer: written bytes land in it directly, with no
+//! staging copy, and are compressed into `output` a block at a time. The
+//! 2-byte header is written lazily, before the first compressed byte reaches
+//! `output` (`init` cannot fail, so it writes nothing). `finish` completes
+//! the deflate stream through flate and writes the Adler-32 trailer. Flate's
+//! checksum hook folds the Adler-32 as each block is emitted, so every byte is
+//! hashed once, with no second pass.
 //!
-//! The framing is this module's: the 2-byte deterministic header is emitted
-//! lazily, before the first compressed byte reaches `output` (Go's shape —
-//! `init` cannot fail, so it writes nothing); `finish` completes the deflate
-//! stream through flate and writes the trailer from the checksum state the
-//! hook accumulated (the Adler-32, OQ1). Every byte is hashed exactly once,
-//! at flate's emit funnel, with no container buffer and no second pass. The
-//! driver machinery — the lazy header, the position sync, the checksum
-//! arming, the poison check, the `Io.Writer` entries — is
-//! `src/internal/container.zig`'s, instantiated over this module's framing
-//! (`framing.zig`).
+//! The lazy header, the position sync with flate's block region, the checksum
+//! arming, the poisoned `finish`, and the `Io.Writer` entries come from the
+//! shared container driver (`src/internal/container.zig`, `WriterHooks`),
+//! instantiated over `framing.zig`.
+//!
+//! Format: docs/research/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -28,15 +25,16 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-/// The caller-provided buffer: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[max_block_size + history_len]u8`, 98303 bytes.
+/// The caller-provided compression buffer: flate's `Writer.Buffer`,
+/// re-exported. 98303 bytes (`[max_block_size + history_len]u8`): one
+/// 65535-byte block plus 32 KiB of match history.
 pub const Buffer = flate.Writer.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const container = internal.container;
-/// Whether the fixed header has reached `output`: the header is lazy
-/// (README, "Streaming"), so the first entry that can emit a byte — a write
-/// that drains, a flush, a rebase, or `finish` — writes it first.
+/// Whether the 2-byte header has reached `output`. It is written lazily, by
+/// the first entry that can emit a byte: a write that drains, a flush, a
+/// rebase, or `finish`.
 const Header = container.Header;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
@@ -49,8 +47,8 @@ writer: Io.Writer,
 output: *Io.Writer,
 inner: flate.Writer,
 options: encode.Options,
-/// The checksum state folded at flate's emit funnel: the Adler-32 over the
-/// input (`§2.2`). RFC 1950's trailer carries no length field beside it.
+/// The Adler-32 of the input so far, folded in as flate emits each block
+/// (`§2.2`). `finish` writes it as the trailer.
 checksum: framing.Checksum = .{},
 header: Header = .pending,
 
@@ -59,28 +57,38 @@ header: Header = .pending,
 /// checksum arming, the poison check, and the generated `Io.Writer` entries.
 const Hooks = container.WriterHooks(framing, Writer);
 
-/// Wrap `output` (the stream's sink) with `buffer` as the compression window
-/// and `options` fixed for the stream's lifetime. Write through `&w.writer`;
-/// complete the stream with `finish`.
+/// Start a zlib stream that is written to `output`, with `buffer` as the
+/// compression buffer and `options` fixed for the stream's lifetime. Write
+/// through `&w.writer` and complete the stream with `finish`. Nothing reaches
+/// `output` until a write fills the buffer or `flush` or `finish` is called.
+///
+/// `options.level == .ratio` is not implemented: the returned writer has
+/// already failed, so every write and `finish` returns `error.WriteFailed`.
+/// Do not move the `Writer` after its first write.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     return Hooks.init(output, buffer, options);
 }
 
-/// Complete the stream: emit the header if it is still pending, complete the
-/// deflate stream through flate (the buffered partial block and the final
-/// empty fixed block), write the trailer — the Adler-32 from the hook's
-/// state (`§2.2`) — and flush `output`. Terminal: the writer is poisoned
-/// afterwards, and a failed or finished writer reports `error.WriteFailed`
-/// instead of a false success (the pattern book's poison check).
+/// Complete the stream: write the header if it is still pending, the
+/// buffered data as a last block, the empty final block that ends the deflate
+/// stream, and the Adler-32 trailer (`§2.2`), then flush `output`. A stream
+/// that is never finished is incomplete and will not decode.
+///
+/// Returns `error.WriteFailed` if `output` fails. It also returns
+/// `error.WriteFailed` if an earlier write failed or the writer was already
+/// finished, so a truncated stream is never reported as complete. The writer
+/// is unusable afterwards: later writes and a second `finish` return
+/// `error.WriteFailed`.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
     return Hooks.finish(w);
 }
 
-/// Stream everything from `in` through a stack-buffered `Writer` into `out`,
-/// returning the bytes consumed and encoded. Consumes `in` exactly through
-/// its end, then finishes the stream (the deflate ending and the trailer are
-/// load-bearing). `.ratio` lands as `error.ReadFailed` upfront. Zero
-/// allocation.
+/// Compress everything in `in` into one zlib stream written to `out`, and
+/// return the number of input bytes consumed. `in` is read to its end, then
+/// the stream is finished. Returns `error.ReadFailed` if `in` fails (and at
+/// once for `.ratio`, which is not implemented) and `error.WriteFailed` if
+/// `out` fails. Uses about 288 KiB of stack (the 96 KiB buffer plus flate's
+/// writer state and block scratch) and allocates nothing.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
@@ -95,7 +103,7 @@ pub fn streamAll(
 // sentinel-checked.
 // ---------------------------------------------------------------------------
 
-/// Decode `stream` with the landed one-shot decoder and expect `want`.
+/// Decode `stream` with the one-shot decoder and expect `want`.
 fn decodeStream(stream: []const u8, want: []const u8) !void {
     const target = try testing.allocator.alloc(u8, want.len + sentinel.len);
     defer testing.allocator.free(target);
@@ -122,9 +130,8 @@ fn roundTrip(source: []const u8) !void {
 }
 
 test "Writer: the buffer type is flate's, re-exported" {
-    // README, "Caller-owned buffer types": `Writer.Buffer` is
-    // `flate.Writer.Buffer` — max_block_size + history_len, 98303 bytes
-    // (OQ6).
+    // `Writer.Buffer` is `flate.Writer.Buffer`: max_block_size +
+    // history_len, 98303 bytes.
     try testing.expectEqual(@as(usize, 98303), @sizeOf(Buffer));
     try testing.expect(Buffer == flate.Writer.Buffer);
 }
@@ -132,7 +139,7 @@ test "Writer: the buffer type is flate's, re-exported" {
 test "Writer: the emitted stream is the deterministic one" {
     // RFC 1950 §2.2 — the header (CM=8, CINFO=7, FLEVEL by band, the minimal
     // FCHECK, FDICT clear) and the trailer (the Adler-32, big-endian) are
-    // pinned; OQ7 makes them reproducible (no clock, no locale).
+    // pinned, and reproducible (no clock, no locale).
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -154,9 +161,9 @@ test "Writer: the emitted stream is the deterministic one" {
 }
 
 test "Writer: the header is lazy and written before the first byte" {
-    // README, "Streaming": "the 2-byte header is emitted lazily, before the
-    // first compressed byte reaches `output`" — `init` writes nothing, and
-    // nothing but the header reaches `output` until a block is emitted.
+    // The 2-byte header is written lazily, before the first compressed byte
+    // reaches `output`: `init` writes nothing, and nothing but the header
+    // reaches `output` until a block is emitted.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -205,9 +212,9 @@ test "Writer: incompressible input round-trips" {
 }
 
 test "Writer: the trailer covers chunked writes with mid-stream flushes" {
-    // README, "Streaming": the Adler-32 is accumulated as the data crosses
-    // the codec boundary — no re-read of the input, no second pass. Chunked
-    // writes and flushes must not drop, double, or reorder a byte.
+    // The Adler-32 is accumulated as the data crosses the codec boundary,
+    // with no re-read of the input and no second pass. Chunked writes and
+    // flushes must not drop, double, or reorder a byte.
     const gpa = testing.allocator;
     var source: [70_000]u8 = undefined;
     var rng: DefaultPrng = .init(0x5EED);
@@ -272,9 +279,9 @@ test "Writer: the writableSliceGreedy path round-trips" {
 }
 
 test "Writer: a failed or finished writer never reports a false success" {
-    // The pattern book's poison check: `finish` after a failed write, after
-    // `finish`, and writes after `finish` all report `error.WriteFailed` — a
-    // truncated stream must not be reported as complete.
+    // `finish` after a failed write, `finish` after `finish`, and writes after
+    // `finish` all report `error.WriteFailed`: a truncated stream must not be
+    // reported as complete.
     const gpa = testing.allocator;
 
     // Finish after a failed write: the write buffers fine, the emit fails
@@ -300,9 +307,9 @@ test "Writer: a failed or finished writer never reports a false success" {
 }
 
 test "Writer: the ratio seat is rejected, never silently aliased" {
-    // README, "API": `Writer.init(..., .{ .level = .ratio })` poisons the
-    // interface (every write and `finish` reports `error.WriteFailed`), and
-    // `Writer.streamAll` returns `error.ReadFailed` upfront.
+    // `Writer.init(..., .{ .level = .ratio })` poisons the interface (every
+    // write and `finish` reports `error.WriteFailed`), and `Writer.streamAll`
+    // returns `error.ReadFailed` upfront.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();

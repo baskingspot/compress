@@ -1,30 +1,30 @@
-//! The fleet corpus generator (bench/README.md, "Corpus"). Deterministic:
-//! the same bytes on every host, so a generated tree reproduces the
-//! committed `bench/corpus/SHA256SUMS` exactly — the trust anchor, and the
-//! only corpus file tracked in git. The bytes themselves live in a
-//! gitignored directory (default `bench/corpus-gen/`), generated on demand.
+//! The benchmark corpus generator (bench/README.md). Deterministic: the same
+//! bytes on every host, so a generated tree reproduces the committed
+//! `bench/corpus/SHA256SUMS` exactly. That file is the trust anchor and the
+//! only corpus file tracked in git. The bytes themselves live in a gitignored
+//! directory (default `bench/corpus-gen/`), generated on demand.
 //!
-//! Shapes and sizes mirror the codec bench files (src/flate/bench.zig):
-//! text, random, html, rle, mixed at 32 KiB and 64 KiB. Alongside each raw
-//! file the generator writes the reference compressed blob per codec —
-//! flate, gzip, zlib at level `.fast`, snappy raw block — produced by the
-//! zcompress one-shots. Decompression rows on the fleet decode these exact
-//! blobs, so every implementation's decoder sees identical input bytes.
+//! The shapes (see `Shape`) come at two sizes, 32 KiB and 64 KiB. The first
+//! five mirror the codec bench files (src/flate/bench.zig). Alongside each raw
+//! file the generator writes the reference compressed blob per codec: flate,
+//! gzip, and zlib at level `.fast`, and the snappy raw block, all produced by
+//! the zcompress one-shots. Decompression rows decode these exact blobs, so
+//! every implementation's decoder sees identical input bytes.
 //!
-//! The `.zst` blobs invert the family's pattern (M4 has no zstd encoder):
-//! the pinned zstd CLI (v1.5.7, the flake) at the shape's `zstdLevel`
-//! produces the frames — level 1 matches the harness-wide fast class, and
-//! the entropy shapes (`words`, `skewlit`) take level 19, whose matcher
-//! leaves the literals to the Huffman streams the level-1 rows never
-//! exercise — and this generator verifies each one byte-exact with our
-//! decoder (`zstd.zstd.decode.decompress`) before writing it. Every run
-//! checks the CLI's own version first (`zstd_cli_version`), so a different
-//! PATH binary fails the run rather than silently rewriting the corpus.
+//! The `.zst` blobs come from the pinned zstd CLI instead (v1.5.7, from the
+//! flake), because zcompress has no zstd encoder. The CLI runs at the shape's
+//! `zstdLevel`: level 1 matches the fast class of the other rows, and the
+//! entropy shapes (`words`, `skewlit`) use level 19, whose matcher leaves the
+//! literals to the Huffman streams that the level-1 rows never exercise. The
+//! generator decodes each frame with our decoder
+//! (`zcompress.zstd.decode.decompress`) and requires the raw bytes back before
+//! writing it. Every run checks the CLI's version first (`zstd_cli_version`),
+//! so a different PATH binary fails the run instead of silently rewriting the
+//! corpus.
 //!
-//! Generation is correct-or-fails: after writing every file the generator
-//! checks the result against the committed anchor file by file and fails
-//! naming any disagreement. Only a manifest that reproduces the anchor is
-//! written next to the bytes.
+//! After writing every file the generator checks the result against the
+//! committed anchor, file by file, and fails naming any disagreement. The
+//! manifest is written next to the bytes only if it reproduces the anchor.
 //!
 //! Run from the repo root: `zig build corpus [-- DIR]` (`just corpus`),
 //! default DIR bench/corpus-gen. Rewrites only files whose bytes differ.
@@ -46,10 +46,10 @@ pub const Shape = enum {
     html, // tag-heavy markup (compressible, short matches)
     rle, // single-byte run (extreme RLE)
     mixed, // structured + random (realistic-ish record batch)
-    // The entropy pair (the wave-2 corpus revision): literals-heavy shapes
-    // whose `.zst` blobs the CLI writes at level 19, so the frames carry
-    // real FSE-described Huffman tables and four-stream literals — the
-    // decode path the fast-class shapes starve.
+    // The entropy pair: literals-heavy shapes whose `.zst` blobs the CLI
+    // writes at level 19, so the frames carry real FSE-described Huffman
+    // tables and four-stream literals, the decode path the fast-class shapes
+    // starve.
     words, // dictionary-word text (compressible, literals-heavy)
     skewlit, // skewed-distribution bytes (Huffman-literals-heavy)
 };
@@ -64,17 +64,15 @@ const default_dir = "bench/corpus-gen";
 /// generated file is checked against it before anything trusts the bytes.
 const committed_sums_path = "bench/corpus/SHA256SUMS";
 
-/// The recorded zstd CLI level of the fast-class shapes' `.zst` reference
-/// blobs (src/zstd/README.md, "Benchmarks"). The CLI's own default is 3;
-/// level 1 is the fast class every other arm's rows measure (zc `.fast`,
-/// klauspost/libdeflate/zlib-ng level 1).
+/// The zstd CLI level of the fast-class shapes' `.zst` reference blobs. The
+/// CLI's own default is 3; level 1 is the fast class every other arm's rows
+/// measure (zc `.fast`, klauspost/libdeflate/zlib-ng level 1).
 const zstd_cli_level = "-1";
 
 /// The level the entropy shapes' `.zst` blobs generate at: level 19's
 /// matcher spends itself on matches a dictionary-word or skewed-literal
 /// shape barely offers, so the literals go out Huffman-coded under a real
-/// FSE-described table — the entropy path the fleet's level-1 rows are
-/// cold on.
+/// FSE-described table, the entropy path the level-1 rows never exercise.
 const zstd_cli_level_entropy = "-19";
 
 /// The zstd CLI level a shape's `.zst` blob generates at.
@@ -86,9 +84,9 @@ fn zstdLevel(shape: Shape) []const u8 {
 }
 
 /// The pinned zstd CLI version the `.zst` reference blobs come from (v1.5.7,
-/// the flake — src/zstd/README.md, "Benchmarks"): every run checks
-/// `zstd --version` against it once, so a different PATH binary cannot
-/// silently produce blobs the committed corpus was not generated with.
+/// the flake): every run checks `zstd --version` against it once, so a
+/// different PATH binary cannot silently produce blobs the committed corpus
+/// was not generated with.
 const zstd_cli_version = "v1.5.7";
 
 /// The four one-shot encoders' error unions: they share the payload (`usize`,
@@ -96,7 +94,7 @@ const zstd_cli_version = "v1.5.7";
 /// `writeBlob` takes one named type rather than a duck-typed value.
 const Generated = error{ BufferTooSmall, Unimplemented }!usize;
 
-/// One definition of the corpus shapes: the fleet drivers read the files
+/// One definition of the corpus shapes: the benchmark drivers read the files
 /// this generates; nothing regenerates shapes on the boxes.
 pub fn makeShape(shape: Shape, buf: []u8) void {
     switch (shape) {
@@ -223,8 +221,8 @@ pub fn main(init: std.process.Init) !void {
         try writeFile(io, arena, dir, &sums, name, blob);
     }
 
-    // Correct-or-fails: the committed anchor is what the harness trusts, so
-    // the generated bytes must reproduce it before the manifest is written.
+    // The committed anchor is what the harness trusts, so the generated
+    // bytes must reproduce it before the manifest is written.
     const file_count = try verifyAgainstCommitted(io, arena, sums.items);
     try dir.writeFile(io, .{ .sub_path = "SHA256SUMS", .data = sums.items });
     var out_buf: [4096]u8 = undefined;
@@ -254,10 +252,10 @@ fn writeBlob(
 }
 
 /// Compress `raw` with the pinned zstd CLI at the shape's `zstdLevel` and
-/// write the frame as `<base_name>.zst` — but only after OUR decoder
-/// reproduces the raw bytes exactly (the inverse verification of the
-/// family's pattern: the reference tool encodes, our decoder is the gate).
-/// The manifest entry is added by the sorted `.zst` pass in main.
+/// write the frame as `<base_name>.zst`, but only after our decoder
+/// reproduces the raw bytes exactly: the reference tool encodes and our
+/// decoder checks. The manifest entry is added by the sorted `.zst` pass in
+/// main.
 fn writeZstdBlob(
     io: Io,
     arena: Allocator,

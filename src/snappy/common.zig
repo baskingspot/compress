@@ -1,11 +1,11 @@
 //! Shared helpers for the snappy module: the block format's LEB128 varint
-//! (the uncompressed-length prefix) and the framed stream's length-prefix
-//! width.
+//! (the uncompressed-length prefix), the framed stream's length-prefix width,
+//! and little-endian `readInt`/`writeInt`.
 
 const internal = @import("../internal/root.zig");
 
-/// The framed stream's length-prefix width: a `u32-le` compressed length
-/// (README.md, "Streaming").
+/// Width in bytes of the framed stream's length prefix: the compressed
+/// block length as a little-endian `u32`.
 pub const frame_prefix_len: usize = 4;
 
 /// Number of bytes to encode `value` as an unsigned LEB128 varint.

@@ -1,13 +1,15 @@
-//! Raw DEFLATE codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! Local benchmarks for the raw DEFLATE codec. Run with
+//! `zig build bench -Doptimize=ReleaseFast` (or `just bench`).
 //!
-//! Covers compress and decompress across the shared data shapes (repetitive
-//! text, random, html-like, a single-byte run, and a mixed batch) at the 64-KiB
-//! block size and at 32 KiB. Throughput is reported as MB/s over the
-//! *uncompressed* input size so compress and decompress are directly
-//! comparable.
+//! `benchmarkCompress` and `benchmarkDecompress` cover five data shapes
+//! (repetitive text, random, html-like, a single-byte run, and a mixed batch)
+//! at 64 KiB (the encoder's block size) and at 32 KiB. They report MB/s over
+//! the *uncompressed* size, so the two directions compare directly.
+//! `benchmarkRatio` reports compressed over uncompressed size per case.
 //!
 //! Output is benchstat-friendly:
 //! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! These are local numbers, not performance claims.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -17,8 +19,7 @@ const fastmem = @import("fastmem");
 const bench = @import("benchmark");
 const flate = @import("zcompress").flate;
 
-/// Input corpus shapes. Each returns a freshly-allocated buffer the benchmark
-/// is responsible for freeing (once, in setup — not in the timed loop).
+/// Input data shapes.
 const Shape = enum {
     text, // repetitive English-ish text (highly compressible)
     random, // PRNG bytes (incompressible -> stored blocks)
@@ -48,6 +49,8 @@ const Size = enum {
     }
 };
 
+/// Build `len` bytes of `shape`. The caller frees the buffer, once, in setup
+/// rather than in the timed loop.
 fn makeShape(allocator: Allocator, shape: Shape, len: usize) ![]u8 {
     const buf = try allocator.alloc(u8, len);
     switch (shape) {

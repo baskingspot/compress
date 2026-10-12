@@ -1,28 +1,32 @@
-//! Raw DEFLATE (RFC 1951) codec. Imports only `std` and `fastmem`. The
-//! `zcompress.flate` namespace of the zcompress module: a full inflate
-//! (stored, fixed, and dynamic blocks), the fast fixed-Huffman encoder, and
-//! the streaming `Io` layer (`Reader`/`Writer`) over raw deflate —
-//! caller-owned buffers, zero heap allocation, end to end.
+//! Raw DEFLATE (RFC 1951): the `zcompress.flate` namespace. An inflate for all
+//! three block types (stored, fixed, and dynamic), a fixed-Huffman encoder, and
+//! streaming `std.Io` adapters, all over caller-owned buffers with no heap
+//! allocation. Imports only `std` and `fastmem`.
 //!
-//! The public surface is four names — everything else composes through
-//! their namespaces: `encode.compress`, `encode.maxCompressedLength`,
-//! `decode.decompress`, `decode.DecompressError`, `Reader.Buffer`,
-//! `Reader.streamAll`, `Writer.finish`. Contracts: README.md.
+//! - `encode.compress`, `encode.maxCompressedLength`: one-shot compression.
+//! - `decode.decompress`, `decode.DecompressError`: one-shot decompression.
+//! - `Writer`: a compressing `Io.Writer`; end the stream with `finish`.
+//! - `Reader`: a decompressing `Io.Reader`.
+//!
+//! Usage and behavior: README.md.
 //!
 //! Format: docs/research/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 
+/// One-shot compression: `compress`, `maxCompressedLength`, and the encoder's
+/// `Options` and `Level`.
 pub const encode = @import("encode.zig");
+/// One-shot decompression: `decompress` and its error set, `DecompressError`.
 pub const decode = @import("decode.zig");
-/// A decompressing `Io.Reader` over a raw deflate stream (README.md,
-/// "Streaming"). Consume through `&r.reader`; ends cleanly with
-/// `error.EndOfStream` once the final block's output is consumed. Zero heap
-/// allocation; the caller provides `Reader.Buffer`.
+/// A decompressing `Io.Reader` over a raw deflate stream. Make one with
+/// `Reader.init` and read through `&r.reader`; it returns `error.EndOfStream`
+/// once the final block's output has been consumed. The caller provides the
+/// window (`Reader.Buffer`); nothing is allocated.
 pub const Reader = @import("Reader.zig");
-/// A compressing `Io.Writer` over a raw deflate stream (README.md,
-/// "Streaming"). Write through `&w.writer`; complete the stream with
-/// `finish`. Zero heap allocation; the caller provides `Writer.Buffer`.
+/// A compressing `Io.Writer` that produces a raw deflate stream. Make one with
+/// `Writer.init`, write through `&w.writer`, and end the stream with `finish`.
+/// The caller provides the buffer (`Writer.Buffer`); nothing is allocated.
 pub const Writer = @import("Writer.zig");
 
 test {

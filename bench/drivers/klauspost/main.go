@@ -1,13 +1,13 @@
-// The klauspost/compress fleet arm (bench/README.md). Same CLI, corpus, and
+// The klauspost/compress arm (bench/README.md). Same CLI, corpus, and
 // schema-v1 JSONL as the zcompress driver: one process is one round of this
 // arm. Rows: flate/gzip/zlib at level 1 (the fast class, matching the
 // zcompress .fast rows) and snappy raw blocks, both directions, plus zstd
-// DecodeAll — decode-only (M4 is the zstd decode milestone; zc has no zstd
-// encoder), the single-buffer arm the zc one-shot decode races.
+// DecodeAll, decode only because zcompress has no zstd encoder. DecodeAll is
+// the single-buffer shape that the zc one-shot decode is measured against.
 //
 // One-shot shape: writers and readers are constructed per iteration, the Go
 // equivalent of the zcompress one-shots' per-call table setup. Decompression
-// rows decode the committed reference blobs, identical bytes for every arm.
+// rows decode the corpus's reference blobs, identical bytes for every arm.
 package main
 
 import (
@@ -38,8 +38,8 @@ var sizes = []int{32 * 1024, 64 * 1024}
 var codecs = []string{"flate", "gzip", "zlib", "snappy", "zstd"}
 var directions = []string{"compress", "decompress"}
 
-// directionsFor: zstd is decode-only this milestone (no zc encoder, so no
-// compress row to compare against).
+// directionsFor: zstd is decode only (zcompress has no zstd encoder, so there
+// is no compress row to compare against).
 func directionsFor(codec string) []string {
 	if codec == "zstd" {
 		return []string{"decompress"}
@@ -97,9 +97,10 @@ func loadCase(o *options, shape string, size int) (*kase, error) {
 	return c, nil
 }
 
-// The zstd decoder, built once: DecodeAll on a shared *Decoder (concurrency
-// 1 — the fleet pins one core) is the single-buffer shape the zc one-shot
-// races; NewReader(nil) makes a decoder with no stream attached.
+// The zstd decoder, built once: DecodeAll on a shared *Decoder (concurrency 1,
+// since the harness pins each run to one core) is the single-buffer shape the
+// zc one-shot is measured against; NewReader(nil) makes a decoder with no
+// stream attached.
 var zstdDec *zstd.Decoder
 
 func zstdDecoder() (*zstd.Decoder, error) {

@@ -1,34 +1,36 @@
 //! zcompress: fast, self-contained compression codecs in pure Zig.
 //!
-//! ONE module; each codec is a namespace under it. Codecs import only `std`
-//! and `fastmem` (plus the codec-agnostic `src/internal/` shares, by
-//! relative import) and lift out of the repo with their directory plus
-//! `src/internal/` in tow (docs/zcompress-plan.md, "Architecture").
+//! One module; each codec is a namespace under it. Codecs import only `std`
+//! and `fastmem`, plus the shared `src/internal/` by relative import (gzip and
+//! zlib also import `flate`), so a codec directory can be copied out together
+//! with `src/internal/`.
 
 const std = @import("std");
 
-/// Raw DEFLATE (RFC 1951) codec. Full inflate over caller-owned buffers,
-/// zero heap allocation. API and design: `src/flate/README.md`; format:
+/// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
+/// and the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
+/// allocation. API: `src/flate/README.md`. Format:
 /// docs/research/specs/rfc1951-deflate.txt.
 pub const flate = @import("flate/root.zig");
-/// gzip (RFC 1952) container over the flate module: the member framing, the
-/// CRC-32 trailer, and the `std.Io` streaming layer. API and design:
-/// `src/gzip/README.md`; format: docs/research/specs/rfc1952-gzip.txt.
+/// gzip (RFC 1952) over `flate`: one-shot `encode.compress` and
+/// `decode.decompress`, and the streaming `Reader` and `Writer`. Caller-owned
+/// buffers, no heap allocation. API: `src/gzip/README.md`. Format:
+/// docs/research/specs/rfc1952-gzip.txt.
 pub const gzip = @import("gzip/root.zig");
-/// Raw-block Snappy codec. Block functions over caller-owned buffers, zero
-/// heap allocation. API and design: `src/snappy/README.md`; format:
+/// Snappy blocks: `encode.compressBlock` and `decode.decompressBlock` over
+/// caller-owned buffers, and a streaming `Reader` and `Writer` over a
+/// length-prefixed framing of this package's own. No heap allocation. API:
+/// `src/snappy/README.md`. Format:
 /// docs/research/specs/snappy-format-description.txt.
 pub const snappy = @import("snappy/root.zig");
-/// zlib (RFC 1950) container over the flate module: the 2-byte header, the
-/// Adler-32 trailer, and the `std.Io` streaming layer. API and design:
-/// `src/zlib/README.md`; format: docs/research/specs/rfc1950-zlib.txt.
+/// zlib (RFC 1950) over `flate`: one-shot `encode.compress` and
+/// `decode.decompress`, and the streaming `Reader` and `Writer`. Caller-owned
+/// buffers, no heap allocation. API: `src/zlib/README.md`. Format:
+/// docs/research/specs/rfc1950-zlib.txt.
 pub const zlib = @import("zlib/root.zig");
-/// zstd (RFC 8878) decoder: the frame, block, literals (huff0), and
-/// sequences (FSE) layers, the XXH64 frame checksum, and the `std.Io`
-/// streaming layer. API and design: `src/zstd/README.md`; format:
-/// docs/research/specs/rfc8878-zstd.txt. M4 is decoder-first: `zstd.decode`
-/// (the one-shot) and `zstd.Reader` (the streaming frame decoder) are here;
-/// `zstd.encode`/`zstd.Writer` (the fast encoder) are M5.
+/// zstd (RFC 8878) decoder: one-shot `decode.decompress` and the streaming
+/// `Reader`, with XXH64 frame checksum verification. There is no encoder.
+/// API: `src/zstd/README.md`. Format: docs/research/specs/rfc8878-zstd.txt.
 pub const zstd = @import("zstd/root.zig");
 
 test {
@@ -37,8 +39,8 @@ test {
     _ = gzip;
     _ = zlib;
     _ = zstd;
-    // The consumer surface, named the way a consumer names it: four names
-    // per codec namespace, nothing flat at the root (AGENTS.md, "Rules").
+    // The consumer surface, spelled the way a consumer spells it: names are
+    // reached through the codec namespaces, and nothing is flat at the root.
     _ = flate.encode.Level;
     _ = flate.decode.decompress;
     _ = flate.Reader.streamAll;

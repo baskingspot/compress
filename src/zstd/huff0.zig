@@ -1,32 +1,17 @@
 //! Huffman (huff0) for the zstd decoder: the weight series a literals block
 //! transmits (`§4.2.1`), the prefix codes it describes (`§4.2.1.3`), and the
-//! backwards Huffman-coded streams (`§4.2.2`).
+//! backward Huffman-coded streams (`§4.2.2`).
 //!
-//! The tree arrives as weights, never as code lengths: `Number_of_Bits =
-//! Max_Number_of_Bits + 1 - Weight` for a nonzero Weight, and the last
-//! symbol's weight is implied — "The last symbol's Weight is deduced from
-//! previously decoded ones, by completing to the nearest power of 2"
-//! (`§4.2.1`). Two descriptions carry it (`§4.2.1.1`): the direct mode, two
-//! 4-bit weights per byte, and the FSE-compressed mode, whose series is
-//! `§4.2.1.2`'s one bitstream with two interleaved states terminated by the
-//! overflow rule ("if updating state after decoding a symbol would require
-//! more bits than remain in the stream, it is assumed that extra bits are
-//! zero. Then, symbols for each of the final states are decoded and the
-//! process is complete").
-//!
-//! The prefix codes are assigned by `§4.2.1.3`: symbols sorted by weight,
-//! natural order within a weight, weight-0 symbols dropped, and "starting
-//! from the lowest Weight, prefix codes are distributed in sequential
-//! order". The decode table holds each code left-justified at the top of the
-//! stream's next `Max_Number_of_Bits` bits, so a symbol decode is one lookup
-//! and one skip. The RFC's own `§4.2.2` example contradicts the assignment
-//! (errata 8195, `docs/research/zstd-notes.md` §4 T1); Table 25 and the
-//! algorithm text win, and `golden.t1_stream` pins the difference.
-//!
-//! The stream decode is the literals layer's building block, not its
-//! driver: `§3.1.1.3.1.6`'s 1-or-4-stream walk, the jump table, and the
-//! per-stream sizes are the literals section's, and it calls `decodeStream`
-//! once per stream with the slice and count it computed.
+//! A tree arrives as weights, not code lengths. A nonzero Weight means
+//! `Number_of_Bits = Max_Number_of_Bits + 1 - Weight`, and the last symbol's
+//! weight is implied by completing the sum to a power of two (`§4.2.1`). The
+//! weights are sent directly (two 4-bit weights per byte) or as an FSE
+//! bitstream with two interleaved states that ends on the overflow rule
+//! (`§4.2.1.1`, `§4.2.1.2`). The decode table holds each code left-justified in
+//! the stream's next `Max_Number_of_Bits` bits, so a symbol is one lookup and
+//! one skip. The RFC's worked example in `§4.2.2` assigns codes differently
+//! from Table 25 (errata 8195); Table 25 and the algorithm text win. The
+//! literals layer picks the stream count and sizes (`§3.1.1.3.1.6`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -83,7 +68,8 @@ pub const Tree = struct {
 };
 
 /// Read a Huffman_Tree_Description (`§4.2.1.1`, `§4.2.1.2`) from the bytes
-/// after the literals header.
+/// after the literals header. Returns `MalformedHuffmanWeights` if the
+/// description is cut short or its weights do not form a valid tree.
 pub fn readTree(source: []const u8) Error!Tree {
     if (source.len == 0) return error.MalformedHuffmanWeights;
     var tree: Tree = .{
@@ -205,8 +191,7 @@ fn complete(tree: *Tree) Error!void {
     if (max_bits > code_length_max) return error.MalformedHuffmanWeights;
     const rest = (@as(u32, 1) << max_bits) - total;
     // `max_bits` is `highBit(total) + 1`, so the power is strictly above the
-    // total: the remainder is never zero (the M4 closing review's N3 — the
-    // check this replaces could not fire).
+    // total and the remainder is never zero.
     assert(rest > 0);
     if ((@as(u32, 1) << highBit(rest)) != rest) return error.MalformedHuffmanWeights;
     const last_weight: u8 = highBit(rest) + 1;
@@ -279,12 +264,12 @@ pub fn buildTable(tree: *const Tree) DecodeTable {
     return table;
 }
 
-/// The batched bulk step: identical to the safe peek/decode/skip, over the
-/// reader's fast paths — the caller's `reload` covered the whole batch
-/// (`bits.BackwardFastReader.batch_bits`: five symbols take at most 55
-/// bits), so the peek's refill check and the skip's held check are provably
-/// dead inside the batch and drop out (the reference's
-/// `BIT_lookBitsFast`/`BIT_skipBits` cadence).
+/// The batched step: the same peek, decode, and skip as `decodeSymbolSafe`,
+/// through the reader's unchecked fast paths. The caller's `reload` covered
+/// the whole batch (five symbols take at most
+/// `bits.BackwardFastReader.batch_bits` bits), so no check is needed inside it.
+/// This is the cadence of the reference's `BIT_lookBitsFast` and
+/// `BIT_skipBits`.
 inline fn decodeSymbolFast(
     table: *const DecodeTable,
     reader: *bits.BackwardFastReader,
@@ -314,16 +299,19 @@ inline fn checkConsumed(reader: *const bits.BackwardFastReader) Error!void {
     if (!reader.isConsumed()) return error.BitstreamNotConsumed;
 }
 
-/// Decode one Huffman-coded stream backwards into `target` (`§4.2.2`):
-/// exactly `target.len` symbols, and then the stream must be exactly
-/// consumed.
+/// Decode one Huffman-coded stream (`§4.2.2`) into `target`: exactly
+/// `target.len` symbols, after which the stream must be exactly consumed.
+/// Returns `MissingStartBit` for a stream with no final 1 bit,
+/// `InvalidBitStream` if the stream runs out of bits first, and
+/// `BitstreamNotConsumed` if bits are left over.
 pub fn decodeStream(table: *const DecodeTable, source: []const u8, target: []u8) Error!void {
     return decodeStreamImpl(table, source, target);
 }
 
 // The body stays outlined: the batched loop is a few hundred instructions,
 // and keeping it out of the block-decode chain's inlining budget held the
-// literals win steadier across builds (measured on the entropy rows).
+// literals speedup steadier across builds (measured on the entropy benchmark
+// rows).
 noinline fn decodeStreamImpl(
     table: *const DecodeTable,
     source: []const u8,
@@ -346,21 +334,10 @@ noinline fn decodeStreamImpl(
     try checkConsumed(&reader);
 }
 
-/// The four-stream layout's decode (`§3.1.1.3.1.6`): four independent
-/// backwards streams, each exactly `targets[i].len` symbols, each exactly
-/// consumed. `targets[3]` may be up to 3 symbols shorter than the others
-/// (`§3.1.1.3.1.6`'s last-stream rule).
-///
-/// The four streams are decoded in lockstep: the per-symbol chain — peek
-/// window, table lookup, skip — is serial within one stream, so interleaving
-/// the four independent streams fills the latency (the reference's
-/// HUF_decompress4X interleave; measured ~2x on literals-heavy blocks over
-/// decoding the streams serially). The bulk runs in batches of five symbols
-/// per stream per reload (the `decodeSymbolFast` cadence), all four streams
-/// in lockstep — one symbol per peek, so the streams never desynchronize;
-/// the tail past the fourth stream's length and the last partial batch run
-/// the careful path, and every stream's exact-consumption check is
-/// unchanged.
+/// Decode the four-stream layout (`§3.1.1.3.1.6`): four independent backward
+/// streams, each exactly `targets[i].len` symbols and each exactly consumed.
+/// `targets[3]` may be up to 3 symbols shorter than the others (the
+/// last-stream rule of `§3.1.1.3.1.6`). The errors are `decodeStream`'s.
 pub fn decodeFourStreams(
     table: *const DecodeTable,
     sources: *const [4][]const u8,
@@ -370,6 +347,16 @@ pub fn decodeFourStreams(
 }
 
 // Outlined for the same reason as `decodeStreamImpl`.
+//
+// The four streams are decoded in lockstep. The per-symbol chain (peek the
+// window, look up the table, skip) is serial within one stream, so
+// interleaving four independent streams fills the latency; that measured about
+// 2x on literals-heavy blocks against decoding the streams one after another
+// (the reference's HUF_decompress4X interleave). The bulk runs in batches of
+// five symbols per stream per reload, one symbol per peek, so the streams never
+// desynchronize. The tail past the fourth stream's length and the last partial
+// batch use the careful path, and every stream keeps its exact-consumption
+// check.
 noinline fn decodeFourStreamsImpl(
     table: *const DecodeTable,
     sources: *const [4][]const u8,
@@ -418,13 +405,13 @@ inline fn highBit(value: u32) u5 {
 test "readTree reads the direct representation, high nibble first" {
     // RFC 8878 §4.2.1.1 — "Weight[0] = (Byte[0] >> 4), Weight[1] =
     // (Byte[0] & 0xf), etc." and "Number_of_Symbols = headerByte - 127".
-    // The T1 pair's tree: five symbols, weights 4, 3, 2, 0, 1.
-    const tree = try readTree(&golden.t1_tree);
+    // The hand-built tree (`golden.pair_tree`): five symbols, weights 4, 3, 2, 0, 1.
+    const tree = try readTree(&golden.pair_tree);
     try testing.expectEqual(@as(usize, 4), tree.bytes_consumed);
     // RFC 8878 §4.2.1 — the completion: the sum of 2^(Weight-1) is 15, "the
     // nearest power of 2 is 16. Therefore, Max_Number_of_Bits = 4 and
     // Weight[5] = 16 - 15 = 1."
-    try testing.expectEqual(golden.t1_max_bits, tree.max_bits);
+    try testing.expectEqual(golden.pair_max_bits, tree.max_bits);
     try testing.expectEqual(@as(u16, 6), tree.symbol_count);
     try testing.expectEqualSlices(
         u8,
@@ -433,33 +420,33 @@ test "readTree reads the direct representation, high nibble first" {
     );
 }
 
-test "decodeStream decodes the T1 pair: Table 25's assignment, not the example's" {
+test "decodeStream decodes the hand-built stream pair: Table 25's assignment, not the example's" {
     // RFC 8878 §4.2.1.3 (Table 25) — "prefix codes are distributed in
     // sequential order" from the lowest weight: the weight-1 symbols 4 and 5
-    // take 0000 and 0001. §4.2.2's worked example (Table 26) swaps them;
-    // errata 8195, docs/research/zstd-notes.md §4 T1. Both streams below are
-    // hand-built frames the C CLI v1.5.7 and Zig std decode as written.
-    const tree = try readTree(&golden.t1_tree);
+    // take 0000 and 0001. §4.2.2's worked example (Table 26) swaps them
+    // (errata 8195). Both streams below are hand-built frames the C CLI v1.5.7
+    // and Zig std decode as written.
+    const tree = try readTree(&golden.pair_tree);
     const table = buildTable(&tree);
-    try testing.expectEqual(golden.t1_max_bits, table.max_bits);
+    try testing.expectEqual(golden.pair_max_bits, table.max_bits);
 
     var target: [4]u8 = @splat(0xaa);
-    try decodeStream(&table, &golden.t1_stream, &target);
-    try testing.expectEqualSlices(u8, &golden.t1_literals, &target);
+    try decodeStream(&table, &golden.pair_stream, &target);
+    try testing.expectEqualSlices(u8, &golden.pair_literals, &target);
 
     var errata: [4]u8 = @splat(0xaa);
-    try decodeStream(&table, &golden.t1_errata_stream, &errata);
-    try testing.expectEqualSlices(u8, &golden.t1_errata_literals, &errata);
+    try decodeStream(&table, &golden.pair_errata_stream, &errata);
+    try testing.expectEqualSlices(u8, &golden.pair_errata_literals, &errata);
 }
 
 test "decodeStream leaves the bytes past its symbols untouched" {
     // RFC 8878 §4.2.2 — the stream holds exactly `target.len` symbols; the
-    // sentinel proves a decode writes nowhere else (AGENTS.md, "Rules").
-    const tree = try readTree(&golden.t1_tree);
+    // sentinel proves a decode writes nowhere else.
+    const tree = try readTree(&golden.pair_tree);
     const table = buildTable(&tree);
     var buffer: [16]u8 = undefined;
     internal.sentinel.fill(&buffer);
-    try decodeStream(&table, &golden.t1_stream, buffer[0..4]);
+    try decodeStream(&table, &golden.pair_stream, buffer[0..4]);
     try internal.sentinel.expect(&buffer, 4);
 }
 
@@ -563,19 +550,19 @@ test "readTree rejects a tree deeper than the code-length ceiling" {
 }
 
 test "decodeStream rejects a stream with bits left over or none to spare" {
-    // RFC 8878 §4.2.2 — the stream must be exactly consumed. The T1 stream
-    // decodes four symbols; asking for three leaves bits over, and asking
-    // for five runs out.
-    const tree = try readTree(&golden.t1_tree);
+    // RFC 8878 §4.2.2 — the stream must be exactly consumed. `golden.pair_stream`
+    // decodes four symbols; asking for three leaves bits over, and asking for
+    // five runs out.
+    const tree = try readTree(&golden.pair_tree);
     const table = buildTable(&tree);
     var target: [5]u8 = @splat(0);
     try testing.expectError(
         error.BitstreamNotConsumed,
-        decodeStream(&table, &golden.t1_stream, target[0..3]),
+        decodeStream(&table, &golden.pair_stream, target[0..3]),
     );
     try testing.expectError(
         error.InvalidBitStream,
-        decodeStream(&table, &golden.t1_stream, target[0..5]),
+        decodeStream(&table, &golden.pair_stream, target[0..5]),
     );
     // A zero last byte has no start bit at all.
     try testing.expectError(
@@ -586,10 +573,10 @@ test "decodeStream rejects a stream with bits left over or none to spare" {
 
 test "buildTable: the codes are left-justified at the table's top bits" {
     // RFC 8878 §4.2.1.3 — Table 25's assignment: weight-1 symbols first (in
-    // natural order), then increasing weight. For the T1 tree the codes are
-    // 0 -> "1", 1 -> "01", 2 -> "001", 4 -> "0000", 5 -> "0001", and the
+    // natural order), then increasing weight. For `golden.pair_tree` the codes
+    // are 0 -> "1", 1 -> "01", 2 -> "001", 4 -> "0000", 5 -> "0001", and the
     // decode table indexes them by the stream's next four bits.
-    const tree = try readTree(&golden.t1_tree);
+    const tree = try readTree(&golden.pair_tree);
     const table = buildTable(&tree);
     try testing.expectEqual(@as(u8, 0), table.entries[0b1000].symbol);
     try testing.expectEqual(@as(u5, 1), table.entries[0b1000].num_bits);

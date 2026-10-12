@@ -1,40 +1,14 @@
-//! FSE (RFC 8878 §4.1) for the zstd decoder: the normalized-count table
-//! description (`§4.1.1`), the decoding-table construction, and the state
-//! machine that reads symbols out of a backwards bitstream (`§4.1`).
+//! FSE (finite state entropy, RFC 8878 §4.1) for the zstd decoder: reading a
+//! normalized-count table description (`§4.1.1`), building the decoding table
+//! from it, and the state machine that reads symbols from a backward bitstream
+//! (`§4.1`).
 //!
-//! Three contexts share this layer: the literals length, match length, and
-//! offset code tables of the sequences section (`§3.1.1.3.2.1`, caps 9, 9, 8
-//! and symbol spans 36, 53, 32) and the Huffman weights (`§4.2.1.2`, cap 6,
-//! symbol span 256). The caller supplies both caps; nothing here knows which
-//! context it serves.
-//!
-//! The description is the one zstd bitstream read *forward* (`§4.1.1`); the
-//! symbol streams are read backward (`§4.1`: "all FSE bitstreams are read
-//! from end to beginning"). The construction is `§4.1.1`'s: "less than 1"
-//! symbols take one cell each from the end of the table and retreat, the
-//! rest are spread (`position += (tableSize >> 1) + (tableSize >> 3) + 3;
-//! position &= tableSize - 1`), and each symbol's states get their widths
-//! and baselines in natural order. Appendix A's three tables are the
-//! day-one golden vectors for it (`golden.zig`).
-//!
-//! Two decisions where the RFC text and the reference decoders disagree are
-//! recorded here (docs/research/zstd-notes.md §4):
-//!
-//! - **T9 — the symbol-count rule.** `§4.1.1` says "If the number of symbols
-//!   decoded is not equal to the expected, the header should be considered
-//!   corrupt", which read literally rejects the short distributions the
-//!   reference encoder emits all the time. The rule enforced here is the
-//!   reference's: the probability budget must land *exactly* on
-//!   `1 << Accuracy_Log`, and the symbol count may fall short of the
-//!   context's expectation but never exceed it. Both directions are pinned
-//!   below; the fuzz lane carries the corner further.
-//! - **"two or more symbols with nonzero probability"** (`§4.1.1`) is
-//!   enforced here and *not* by the reference (`FSE_readNCount` and
-//!   `FSE_buildDTable` have no such check), so a single-symbol compressed
-//!   distribution — which the reference encoder never emits, because
-//!   `Table 15`'s FSE_Compressed mode "must not be used when only one symbol
-//!   is present" — is `MalformedFseTable` rather than a decodable table.
-//!   Fail closed, per the house posture.
+//! One implementation serves four contexts: the literals length, match length,
+//! and offset code tables of the sequences section (`§3.1.1.3.2.1`: accuracy log
+//! caps 9, 9, 8; symbol counts 36, 53, 32) and the Huffman weights (`§4.2.1.2`:
+//! cap 6, 256 symbols). The caller passes both limits; nothing here knows which
+//! context it serves. Appendix A's three tables are the test vectors for the
+//! table construction (`golden.zig`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -50,10 +24,11 @@ const sequences = @import("sequences.zig");
 
 /// Everything the FSE layer reports.
 pub const Error = error{
-    /// `§4.1.1`'s rules: the accuracy log exceeds the context's cap, the
-    /// probability budget does not land exactly on `1 << Accuracy_Log`, the
-    /// symbol count exceeds the context's expectation, or fewer than two
-    /// symbols have a nonzero probability.
+    /// A table description that breaks `§4.1.1`'s rules: the accuracy log
+    /// exceeds the context's cap, the probability budget does not land exactly
+    /// on `1 << Accuracy_Log`, the symbol count exceeds the context's, fewer
+    /// than two symbols have a nonzero probability, or the description needs
+    /// more bytes than the source holds.
     MalformedFseTable,
     /// A backwards stream whose last byte is zero, so it carries no final 1
     /// bit (`§3.1.1.3.2.1.2`, `§4.2.2`).
@@ -114,13 +89,15 @@ pub const Description = struct {
     bytes_consumed: usize,
 };
 
-/// Read a distribution table description (`§4.1.1`).
+/// Read a distribution table description (`§4.1.1`) from the front of
+/// `source`.
 ///
-/// `symbol_value_max` is the context's last symbol index — 35, 52, and 31
-/// for the literals length, match length, and offset code tables, 255 for
-/// the Huffman weights — and `accuracy_log_cap` its accuracy cap. The
-/// description may cover fewer symbols than the context allows (T9) but
-/// never more.
+/// `symbol_value_max` is the context's last symbol index (35, 52, and 31 for
+/// the literals length, match length, and offset code tables, 255 for the
+/// Huffman weights) and `accuracy_log_cap` its accuracy log cap. The
+/// description may cover fewer symbols than the context allows but never
+/// more. Returns `MalformedFseTable` for a description that breaks the rules
+/// listed on that error.
 pub fn readDescription(
     source: []const u8,
     symbol_value_max: u16,
@@ -170,8 +147,12 @@ pub fn readDescription(
 
     // The budget must land exactly on the table size (`§4.1.1`: "If the last
     // symbol makes the cumulated total go above (1 << Accuracy_Log),
-    // distribution is considered corrupted"), and the symbol count may fall
-    // short of the context's expectation but never exceed it (T9).
+    // distribution is considered corrupted"). The symbol count may fall short
+    // of the context's expectation but never exceed it. `§4.1.1` also says a
+    // count different from the expected one is corrupt, which read literally
+    // would reject the short distributions the reference encoder emits
+    // routinely; the reference decoder enforces only the budget and the upper
+    // bound, and so does this.
     if (budget.remaining != 1) return error.MalformedFseTable;
     if (symbol_index > symbol_count_limit) return error.MalformedFseTable;
     // The reader may look past the description's own bytes (the reference
@@ -267,7 +248,11 @@ fn skipZeroRun(
 }
 
 /// §4.1.1 — "Note that there must be two or more symbols with nonzero
-/// probability."
+/// probability." The reference decoder does not check this (`FSE_readNCount`
+/// and `FSE_buildDTable` have no such check), but its encoder never emits a
+/// single-symbol FSE table (Table 15: FSE_Compressed_Mode "must not be used
+/// when only one symbol is present"), so this decoder rejects one with
+/// `MalformedFseTable` instead of building a table for it.
 fn hasTwoNonzero(description: Description) bool {
     var nonzero: u32 = 0;
     for (description.counts[0..description.symbol_count]) |count| {
@@ -444,12 +429,11 @@ test "readDescription: the budget must land exactly on 1 << Accuracy_Log" {
 }
 
 test "readDescription: a short distribution is legal, an exceeding count is not" {
-    // RFC 8878 §4.1.1 + docs/research/zstd-notes.md §4 T9 — the RFC's "if
-    // the number of symbols decoded is not equal to the expected, the header
-    // should be considered corrupt" would reject the short distributions the
-    // reference encoder emits routinely. The reference's reading is enforced:
-    // fewer symbols than the context expects is legal when the budget is
-    // exact, more is corruption.
+    // RFC 8878 §4.1.1 — the RFC's "if the number of symbols decoded is not
+    // equal to the expected, the header should be considered corrupt" would
+    // reject the short distributions the reference encoder emits routinely.
+    // The reference's reading is enforced: fewer symbols than the context
+    // expects is legal when the budget is exact, more is corruption.
     //
     // Two symbols of 16 points over an accuracy log of 5: the literals
     // length context expects up to 36 symbols and accepts it.
@@ -463,7 +447,7 @@ test "readDescription: a short distribution is legal, an exceeding count is not"
 test "readDescription rejects a distribution with one nonzero symbol" {
     // RFC 8878 §4.1.1 — "Note that there must be two or more symbols with
     // nonzero probability." The reference's FSE_readNCount has no such
-    // check; this reader fails closed. 32 points all on symbol 1, with
+    // check; this reader returns an error. 32 points all on symbol 1, with
     // symbol 0 a transmitted zero.
     try testing.expectError(error.MalformedFseTable, readDescription(&.{ 0x10, 0xf8, 0x01 }, 3, 9));
     // And the degenerate single-symbol distribution the same rule forbids.
@@ -513,10 +497,10 @@ test "buildTable reproduces Appendix A's three predefined tables" {
     // RFC 8878 §4.1.1 + Appendix A — "The tables here can be used as
     // examples to crosscheck that an implementation has built its decoding
     // tables correctly." Each table's first data row is the all-zero state-0
-    // duplicate (errata 6441, docs/research/zstd-notes.md §4 T2); the real
-    // state-0 row is the second. The input is the sequences layer's
-    // Predefined_Mode distributions (`sequences.zig`, `§3.1.1.3.2.2`), so the
-    // production data is what the spec's own tables pin.
+    // duplicate (errata 6441); the real state-0 row is the second. The input
+    // is the sequences layer's Predefined_Mode distributions (`sequences.zig`,
+    // `§3.1.1.3.2.2`), so the production data is what the spec's own tables
+    // pin.
     const cases = .{
         .{
             .counts = &sequences.literals_length_distribution,

@@ -1,9 +1,9 @@
-//! Shared helpers for the zlib container: big-endian integer access. RFC 1950
-//! §2.1 stores every multi-byte number MOST-significant byte first — the
-//! Adler-32 trailer (§2.2) — so the helpers bake the endianness in and call
-//! sites carry no endian argument. The fuzz seeds' Smith serialization is
-//! little-endian by that harness's format and does not use these helpers.
-//! The bodies are `internal.int`'s, bound here.
+//! Big-endian integer access for the zlib container. RFC 1950 §2.1 stores
+//! multi-byte numbers most-significant byte first (the Adler-32 trailer,
+//! §2.2), so these helpers fix the byte order and call sites pass no endian
+//! argument. They are `internal.int.big`'s, bound here. The fuzz seeds in
+//! `fuzz.zig` use the Smith harness's little-endian serialization and do not
+//! go through them.
 
 const internal = @import("../internal/root.zig");
 

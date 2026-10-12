@@ -1,54 +1,22 @@
-//! Fuzz targets for the gzip container (RFC 1952) over the flate module, one
-//! per layer of the container surface:
+//! Fuzz targets for gzip, one per layer of the surface:
 //!
-//!   - `fuzzOneShotRoundTrip`: structured shapes through `encode.compress` ->
-//!     `decode.decompress`: identity, the `maxCompressedLength` bound, the
-//!     deterministic header (FLG=0, MTIME=0, the XFL band, OS=255), the
-//!     trailer against a reference CRC-32/ISIZE over the same bytes, and the
-//!     trailer-location divergence: bytes after the trailer are ignored by
-//!     the one-shot (README, "Contracts").
-//!   - `fuzzHeaderTrailerCorruption`: valid members with Smith mutations —
-//!     truncation at every position, header/body/trailer flips, reserved FLG
-//!     bits, a giant XLEN, an unterminated FNAME, appended markers, a
-//!     duplicated member — with the contract's specific errors pinned and the
-//!     universal property: a successful decode re-encodes, and a clean
-//!     `Reader` end proves its trailer matches the reference checksums of its
-//!     own output at the exact member boundary.
-//!   - `fuzzStreamRoundTrip`: `Writer` -> `Reader` identity over members,
-//!     through both `streamMember` pairs and the manual init/write/finish and
-//!     consume paths, plus the exact-boundary property: markers and a second
-//!     member after the trailer are never consumed, and a fresh reader at the
-//!     boundary decodes the next member (the caller loop).
-//!   - `fuzzWriterMachinery`: Smith-chosen `Io.Writer` operation sequences
-//!     against an expected-bytes model — the lazy header, `drain`/`flush`/
-//!     `rebase` accounting, and the trailer at `finish` — then decoded and
-//!     compared.
-//!   - `fuzzReaderMachinery`: Smith-chosen consumer op sequences
-//!     (peek/take/discardAll/readSliceAll/stream) over known members — the
-//!     boundary preserved under every op, the contiguity cap probed.
-//!   - `fuzzChecksumAccounting`: chunked streaming writes with mid-stream
-//!     flushes; the trailer must equal a reference CRC-32 over the same bytes
-//!     in order (every byte exactly once), and a corrupted trailer must fail
-//!     closed.
-//!   - `fuzzChecksumHook`: the flate checksum hook (`src/flate/Checksum.zig`,
-//!     in the tree) is the container's zero-copy dependency, so this lane
-//!     drives `flate.Writer`/`flate.Reader` with a synthetic fold and pins the
-//!     contract the container rides: every payload byte folded exactly once,
-//!     in stream order, through both layers.
-//!   - `fuzzAmplification`: bomb-shaped members decoded into caps below their
-//!     decoded length: fail closed (`BufferTooSmall`), never write past the
-//!     cap, never allocate.
+//! 1. `fuzzOneShotRoundTrip`: `encode.compress` -> `decode.decompress`.
+//! 2. `fuzzHeaderTrailerCorruption`: mutated members through both decoders.
+//! 3. `fuzzStreamRoundTrip`: `Writer` -> `Reader`, and the member boundary.
+//! 4. `fuzzWriterMachinery`: random `Io.Writer` call sequences.
+//! 5. `fuzzReaderMachinery`: random `Io.Reader` call sequences.
+//! 6. `fuzzChecksumAccounting`: the trailer under chunked writes and flushes.
+//! 7. `fuzzChecksumHook`: flate's checksum hook, which the container relies on.
+//! 8. `fuzzAmplification`: small members decoded into too-small targets.
 //!
-//! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run
-//! hits ziglang/zig#30655). Every target caps its per-iteration input
-//! (`roundtrip_max`, `stream_max`, `corrupt_source_max`, `checksum_max`,
-//! `bomb_source_max`) so a budget run finishes. The container allocates
-//! nothing; the only allocation is the harness's `Io.Writer.Allocating`,
-//! which the runner's per-input leak check covers.
+//! Each target's doc comment says what it attacks and which property it checks.
+//! Run them with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run
+//! hits ziglang/zig#30655); each caps its per-iteration input so a budget run
+//! finishes. The "hostile-header pins" test at the end is a plain unit test, so
+//! `just test` runs it too.
 //!
 //! Spec: docs/research/specs/rfc1952-gzip.txt (§2.2 members, §2.3.1 the fixed
-//! header, §2.3.1.1 FEXTRA, §2.3.1.2 decoder obligations, §8 the CRC-32
-//! sample). Contracts: src/gzip/README.md.
+//! header, §2.3.1.1 FEXTRA, §2.3.1.2 decoder obligations, §8 the CRC-32 sample).
 
 const std = @import("std");
 const Io = std.Io;
@@ -91,16 +59,15 @@ const roundtrip_max: usize = 131_072;
 const stream_max: usize = 64 * 1024;
 
 /// The mid-stream flush budget: how many Smith-chosen flushes a target's
-/// writer loop may take. Every flush ends the current block and every block
+/// writer loop may take. Every flush ends the current block, and every block
 /// costs at most 5 stored-header bytes beyond its input (the encoder's
-/// stored-block fallback, `src/flate/README.md`, "Encoder"), so each flushed
-/// block grows the member past the no-flush `maxCompressedLength` bound by
-/// at most 5 bytes — the fixed buffers below carry `5 * flush_budget` of
-/// headroom for exactly this (the bound itself budgets only the
-/// unflushed block count).
+/// stored-block fallback), so each flushed block grows the member past the
+/// no-flush `maxCompressedLength` bound by at most 5 bytes. The fixed buffers
+/// below carry `5 * flush_budget` bytes of headroom for this, because the
+/// bound itself only budgets for the unflushed block count.
 const flush_budget: usize = 16;
 
-/// The checksum lane's source cap.
+/// The source cap for the checksum-accounting target.
 const checksum_max: usize = 64 * 1024;
 
 /// The corruption source cap: the valid member is built from at most this
@@ -120,12 +87,12 @@ const corrupt_mut_max: usize = 2 * gzip.encode.maxCompressedLength(corrupt_sourc
 /// bytes, so its decode is a ~100x expansion — a bomb in miniature.
 const bomb_source_max: usize = 64 * 1024;
 
-/// The checksum-hook lane's source cap.
+/// The source cap for the checksum-hook target.
 const hook_max: usize = 64 * 1024;
 
 /// Marker bytes appended after a member to prove the reader stops at the
-/// trailer's last byte (README, "Streaming"): the member is self-delimiting,
-/// so bytes after the trailer are not the reader's to consume.
+/// trailer's last byte: the member is self-delimiting, so bytes after the
+/// trailer are not the reader's to consume.
 const marker_len: usize = 8;
 const marker_byte: u8 = 0xa5;
 
@@ -139,9 +106,9 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
 }
 
 /// A Smith-picked implemented level: `.fast`, the stored-only `.@"0"`, or one
-/// of the numeric aliases that tune to `.fast` today (`encode.Level`'s
-/// contract). `.ratio` is never returned — it is `error.Unimplemented`,
-/// exercised explicitly by the round-trip target.
+/// of the numeric levels `.@"1"` to `.@"9"` (which all use the `.fast`
+/// encoder). `.ratio` is never returned: it is `error.Unimplemented`, which
+/// the round-trip target exercises explicitly.
 fn implementedLevel(smith: *Smith) gzip.encode.Level {
     const pick = rangeAtMost(smith, 0, 10);
     if (pick == 0) return .fast;
@@ -172,8 +139,8 @@ fn pump(r: *Io.Reader, w: *Io.Writer, limit: usize) !void {
     }
 }
 
-/// How a corruption-lane pump stopped. `output_full` is the harness's own cap
-/// (a fixed writer), not a codec failure.
+/// How a corruption-target pump stopped. `output_full` is the harness's own
+/// cap (a fixed writer), not a codec failure.
 const Stop = enum { end_of_stream, read_failed, output_full };
 
 const Pumped = struct { served: usize, stop: Stop };
@@ -220,9 +187,9 @@ fn shapeSeed(
     return seed;
 }
 
-/// A stream-lane seed in Smith's serialized form: the little-endian level
-/// `smith.value(encode.Level)` consumes, then the `u32-le` length plus bytes
-/// `smith.slice` consumes.
+/// A seed for the stream targets in Smith's serialized form: the
+/// little-endian level `smith.value(encode.Level)` consumes, then the `u32-le`
+/// length plus bytes `smith.slice` consumes.
 fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8 {
     var seed: [12 + bytes.len]u8 = undefined;
     mem.writeInt(u64, seed[0..8], level, .little);
@@ -299,9 +266,9 @@ fn buildShape(smith: *Smith, buf: []u8) usize {
     return used;
 }
 
-/// RFC 1952 §2.3.1 — the deterministic emitted header (README, "The member
-/// format"): ID1/ID2/CM fixed, FLG=0 (no optional fields, reserved bits
-/// clear), MTIME=0, XFL by level band, OS=255.
+/// RFC 1952 §2.3.1 — the emitted header is the same every time: ID1/ID2/CM
+/// fixed, FLG=0 (no optional fields, reserved bits clear), MTIME=0, XFL by
+/// level band, OS=255.
 fn expectGzipHeader(member: []const u8, level: gzip.encode.Level) !void {
     try testing.expect(member.len >= header_len + trailer_len);
     try testing.expectEqual(@as(u8, 0x1f), member[0]);
@@ -314,9 +281,9 @@ fn expectGzipHeader(member: []const u8, level: gzip.encode.Level) !void {
     try testing.expectEqual(@as(u8, 255), member[9]);
 }
 
-/// RFC 1952 §2.3.1 — XFL is informational; the emitted band follows the
-/// reference lineage (README, "The member format"): 4 for the levels that
-/// select the fast fixed-Huffman encoder, 2 for level 9, 0 otherwise.
+/// RFC 1952 §2.3.1 — XFL is informational; the emitted band is the one C
+/// zlib and Go use: 4 for `.fast`, `.@"0"` and `.@"1"`, 2 for level 9, 0
+/// otherwise.
 fn xflFor(level: gzip.encode.Level) u8 {
     return switch (level) {
         .fast, .@"0", .@"1" => 4,
@@ -384,8 +351,8 @@ fn expectFailure(result: gzip.decode.DecompressError!usize) !void {
 }
 
 /// Whatever a hostile member decoded to must survive a full encode/decode
-/// cycle (the oracle-within-process property): our encoder is checked by our
-/// decoder on bytes the fuzzer chose, not on bytes we chose.
+/// cycle: the encoder is checked by the decoder on bytes the fuzzer chose,
+/// not on bytes we chose.
 fn reencodeRoundTrip(bytes: []const u8) !void {
     assert(bytes.len <= corrupt_out_max);
     var member: [gzip.encode.maxCompressedLength(corrupt_out_max)]u8 = undefined;
@@ -437,9 +404,9 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     if (level == .ratio) {
-        // encode.Level's contract: the ratio mode is `error.Unimplemented` on
-        // the one-shot and `error.ReadFailed` on the stream, never silent
-        // aliasing (README, "API").
+        // `.ratio` is `error.Unimplemented` on the one-shot and
+        // `error.ReadFailed` on the stream pump, never silently aliased to
+        // another level.
         var tiny: [16]u8 = undefined;
         try testing.expectError(
             error.Unimplemented,
@@ -464,7 +431,7 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     const m_len = try gzip.encode.compress(source, &member_buf, .{ .level = level });
     const member = member_buf[0..m_len];
 
-    // The documented bound, on every emission (README, "Contracts").
+    // The `maxCompressedLength` bound holds on every emission.
     try testing.expect(m_len <= gzip.encode.maxCompressedLength(source.len));
     try expectGzipHeader(member, level);
     try expectGzipTrailer(member, source);
@@ -485,10 +452,9 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, source, plain_buf[0..m]);
     try sentinel.expect(&plain_buf, m);
 
-    // The trailer-location divergence, pinned: the one-shot decodes a member
-    // followed by marker bytes identically — bytes after the trailer are
-    // ignored (README, "Contracts"; the streaming reader is the
-    // boundary-aware route).
+    // Bytes after the trailer are ignored by the one-shot decoder, so a member
+    // followed by marker bytes decodes identically (the streaming reader is
+    // the route that sees the boundary).
     fastmem.set(u8, member_buf[m_len..][0..marker_len], marker_byte);
     const framed = member_buf[0 .. m_len + marker_len];
     sentinel.fill(&plain_buf);
@@ -506,8 +472,8 @@ test "gzip fuzz: one-shot round trip" {
 // Target 2: header and trailer corruption
 // ---------------------------------------------------------------------------
 
-/// The outcome class a mutation pins (README, "The member format" and
-/// "Contracts"; the error names are the `DecompressError` set).
+/// The outcome class a mutation pins; the error names are those of
+/// `DecompressError`.
 const Expected = enum {
     /// The member must decode to exactly the original source.
     exact_source,
@@ -521,7 +487,8 @@ const Expected = enum {
     fail_header_too_long,
     /// `error.WrongChecksum` or `error.WrongSize`.
     fail_trailer,
-    /// Fail closed or succeed, with the universal properties checked.
+    /// Either outcome is allowed, but the properties that hold for every
+    /// outcome are checked.
     unknown,
 };
 
@@ -541,10 +508,10 @@ const Mutation = enum(u8) {
     flip_magic,
     /// FEXTRA/FNAME/FCOMMENT/FHCRC: the parse shifts into the body.
     poke_optional_flg,
-    /// A tiny member declaring a 65,535-byte extra field (T7): fail closed,
-    /// never staged.
+    /// A tiny member declaring a 65,535-byte extra field: the skip runs out of
+    /// input, and the field is never stored.
     giant_xlen,
-    /// FNAME with no NUL before the 512-byte cap (T7): `HeaderTooLong`.
+    /// FNAME with no NUL before the 512-byte cap: `HeaderTooLong`.
     unterminated_name,
     /// Marker bytes after the trailer: ignored by the one-shot, unconsumed by
     /// the reader.
@@ -599,7 +566,7 @@ fn mutateMember(smith: *Smith, buf: []u8, member_len: usize) Mutated {
         .set_reserved_flg => {
             // §2.3.1.2 — a reserved bit "could indicate the presence of a new
             // field that would cause subsequent data to be interpreted
-            // incorrectly": fail closed.
+            // incorrectly": the header is rejected.
             const bit = @as(u8, 0x20) << @intCast(rangeAtMost(smith, 0, 2));
             buf[3] |= bit;
             return .{ .len = member_len, .member_end = member_len, .expected = .fail_bad_header };
@@ -616,7 +583,7 @@ fn mutateMember(smith: *Smith, buf: []u8, member_len: usize) Mutated {
         },
         .giant_xlen => {
             // FLG = FEXTRA, XLEN = 0xffff, and nothing after: the skip runs
-            // out of input (§2.3.1.1, T7).
+            // out of input (§2.3.1.1).
             buf[3] = 0x04;
             fastmem.set(u8, buf[header_len..][0..2], 0xff);
             return .{
@@ -780,8 +747,8 @@ fn checkReader(mutated: []const u8, source: []const u8, meta: Mutated) !void {
 /// Attacks the header parse (magic, CM, FLG bits, the optional-field skip, the
 /// 512-byte FNAME cap, a giant XLEN), the body's exact end, and the trailer
 /// check (CRC-32 and ISIZE). The property: the mutation's contract class
-/// holds — the specific error, or an exact-source decode for ignorable header
-/// bytes and trailing bytes — and otherwise the decode fails closed, any
+/// holds (the specific error, or an exact-source decode for ignorable header
+/// bytes and trailing bytes), and otherwise the decode returns an error, any
 /// success re-encodes, and the streaming reader's clean end is
 /// trailer-consistent at the exact member boundary.
 fn fuzzHeaderTrailerCorruption(_: void, smith: *Smith) anyerror!void {
@@ -872,7 +839,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, input, plain.written());
     try testing.expectEqual(member.len, framed_in.seek);
 
-    // Garbage where a member would be: fail closed with BadHeader, sticky.
+    // Garbage where a member would be: BadHeader, and the failure is sticky.
     // The garbage is at least a full fixed header, so the magic check is what
     // rejects it (a shorter prefix is a truncated header instead).
     var garbage: [2 * marker_len]u8 = undefined;
@@ -1072,8 +1039,8 @@ test "gzip fuzz: writer machinery" {
 /// slides the window and crosses blocks.
 const reader_source_max: usize = 96 * 1024;
 
-/// The consumer ops the reader target mixes: the `Io.Reader` surface the
-/// README's "Streaming" section contracts on.
+/// The consumer ops the reader target mixes: the `Io.Reader` calls a
+/// consumer can make on a `gzip.Reader`.
 const ReadOp = enum(u8) {
     peek,
     take,
@@ -1088,8 +1055,8 @@ const ReadOp = enum(u8) {
     /// room, `StreamTooLong` when it does not — never an assert.
     over_cap_take,
     /// A peek past the cap with no `left` guard: the member's end through the
-    /// rebase path, where the trailer check must still run (the M3 closing
-    /// review's blocker: a clean end always means the trailer was verified).
+    /// rebase path, where the trailer check must still run (a clean end always
+    /// means the trailer was verified).
     over_end_peek,
 };
 
@@ -1159,9 +1126,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
         const left = input.len - pos;
         switch (smith.value(ReadOp)) {
             .peek => {
-                // README, "Streaming": any contiguous request of at most the
-                // window's retained tail is served, so a failure here is the
-                // contiguity stop, not a decode error.
+                // A contiguous request of at most the window's retained tail
+                // is served; the only failure accepted here is the contiguity
+                // stop, never a decode error.
                 const n = @min(left, rangeAtMost(smith, 1, windowTailLen()));
                 if (r.reader.peek(n)) |served| {
                     try testing.expectEqualSlices(u8, input[pos..][0..n], served);
@@ -1262,7 +1229,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
                     pos += n;
                 } else |err| {
                     // Past what the window can hold at the consumer's
-                    // position: fail closed, stickily, with the contiguity
+                    // position: the failure is sticky, with the contiguity
                     // detail.
                     try expectContiguityStop(&r, err);
                     dead = true;
@@ -1273,19 +1240,18 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
                 // A peek past the contiguity cap with no `left` guard:
                 // mid-member it is the contiguity stop, but at the member's
                 // end it routes through `rebase`, where flate's sticky end
-                // fires before the trailer is read — the trailer check must
-                // run there too (the M3 closing review's blocker: a clean
-                // `EndOfStream` must always mean the trailer was verified,
-                // `§2.3.1`, T4). The unserved decoded bytes stay in the
-                // window; the epilogue drains them.
+                // fires before the trailer is read. The trailer check must
+                // run there too: a clean `EndOfStream` must always mean the
+                // trailer was verified (`§2.3.1`). The unserved decoded
+                // bytes stay in the window; the epilogue drains them.
                 const n = windowTailLen() + 1 + rangeAtMost(smith, 0, windowTailLen() - 1);
                 if (r.reader.peek(n)) |served| {
                     try testing.expect(n <= left);
                     try testing.expectEqualSlices(u8, input[pos..][0..n], served);
                 } else |err| switch (err) {
                     error.EndOfStream => {
-                        // The member ended through the trailer funnel: the
-                        // clean end is real — no detail, the state done, the
+                        // The member ended through the trailer check, so the
+                        // clean end is real: no detail, the state done, the
                         // input stopped exactly at the trailer's last byte
                         // (the plain reader), every unserved decoded byte
                         // still in the window.
@@ -1325,16 +1291,15 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
 }
 
 /// The retained history length: `Reader.Buffer` is `2 * history_len` and the
-/// decoder guarantees a contiguous request of at most one history length
-/// (`src/flate/README.md`, "Streaming"; the container re-exports the buffer).
+/// decoder guarantees a contiguous request of at most one history length.
 fn windowTailLen() usize {
     return @sizeOf(gzip.Reader.Buffer) / 2;
 }
 
 /// The only legal failure of a *valid* member: the window cannot hold what the
-/// consumer asked for (README, "Streaming": the contiguous-read cap). Anything
-/// else is a finding. The failure is sticky and reports the detail beside the
-/// interface's coarse error.
+/// consumer asked for (the contiguous-read cap). Anything else is a finding.
+/// The failure is sticky and reports the detail beside the interface's coarse
+/// error.
 fn expectContiguityStop(r: *gzip.Reader, err: anyerror) !void {
     try testing.expectEqual(error.ReadFailed, err);
     try testing.expectEqual(gzip.Reader.Error.StreamTooLong, r.err.?);
@@ -1358,12 +1323,11 @@ test "gzip fuzz: reader machinery" {
 
 /// Target 6: the checksum's byte accounting through the streaming writer.
 ///
-/// The flate checksum hook is not in the tree yet, so this lane drives the
-/// public surface instead: chunked writes with mid-stream flushes, empty
-/// writes, and empty flushes — then the trailer must equal a reference CRC-32
+/// Drives the public surface: chunked writes with mid-stream flushes, empty
+/// writes, and empty flushes. The trailer must then equal a reference CRC-32
 /// over exactly the input bytes in order (a dropped, doubled, or reordered
 /// byte changes it). The reader must verify the same trailer, and a corrupted
-/// CRC byte or ISIZE byte must fail closed with the specific error, stickily.
+/// CRC byte or ISIZE byte must return the specific error, stickily.
 fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     const gpa = testing.allocator;
     const level = implementedLevel(smith);
@@ -1402,8 +1366,8 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, input, plain.written());
     try testing.expectEqual(m.len, fixed_in.seek);
 
-    // A corrupted trailer must fail closed: a CRC byte is WrongChecksum, an
-    // ISIZE byte is WrongSize — the check the format's own trailer exists for.
+    // A corrupted trailer must be rejected: a CRC byte is WrongChecksum, an
+    // ISIZE byte is WrongSize.
     var corrupted: [gzip.encode.maxCompressedLength(checksum_max) + 5 * flush_budget]u8 = undefined;
     fastmem.copy(u8, corrupted[0..m.len], m);
     const at = m.len - trailer_len + rangeAtMost(smith, 0, trailer_len - 1);
@@ -1451,9 +1415,9 @@ test "gzip fuzz: checksum accounting" {
 // Target 7: the flate checksum hook
 // ---------------------------------------------------------------------------
 
-/// The hook lane's fold state: the container's day-one kernel is std's
-/// (README, "The checksums"), so the synthetic hook folds runs through a std
-/// CRC-32 state and the reference is the one-shot hash over the same bytes.
+/// The checksum-hook target's fold state: the synthetic hook folds runs into
+/// a std CRC-32 state, and the reference is the one-shot hash over the same
+/// bytes.
 const Fold = struct {
     crc: std.hash.crc.Crc32 = .init(),
 
@@ -1476,16 +1440,16 @@ const hook_corpus: []const []const u8 = &.{
     &sliceSeed(0, ""),
 };
 
-/// Target 7: the flate checksum hook, the container's dependency.
+/// Target 7: the flate checksum hook (`src/flate/Checksum.zig`), which the
+/// container relies on.
 ///
-/// The hook slice is in the tree (`src/flate/Checksum.zig`), so this lane pins
-/// the contract the containers ride (README, "Hashing rides the codec
-/// boundary"): set before the first write and the first read, the hook folds
-/// every payload byte exactly once, in stream order, through both streaming
-/// layers — across mid-stream flushes on the encode side and a chunked input
-/// on the decode side — and each digest equals the reference CRC-32 over the
-/// same bytes. The container's own wiring of this state into a trailer is
-/// targets 1, 3, and 6; this lane is the raw funnel underneath.
+/// Drives `flate.Writer` and `flate.Reader` with a synthetic fold. Set before
+/// the first write and the first read, the hook must fold every payload byte
+/// exactly once, in stream order, through both layers (across mid-stream
+/// flushes on the encode side and a chunked input on the decode side), and
+/// each digest must equal the reference CRC-32 over the same bytes. How the
+/// container turns this state into a trailer is covered by targets 1, 3, and
+/// 6; this target checks the hook underneath.
 fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
     const gpa = testing.allocator;
     var input_buf: [hook_max]u8 = undefined;
@@ -1565,18 +1529,17 @@ const amplification_corpus: []const []const u8 = &.{
 
 /// Target 8: the amplification caps.
 ///
-/// Attacks the two amplification rules the README states ("Sizing"): the
-/// one-shot writes only into `target`, and a small member cannot buy output
-/// past what the caller offered. A bomb-shaped member is decoded into a cap
-/// below its decoded length — including the exact boundary `len - 1` — which
-/// must fail closed with `BufferTooSmall` and leave every byte past the cap
-/// untouched, then at the exact length (identity) and with slack (the guard
-/// region untouched). The stored-only level decodes the same source through
-/// the passthrough path, so the cap rule is not a property of the match
-/// finder.
+/// Attacks two amplification rules: the one-shot decoder writes only into
+/// `target`, and a small member cannot buy output past what the caller
+/// offered. A bomb-shaped member is decoded into a cap below its decoded
+/// length, including the exact boundary `len - 1`; that must return
+/// `BufferTooSmall` and leave every byte past the cap untouched. It is then
+/// decoded at the exact length (identity) and with slack (the guard region
+/// untouched). The stored-only level decodes the same source through the
+/// passthrough path, so the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const level = smith.value(gzip.encode.Level);
-    if (level == .ratio) return; // the reserved seat; target 1 covers it
+    if (level == .ratio) return; // not implemented; target 1 covers it
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];
@@ -1595,7 +1558,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
 
     var window: [bomb_source_max + guard_len]u8 = undefined;
 
-    // Below the decoded length: fail closed, nothing past the cap written.
+    // Below the decoded length: BufferTooSmall, nothing past the cap written.
     if (source.len > 0) {
         const caps = [_]usize{ source.len - 1, rangeAtMost(smith, 0, source.len - 1) };
         for (caps) |cap| {
@@ -1628,11 +1591,12 @@ test "gzip fuzz: amplification caps" {
 }
 
 // ---------------------------------------------------------------------------
-// Contract pins: the hostile-header first targets (T7), deterministic
+// Contract pins: deterministic hostile-header cases
 // ---------------------------------------------------------------------------
 
-// The constructed members the header parser must fail closed on, as plain
-// unit tests so a normal `zig build test` run gates them too.
+// Hand-built headers at the parser's limits (rejected, accepted, and ignorable
+// fields), as a plain unit test so a normal `zig build test` run gates them
+// too.
 test "gzip fuzz: hostile-header pins" {
     // The empty member our encoder emits: FLG=0, MTIME=0, XFL=4, OS=255, the
     // final empty fixed block, CRC-32 0 and ISIZE 0 (§2.3.1).
@@ -1640,10 +1604,10 @@ test "gzip fuzz: hostile-header pins" {
         "\x03\x00" ++
         "\x00\x00\x00\x00\x00\x00\x00\x00";
 
-    // A zero-byte input is error.Truncated: no member began (T2/OQ3).
+    // A zero-byte input is error.Truncated: no member began.
     try testing.expectError(error.Truncated, gzip.decode.decompress("", &.{}));
 
-    // Every truncation — header, body, trailer — fails closed.
+    // Every truncation (header, body, trailer) returns `Truncated`.
     var i: usize = 0;
     while (i < empty_member.len) : (i += 1) {
         try testing.expectError(
@@ -1653,11 +1617,11 @@ test "gzip fuzz: hostile-header pins" {
     }
 
     // A tiny member declaring a giant XLEN: the skip runs out of input, and
-    // nothing was staged (§2.3.1.1, T7).
+    // nothing was stored (§2.3.1.1).
     const giant_xlen = "\x1f\x8b\x08\x04\x00\x00\x00\x00\x00\xff\xff\xff";
     try testing.expectError(error.Truncated, gzip.decode.decompress(giant_xlen, &.{}));
 
-    // An unterminated FNAME past the 512-byte cap: HeaderTooLong (T7).
+    // An unterminated FNAME past the 512-byte cap: HeaderTooLong.
     var name_buf: [header_len + 600]u8 = undefined;
     fastmem.copy(u8, name_buf[0..header_len], empty_member[0..header_len]);
     name_buf[3] = 0x08; // FNAME
@@ -1681,7 +1645,7 @@ test "gzip fuzz: hostile-header pins" {
         try testing.expectError(error.BadHeader, gzip.decode.decompress(&buf, &.{}));
     }
 
-    // FHCRC (§2.3.1, T3): the low 16 bits of the header CRC-32, verified when
+    // FHCRC (§2.3.1): the low 16 bits of the header CRC-32, verified when
     // present — a right value decodes, a wrong one is WrongHeaderChecksum.
     var fhcrc: [header_len + 2 + 2 + trailer_len]u8 = undefined;
     fastmem.copy(u8, fhcrc[0..header_len], empty_member[0..header_len]);

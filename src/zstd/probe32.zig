@@ -1,17 +1,15 @@
-//! The 32-bit proof probe: drives the Reader over the two large-total frames
-//! on a usize=32 target, the only place their wraps are observable (the
-//! M4 closing reviews found both there: `frame.State.decoded_len` and the
-//! checksum fold's byte count, the latter inside std's `XxHash64`).
+//! A 32-bit check for `zstd.Reader`. It decodes two frames whose output is
+//! more than 2^32 bytes on a target where `usize` is 32 bits, the only place
+//! the counters that must not wrap can be seen wrapping: `frame.State.decoded_len`
+//! and the XXH64 byte count.
 //!
-//! Build and run: `just check-32` — this file is installed as
-//! `zig-out/bin/zstd-probe32.wasm` (wasm32-wasi, ReleaseSafe — a wrap
-//! panics) and executed under wasmtime. The aarch64 dev host cannot see
-//! either wrap (usize is u64 there), and `just check-baseline` only compiles
-//! the 32-bit targets; executing on one is the proof, and this probe is the
-//! execution. The two frames and the direct-drive drain mirror the tests in
-//! `Reader.zig` ("the frame total runs past 2^32 without wrapping", "the
-//! checksum fold runs past 2^32 without wrapping"); the probe is
-//! self-asserting and exit-coded for the runner.
+//! Run it with `just check-32`. The file is built as `zig-out/bin/zstd-probe32.wasm`
+//! (wasm32-wasi, ReleaseSafe, so a wrap panics) and run under wasmtime. A 64-bit
+//! host cannot show either wrap, and `just check-baseline` only compiles for the
+//! other targets. The frames and the drain loop mirror the `Reader.zig` tests "the
+//! frame total runs past 2^32 without wrapping" and "the checksum fold runs past
+//! 2^32 without wrapping". The probe checks its own results and exits nonzero on
+//! failure.
 
 const std = @import("std");
 const Io = std.Io;
@@ -55,8 +53,8 @@ fn buildFrame(checksum: bool) []const u8 {
     return frame_buf[0..at];
 }
 
-/// The direct-drive drain (the tests' shape): the per-call counts fit any
-/// usize; only the total needs the u64.
+/// Reads `r` to its end and adds up the bytes served. Each call's count fits a
+/// `usize`; only the total needs 64 bits.
 fn drain(r: *Reader, served: *u64) !void {
     var sink: Io.Writer.Discarding = .init(&.{});
     while (true) {

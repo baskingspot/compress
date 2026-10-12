@@ -1,11 +1,11 @@
-"""Shared plumbing for the external-oracle lanes (flate, gzip, zlib).
+"""Shared plumbing for the external-oracle scripts (flate, gzip, zlib).
 
-Each lane is its own script with its own harness, its own oracle, and its own
-checks; nothing here knows about a codec. This module owns the parts that are
-identical across the lanes: the repository root, the generated conformance
-shapes, one harness command over a temp-file input, and one example-CLI row.
-The lanes import nothing from each other and nothing from `src/` — python's
-zlib and the CPython gzip module stay the independent references.
+Each script has its own harness, its own oracle, and its own checks; nothing
+here knows about a codec. This module holds what the scripts share: the
+repository root, the generated conformance shapes, one harness command over a
+temp-file input, and one example-CLI row. The scripts import nothing from each
+other and nothing from `src/`, so python's zlib and the CPython gzip module
+stay independent references.
 """
 
 import os
@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 def _shapes() -> dict[str, bytes]:
     """The generated conformance shapes by description.
 
-    The same bytes in every lane, so the same inputs exercise every codec:
+    The same bytes in every script, so the same inputs exercise every codec:
     the empty input, text, seeded random bytes, an RLE run that spans a
     64-KiB block split, and a multi-block long text.
     """
@@ -60,7 +60,7 @@ def run_harness(
 def harness_output(harness: Path, command: str, data: bytes, *args: str) -> bytes:
     """`run_harness` for the commands that must succeed.
 
-    A nonzero exit is the lane's failure, with the harness's own stderr (the
+    A nonzero exit raises AssertionError, with the harness's own stderr (the
     codec's error name) as the detail.
     """
     result = run_harness(harness, command, data, *args)

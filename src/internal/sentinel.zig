@@ -1,11 +1,11 @@
-//! The decode-overrun sentinel: every decode test pre-fills the target with
-//! a cycling byte pattern and proves the bytes past the decoded length are
-//! untouched (AGENTS.md, "Rules"; both codecs' READMEs, "Testing").
+//! The decode-overrun sentinel. A decode test pre-fills its target with
+//! `fill`, decodes, then calls `expect` to prove the bytes past the decoded
+//! length are untouched.
 //!
-//! The cycle is `[base, base + len)`, period 37: prime, so a mis-copied byte
-//! lands at an unrelated phase — a power of two could mask an 8-byte-off
-//! copy. The range and period match golang/snappy's
-//! `notPresentBase`/`notPresentLen` (THIRD_PARTY.md).
+//! The pattern cycles through `[base, base + len)` with period 37. The period
+//! is prime so a mis-copied byte lands at an unrelated phase; a power of two
+//! could mask a copy that is off by 8 bytes. The range and period match
+//! golang/snappy's `notPresentBase`/`notPresentLen`.
 
 const std = @import("std");
 const testing = std.testing;
@@ -22,8 +22,9 @@ pub fn at(i: usize) u8 {
     return base + @as(u8, @intCast(i % len));
 }
 
-/// Pre-fill `target` with the cycling sentinel, from index 0: the phase is
-/// the absolute buffer index, so a partial fill starts there too.
+/// Fills `target` with the sentinel cycle, so that `target[i] == at(i)` for
+/// every `i`. A target shorter than one cycle gets the start of it. Pass
+/// `expect` the same slice.
 pub fn fill(target: []u8) void {
     var i: usize = 0;
     while (i + len <= target.len) : (i += len) {
@@ -32,8 +33,11 @@ pub fn fill(target: []u8) void {
     fastmem.copy(u8, target[i..], pattern[0 .. target.len - i]);
 }
 
-/// Every byte from `decoded_len` on must still hold its sentinel: a decode
-/// wrote past the length it was allowed.
+/// Test helper: checks that every byte of `target` from `decoded_len` on
+/// still holds its sentinel value. A byte that does not means the decode wrote
+/// past the length it was allowed; the check returns `error.TestExpectedEqual`
+/// at the first such byte. `target` must have been filled with `fill`, and
+/// `decoded_len` must not exceed `target.len`.
 pub fn expect(target: []const u8, decoded_len: usize) !void {
     for (target[decoded_len..], decoded_len..) |byte, i| {
         try testing.expectEqual(at(i), byte);

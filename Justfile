@@ -1,5 +1,4 @@
-# zcompress: fast compression codecs for Zig. docs/zcompress-plan.md is the
-# plan: mission, architecture, methodology, milestones with acceptance criteria.
+# zcompress: fast compression codecs for Zig. `just --list` shows the recipes.
 
 default: test
 
@@ -26,9 +25,7 @@ lint:
 fmt:
     zig fmt src build.zig
 
-# The 32-bit proof: the large-total probe executed on a usize=32 target
-# (wasm32-wasi under wasmtime), where the wraps are observable. The dev host
-# cannot see them (usize is u64 there) and check-baseline only compiles.
+# Decode very large zstd frames on a 32-bit target (wasm32-wasi under wasmtime)
 check-32:
     zig build probe32 && wasmtime zig-out/bin/zstd-probe32.wasm
 
@@ -41,55 +38,26 @@ check-baseline:
     zig build check -Dtarget=riscv64-linux
     zig build check -Dtarget=wasm32-wasi
 
-# External-oracle lane for gzip: python3's zlib (the C reference, the wbits
-# 31 gzip wrapper), the CPython gzip module, and the gzip/gunzip 1.14 CLIs
-# cross-check our members in both directions (our encode -> their decode,
-# theirs -> our decode) over generated shapes and levels, plus the FHCRC
-# verification, the single-member boundary, the trailing-garbage fail-closed
-# pin, and the streaming rows through the example CLI's caller loop. The
-# incantations are docs/research/containers-notes.md §5.5; the harness is
-# src/gzip/oracle.zig.
+# Check gzip against python3's zlib, CPython's gzip module, and the gzip/gunzip CLIs
 gzip-oracle:
     zig build gzip-oracle-harness
     uv run scripts/gzip_oracle.py
 
-# External-oracle lane for zlib: python3's zlib (the C reference, the wbits 15
-# zlib wrapper) cross-checks our streams in both directions (our encode -> its
-# decode, its encode -> our decode) over generated shapes and levels, plus the
-# FDICT refusal (and the T5 FCHECK=31 corner), the FLEVEL/FCHECK emissions, the
-# exact stream boundary, and the streaming rows through the example CLI. The
-# incantations are docs/research/containers-notes.md §5.5; the harness is
-# src/zlib/oracle.zig.
+# Check zlib against python3's zlib in both directions, including the FDICT refusal
 zlib-oracle:
     zig build zlib-oracle-harness
     uv run scripts/zlib_oracle.py
 
-# External-oracle lane for flate: python3's zlib cross-checks the committed
-# fixtures and freshly generated shapes in both directions, raw deflate
-# (wbits=-15) — the incantations of docs/research/flate-notes.md §4.3. Both
-# sides run through the harness built from src/flate/oracle.zig: the decode
-# direction (oracle encode -> our decode) and the encode direction (our encode
-# -> oracle decode), which is the only lane that catches a bit-packing bug
-# invisible to a self-round-trip (the T1 `writeBits`/`writeCode` split). The
-# streaming row drives the same both-directions check through the example CLI,
-# which pumps through flate.Reader/flate.Writer (src/flate/README.md,
-# "Streaming") — the only lane that covers the streaming layer end to end.
-# The flate external-oracle conformance lane: our codec vs python3 zlib
-# raw-deflate, both directions (python is the point — an independent
-# implementation). Fixtures, generated shapes, and CLI streaming rows.
+# Check flate (raw deflate) against python3's zlib in both directions
 flate-oracle:
     zig build flate-oracle-harness
     uv run scripts/flate_oracle.py
 
-# Generate + verify the fleet corpus (bench/README.md, "Corpus"): the raw
-# shapes and the reference blobs — our encoders for flate/gzip/zlib/snappy,
-# the flake-pinned zstd CLI for the .zst frames — land in the gitignored
-# bench/corpus-gen/, every file checked against the committed
-# bench/corpus/SHA256SUMS (the trust anchor). The fleet harness refuses to
-# run without a verified generated corpus.
+# Generate the benchmark corpus in bench/corpus-gen/ and verify it against bench/corpus/SHA256SUMS
 corpus:
     zig build corpus
 
+# Local benchmarks (zig-benchmark). The numbers are not claims.
 bench *ARGS:
     zig build bench -Doptimize=ReleaseFast -- {{ ARGS }}
 
@@ -101,9 +69,9 @@ example example *args:
 clean:
     rm -rf zig-out .zig-cache zig-pkg bench/zig-out bench/.zig-cache bench/zig-pkg
 
-# Benchmark fleet: the bench/ harness (bench/README.md). The fleet shares the
-# fastmem-bench IAM user and launch templates (see bench.toml); every fleet
-# command runs as that profile.
+# EC2 benchmark harness (bench/README.md). It shares fastmem's IAM user and
+# launch templates (see bench.toml), so every recipe below runs under that AWS
+# profile.
 export AWS_PROFILE := env("AWS_PROFILE", "fastmem-bench")
 
 # Run any harness command (e.g. just b ls, just b up c8g --ttl 2h, just b analyze <run-dir>)
@@ -116,12 +84,12 @@ b *ARGS:
 bench-up *TARGETS:
     uv run bench up {{ if TARGETS == "" { "c7i c8i c7a c8a c7g c8g c9g" } else { TARGETS } }}
 
-# Terminate every box of the fleet
+# Terminate every box with this project's tag, including boxes the fastmem repo launched
 [working-directory("bench")]
 bench-down:
     uv run bench down --all
 
-# Show the fleet
+# Show the running boxes
 [working-directory("bench")]
 bench-ls:
     uv run bench ls
@@ -131,7 +99,7 @@ bench-ls:
 bench-test *ARGS:
     uv run bench test {{ ARGS }}
 
-# Measure on every running box (e.g. just bench-run --up --rounds 5 --label m3)
+# Measure on every running box (e.g. just bench-run --up --rounds 5 --label base)
 [working-directory("bench")]
 bench-run *ARGS:
     uv run bench run {{ ARGS }}

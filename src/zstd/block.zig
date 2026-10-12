@@ -1,128 +1,17 @@
-//! The block layer of a zstandard frame (`§3.1.1.2`): the 3-byte
-//! Block_Header, the four Block_Types, and the per-block decode that
-//! composes the landed literals and sequences layers with the frame's
-//! cross-block state.
+//! The block layer of a Zstandard frame (`§3.1.1.2`): the 3-byte Block_Header,
+//! the four Block_Types, and the per-block decode that ties the literals and
+//! sequences layers to the frame's cross-block state.
 //!
-//! A frame is a chain of blocks — "Each frame must have at least 1 block,
-//! but there is no upper limit on the number of blocks per frame"
-//! (`§3.1.1.2`) — and each block is a 3-byte little-endian Block_Header
-//! followed by Block_Content: Last_Block (bit 0), Block_Type (bits 1-2),
-//! Block_Size (bits 3-23) (`§3.1.1.2`, Tables 8-9). Four types
-//! (`§3.1.1.2.2`, Table 10):
+//! `decode` decodes one block, starting at its Block_Header, into the frame's
+//! output region. A Raw block is copied, an RLE block repeats one byte
+//! Block_Size times, a Compressed block runs `literals.decode` and then
+//! `sequences.decode`, and a Reserved block is an error (`§3.1.1.2.2`, Table
+//! 10). `parseHeader` and `decodeContent` split the same work for a caller that
+//! reads its own input. The `literals.State` and `sequences.State` a Compressed
+//! block updates belong to the frame; this layer only passes them through.
 //!
-//! - **Raw_Block** (0): "Block_Content contains Block_Size bytes" — one
-//!   `fastmem.copy`.
-//! - **RLE_Block** (1): "a single byte, repeated Block_Size times";
-//!   Block_Content is that one byte — one `fastmem.set`. The reference CLI
-//!   never emits it, so only fixtures cover it (the golden corpus's
-//!   `rle-first-block.zst`, and `frame_rle`/`frame_rle_max` here).
-//! - **Compressed_Block** (2): Block_Size is "the length of Block_Content,
-//!   namely the compressed data. The decompressed size is not known, but
-//!   its maximum possible value is guaranteed" — `decodeCompressed` below,
-//!   the literals and sequences layers composed (`§3.1.1.3`).
-//! - **Reserved** (3): "This is not a block. ... If such a value is
-//!   present, it is considered to be corrupt data, and a compliant decoder
-//!   must reject it" — `ReservedBlock`.
-//!
-//! Block_Maximum_Size (`§3.1.1.2.4`) is "the smallest of: Window_Size,
-//! 128 KB", "constant for a given frame", and "applicable to both the
-//! decompressed size and the compressed size of any block in the frame" —
-//! so one `BlockOversize` covers a declared Block_Size past it (every type)
-//! and a compressed block whose output would land past it, and the
-//! window/block coupling is real: a frame with a small window cannot carry
-//! a large block at all (the single-segment `Window_Size = Frame_Content_Size`
-//! corner, `docs/research/zstd-notes.md` §4 T7).
-//!
-//! ## The composition, and the state it threads
-//!
-//! `decode` is the whole hand-off to the frame layer: it takes the frame's
-//! remaining bytes at this block's Block_Header, the frame's output region,
-//! how many bytes the frame has decoded so far, the frame's Window_Size, and
-//! the two landed layers' states; it returns the block's output length, the
-//! bytes it consumed, and the Last_Block flag. Everything the frame layer
-//! has to carry lives in the layers' own states and its one running counter:
-//!
-//! - **The output region.** `target[0..decoded_len]` is the frame's output
-//!   so far — the one-shot's `target`, the streaming reader's serving
-//!   region — and `target[decoded_len..]` is this block's capacity. The
-//!   region the sequences layer sees is re-based at `decoded_len - history`
-//!   (`history = min(decoded_len, Window_Size)`): the writes still land at
-//!   `target[decoded_len..]` while a match may read from the region's start
-//!   through the current write position — the history region plus this
-//!   block's own writes (T12, stated precisely). That addressable span, not
-//!   the declared Window_Size alone, is the bound the sequences layer
-//!   enforces: `executeSequence` rejects only an offset that reaches before
-//!   the region's start, so an offset of exactly Window_Size reads the
-//!   oldest retained byte (the reference family's windowSize-byte history
-//!   accepts it and its encoder can emit it — its match search is bounded
-//!   by the window), and `frame_window_1k_span`'s ten literals make an
-//!   offset of 1025 over a declared 1 KB window addressable — it decodes
-//!   here and through the pinned CLI alike. The reference's whole-buffer
-//!   decoder is *looser* still when more bytes are around: it checks the
-//!   available history, not the declared window (`frame_window_*_over` are
-//!   frames it decodes and we refuse). Ours fails closed at the region's
-//!   start, so a hostile frame cannot read past what this decoder holds,
-//!   and it is what lets a 256 KB frame over a 128 KB window decode with
-//!   the same call as a 20-byte one (`frame_window_128k`).
-//! - **The literals state** (`literals.State`): the Huffman tree a
-//!   Treeless_Literals_Block reuses — "The Huffman tree comes from the
-//!   previous Compressed_Literals_Block" (`§3.1.1.3`) — one per frame,
-//!   updated only by a Compressed_Literals_Block.
-//! - **The sequences state** (`sequences.State`): the three decoding tables
-//!   a Repeat_Mode reuses and the three repeat offsets, one per frame
-//!   (`§3.1.1.3`, `§3.1.1.5`). A Raw or RLE block leaves both states
-//!   alone — "blocks that are not Compressed_Block are skipped; they do not
-//!   contribute to offset history" (`§3.1.1.5`) — which is why this layer
-//!   threads them rather than owning them: only a Compressed_Block with a
-//!   nonzero sequence count moves the tables and the offsets, and a
-//!   zero-count section leaves them too.
-//! - **The window accounting** is the caller's `decoded_len`; the block
-//!   layer never accumulates it, so the frame layer's one counter is the
-//!   whole story.
-//!
-//! ## Staging and amplification limits
-//!
-//! The compressed block is staged before it is decoded, because both
-//! backwards bitstreams (the sequences stream, `§3.1.1.3.2.1.2`, and each
-//! Huffman literals stream, `§4.2.2`) are read from the block's *end*
-//! toward its beginning: the last byte's offset must be known before the
-//! first symbol. Here `source` *is* that staged block — a contiguous slice,
-//! exactly `Block_Size` bytes of content — so the one-shot passes the input
-//! directly and the streaming reader stages the block into its own buffer
-//! (`src/zstd/README.md`, "The block and entropy layers"). The literals
-//! decode into a comptime `[max_block_size]u8` scratch, bounded by
-//! Block_Maximum_Size: the literals are part of the block's output (every
-//! one of them lands in it, as sequence literals or trailing literals), so
-//! a declared Regenerated_Size past the block maximum is `LiteralsTooLarge`
-//! and never a write. Total per-block stack scratch: 128 KB, comptime, zero
-//! allocation.
-//!
-//! The limits this layer owns, each fail-closed before its write:
-//!
-//! - Block_Size past Block_Maximum_Size is `BlockOversize` (`§3.1.1.2.4`).
-//! - A compressed block whose output would pass Block_Maximum_Size is
-//!   `BlockOversize` too: the output region is capped at the block maximum
-//!   first, so the sequences layer's `BufferTooSmall` means the caller's
-//!   cap only when the cap was smaller (`§8`'s amplification vectors).
-//! - Raw and RLE block sizes are declarations, not licenses: both copies
-//!   are bounded by the caller's remaining capacity, and a declared size
-//!   the target cannot hold is `BufferTooSmall` before the write.
-//! - Block_Content past the input's end — the header itself included — is
-//!   `Truncated`: the input ended inside the frame.
-//!
-//! ## Errors
-//!
-//! The public set is the two landed layers' sets composed with this layer's
-//! own names — `Truncated`, `BlockOversize`, `ReservedBlock`, and the
-//! `BufferTooSmall` the Raw and RLE capacity checks raise (the sequences
-//! layer's name for the same class) — so the frame layer's
-//! `zstd.decode.DecompressError` is this set plus the frame layer's own
-//! (`BadMagic`, `ReservedBitSet`, `DictionaryRequired`,
-//! `ContentSizeMismatch`, `WrongChecksum`, ...). Nothing is renamed: a
-//! sequence that overruns the window is `OffsetTooFar`, a literals section
-//! past the block is `LiteralsTooLarge`, a sequences section cut inside its
-//! header is `MalformedSequencesHeader` (the sequences slice's addition,
-//! carried into the README's list by this slice).
+//! Block_Maximum_Size is the smaller of Window_Size and 128 KiB (`§3.1.1.2.4`)
+//! and bounds the declared and the decoded size of every block.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -148,14 +37,13 @@ pub const max_block_size: usize = 128 * 1024;
 /// convention."
 pub const block_header_len = 3;
 
-/// Everything the block layer reports: the two landed layers' error sets
-/// composed with this layer's own names. The frame layer's public set is
-/// this one plus the frame header's own (`BadMagic`, `ReservedBitSet`,
-/// `DictionaryRequired`, ...).
+/// Everything the block layer reports: the literals and sequences layers'
+/// error sets plus this layer's own names. The frame layer's set adds the
+/// frame header's (`BadMagic`, `ReservedBitSet`, `DictionaryRequired`, and so
+/// on).
 pub const Error = error{
-    /// The 3-byte Block_Header, or the Block_Content its Block_Size
-    /// declares, running past the input (`§3.1.1.2`). The input's end: the
-    /// frame layer's `Truncated`.
+    /// The input ends inside the 3-byte Block_Header or inside the
+    /// Block_Content its Block_Size declares (`§3.1.1.2`).
     Truncated,
     /// `§3.1.1.2.4` — Block_Size past Block_Maximum_Size = "the smallest
     /// of: Window_Size, 128 KB" — or a compressed block that would decode
@@ -165,8 +53,8 @@ pub const Error = error{
     /// `§3.1.1.2.2` — block type 3, Reserved: "This is not a block. ...
     /// a compliant decoder must reject it."
     ReservedBlock,
-    /// A block whose output does not fit the caller's region: the one-shot's
-    /// `target` cap, reported before the overflowing write (`§3.1.1.2.4`,
+    /// A block's output does not fit in what is left of the caller's
+    /// `target`. Raised before the write that would overflow (`§3.1.1.2.4`,
     /// `§8`).
     BufferTooSmall,
 } || literals.Error || sequences.Error;
@@ -225,19 +113,33 @@ pub const Section = struct {
     last_block: bool,
 };
 
-/// Decode one block: the frame's remaining bytes at this block's
-/// Block_Header, into the frame's output region, threading the two landed
-/// layers' per-frame states.
+/// Decode one block. `source` starts at the block's Block_Header and may hold
+/// more input after the block.
 ///
-/// `target[0..decoded_len]` is the frame's output so far and
-/// `target[decoded_len..]` this block's capacity; `window_size` is the
-/// frame's declared Window_Size (`§3.1.1.1.2`), which caps both the history
-/// a match may read and Block_Maximum_Size. Both layers' states are the
-/// frame's, updated in place by a Compressed_Block and left alone by Raw
-/// and RLE blocks (`§3.1.1.5`).
+/// `target[0..decoded_len]` is the frame's output so far, and the block's
+/// output goes to `target[decoded_len..]`. `window_size` is the frame's
+/// Window_Size (`§3.1.1.1.2`); it also sets Block_Maximum_Size, the smaller
+/// of `window_size` and 128 KiB. A match may read the last
+/// `min(decoded_len, window_size)` bytes of the earlier output and whatever
+/// this block has already written. An offset of exactly `window_size` reads
+/// the oldest retained byte, and later in a block an offset can exceed
+/// `window_size`, because the block's own output extends the readable span.
+/// An offset that reaches before the retained history is `OffsetTooFar`.
 ///
-/// Every failure is raised before the write it refuses: the caller's output
-/// past `decoded_len` is untouched on every error path.
+/// `literals_state` and `sequences_state` belong to the frame. A Compressed
+/// block updates them; Raw and RLE blocks leave them alone (`§3.1.1.5`:
+/// "blocks that are not Compressed_Block are skipped; they do not contribute
+/// to offset history").
+///
+/// Returns the bytes written, the bytes consumed (header included), and the
+/// Last_Block flag. The errors are `Error`'s. Each check runs before the write
+/// it guards, so the decode never writes more than Block_Maximum_Size bytes
+/// or past the end of `target`. A Compressed block that fails partway can
+/// leave the output of its earlier sequences in `target[decoded_len..]`; the
+/// caller discards it.
+///
+/// A Compressed block keeps a literals scratch of `max_block_size` (128 KiB)
+/// on the stack. Nothing is allocated.
 pub fn decode(
     source: []const u8,
     target: []u8,
@@ -263,11 +165,17 @@ pub fn decode(
     };
 }
 
-/// Decode one block's Block_Content, its header already parsed — the shape
-/// a caller that reads the input itself needs (the streaming reader parses
-/// the header off its input, then stages the content). Returns the block's
-/// output length; `decode` is this plus the header parse and the consumed
-/// count.
+/// Decode one block's Block_Content when its header is already parsed, for a
+/// caller that reads its own input (the streaming reader parses the header,
+/// then stages the content). `content` must hold at least
+/// `contentLength(header)` bytes, and anything after them is ignored. Returns
+/// the length of the block's output, written to `target[decoded_len..]`.
+/// Everything else is as for `decode`, which is this plus the header parse
+/// and the consumed count.
+///
+/// Staging is the caller's job because a Compressed block's two backward
+/// bitstreams are read from the block's end, so all of its content must be in
+/// memory before decoding starts.
 pub fn decodeContent(
     header: Header,
     content: []const u8,
@@ -306,11 +214,8 @@ pub fn decodeContent(
 }
 
 /// `§3.1.1.2.2` — "This is an uncompressed block. Block_Content contains
-/// Block_Size bytes": one `fastmem.copy`.
-///
-/// The amplification limit: Block_Size is a declared size, and the copy is
-/// bounded by it *and* by the caller's remaining capacity — a declared size
-/// the target cannot hold fails `BufferTooSmall` before the write.
+/// Block_Size bytes". A size that does not fit in the rest of `target` is
+/// `BufferTooSmall`, raised before the copy.
 fn decodeRaw(block_size: usize, block: []const u8, target: []u8, decoded_len: usize) Error!usize {
     assert(block.len == block_size);
     assert(decoded_len <= target.len);
@@ -320,14 +225,10 @@ fn decodeRaw(block_size: usize, block: []const u8, target: []u8, decoded_len: us
 }
 
 /// `§3.1.1.2.2` — "This is a single byte, repeated Block_Size times. ...
-/// On the decompression side, this byte must be repeated Block_Size times":
-/// one `fastmem.set`, the same capacity bound as a Raw block.
-///
-/// This is the format's cheapest amplification: one content byte declares
-/// up to Block_Maximum_Size bytes of output. The declared size is a bound,
-/// never a license — `block_size` has already been checked against
-/// Block_Maximum_Size, and the capacity check below is the second bound, so
-/// the splat is at most `min(block_max_size, the caller's room)`.
+/// On the decompression side, this byte must be repeated Block_Size times".
+/// One input byte can declare up to Block_Maximum_Size bytes of output, so the
+/// size is checked against the room left in `target` before the write, as for
+/// a Raw block.
 fn decodeRle(block_size: usize, block: []const u8, target: []u8, decoded_len: usize) Error!usize {
     assert(block.len == 1);
     assert(decoded_len <= target.len);
@@ -341,13 +242,12 @@ fn decodeRle(block_size: usize, block: []const u8, target: []u8, decoded_len: us
 /// Literals_Section_Header - Literals_Section_Content" (`§3.1.1.3.2`),
 /// combined by Sequence Execution (`§3.1.1.4`).
 ///
-/// The literals decode into a scratch bounded by Block_Maximum_Size (every
-/// literal lands in the block's output, so the maximum bounds them too);
-/// the sequences then execute into the output region, whose history is
-/// `min(decoded_len, Window_Size)` and whose capacity is capped by
-/// Block_Maximum_Size — the one `BufferTooSmall` the sequences layer
-/// reports at that cap is this layer's `BlockOversize`, a corrupt block
-/// rather than a caller's small target.
+/// The literals decode into a stack scratch of `max_block_size` bytes (every
+/// literal lands in the block's output, so Block_Maximum_Size bounds them
+/// too). The sequences then execute into the output region, whose capacity is
+/// capped at Block_Maximum_Size. A block that hits that cap is corrupt rather
+/// than meeting a caller's small target, so the sequences layer's
+/// `BufferTooSmall` at the cap becomes `BlockOversize`.
 fn decodeCompressed(
     block: []const u8,
     target: []u8,
@@ -370,10 +270,28 @@ fn decodeCompressed(
     );
     const section_source = block[literals_section.bytes_consumed..];
     // §3.1.1.4 — "all offsets leading to previously decoded data must be
-    // smaller than Window_Size": the retained history is the frame's decoded
-    // bytes so far, capped by the frame's window, and the sequences layer's
-    // bound is the addressable span in front of the match — this region's
-    // start through the current write position (T12, the module doc above).
+    // smaller than Window_Size". The retained history is the frame's decoded
+    // bytes so far, capped by the frame's window. The sequences layer sees a
+    // region that starts at the history and runs through this block's output,
+    // so the bound it enforces is the addressable span in front of the match
+    // (the region's start through the current write position), not
+    // Window_Size alone:
+    //
+    // - An offset of exactly Window_Size reads the oldest retained byte. The
+    //   reference's windowSize-byte history accepts it, and its encoder can
+    //   emit it, because its match search is bounded by the window.
+    // - A match after some literals can reach past Window_Size, because the
+    //   block's own writes extend the span: `frame_window_1k_span` makes an
+    //   offset of 1025 addressable over a declared 1 KB window, and the pinned
+    //   CLI decodes it too.
+    // - The reference's whole-buffer decoder is looser still when more bytes
+    //   are around: it checks the history it holds, not the declared window.
+    //   `frame_window_1k_over` and `frame_window_128k_over` decode there and
+    //   are refused here with `OffsetTooFar`.
+    //
+    // Stopping at the region's start means a hostile frame cannot read past
+    // what this decoder holds, and it lets a frame much larger than its window
+    // decode in one call (`frame_window_128k` is 256 KB over a 128 KB window).
     const history: usize = @intCast(@min(decoded_len, window_size));
     // The sequences layer's region: the retained history in front of this
     // block's output, the output capped at Block_Maximum_Size.
@@ -401,11 +319,11 @@ fn decodeCompressed(
     return section.bytes_written;
 }
 
-/// Walk a fixture frame's block chain the way the frame layer will: the
-/// 6-byte prefix (magic, Frame_Header_Descriptor, Window_Descriptor) is
-/// checked, then `decode` runs until the Last_Block flag, threading both
-/// layer states and the running decoded length. Returns the decoded length;
-/// the caller checks the output and the sentinel.
+/// Walk a fixture frame's block chain the way the frame layer does: the 6-byte
+/// prefix (magic, Frame_Header_Descriptor, Window_Descriptor) is checked, then
+/// `decode` runs until the Last_Block flag, passing both layer states and the
+/// running decoded length along. Returns the decoded length; the caller checks
+/// the output and the sentinel.
 fn decodeFrame(bytes: []const u8, target: []u8) !usize {
     try testing.expectEqualSlices(u8, &golden.frame_magic, bytes[0..4]);
     try testing.expectEqual(golden.frame_descriptor, bytes[4]);
@@ -437,7 +355,7 @@ fn decodeFrame(bytes: []const u8, target: []u8) !usize {
 }
 
 /// Decode a fixture frame and check its output, with the sentinel overrun
-/// check every decode test runs (AGENTS.md, "Rules").
+/// check every decode test runs.
 fn expectFrame(bytes: []const u8, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -541,7 +459,7 @@ test "decode copies a Raw block" {
     // contains Block_Size bytes": the frame's block chain is the bytes
     // themselves.
     try expectFrame(&golden.frame_raw, "zstd raw");
-    // A zero-size Raw block is the empty frame's shape (T7: the CLI's own
+    // A zero-size Raw block is the empty frame's shape (the CLI's own
     // empty-input frame is a 0-size Raw block).
     try expectFrame(&golden.frame_raw_empty, "");
     var target: [16]u8 = undefined;
@@ -694,7 +612,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     try internal.sentinel.expect(&big, written);
 }
 
-test "decode fails closed on a block cut short" {
+test "decode fails on a block cut short" {
     // RFC 8878 §3.1.1.2 — the Block_Header and the Block_Content it
     // declares both come from the input: a frame cut inside either is the
     // input's end (`Truncated`), never a structure's own error. The CLI
@@ -708,7 +626,7 @@ test "decode fails closed on a block cut short" {
     try expectBlockError(error.Truncated, &.{ 0x2b, 0x00, 0x00 }, &target);
 }
 
-test "decode fails closed on a target too small" {
+test "decode fails on a target too small" {
     // RFC 8878 §3.1.1.2.4 + §8 — a declared size is a bound, never a
     // license: the copy is refused before the write, and the sentinel
     // proves the byte the block would have written is untouched. A Raw
@@ -770,14 +688,14 @@ test "decode fails closed on a target too small" {
     try internal.sentinel.expect(&fits, 77);
 }
 
-test "decode composes the landed sequences fixtures as whole frames" {
+test "decode composes the golden sequences fixtures as whole frames" {
     // RFC 8878 §3.1.1.3 — "A compressed block consists of two sections: a
     // Literals_Section and a Sequences_Section. The results of the two
     // sections are then combined to produce the decompressed data in
-    // Sequence Execution": each landed sequences fixture pair framed as one
+    // Sequence Execution": each sequences fixture pair framed as one
     // compressed block, and the CLI's own `zstd -d` output as the
-    // expectation (the same bytes the landed slice's tests decode section
-    // by section).
+    // expectation (the same bytes `sequences.zig`'s tests decode section by
+    // section).
     try expectFrame(&golden.frame_sequences_predefined, &golden.sequences_predefined_expected);
     try expectFrame(
         &golden.frame_sequences_rle_match_lengths,
@@ -787,9 +705,9 @@ test "decode composes the landed sequences fixtures as whole frames" {
     try expectFrame(&golden.frame_sequences_fse_all, &golden.sequences_fse_all_expected);
 }
 
-test "decode composes the landed literals fixtures as whole frames" {
+test "decode composes the golden literals fixtures as whole frames" {
     // RFC 8878 §3.1.1.3.2.1 — "Decompressed content is defined entirely as
-    // Literals_Section content": each landed literals fixture framed with
+    // Literals_Section content": each literals fixture framed with
     // the zero-count sequences section, so the block's output is its
     // literals. The 4-stream fixtures pin the Jump_Table path end to end,
     // the FSE-weights one the Huffman_Tree_Description path.
@@ -797,10 +715,10 @@ test "decode composes the landed literals fixtures as whole frames" {
     try expectFrame(&golden.frame_literals_4stream_sf1, &golden.literals_4stream_sf1_expected);
     try expectFrame(&golden.frame_literals_4stream_sf2, &golden.literals_4stream_sf2_expected);
     try expectFrame(&golden.frame_literals_fse_tree, &golden.literals_fse_tree_expected);
-    // The T1 pair: the Table-25 assignment and the errata-8195 stream, as
-    // whole frames both decoders read.
-    try expectFrame(&golden.frame_t1, &golden.t1_literals);
-    try expectFrame(&golden.frame_t1_errata, &golden.t1_errata_literals);
+    // The hand-built pair: the Table 25 assignment and the errata 8195
+    // stream, as whole frames the CLI and std both decode.
+    try expectFrame(&golden.frame_pair, &golden.pair_literals);
+    try expectFrame(&golden.frame_pair_errata, &golden.pair_errata_literals);
 }
 
 test "decode carries the Huffman tree across blocks" {
@@ -832,7 +750,8 @@ test "decode carries the tables and the repeat offsets across blocks" {
 test "decode reads the hand-built fixture blocks as whole frames" {
     // RFC 8878 §3.1.1.4 + §3.1.1.5 — the corner fixture's six RLE-mode
     // sequences with their trailing literals, and the two zero-count forms
-    // (the 2-byte `80 00` is T5's decoded-zero corner, which std rejects).
+    // (the 2-byte `80 00` is a zero count in the 2-byte form, which std
+    // rejects).
     try expectFrame(&golden.frame_corner, &golden.frame_corner_expected);
     try expectFrame(&golden.frame_zero_seq, &golden.frame_zero_seq_expected);
     try expectFrame(&golden.frame_zero_seq_2b, &golden.frame_zero_seq_expected);
@@ -840,16 +759,16 @@ test "decode reads the hand-built fixture blocks as whole frames" {
 
 test "the history a match may read is the addressable span at the match" {
     // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded data
-    // must be smaller than Window_Size" is enforced as the addressable span
-    // (T12): with 2 KB decoded over a 1 KB window, a match at offset 1024
-    // reads the window's oldest retained byte and decodes; at literals
-    // length 0 one byte further is `OffsetTooFar` — the region's start is
-    // the floor — while ten literals move the write position ten bytes past
-    // the window, and `frame_window_1k_span`'s offset 1025 reads a byte the
+    // must be smaller than Window_Size" is enforced as the addressable span:
+    // with 2 KB decoded over a 1 KB window, a match at offset 1024 reads the
+    // window's oldest retained byte and decodes; at literals length 0 one
+    // byte further is `OffsetTooFar`, because the region's start is the
+    // floor; while ten literals move the write position ten bytes past the
+    // window, and `frame_window_1k_span`'s offset 1025 reads a byte the
     // declared window alone would not admit. The CLI decodes the `*_over`
-    // pair too — its whole-buffer decoder checks the bytes it still has,
-    // not the declared window — and the module doc above records the
-    // divergence.
+    // pair too, because its whole-buffer decoder checks the bytes it still
+    // has, not the declared window; the comment in `decodeCompressed`
+    // records that divergence.
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_1k, &target);
@@ -861,9 +780,9 @@ test "the history a match may read is the addressable span at the match" {
     // Offset 1024 from position 2048 is the B block's first byte.
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
-    // The span fixture: ten literals, then offset 1025 — past the declared
-    // window, inside the history region plus this block's writes. The CLI
-    // decodes it to the same 2061 bytes (T12's precision fixture).
+    // The span fixture: ten literals, then offset 1025, which is past the
+    // declared window but inside the history region plus this block's writes.
+    // The CLI decodes it to the same 2061 bytes.
     internal.sentinel.fill(&target);
     const span = try decodeFrame(&golden.frame_window_1k_span, &target);
     try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);
@@ -898,8 +817,8 @@ test "the window accounting crosses Block_Maximum_Size" {
     // RFC 8878 §3.1.1.2.4 + §3.1.1.4 — two 128 KB blocks put the decoded
     // length past both Block_Maximum_Size and Window_Size, so the history
     // is the window's 128 KB and a match at offset 131072 reads the first
-    // retained byte; 131073 is `OffsetTooFar` (the CLI decodes both — the
-    // recorded divergence above). The output position is 262144 while the
+    // retained byte; 131073 is `OffsetTooFar` (the CLI decodes both; see the
+    // comment in `decodeCompressed`). The output position is 262144 while the
     // history starts at 131072: the re-based region the sequences layer
     // sees is what makes the two independent.
     var target: [300 * 1024]u8 = undefined;
@@ -928,14 +847,12 @@ test "a compressed block cannot amplify past Block_Maximum_Size" {
     try expectFrameError(error.LiteralsTooLarge, &golden.frame_oversize_literals);
 }
 
-test "decode fails closed on the entropy layers' corners" {
-    // RFC 8878 §3.1.1.3.1.1 — a compressed block that is only a literals
-    // header short of nothing: the literals section must have its 1-5 byte
-    // header (`MalformedLiteralsHeader`; the CLI reads a zero-size
-    // compressed block as a no-op, ours fails closed). §3.1.1.3.2.1 — a
-    // sequences section cut inside its fixed-size fields is
-    // `MalformedSequencesHeader`, the sequences slice's name carried into
-    // the public set.
+test "decode fails on the entropy layers' corners" {
+    // RFC 8878 §3.1.1.3.1.1 — a zero-size compressed block has no literals
+    // header, which must be 1-5 bytes (`MalformedLiteralsHeader`; the CLI
+    // reads it as a no-op, ours returns an error). §3.1.1.3.2.1 — a block that
+    // is only its literals section, or a sequences section cut inside its
+    // fixed-size fields, is `MalformedSequencesHeader`.
     try expectFrameError(error.MalformedLiteralsHeader, &golden.frame_empty_compressed);
     try expectFrameError(error.MalformedSequencesHeader, &golden.frame_no_sequences);
     try expectFrameError(error.MalformedSequencesHeader, &golden.frame_short_sequences);

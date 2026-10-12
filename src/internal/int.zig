@@ -1,26 +1,23 @@
-//! Endian-bound integer access: the shared home of the codec `readInt`/
-//! `writeInt` helpers (README.md). A codec's `common.zig` binds its one wire
-//! endianness — little-endian for flate, gzip, and snappy; big-endian for
-//! zlib — and re-exports the names, so call sites carry no endian argument
-//! (the per-codec `common.zig` shape, with one body for every codec).
-//! zstd's decoder-only `common.zig` binds `little` for `readInt` alone;
-//! M5's encoder adds the `writeInt` mirror there.
+//! Integer access with the byte order fixed by the namespace: `little` and
+//! `big`, each an `Int(endian)` with `readInt` and `writeInt`. The width comes
+//! from the integer type, so call sites carry no endian argument.
 //!
-//! The operations are `std.mem`'s, bound: the width comes from `T`, the
-//! byte order from the namespace.
+//! A codec's `common.zig` binds the one order its wire format uses and
+//! re-exports the functions it needs: `little` for flate, gzip, snappy, and
+//! zstd, `big` for zlib. Both functions are `std.mem.readInt` and
+//! `std.mem.writeInt` with the endian argument filled in.
 
 const std = @import("std");
 const mem = std.mem;
 
-/// The two operations, bound to one endianness. A codec takes its binding
-/// from `little`/`big` below; a codec with a second wire order instantiates
-/// its own.
+/// `readInt` and `writeInt` for one byte order. Use the ready-made `little`
+/// and `big` bindings below.
 pub fn Int(comptime endian: std.builtin.Endian) type {
     return struct {
         /// Reads an integer from memory with bit count specified by T.
         /// The bit count of T must be evenly divisible by 8.
         /// This function cannot fail and cannot cause undefined behavior.
-        /// Forces `endian`ness.
+        /// Reads in `endian` byte order.
         pub inline fn readInt(
             comptime T: type,
             buffer: *const [@divExact(@typeInfo(T).int.bits, 8)]u8,
@@ -31,7 +28,7 @@ pub fn Int(comptime endian: std.builtin.Endian) type {
         /// Writes an integer to memory, storing it in twos-complement.
         /// This function always succeeds, has defined behavior for all
         /// inputs, but the integer bit width must be divisible by 8.
-        /// Forces `endian`ness.
+        /// Writes in `endian` byte order.
         pub inline fn writeInt(
             comptime T: type,
             buffer: *[@divExact(@typeInfo(T).int.bits, 8)]u8,

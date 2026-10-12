@@ -12,20 +12,18 @@ pub fn build(b: *Build) void {
     const fuzz_mode =
         b.option(bool, "fuzz", "Enable fuzzing (uses the default test runner)") orelse false;
 
-    // fastmem: the blessed memory-copy primitive for every codec
-    // (docs/zcompress-plan.md, Architecture).
+    // fastmem: the copy and fill primitive every codec uses (`fastmem.copy`,
+    // `fastmem.move`, `fastmem.set`).
     const fastmem_dep = b.dependency("fastmem", .{
         .target = target,
         .optimize = optimize,
     });
     const fastmem_mod = fastmem_dep.module("fastmem");
 
-    // ONE module, `zcompress`, rooted at src/root.zig. Codecs are
-    // namespaces under it (`zcompress.snappy`, `zcompress.flate`); the
-    // codec-agnostic shares in `src/internal/` are reached by relative
-    // import, never a module import and never re-exported. A codec lifts
-    // out of the repo with its directory plus `src/internal/` in tow
-    // (docs/zcompress-plan.md, "Architecture").
+    // One module, `zcompress`, rooted at src/root.zig. Codecs are
+    // namespaces under it (`zcompress.snappy`, `zcompress.flate`). The shared
+    // code in `src/internal/` is reached by relative import: it is not a
+    // module and is not re-exported.
     const zcompress_mod = b.addModule("zcompress", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
@@ -42,9 +40,7 @@ pub fn build(b: *Build) void {
         null;
     const test_step = b.step("test", "Run unit tests");
 
-    // Example CLIs: one per codec (examples/), sharing examples/cli.zig.
-    // The framing decision per codec lives in its example file, and both
-    // consume the one module through its namespaces. Run:
+    // Example CLIs, one per codec (examples/), sharing examples/cli.zig. Run:
     //   zig build example-snappy -- encode README.md > out
     const cli_mod = b.createModule(.{
         .root_source_file = b.path("examples/cli.zig"),
@@ -84,8 +80,8 @@ pub fn build(b: *Build) void {
     }
 
     // External-oracle harness (src/flate/oracle.zig): decodes one stream from
-    // a file into a caller-sized buffer, for the `just flate-oracle` lane.
-    // Installed, not part of the module surface or the test/check steps.
+    // a file into a caller-sized buffer, for `just flate-oracle`. Installed,
+    // not part of the module surface or the test/check steps.
     const flate_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/flate/oracle.zig"),
         .target = target,
@@ -107,8 +103,8 @@ pub fn build(b: *Build) void {
 
     // External-oracle harness (src/gzip/oracle.zig): decodes one member from
     // a file into a caller-sized buffer (and encodes an input at a chosen
-    // level), for the `just gzip-oracle` lane. Installed, not part of the
-    // module surface or the test/check steps.
+    // level), for `just gzip-oracle`. Installed, not part of the module
+    // surface or the test/check steps.
     const gzip_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/gzip/oracle.zig"),
         .target = target,
@@ -130,8 +126,8 @@ pub fn build(b: *Build) void {
 
     // External-oracle harness (src/zlib/oracle.zig): decodes one stream from
     // a file into a caller-sized buffer (and encodes an input at a chosen
-    // level), for the `just zlib-oracle` lane. Installed, not part of the
-    // module surface or the test/check steps.
+    // level), for `just zlib-oracle`. Installed, not part of the module
+    // surface or the test/check steps.
     const zlib_oracle_mod = b.createModule(.{
         .root_source_file = b.path("src/zlib/oracle.zig"),
         .target = target,
@@ -151,9 +147,9 @@ pub fn build(b: *Build) void {
     );
     zlib_oracle_step.dependOn(&install_zlib_oracle.step);
 
-    // Unit tests: one test executable over the one module. The codec
-    // suites, their shared-layer consumers, and the barrel's own tests all
-    // land in one binary; ztest still reports each test by name.
+    // Unit tests: one test executable over the one module, covering every
+    // codec's tests and the barrel's own. ztest still reports each test by
+    // name.
     const zcompress_tests = b.addTest(.{
         .root_module = zcompress_mod,
         .test_runner = test_runner,
@@ -169,10 +165,10 @@ pub fn build(b: *Build) void {
     const check_step = b.step("check", "Compile the tests without running (cross-target gate)");
     check_step.dependOn(&zcompress_tests.step);
 
-    // The fleet benchmark driver (bench/README.md): one binary carrying the
-    // zcompress one-shot rows and the std.compress.flate competitor rows,
-    // cross-built per fleet target by the bench/ harness and uploaded to the
-    // boxes. `-Drev` stamps the measured revision into the meta record.
+    // The benchmark driver for the bench/ harness (bench/README.md): one
+    // binary with the zcompress one-shot rows and the std.compress rows,
+    // cross-built per EC2 target by the harness and uploaded to the boxes.
+    // `-Drev` stamps the measured revision into the meta record.
     const rev =
         b.option([]const u8, "rev", "Revision label for the fleet bench driver") orelse "dev";
     const fleet_options = b.addOptions();
@@ -198,10 +194,10 @@ pub fn build(b: *Build) void {
     );
     fleet_bench_step.dependOn(&install_fleet_bench.step);
 
-    // The fleet corpus generator (bench/README.md): deterministic,
-    // byte-identical across hosts; writes the gitignored bench/corpus-gen/
-    // and verifies every file against the committed
-    // bench/corpus/SHA256SUMS (run from the repo root): `zig build corpus`.
+    // The benchmark corpus generator (bench/README.md): deterministic,
+    // byte-identical across hosts. It writes the gitignored bench/corpus-gen/
+    // and verifies every file against the committed bench/corpus/SHA256SUMS.
+    // Run from the repo root: `zig build corpus`.
     const corpus_mod = b.createModule(.{
         .root_source_file = b.path("bench/zig/corpus.zig"),
         .target = target,
@@ -224,18 +220,17 @@ pub fn build(b: *Build) void {
     );
     corpus_step.dependOn(&run_corpus.step);
 
-    // Bench competitor sources (bench/README.md, "Arms"): the C arms build
-    // libdeflate, zlib-ng, and google/snappy from the release tarballs pinned
-    // by url+hash in bench/build.zig.zon. The bench tool's own build root
-    // fetches them (zig's fetcher verifies each hash) and installs the trees
-    // under bench/zig-out/bench-src/<name>/ for the harness's zig-cc/cmake
-    // builds (the ztls conformance precedent: dep.path(...) straight out of
-    // the fetched tree — no module import, no build.zig inside the dep). This
-    // step only delegates to it, and the dependency deliberately stays out of
-    // THIS build graph: a `b.lazyDependency` call here would mark it needed at
-    // configure time, and the build runner fetches every marked dependency on
-    // any invocation, `zig build test` included — the fetch trigger is the
-    // call site, not the requested step.
+    // Competitor sources for the benchmark harness (bench/README.md): the C
+    // arms build libdeflate, zlib-ng, google/snappy, and zstd from release
+    // tarballs pinned by url+hash in bench/build.zig.zon. The bench/ build
+    // root fetches them (zig's fetcher verifies each hash) and installs the
+    // trees under bench/zig-out/bench-src/<name>/ for the harness's zig-cc and
+    // cmake builds. This step only delegates to that build root. The
+    // dependencies stay out of this build graph on purpose: a
+    // `b.lazyDependency` call here would mark them needed at configure time,
+    // and the build runner fetches every marked dependency on any invocation,
+    // `zig build test` included. The call site triggers the fetch, not the
+    // requested step.
     const bench_vendor_step = b.step(
         "bench-vendor",
         "Materialize the pinned bench competitor sources (bench/zig-out/bench-src/)",
@@ -245,13 +240,13 @@ pub fn build(b: *Build) void {
     bench_vendor.setCwd(b.path("bench"));
     bench_vendor_step.dependOn(&bench_vendor.step);
 
-    // The 32-bit proof probe (src/zstd/probe32.zig): the large-total frames
-    // driven on a usize=32 target, where their wraps are observable.
-    // wasm32-wasi, ReleaseSafe (a wrap panics), an explicit 8 MiB stack (the
-    // window buffer rides it); `just check-32` runs it under wasmtime. It is
-    // a correctness gate, not a bench artifact, so it lives outside the lazy
-    // benchmark-import block below: its module and step never ride the bench
-    // dependency's graph.
+    // The 32-bit probe (src/zstd/probe32.zig): decodes frames with very large
+    // totals on a usize=32 target, where a 32-bit length wrap is observable.
+    // It is built for wasm32-wasi in ReleaseSafe (a wrap panics) with an
+    // explicit 8 MiB stack (the window buffer lives on it), and `just
+    // check-32` runs it under wasmtime. It is a correctness check, not a
+    // benchmark, so it sits outside the lazy benchmark block below and never
+    // depends on the benchmark package.
     const probe32_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .wasi,
@@ -278,9 +273,9 @@ pub fn build(b: *Build) void {
     // Benchmarks. The benchmark dependency is lazy in the zon: while it is
     // unfetched, b.lazyImport returns null and no bench step is defined. The
     // call itself still marks the dependency needed, and the build runner
-    // fetches every marked lazy dependency on any invocation (the
-    // bench/build.zig precedent) — so a cold cache's first `zig build`,
-    // whatever the step, fetches benchmark before this block runs again.
+    // fetches every marked lazy dependency on any invocation, so a cold
+    // cache's first `zig build`, whatever the step, fetches benchmark before
+    // this block runs again.
     if (b.lazyImport(@This(), "benchmark")) |benchmark| {
         // The dependency is lazy in the zon, so it must come through
         // lazyDependency. lazyImport already confirmed it is fetched, so
@@ -352,9 +347,10 @@ pub fn build(b: *Build) void {
         });
         if (b.args) |args| run_zlib_bench.addArgs(args);
 
-        // The zstd bench (src/zstd/bench.zig): decode-only until M5, over
-        // the fleet corpus's reference frames (bench/corpus-gen/, `just
-        // corpus`), so the local rows are the fleet's zstd/decompress cells.
+        // The zstd bench (src/zstd/bench.zig): decode only, over the
+        // benchmark corpus's reference frames (bench/corpus-gen/, made by
+        // `just corpus`), so the local rows match the harness's
+        // zstd/decompress cells.
         const zstd_bench_root = b.createModule(.{
             .root_source_file = b.path("src/zstd/bench.zig"),
             .target = target,

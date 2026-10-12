@@ -1,8 +1,7 @@
-//! Shared helpers for the gzip codec: little-endian integer access. RFC 1952
-//! §2.1 stores every multi-byte number least-significant byte first — the
-//! CRC32 and ISIZE trailer and the FHCRC header field (§2.3.1) — so the
-//! helpers bake the endianness in and call sites carry no endian argument.
-//! The bodies are `internal.int`'s, bound here.
+//! Little-endian integer access for the gzip codec. RFC 1952 §2.1 stores
+//! every multi-byte number least-significant byte first (the CRC32 and ISIZE
+//! trailer fields, the FHCRC header field), so the byte order is fixed here
+//! and call sites pass none. Both functions are `internal.int.little`'s.
 
 const internal = @import("../internal/root.zig");
 

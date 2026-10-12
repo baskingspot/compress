@@ -1,20 +1,22 @@
-//! zlib container benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! zlib benchmarks. Run with `zig build bench -Doptimize=ReleaseFast` (or
+//! `just bench`).
 //!
-//! Covers the one-shot container path (compress, decompress, ratio) over the
-//! same shapes as flate's bench, plus the paired raw-flate rows over the same
-//! corpus and level: the container story is that the flate core dominates and
-//! the framing must be noise — the delta between the zlib and raw rows is the
-//! 2-byte header, the 4-byte trailer, and the Adler-32 pass, measured, not
-//! assumed (README, "Benchmarks"). The container's own rows carry a `Zlib`
-//! prefix (`BenchmarkZlibCompress/...`) because each bench root builds its
-//! own binary: an unprefixed `BenchmarkCompress/32K/text` collides with
-//! flate's own bench rows in a combined report, and the rows are not
-//! interchangeable — cross-binary, flate.encode.compress codegen flips with
-//! unrelated binary composition (LLVM's inlining of the bit-writer state;
-//! the random shape swings ~2x). Compare container rows to the paired rows
-//! in the SAME binary, never to flate's own bench binary. Throughput is
-//! reported as MB/s over the *uncompressed* size so compress and decompress
-//! are directly comparable.
+//! Rows cover one-shot compress, decompress, and ratio over the same shapes
+//! as flate's bench, plus paired raw-flate rows over the same corpus and
+//! level. The flate core dominates a zlib number; the difference between a
+//! zlib row and its paired flate row is what the container adds: the 2-byte
+//! header, the 4-byte trailer, and the Adler-32 pass. Throughput is MB/s over
+//! the uncompressed size, so compress and decompress rows are comparable.
+//!
+//! The zlib rows carry a `Zlib` prefix (`BenchmarkZlibCompress/...`) because
+//! each bench root builds its own binary, and an unprefixed
+//! `BenchmarkCompress/32K/text` would collide with flate's own rows in a
+//! combined report. Compare zlib rows only with the paired flate rows in this
+//! same binary, never with flate's own bench binary: across binaries,
+//! `flate.encode.compress` code generation changes with unrelated binary
+//! composition (LLVM's inlining of the bit-writer state; the random shape
+//! swings about 2x). Numbers from these rows are local measurements, not
+//! performance claims.
 //!
 //! Output is benchstat-friendly:
 //! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.

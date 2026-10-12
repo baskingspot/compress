@@ -1,15 +1,14 @@
-"""Source resolution and content-addressed cross builds for the five arms.
+"""Source resolution and content-addressed cross builds for the six arms.
 
 Every arm cross-builds on this host; the boxes only execute. The zc arm is
 `zig build fleet-bench` from the measured source tree. The klauspost arm is
-`go build` of bench/drivers/klauspost (the module pins klauspost/compress to
-the research's local checkout commit). The libdeflate, zlib-ng, and
-google/snappy arms compile the release tarballs pinned by url+hash in
-bench/build.zig.zon — the bench tool's own build root, which `zig build
-bench-vendor` delegates to; it fetches and materializes them under
-bench/zig-out/bench-src/ — with `zig cc`/`zig c++` (zlib-ng and google/snappy
-configure through cmake with zig toolchain wrappers; the flake provides cmake
-and go).
+`go build` of bench/drivers/klauspost (go.mod pins klauspost/compress to a
+commit). The libdeflate, zlib-ng, google/snappy, and zstd arms compile release
+tarballs with `zig cc` or `zig c++`. The tarballs are pinned by url+hash in
+bench/build.zig.zon, and `zig build bench-vendor` delegates to the bench/ build
+root, which fetches them and materializes the trees under
+bench/zig-out/bench-src/. zlib-ng, google/snappy, and zstd configure through
+cmake with zig toolchain wrappers. The flake provides cmake and go.
 """
 
 import errno
@@ -28,12 +27,9 @@ from ec2bench.parallel import Outcome, parallel, progress
 from ec2bench.runs import git
 
 ARMS = ("zc", "klauspost", "libdeflate", "zlibng", "googlesnappy", "zstd-c")
-# The competitor version labels (docs/research/containers-notes.md names the
-# flate-family sources; google/snappy is docs/zcompress-plan.md's pinned
-# snappy competitor; zstd v1.5.7 is the zstd notes' pinned tag,
-# docs/research/zstd-notes.md §6.1). The content pins — the release-tarball
-# url+hash — live in bench/build.zig.zon; `zig build bench-vendor`
-# materializes the fetched trees.
+# The competitor version labels, as reported in results. The content pins (the
+# release-tarball url+hash) live in bench/build.zig.zon; `zig build
+# bench-vendor` materializes the fetched trees.
 LIBDEFLATE_VERSION = "v1.26"
 ZLIBNG_VERSION = "2.3.3"
 SNAPPY_VERSION = "1.3.1"
@@ -146,9 +142,8 @@ def vendor(config: Config) -> dict[str, Vendor]:
     The pins are bench/build.zig.zon's lazy url+hash entries; `zig build
     bench-vendor` delegates to the bench tool's build root, which fetches each
     tarball through zig's own fetcher and installs the verified tree under
-    bench/zig-out/bench-src/<name>/ (the ztls conformance precedent: the
-    tool-local zon pins the tool's competitors). The harness never downloads
-    or unpacks a tarball itself, and the root package's zon stays clean.
+    bench/zig-out/bench-src/<name>/. The harness never downloads or unpacks a
+    tarball itself, and the root package's zon stays clean.
     """
     log = config.cache_dir / "build" / "bench-vendor.log"
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -474,7 +469,7 @@ def build_googlesnappy(config: Config, source: Vendor, target: str, zig_version:
 
 def build_zstdc(config: Config, source: Vendor, target: str, zig_version: str) -> Build:
     """The zstd-c arm: facebook/zstd's cmake (build/cmake) under a zig-cc
-    wrapper, the zlib-ng pattern; the driver links the static libzstd."""
+    wrapper, as for zlib-ng; the driver links the static libzstd."""
     settings = config.targets[target]
     driver = config.root / "bench" / "drivers" / "c"
     driver_hash = hash_paths([driver / "cbench.h", driver / "bench_zstd.c"])

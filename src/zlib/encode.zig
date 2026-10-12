@@ -1,17 +1,21 @@
-//! zlib.encode: the one-shot stream encoder (README.md, "API").
+//! zlib.encode: one-shot zlib compression.
 //!
-//! One complete stream into a caller-provided target: the deterministic
-//! 2-byte header (CM=8, CINFO=7, the level's FLEVEL band, the minimal FCHECK,
-//! FDICT clear), the deflate body through flate's one-shot encoder, and the
-//! 4-byte trailer — the Adler-32 of `source`, big-endian
-//! (`rfc1950-zlib.txt §2.1`, `§2.2`). The Adler-32 is hashed directly over
-//! `source` (OQ1's one-shot shape: the container holds the bytes, so one
-//! pass, no flate involvement). Zero heap allocation; the stream is
-//! byte-identical for the same input and options. The driver — the
-//! framing/body/trailer order and the bound — is
-//! `src/internal/container.zig`'s `EncodeHooks`, instantiated over this
-//! module's framing (`framing.zig`); the header and trailer emissions below
-//! are the framing's own.
+//! `compress` writes one complete stream into a caller-provided target: the
+//! 2-byte header (CM=8, CINFO=7, FLEVEL for the level, the minimal FCHECK,
+//! FDICT clear), flate's deflate body, and the 4-byte trailer, which is the
+//! Adler-32 of `source` in big-endian order (`rfc1950-zlib.txt §2.1`,
+//! `§2.2`). The Adler-32 is computed directly over `source` in one pass, with
+//! no flate involvement. The same input and options always produce the same
+//! bytes, and nothing is allocated. `maxCompressedLength` sizes the target.
+//! The header and trailer helpers (`cmf`, `flgFor`, `writeHeader`,
+//! `writeTrailer`) are public because the streaming `Writer` is built from
+//! them too.
+//!
+//! The ordering and the size bound come from the shared container driver
+//! (`src/internal/container.zig`, `EncodeHooks`), instantiated over
+//! `framing.zig`.
+//!
+//! Format: docs/research/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 const testing = std.testing;
@@ -26,9 +30,9 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
-/// The flate level type, re-exported: the container adds no levels of its own
-/// (README, "API"). `.ratio` is flate's reserved seat — `error.Unimplemented`
-/// here, never silent aliasing.
+/// The flate level type, re-exported (see `flate.encode.Level`). The level
+/// also selects the header's FLEVEL bits (`flgFor`). `.ratio` is not
+/// implemented: `compress` returns `error.Unimplemented` for it.
 pub const Level = framing.Level;
 /// Encoder configuration. `.{}` is the default: the fast level.
 pub const Options = framing.Options;
@@ -39,46 +43,51 @@ pub const trailer_len = framing.trailer_len;
 const golden = @import("golden.zig");
 
 /// The emitted CMF: CM = 8 ("deflate", `§2.2`) in the low four bits, CINFO = 7
-/// (a 32-KiB window: "the base-2 log of the window size minus eight", `§2.2`)
-/// in the high four. Fixed — the encoder exposes no header knobs.
+/// (a 32-KiB window: CINFO is "the base-2 logarithm of the LZ77 window size,
+/// minus eight", `§2.2`) in the high four. Fixed: the encoder exposes no
+/// header knobs.
 pub const cmf: u8 = 0x78;
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`).
 const Hooks = internal.container.EncodeHooks(framing);
 
-/// The worst-case stream length: the fixed header, flate's worst-case body,
-/// and the fixed trailer (README, "API").
+/// The most bytes `compress` can write for `input_len` input bytes: the
+/// 2-byte header, flate's worst-case deflate body, and the 4-byte trailer.
+/// Size `compress`'s `target` to this to rule out `error.BufferTooSmall`.
 pub fn maxCompressedLength(input_len: usize) usize {
     return Hooks.maxCompressedLength(input_len);
 }
 
-/// Emit the deterministic 2-byte header: CMF fixed, FLG carrying only the
-/// level's FLEVEL band and the minimal FCHECK, FDICT clear (OQ7; `§2.2`).
+/// Write the 2-byte header into `target`: CMF is `cmf` and FLG is
+/// `flgFor(level)`. No other flag is set (never FDICT), and nothing depends on
+/// the clock or the environment, so the output is reproducible (`§2.2`).
 pub fn writeHeader(target: *[header_len]u8, level: Level) void {
     target[0] = cmf;
     target[1] = flgFor(level);
 }
 
-/// The emitted FLG byte for `level` (`§2.2`): FLEVEL in bits 6-7, FCHECK in
-/// bits 0-4, FDICT (bit 5) clear. FLEVEL's bands follow the reference
-/// lineage's mapping (C zlib and Go, oracle-verified in `containers-notes.md
-/// §5.5`): {0,1} → 0, {2-5} → 1, {fast, 6} → 2, {7-9} → 3. FCHECK is the
-/// minimal form, `(31 - r) % 31` with `r` the remainder of `CMF*256 +
-/// FLEVEL<<6` (FCHECK's five bits zero) — the emitted pair always satisfies
-/// "CMF and FLG, when viewed as a 16-bit unsigned integer stored in MSB
-/// order (CMF*256 + FLG), is a multiple of 31" (`§2.2`).
+/// The FLG byte `compress` writes for `level` (`§2.2`): FLEVEL in bits 6-7,
+/// FCHECK in bits 0-4, FDICT (bit 5) clear. FLEVEL follows the bands C zlib
+/// and Go use: levels 0 and 1 give 0, 2 to 5 give 1, `.fast` and 6 give 2,
+/// and 7 to 9 give 3. It is only a hint ("not needed for decompression").
+/// FCHECK is the smallest value that makes `CMF*256 + FLG` a multiple of 31,
+/// as the RFC requires ("CMF and FLG, when viewed as a 16-bit unsigned integer
+/// stored in MSB order (CMF*256 + FLG), is a multiple of 31"), so the pair
+/// always passes `decode.checkHeader`.
+///
+/// `.ratio` is not implemented, but this function is total: it reports
+/// FLEVEL 2, the same as `.fast`.
 pub fn flgFor(level: Level) u8 {
     const flevel: u8 = switch (level) {
         .@"0", .@"1" => 0,
         .@"2", .@"3", .@"4", .@"5" => 1,
         .fast, .@"6" => 2,
         .@"7", .@"8", .@"9" => 3,
-        // The reserved seat never emits a stream (`compress` is
-        // `error.Unimplemented`), but this function is public and total: the
-        // seat reports the RFC's default-algorithm band, the same FLEVEL the
-        // default `.fast` level emits, so spelling it out is defined bytes —
-        // never `unreachable` (the M3 closing review found the UB).
+        // `compress` never emits a stream for `.ratio`, but this function is
+        // public, so it must be total: `unreachable` here would be undefined
+        // behavior in ReleaseFast. Report the default-algorithm band, the same
+        // FLEVEL `.fast` writes.
         .ratio => 2,
     };
     return flevel << 6 | fcheck(flevel);
@@ -99,11 +108,14 @@ pub fn writeTrailer(target: *[trailer_len]u8, adler: u32) void {
 }
 
 /// Compress `source` as one complete zlib stream into `target` and return the
-/// stream's length. `error.BufferTooSmall` when `target` cannot hold it (size
-/// `target` with `maxCompressedLength`; a smaller target may still fit when
-/// the body compresses under the bound, and its contents are unspecified on
-/// failure). `error.Unimplemented` for the reserved `.ratio` level. Zero heap
-/// allocation.
+/// stream's length. Returns `error.BufferTooSmall` when `target` cannot hold
+/// the stream: size it with `maxCompressedLength`, although a smaller target
+/// can still fit when the data compresses under the bound. After an error,
+/// `target`'s contents are unspecified; nothing is written past its end.
+/// Returns `error.Unimplemented` for the `.ratio` level.
+///
+/// Uses about 128 KiB of stack (flate's match-finder table). Allocates
+/// nothing.
 pub fn compress(
     source: []const u8,
     target: []u8,
@@ -147,7 +159,7 @@ test "encode: the emitted stream is the deterministic one" {
 test "encode: the empty stream is the golden bytes" {
     // RFC 1950 §2.2 — an empty payload is a valid stream: the header, the
     // final empty fixed block (`03 00`, flate's uniform ending), and the
-    // Adler-32 of nothing, 1. The fuzz lane's hostile-header pins carry the
+    // Adler-32 of nothing, 1. The hostile-header pins in `fuzz.zig` carry the
     // same bytes; Go's `zlibTests` "empty" vector is byte-identical.
     var target: [maxCompressedLength(0)]u8 = undefined;
     const len = try compress("", &target, .{});
@@ -160,10 +172,10 @@ test "encode: the empty stream is the golden bytes" {
 
 test "encode: FLEVEL follows the level bands" {
     // RFC 1950 §2.2 — FLEVEL is informational ("not needed for
-    // decompression"); the bands follow the reference lineage
-    // (containers-notes.md §5.5, oracle-verified): {0,1} -> 0, {2-5} -> 1,
-    // {fast, 6} -> 2, {7-9} -> 3. The oracle emits 78 01 at level 0/1,
-    // 78 9c at level 6, 78 da at level 9. `.ratio` never emits a stream.
+    // decompression"); the bands are C zlib's and Go's: {0,1} -> 0,
+    // {2-5} -> 1, {fast, 6} -> 2, {7-9} -> 3. python3's zlib (the C
+    // reference) writes 78 01 at level 0/1, 78 9c at level 6, and 78 da at
+    // level 9. `.ratio` never emits a stream.
     const cases = [_]struct { level: Level, flg: u8 }{
         .{ .level = .fast, .flg = 0x9c },
         .{ .level = .@"0", .flg = 0x01 },
@@ -186,12 +198,12 @@ test "encode: FLEVEL follows the level bands" {
 }
 
 test "encode: the reserved seat's FLG is defined, never unreachable" {
-    // README, "API": `.ratio` is flate's reserved seat — `compress` is
-    // `error.Unimplemented` and never emits a stream. `flgFor` is public, so
-    // it is total: the seat's band is the default algorithm's (FLEVEL 2, the
-    // band `.fast` emits), and the pair still satisfies §2.2's FCHECK
-    // arithmetic. Found by the M3 closing review: `unreachable` here was UB
-    // in ReleaseFast through the public surface.
+    // `.ratio` is not implemented: `compress` returns `error.Unimplemented`
+    // and never emits a stream. `flgFor` is public, so it must be total: the
+    // band is the default algorithm's (FLEVEL 2, the band `.fast` emits), and
+    // the pair still satisfies §2.2's FCHECK arithmetic. An `unreachable`
+    // here would be undefined behavior in ReleaseFast through the public
+    // surface.
     const flg = flgFor(.ratio);
     try testing.expectEqual(@as(u8, 0x9c), flg);
     const header = @as(u16, cmf) * 256 + @as(u16, flg);
@@ -200,18 +212,18 @@ test "encode: the reserved seat's FLG is defined, never unreachable" {
 }
 
 test "encode: the ratio seat is unimplemented, never aliased" {
-    // flate's reserved seat (README, "API"): `error.Unimplemented`, and no
-    // stream bytes are claimed.
+    // `.ratio` is not implemented: `error.Unimplemented`, and the target is
+    // left untouched.
     var target: [64]u8 = undefined;
     sentinel.fill(&target);
     try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = .ratio }));
     try sentinel.expect(&target, 0);
 }
 
-test "encode: a small target fails closed, an exact one fits" {
-    // README, "Contracts": a target smaller than `maxCompressedLength` may
-    // still fit; when it does not, `error.BufferTooSmall` and `target`'s
-    // contents are unspecified. Nothing is ever written past the target.
+test "encode: a small target fails, an exact one fits" {
+    // A target smaller than `maxCompressedLength` may still fit; when it does
+    // not, the result is `error.BufferTooSmall` and `target`'s contents are
+    // unspecified. Nothing is ever written past the target.
     const source = "hello world\n";
     var stream: [maxCompressedLength(source.len)]u8 = undefined;
     const len = try compress(source, &stream, .{});
@@ -239,8 +251,8 @@ test "encode: a small target fails closed, an exact one fits" {
 }
 
 test "encode: the bound holds for every shape" {
-    // README, "API": `compress` never expands past `maxCompressedLength`.
-    // Random bytes take the stored fallback, runs the match finder.
+    // `compress` never writes more than `maxCompressedLength`. Random bytes
+    // take the stored fallback, runs the match finder.
     const cases = [_][]const u8{
         "",
         "a",

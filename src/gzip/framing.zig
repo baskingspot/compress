@@ -1,15 +1,14 @@
-//! The gzip framing, as the shared container driver consumes it
-//! (`src/internal/container.zig`): the member header, the trailer, the
-//! CRC-32 state, and the error sets, bound to flate's streaming types. The
-//! module's `Reader`/`Writer`/`encode`/`decode` instantiate the driver over
-//! this type; it is not part of the public surface (the barrel exposes the
-//! four namespaces, never this file).
+//! The gzip framing as the shared container driver consumes it
+//! (`src/internal/container.zig`): the member header, the trailer, the CRC-32
+//! state, and the error sets, bound to flate's streaming types. `Reader`,
+//! `Writer`, `encode`, and `decode` instantiate the driver over this type. It
+//! is not part of the public surface.
 //!
-//! The contract is stated in full at `src/internal/container.zig`; the
-//! functions here are the gzip halves — the byte-fed header parser
-//! (`decode.HeaderParser`), the CRC-32 trailer check (`decode.checkTrailer`),
-//! the deterministic emissions (`encode.writeHeader`/`writeTrailer`), and
-//! flate's one-shot body.
+//! `src/internal/container.zig` documents what a framing type must provide.
+//! The functions here are gzip's half: the byte-fed header parser
+//! (`decode.HeaderParser`), the trailer check (`decode.checkTrailer`), the
+//! header and trailer writers (`encode.writeHeader`, `encode.writeTrailer`),
+//! and flate's one-shot body.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,9 +19,8 @@ const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 
-/// The flate level type, re-exported: the container adds no levels of its
-/// own (README, "API"). `.ratio` is flate's reserved seat — `error.Unimplemented`
-/// here, never silent aliasing.
+/// Compression level: flate's `encode.Level`, re-exported. `.ratio` is not
+/// implemented and selects `error.Unimplemented`.
 pub const Level = flate.encode.Level;
 
 /// Encoder configuration. `.{}` is the default: the fast level.
@@ -30,10 +28,9 @@ pub const Options = struct {
     level: Level = .fast,
 };
 
-/// The detailed error recorded once the reader's `state == .failed`
-/// (README, "API"): flate's decode detail set — minus `BufferTooSmall`, the
-/// window is the caller's and flate owns it — plus this module's header and
-/// trailer entries.
+/// The failure detail a reader records in `err` once its state is `.failed`:
+/// flate's reader errors plus the header and trailer errors below. There is no
+/// `BufferTooSmall`: output goes through a fixed window, not a sized target.
 pub const Error = flate.Reader.Error || error{
     BadHeader,
     HeaderTooLong,
@@ -42,12 +39,12 @@ pub const Error = flate.Reader.Error || error{
     WrongSize,
 };
 
-/// The one-shot decoder's error set (README, "API"): flate's decode detail
-/// set plus this module's header and trailer entries. `BufferTooSmall` is
-/// flate's (a member that does not fit the caller's cap).
+/// The one-shot decoder's errors: flate's `DecompressError` plus the header
+/// and trailer errors below. `BufferTooSmall` (flate's) means the decoded
+/// member does not fit the caller's `target`.
 pub const DecompressError = flate.decode.DecompressError || error{
     BadHeader, // ID1/ID2/CM wrong, or a reserved FLG bit (§2.3.1.2)
-    HeaderTooLong, // FNAME/FCOMMENT past the 512-byte cap (T7)
+    HeaderTooLong, // FNAME/FCOMMENT over the 512-byte cap
     WrongHeaderChecksum, // FHCRC mismatch (§2.3.1)
     WrongChecksum, // CRC32 mismatch (§2.3.1)
     WrongSize, // ISIZE mismatch (§2.3.1)
@@ -72,20 +69,20 @@ pub const TrailerError = error{
     WrongSize,
 };
 
-/// The container's checksum state folded through flate's hook: CRC-32 over
-/// the decoded bytes and the decoded length mod 2^32, the trailer's ISIZE
-/// (`§2.3.1`).
+/// The checksum state: the CRC-32 and the length mod 2^32 (the trailer's
+/// ISIZE, `§2.3.1`) of the uncompressed bytes, folded in as they pass through
+/// flate's checksum hook.
 pub const Checksum = crc32.Checksum;
 
 /// The header parse state (`§2.3.1`), run once, before the first body byte.
 pub const Header = decode.HeaderParser;
 
-/// The caller-provided window: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[2 * history_len]u8`, 64 KiB.
+/// The caller-provided decode window: flate's `Reader.Buffer`, 64 KiB
+/// (`[2 * history_len]u8`). gzip adds no buffer of its own.
 pub const ReaderBuffer = flate.Reader.Buffer;
 
-/// The caller-provided buffer: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[max_block_size + history_len]u8`, 98303 bytes.
+/// The caller-provided encode buffer: flate's `Writer.Buffer`, 98303 bytes
+/// (`[max_block_size + history_len]u8`). gzip adds no buffer of its own.
 pub const WriterBuffer = flate.Writer.Buffer;
 
 /// The inner codec's streaming types, as the driver reads them.
@@ -119,9 +116,9 @@ pub fn headerDone(header: *const Header) bool {
 }
 
 /// Parse the member header from `input` (`§2.3.1`), feeding the parser from
-/// the input's buffered bytes and consuming them as it goes: the optional
-/// fields are skipped streaming, never staged (T7, OQ6). A header cut short
-/// by the input's end is `Truncated`.
+/// the input's buffered bytes and consuming them as it goes. The optional
+/// fields are skipped as they stream past, never stored. A header cut short
+/// by the end of the input is `Truncated`.
 pub fn readHeader(header: *Header, input: *Io.Reader) HeaderError!void {
     while (!header.done()) {
         input.fill(1) catch |err| switch (err) {
@@ -139,19 +136,19 @@ pub fn readHeader(header: *Header, input: *Io.Reader) HeaderError!void {
 
 /// Verify the 8-byte trailer against the folded checksum state (`§2.3.1`):
 /// CRC-32 (ISO 3309) and ISIZE, the input size mod 2^32, both u32
-/// little-endian (`§2.1`). The two are kept separate — Go collapses both
-/// into `ErrChecksum` (`gunzip.go:267`); ours report which half failed (T4).
+/// little-endian (`§2.1`). `WrongChecksum` and `WrongSize` are separate
+/// errors so the caller learns which half failed (Go reports one error).
 pub fn checkTrailer(trailer: *const [trailer_len]u8, checksum: *const Checksum) TrailerError!void {
     return decode.checkTrailer(trailer, checksum.final(), checksum.len);
 }
 
-/// Emit the deterministic 10-byte header (OQ7) into its exact pointer.
+/// Write the fixed 10-byte header (`encode.writeHeader`) into `target`.
 pub fn writeHeader(target: *[header_len]u8, level: Level) void {
     encode.writeHeader(target, level);
 }
 
-/// Emit the 8-byte trailer — CRC-32 and ISIZE, both u32 little-endian
-/// (`§2.1`, `§2.3.1`) — from the folded checksum state.
+/// Write the 8-byte trailer (CRC-32, then ISIZE; both u32 little-endian,
+/// `§2.1`, `§2.3.1`) from the folded checksum state.
 pub fn writeTrailer(target: *[trailer_len]u8, checksum: *const Checksum) void {
     encode.writeTrailer(target, checksum.final(), checksum.len);
 }

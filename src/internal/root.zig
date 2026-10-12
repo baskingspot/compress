@@ -1,24 +1,26 @@
-//! The codec-agnostic shares every zcompress codec may import
-//! (docs/zcompress-plan.md, "Architecture"): imports only `std` and
-//! `fastmem`, holds no codec-specific state, and travels with a codec that
-//! uses it. Never re-exported by the barrel (`src/root.zig`) or a codec
-//! namespace.
+//! Code shared by zcompress codecs. Not public API: neither the barrel
+//! (`src/root.zig`) nor any codec namespace re-exports it, and there is no
+//! build module for it. A codec imports it by relative path
+//! (`@import("../internal/root.zig")`) and takes this directory along when it
+//! is copied out of the repo.
 //!
-//! Contracts: README.md (the Io codec pattern book).
+//! The layer imports only `std` and `fastmem` and holds no codec-specific
+//! state.
 
-/// The decode-overrun sentinel: the constants, the fill, and the check every
-/// decode test runs (AGENTS.md, "Rules").
+/// Decode-overrun test helper: `fill` a target with a cycling byte pattern,
+/// decode into it, then `expect` that the bytes past the decoded length are
+/// untouched.
 pub const sentinel = @import("sentinel.zig");
 /// The reader lifecycle (`State`, `guard`, `fail`) and the generated
 /// `Io.Reader` vtable entries (`VTable`).
 pub const reader = @import("reader.zig");
-/// The shared writer machinery: the generated `Io.Writer` vtable entries and
-/// the poisoned `finish` every compressing codec writer runs (`VTable`).
+/// The generated `Io.Writer` vtable entries and the poisoned `finish` for
+/// block-based compressing writers (`VTable`).
 pub const writer = @import("writer.zig");
-/// Endian-bound integer access: the one home of the codecs' `readInt`/
-/// `writeInt` (`Int`, `little`, `big`).
+/// Integer access with a fixed byte order (`Int`, `little`, `big`): the
+/// `readInt` and `writeInt` that each codec's `common.zig` binds.
 pub const int = @import("int.zig");
-/// The container driver: the framing-agnostic machinery a container codec
-/// over an inner codec shares (`ReaderHooks`/`WriterHooks`/`EncodeHooks`/
-/// `DecodeHooks`, `readExact`), parameterized over the codec's framing.
+/// The driver shared by container codecs over an inner codec (`ReaderHooks`,
+/// `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`). Each container
+/// supplies its own framing type.
 pub const container = @import("container.zig");

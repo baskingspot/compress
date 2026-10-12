@@ -1,18 +1,19 @@
-//! Snappy block encoder — LZ77 with a hash-table match finder.
+//! Snappy block encoder: LZ77 with a hash-table match finder. Entry points:
+//! `compressBlock` and `maxCompressedLength`.
 //!
-//! This is a port of the algorithm used by klauspost/compress's
-//! `encodeBlockSnappyGo64K` (itself derived from the Snappy-Go reference),
-//! which is the same shape as Google's C++ `CompressFragment`: hash 6 bytes at
-//! the cursor into a power-of-two `u16` position table, scan forward, and on a
-//! 4-byte match extend it 8 bytes at a time using `@ctz` on the XOR to find the
-//! first mismatch byte. A skip heuristic gradually strides past incompressible
-//! regions. If the encoded form would exceed `source - source>>5 - 5` bytes the whole
-//! block is emitted as a single literal (snappy guarantees it never expands
-//! past its bound).
+//! A port of the algorithm in klauspost/compress's `encodeBlockSnappyGo64K`
+//! (itself derived from the Snappy-Go reference, and the same shape as
+//! Google's C++ `CompressFragment`): hash 6 bytes at the cursor into a
+//! power-of-two `u16` position table, scan forward, and on a 4-byte match
+//! extend it 8 bytes at a time, using `@ctz` on the XOR of two loads to find
+//! the first mismatch. A skip heuristic strides past incompressible regions.
+//! If the encoded form would exceed `source - source>>5 - 5` bytes, the whole
+//! block is emitted as one literal, so output never exceeds the
+//! `maxCompressedLength` bound.
 //!
-//! Zero heap allocation: the hash table is a fixed `[1<<14]u16` stack frame
-//! (32 KiB), sized for the 64 KiB max block. The caller provides the `target`
-//! buffer sized via `maxCompressedLength`.
+//! No heap allocation: the hash table is a `[1 << 14]u16` stack array (32 KiB),
+//! sized for the 64 KiB maximum block. The caller supplies `target`, sized with
+//! `maxCompressedLength`.
 //!
 //! Format: https://github.com/google/snappy/blob/main/format_description.txt
 //! Reference encoder: https://github.com/klauspost/compress (s2/encode_all.go)
@@ -31,35 +32,32 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 
-/// Worst-case compressed size for a raw snappy block of `input_len` bytes:
-/// the varint length prefix plus the literal-only blowup bound. The real
-/// encoder bails to a single literal when it can't compress, so this is the
-/// true worst case (one tag byte per 60-byte chunk + the varint). Matches only
-/// ever shrink the output.
+/// Upper bound on the size of `compressBlock`'s output for `input_len` bytes of
+/// input: the length varint, the input itself, and one tag byte per 60 input
+/// bytes. The encoder falls back to a single literal whenever matching would
+/// not help, so its output never exceeds this. A `target` of this size makes
+/// `compressBlock` infallible.
 pub fn maxCompressedLength(input_len: usize) usize {
     return uvarintSize(input_len) + input_len + (input_len + 59) / 60;
 }
 
-/// Maximum raw block size. Snappy positions are stored as `u16`, so a block
-/// is at most 64 KiB. Larger inputs must be split by the caller's framing
-/// layer.
+/// Largest input `compressBlock` accepts, 64 KiB: the match finder stores
+/// positions as `u16`. Split larger input into blocks of at most this size;
+/// `snappy.Writer` does that for streams.
 pub const max_block_size: usize = 65536;
 /// Minimum input length below which the encoder skips match-finding and emits
 /// the whole block as one literal. Matches the reference `minNonLiteralBlockSize`
 /// (32): below this there is nothing to gain from the hash table.
 const min_non_literal_block_size: usize = 32;
 
-/// Number of trailing input bytes reserved so the 8-byte fast-path loads
-/// stay in bounds. Matches the reference `inputMargin` (8): the fast paths
-/// load 8 bytes, so a 1-byte literal's 8-byte load stays in bounds with 8
-/// in margin.
+/// Trailing input bytes the match finder stops short of, so its 8-byte loads
+/// stay in bounds. Same as the reference's `inputMargin` (8).
 const input_margin: usize = 8;
 
 /// Hash table size: `1 << table_bits` u16 entries = 32 KiB on the stack.
-/// `table_bits = 14` is what the reference uses for <=64K snappy blocks; it
-/// indexes the high-quality bits of the 6-byte hash. Larger tables trade stack
-/// for slightly fewer collisions (marginally better ratio); 14 is the sweet
-/// spot the reference settled on.
+/// 14 is the reference's choice for blocks up to 64 KiB; it indexes the
+/// high-quality bits of the 6-byte hash. A larger table would trade stack for
+/// slightly fewer collisions (marginally better ratio).
 const table_bits = 14;
 const table_size: usize = 1 << table_bits;
 
@@ -84,15 +82,18 @@ inline fn load32(b: []const u8, i: usize) u32 {
     return readInt(u32, b[i..][0..4]);
 }
 
-/// Compress `source` into `target` as a raw snappy block (varint uncompressed length
-/// + tag stream). Returns bytes written, or `error.BufferTooSmall`. Zero heap
-/// allocation. The block is at most 64 KiB; larger inputs are split by the
-/// caller's framing layer.
+/// Compress `source` into `target` as a raw snappy block: the uncompressed
+/// length as a varint, then the tag stream. Returns the number of bytes
+/// written.
 ///
-/// For `source.len < min_non_literal_block_size` the block is a single literal —
-/// the hash table can't help. Otherwise the match finder runs; if it can't beat
-/// the bail threshold the whole block is emitted as one literal (snappy never
-/// expands past its bound).
+/// `source.len` must be at most `max_block_size` (asserted). Returns
+/// `error.BufferTooSmall` if `target` cannot hold the result; a `target` of
+/// `maxCompressedLength(source.len)` bytes always can. Uses about 32 KiB of
+/// stack for the match finder's hash table and does not allocate. The output
+/// is valid Snappy but need not match another encoder's bytes.
+///
+/// Inputs shorter than 32 bytes, and inputs that do not shrink by about 3%,
+/// come out as a single literal.
 pub fn compressBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
     // Positions are stored as u16, so a raw block is at most 64 KiB.
     // Callers must respect it.

@@ -1,37 +1,21 @@
-//! The zlib checksum state over a vectorized Adler-32 kernel.
+//! The Adler-32 kernel and the zlib container's checksum state.
 //!
-//! RFC 1950 §2.2 defines the trailer value: the Adler-32 of "the uncompressed
-//! data (excluding any dictionary data)", stored "in most-significant-byte
-//! first (network) order". The algorithm is `§8.2`: two sums mod 65521 — s1
-//! the sum of all bytes (initialized to 1, "to make the length of the
-//! sequence part of s2"), s2 the sum of all s1 values — combined as
-//! `s2*65536 + s1`; the appendix's implementation shape is the deferred
-//! modulo ("The modulo on unsigned long accumulators can be delayed for 5552
-//! bytes").
+//! `adler32(adler, bytes)` folds `bytes` into a running Adler-32. `Checksum`
+//! is the state a stream carries: the running value over the payload, fed
+//! through flate's checksum hook so every payload byte is hashed once, in
+//! stream order, as it crosses the codec boundary. RFC 1950's trailer is this
+//! value alone, big-endian; it has no length field.
 //!
-//! The kernel here keeps that deferred-modulo block structure (blocks of at
-//! most 5552 bytes, one mod per block — the zlib NMAX bound keeps every
-//! accumulator under 2^32) but replaces the per-byte `s1 += b; s2 += s1`
-//! chain with vector arithmetic. Within a block of `len` bytes the two sums
-//! are
+//! The algorithm is `§8.2`: two sums mod 65521, s1 the sum of all bytes
+//! (starting at 1) and s2 the sum of all s1 values, stored as
+//! `s2*65536 + s1`. The kernel keeps `§8.2`'s deferred modulo (at most 5552
+//! bytes between reductions) and folds each block with `@Vector`
+//! accumulators instead of a per-byte loop; the comments in `adler32` give
+//! the arithmetic. `std.hash.Adler32` is the reference the tests check it
+//! against.
 //!
-//!   s1 += Σ b_i                    (lane-wise byte sums)
-//!   s2 += len·s1_old + Σ (len-i) b_i  (lane-wise weighted byte sums)
-//!
-//! so the block folds as two `@Vector` accumulators — byte-sum lanes and
-//! weight-times-byte lanes — reduced once at the block's end; the serial
-//! per-byte dependency is gone. The day-one kernel was
-//! `std.hash.Adler32.permute` (the same 5552 blocks, a 16-byte
-//! comptime-unrolled scalar inner loop: ~0.32 ns/byte measured, 3x the flate
-//! core's cost on text); std's `Adler32.hash` stays in the tests as the
-//! reference oracle (check values, a differential length sweep across the
-//! 5552 boundary).
-//!
-//! The container keeps only the state: the running Adler-32, folded through
-//! flate's checksum hook as bytes cross the codec boundary — every payload
-//! byte exactly once, in stream order, with no copy and no second pass
-//! (README.md, "The checksum"; OQ1). RFC 1950's trailer carries no length
-//! field, so the state is the digest alone.
+//! Format: docs/research/specs/rfc1950-zlib.txt (§2.2 the trailer, §8.2 the
+//! algorithm).
 
 const std = @import("std");
 const testing = std.testing;
@@ -56,27 +40,33 @@ const nmax: usize = 5552;
 const chunk_len = 16;
 const Chunk = @Vector(chunk_len, u8);
 
-/// The vector kernel's accumulator type: one u32 lane per input byte, the
+/// The vector kernel's accumulator type: one u32 element per input byte, the
 /// width the NMAX bound's arithmetic demands (see `nmax`).
 const Lane = @Vector(chunk_len, u32);
 
-/// Lane indices 0..15, the per-lane weight offset within a chunk.
+/// The indices 0..15: each position's weight offset within a chunk.
 const lane_index: Lane = std.simd.iota(u32, chunk_len);
 
-/// Fold `bytes` into `adler` (a `final()` value, the initial value 1) and
-/// return the new value: the libdeflate `adler32(adler, bytes)` shape the
-/// one-shot paths use (`containers-notes.md §3.3`). The state is a
-/// continuation, so `adler32(1, b) == Adler32.hash(b)` and
-/// `adler32(adler, "") == adler`.
+/// Fold `bytes` into the running value `adler` and return the new value.
+/// Start from 1, the Adler-32 of no bytes (`§8.2`). Folding in pieces gives
+/// the same value as one call over the whole, `adler32(1, b)` equals
+/// `std.hash.Adler32.hash(b)`, and `adler32(adler, "")` returns `adler`.
 pub fn adler32(adler: u32, bytes: []const u8) u32 {
     var s1: u32 = adler & 0xffff;
     var s2: u32 = adler >> 16;
 
     var rest = bytes;
     while (rest.len >= chunk_len) {
-        // One deferred-modulo block: full chunks fold into the vector
-        // accumulators, a sub-chunk tail (only possible in the input's last
-        // block) finishes with the per-byte recurrence.
+        // One deferred-modulo block of `len` bytes. Its sums are
+        //
+        //   s1 += Σ b_i
+        //   s2 += len·s1_old + Σ (len-i)·b_i
+        //
+        // so the block folds as two vector accumulators, the byte sums and
+        // the weight-times-byte sums, each reduced once at the end of the
+        // block. Full chunks go through the vector accumulators; a sub-chunk
+        // tail (only possible in the input's last block) finishes with the
+        // per-byte recurrence.
         const len = @min(rest.len, nmax);
         const block = rest[0..len];
         defer rest = rest[len..];
@@ -93,14 +83,14 @@ pub fn adler32(adler: u32, bytes: []const u8) u32 {
         while (at < vec_len) : (at += chunk_len) {
             const chunk: Chunk = block[at..][0..chunk_len].*;
             const wide: Lane = chunk;
-            // Per chunk, the lane weights are (vec_len - at) - lane.
+            // Per chunk, the weights are (vec_len - at) - lane_index.
             const weights: Lane =
                 @as(Lane, @splat(@intCast(vec_len - at))) - lane_index;
             sum_lanes +%= wide;
             weighted_lanes +%= wide *% weights;
         }
-        // The NMAX bound: every lane and every sum below stays under 2^32
-        // (see nmax), so the wrapping ops never wrap.
+        // The NMAX bound: every accumulator element and every sum below
+        // stays under 2^32 (see nmax), so the wrapping ops never wrap.
         const block_s1 = @reduce(.Add, sum_lanes);
         const block_s2 = @reduce(.Add, weighted_lanes);
         s2 +%= block_s2 +% @as(u32, @intCast(vec_len)) *% s1;
@@ -128,10 +118,10 @@ pub fn adler32(adler: u32, bytes: []const u8) u32 {
     return s1 | (s2 << 16);
 }
 
-/// The container's checksum state, folded through flate's checksum hook as
-/// bytes cross the codec boundary (README.md, "The checksum"; OQ1): the
-/// Adler-32 of every payload byte, exactly once, in stream order. RFC 1950's
-/// trailer is this value alone — there is no size field beside it (`§2.2`).
+/// The container's checksum state: the running Adler-32 of a stream's
+/// payload, folded through flate's checksum hook as bytes cross the codec
+/// boundary, each byte once and in stream order. The trailer is this value
+/// alone (`§2.2`); there is no size field beside it.
 pub const Checksum = struct {
     /// The running digest (`§8.2`); starts at the algorithm's initial value,
     /// 1 (`§8.2`: "s1 is initialized to 1").
@@ -168,13 +158,13 @@ pub const Checksum = struct {
 // ---------------------------------------------------------------------------
 // Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.2 (the trailer value),
 // §8.2 (the algorithm and the deferred modulo), §9 (the sample). std's
-// `Adler32` is the reference oracle for the vector kernel.
+// `Adler32` is the reference the vector kernel is checked against.
 // ---------------------------------------------------------------------------
 
 test "adler32: the standard check values" {
     // RFC 1950 §9's sample is the per-byte form; these are the values every
     // Adler-32 description pins. `Wikipedia` is the canonical check value
-    // (0x11E60398); `Hello world\n` is the value std's own zlib test member
+    // (0x11E60398); `Hello world\n` is the value std's own zlib test stream
     // carries big-endian as the bytes `1c f2 04 47`; `123456789` is the
     // companion check value to the RFC's sample table.
     try testing.expectEqual(@as(u32, 0x11E60398), Adler32.hash("Wikipedia"));
@@ -208,9 +198,10 @@ test "adler32: the vector kernel agrees with std over a length sweep" {
 }
 
 test "adler32: the wrapper is a continuation of the kernel" {
-    // The libdeflate shape: `adler32(crc, bytes)` continues a digest, with
-    // the initial value 1 standing for "no bytes yet". The identity
-    // `adler32(1, b) == Adler32.hash(b)` is what the one-shot encoder rides.
+    // `adler32(adler, bytes)` continues a digest, with the initial value 1
+    // standing for "no bytes yet" (libdeflate's signature). The identity
+    // `adler32(1, b) == Adler32.hash(b)` is what the one-shot encoder relies
+    // on.
     const bytes = "the quick brown fox jumps over the lazy dog. " ** 20;
     try testing.expectEqual(Adler32.hash(bytes), adler32(1, bytes));
     try testing.expectEqual(
@@ -220,9 +211,9 @@ test "adler32: the wrapper is a continuation of the kernel" {
 }
 
 test "adler32: incremental runs equal one pass" {
-    // The streaming layers fold runs as bytes cross the codec boundary
-    // (OQ1): the digest must be independent of where the runs are cut —
-    // including across the 5552-byte deferred-modulo boundary (§8.2).
+    // The streaming layers fold runs as bytes cross the codec boundary: the
+    // digest must be independent of where the runs are cut, including across
+    // the 5552-byte deferred-modulo boundary (§8.2).
     const bytes = "the quick brown fox jumps over the lazy dog. " ** 300;
     try testing.expect(bytes.len > nmax);
     const whole = Adler32.hash(bytes);

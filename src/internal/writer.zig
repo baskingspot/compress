@@ -1,21 +1,11 @@
-//! The shared writer machinery: the generated `Io.Writer` vtable entries and
-//! the poisoned `finish` every compressing codec writer runs (README.md,
-//! "The Io codec pattern book").
+//! The `Io.Writer` vtable entries and `finish` shared by block-based
+//! compressing writers (snappy and flate).
 //!
-//! The generator builds `drain`/`flush`/`rebase` and `finish` from a codec
-//! writer `Host`, an `emitBlock` hook, and an optional stream-ending hook:
-//! the `errdefer` poison, the parent-pointer cast, the drain top-up, the
-//! rebase slide, the postconditions, and the terminal finish are structural,
-//! not per-codec.
-//!
-//! `Host` carries two fields: `writer: Io.Writer` (the embedded interface,
-//! whose `buffer` is the codec's block region) and `output: *Io.Writer` (the
-//! compressed-stream sink). `emitBlock(host, len)` emits the first `len`
-//! bytes of the buffered block through the codec's encoder and leaves the
-//! unemitted tail at the front of the block region (`writer.end -= len`) —
-//! the contract `drain`, `flush`, and `rebase` all rely on. `ending(host)`
-//! writes the codec's stream ending after the final block (flate's `03 00`
-//! fixed block); a codec whose stream has no ending of its own passes null.
+//! `VTable` generates `drain`, `flush`, `rebase`, and `finish` from the
+//! codec's `emitBlock` hook and an optional stream-ending hook. The codec
+//! supplies only block encoding. After a failed call, and after `finish`, the
+//! writer is replaced by `Io.Writer.failing`, so every later call returns
+//! `error.WriteFailed`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,12 +13,26 @@ const assert = std.debug.assert;
 
 const fastmem = @import("fastmem");
 
-/// The generated `Io.Writer` vtable entries and `finish` for a codec writer
+/// Generates the `Io.Writer` vtable entries and `finish` for a codec writer
 /// `Host`:
 ///
 ///     const Hooks = internal.writer.VTable(Writer, emitBlock, ending);
 ///     // init:        .vtable = &Hooks.vtable  (the generated const, never a copy)
 ///     // public API:  pub fn finish(w: *Writer) !void { return Hooks.finish(w); }
+///
+/// `finish` recognizes a live writer by the address of `Hooks.vtable`, so
+/// `init` must store `&Hooks.vtable`, not a copy of its value.
+///
+/// `Host` needs two fields: `writer: Io.Writer`, the embedded interface whose
+/// `buffer` is the codec's block region, and `output: *Io.Writer`, the sink for
+/// the compressed bytes.
+///
+/// - `emitBlock(host, len)` encodes the first `len` buffered bytes to `output`
+///   and leaves the rest at the front of the block region
+///   (`writer.end -= len`). `drain`, `flush`, and `rebase` all rely on that.
+/// - `ending(host)` writes the stream ending after the final block (flate's
+///   `03 00`, an empty final fixed block). A codec whose stream has no ending
+///   of its own passes null.
 pub fn VTable(
     comptime Host: type,
     comptime emitBlock: fn (*Host, usize) Io.Writer.Error!void,
@@ -41,12 +45,11 @@ pub fn VTable(
             .rebase = rebase,
         };
 
-        /// The buffer is full: top it up from the front of `data` (the last
-        /// slice repeats `splat` times), then emit the full block. `drain`
-        /// only runs when `data` does not fit, so the top-up fills the
-        /// region: every emitted block but the last is full. A degenerate
-        /// call that accepted nothing still makes progress by emitting what
-        /// is buffered.
+        /// Called when `data` does not fit in the buffer. Tops the buffer up
+        /// from the front of `data` (the last slice repeats `splat` times),
+        /// then emits the full block, so every emitted block but the last is
+        /// full whatever the caller's write sizes were. A call that accepts
+        /// nothing still makes progress by emitting what is buffered.
         fn drain(w: *Io.Writer, data: []const []const u8, splat: usize) Io.Writer.Error!usize {
             errdefer w.* = .failing;
             const host: *Host = @alignCast(@fieldParentPtr("writer", w));
@@ -66,8 +69,8 @@ pub fn VTable(
             return consumed;
         }
 
-        /// Emit the buffered block and flush `output`, keeping the writer
-        /// usable: the codec's own ending is `finish`'s, never a flush's.
+        /// Emits the buffered block and flushes `output`. The writer stays
+        /// usable: the stream ending is written only by `finish`.
         fn flush(w: *Io.Writer) Io.Writer.Error!void {
             errdefer w.* = .failing;
             const host: *Host = @alignCast(@fieldParentPtr("writer", w));
@@ -75,13 +78,13 @@ pub fn VTable(
             try host.output.flush();
         }
 
-        /// Everything buffered except the last `preserve` bytes is written
-        /// data: emit it as a block, then leave the preserved tail as the
-        /// buffered block. (A consumer can ask for a direct writable slice
-        /// into the region via `writableSliceGreedy`; when the region is
-        /// full, that call lands here — discarding instead of emitting would
-        /// silently drop input.) `emitBlock` owns the slide: it leaves the
-        /// tail at the front of the block region, with `end == keep`.
+        /// Makes room for `capacity` more bytes. Everything buffered except
+        /// the last `preserve` bytes is written data: emit it as a block, then
+        /// leave the preserved tail as the buffered block. A consumer that asks
+        /// for a direct writable slice (`writableSliceGreedy`) on a full
+        /// buffer lands here; discarding instead of emitting would silently
+        /// drop input. `emitBlock` does the slide: it leaves the tail at the
+        /// front of the block region, with `end == keep`.
         fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void {
             errdefer w.* = .failing;
             assert(preserve + capacity <= w.buffer.len);
@@ -94,10 +97,11 @@ pub fn VTable(
             assert(w.buffer.len - w.end >= capacity);
         }
 
-        /// Complete the stream: emit the buffered block, write the codec's
-        /// ending, then flush `output`. Terminal — the writer is poisoned
-        /// afterwards, and a failed or finished writer reports
-        /// `error.WriteFailed` instead of a false success.
+        /// Completes the stream: emits the buffered block, writes the codec's
+        /// ending, and flushes `output`. Terminal: the writer is poisoned
+        /// afterwards, so later writes and `finish` calls return
+        /// `error.WriteFailed`. A writer that already failed or finished
+        /// returns `error.WriteFailed` here too, never a false success.
         pub fn finish(host: *Host) Io.Writer.Error!void {
             if (host.writer.vtable != &vtable) return error.WriteFailed;
             defer host.writer = .failing;

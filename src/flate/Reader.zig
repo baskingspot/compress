@@ -1,25 +1,21 @@
 //! flate.Reader: a decompressing `Io.Reader` over a raw deflate stream
-//! (README.md, "Streaming") produced by `Writer`.
+//! (RFC 1951), such as the one `Writer` produces. It decodes straight from
+//! `input` into a caller-provided 64-KiB window and allocates nothing.
+//! `streamAll` pumps a whole stream in one call.
 //!
-//! The window: `buffer[0..end]` is decoded output, `buffer[seek..end]` the
-//! bytes the consumer has not consumed. The decoder slides it forward as it
-//! fills, keeping the last `history_len` bytes before `end` — the format's
-//! match reach (`§3.2.3`) — so the buffer is a sliding window, never an
-//! accumulation. There is no compressed staging region: a Huffman block
-//! carries no compressed length, so the decoder reads the input through a bit
-//! reader and decodes straight into the window.
+//! The stream ends with `error.EndOfStream` after the last output byte. A
+//! malformed stream or a failing `input` gives `error.ReadFailed`, with the
+//! cause in `err`. Both are sticky: later reads repeat the result. The reader
+//! consumes `input` exactly through the stream's last byte (the final block's
+//! padded partial byte included) and leaves later bytes unread, so a
+//! container can read its trailer from the same `input`.
 //!
-//! The bit reader consumes `input` exactly through the stream's last byte —
-//! the final block's partial byte included — and stops there (README,
-//! "Streaming"). It peeks bits out of `input`'s buffer and tosses a byte only
-//! once all eight of its bits are consumed, so bytes after the stream are
-//! never consumed, and the final padded byte is.
+//! The window keeps the last 32 KiB of output as match history (`§3.2.3`), so
+//! a contiguous request (`peek`, `take`) is guaranteed only up to 32 KiB. A
+//! larger one that does not fit at the consumer's position returns
+//! `error.ReadFailed` with `err == .StreamTooLong`.
 //!
-//! The contiguous-read cap: the window holds 64 KiB and can slide only when
-//! the consumer has drained everything older than the retained 32-KiB tail,
-//! so any request of at most `history_len` bytes is served and a request
-//! beyond what the window can hold at the consumer's position fails closed
-//! with `error.ReadFailed` (`err == .StreamTooLong`) — never an assert.
+//! Format: docs/research/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -37,10 +33,10 @@ const State = internal.reader.State;
 const VTable = internal.reader.VTable;
 const common = @import("common.zig");
 const readVarInt = common.readVarInt;
-/// The optional checksum hook's type (`Checksum.zig`, README "Checksum
-/// hook"): a container's state plus its byte-fold function, named here so a
-/// container can name it through this namespace (type identity across build
-/// modules) and assign it to `checksum` before the first read.
+/// The checksum hook's type: a container's state plus its byte-fold function
+/// (`Checksum.zig`). It is re-exported here so a container can name it
+/// through this namespace (one type across build modules) and assign it to
+/// `checksum` before the first read.
 pub const Checksum = @import("Checksum.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
@@ -58,15 +54,16 @@ const max_match_len = decode.max_match_len;
 /// (`§3.2.4`). The Huffman tables peek at most 15.
 const max_peek_bits: u6 = 16;
 
-/// The caller-provided window: one window of decoded output. The last
-/// `history_len` bytes of it are the match history (`§3.2.3`), the rest is
-/// fresh output; there is no compressed staging region.
+/// The caller-provided decode window, 2 * `history_len` = 64 KiB. The last
+/// `history_len` bytes are the match history (`§3.2.3`) and the rest is fresh
+/// output. The reader keeps no other buffer of decoded or compressed bytes.
 pub const Buffer = [2 * history_len]u8;
 
-/// The detailed error recorded once `state == .failed` (the interface reports
-/// `error.ReadFailed`): `decode.DecompressError` minus `BufferTooSmall` — the
-/// Reader owns its window, so no decode can outgrow it — plus the contiguity
-/// cap and the interface's own `ReadFailed`/`EndOfStream`.
+/// The cause recorded in `Reader.err` beside the interface's coarse
+/// `error.ReadFailed`. It holds every `decode.DecompressError` except
+/// `BufferTooSmall` (the reader owns its window, so output cannot outgrow it),
+/// plus the three below. `EndOfStream` is the clean end of the stream and is
+/// never recorded in `err`.
 pub const Error = error{
     Truncated,
     InvalidBlockType,
@@ -77,13 +74,15 @@ pub const Error = error{
     MissingEndOfBlockCode,
     InvalidCode,
     InvalidMatch,
+    /// A contiguous request that the window cannot hold at the consumer's
+    /// position.
     StreamTooLong,
+    /// Reading `input` failed.
     ReadFailed,
     EndOfStream,
 };
 
-/// An alias for `Error` that `Bits` can name: a container declaration shadows
-/// the file scope inside it, so `Bits.Error` cannot refer to `Error` directly.
+/// `Error` under a second name, for `Bits.ErrorSet`.
 const ReaderError = Error;
 
 /// Where the decoder is in the block structure (`§3.2.3`): a resume point, so
@@ -104,7 +103,8 @@ const Phase = union(enum) {
 };
 
 /// The bit reader (`§3.1.1`): LSB-first fill, straight from the input
-/// `Io.Reader`, no compressed staging.
+/// `Io.Reader`. A Huffman block carries no compressed length, so there is
+/// nothing to stage; the decoder reads bits as it needs them.
 ///
 /// `input`'s position advances only in whole consumed bytes: `consumed` counts
 /// the bits already consumed in the byte at the input's position, so a peek
@@ -180,8 +180,8 @@ const Bits = struct {
     }
 
     /// The stream's last byte: the final block ends mid-byte and the format
-    /// pads it (`§3.1.1`), so the byte belongs to the stream — and the bytes
-    /// after it do not (README, "Streaming").
+    /// pads it (`§3.1.1`), so that byte belongs to the stream and the bytes
+    /// after it do not.
     fn finish(self: *Bits) void {
         if (self.consumed == 0) return;
         assert(self.input.seek < self.input.end);
@@ -192,15 +192,16 @@ const Bits = struct {
 
 const Reader = @This();
 
+/// The `Io.Reader` interface: read the decoded bytes through `&r.reader`.
 reader: Io.Reader,
 bits: Bits,
-/// The container's checksum hook, updated with the bytes that enter the
-/// window (the literal store, the match copy, the stored-block copy). Null —
-/// the raw module's only use — costs one predictable check per window fill
-/// and nothing per byte (README, "Checksum hook"). Set it before the first
-/// read: a hook set mid-stream sees only the bytes decoded after it, and the
-/// container reads its own state at the clean end (this module writes no
-/// trailer and finalizes nothing).
+/// Optional checksum hook, handed the decoded bytes as they enter the window
+/// (literal stores, match copies, stored-block copies), each exactly once and
+/// in stream order. A container sets it before the first read: a hook set
+/// mid-stream sees only the bytes decoded after it. The container reads its
+/// own state after `error.EndOfStream`; after `error.ReadFailed` the digest
+/// is incomplete. Null costs one check per window fill and nothing per byte.
+/// This module writes no trailer.
 checksum: ?Checksum = null,
 phase: Phase = .block_header,
 /// `§3.2.3` — "a distance cannot refer past the beginning of the output
@@ -220,17 +221,25 @@ state: State = .streaming,
 /// `error.ReadFailed`.
 err: ?Error = null,
 
-/// The generated `Io.Reader` entries (src/internal/README.md, "The Io codec
-/// pattern book"): the sticky guard, the zero-length poll, and the
-/// fill-and-return-0 count are structural. `fill` is the pump; `rebase`
-/// owns the window's capacity policy.
+/// The `Io.Reader` vtable, generated by `internal.reader.VTable`. The
+/// generated entries own the sticky-state check and the zero-length poll;
+/// `fill` decodes more output into the window and `rebase` makes room when a
+/// request needs it.
 const vtable = VTable(Reader, fill, rebase).vtable;
 
-/// Wrap `input` (a raw deflate stream) with `buffer` as the decoded window.
-/// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
-/// stream ends cleanly with `error.EndOfStream` once the final block's output
-/// has been consumed and fails closed with `error.ReadFailed` (sticky,
-/// details in `err`) on any malformed stream or input failure.
+/// Start reading the raw deflate stream in `input`, with `buffer` as the
+/// decode window. Read the decoded bytes through `&r.reader` (`stream`, the
+/// `read` and `peek` families).
+///
+/// The stream ends with `error.EndOfStream` once the final block's output has
+/// been consumed. A malformed stream or a failing `input` returns
+/// `error.ReadFailed`, with the cause in `err`. Both outcomes are sticky: later
+/// reads repeat the result.
+///
+/// `input`'s own buffer must hold at least 3 bytes: a 16-bit peek (a stored
+/// block's LEN or NLEN) can start up to 7 bits into a byte, so it spans 3
+/// bytes. An `Io.Reader.fixed` over a shorter slice is fine, since it already
+/// holds the whole stream.
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
     return .{
         .reader = .{
@@ -250,28 +259,28 @@ fn fillWindow(r: *Reader) Error!usize {
     var added: usize = 0;
     // The checksum hook's mark: everything before it is already folded into
     // the container's state. Bytes enter the window only at `reader.end` (the
-    // literal store, the match copy, the stored-block copy — all inside
+    // literal store, the match copy, the stored-block copy, all inside
     // `step`), so the pending bytes are one contiguous run at the window's
     // tail, in stream order. The run is flushed before a slide drops its
     // head and before this call returns, so the digest is exact whenever the
-    // window is quiescent — in particular at `error.EndOfStream`, where a
+    // window is quiescent, in particular at `error.EndOfStream`, where a
     // container reads it. One hook call per window fill, never one per
-    // symbol (README, "Checksum hook").
+    // symbol.
     var hashed_end = r.reader.end;
     while (r.state == .streaming) {
         // Room for the next write: a match may declare up to 258 bytes
         // (`§3.2.5`), so the decoder stops this far short of a full window and
-        // slides the retained history forward. That is what bounds the
-        // guaranteed contiguous request at `history_len` bytes: a slide always
-        // leaves at least that much free (README, "Streaming").
+        // slides the retained history forward. That is what guarantees a
+        // contiguous request of `history_len` bytes: when the consumer holds no
+        // more than that unconsumed, a slide leaves at least that much free.
         if (r.reader.buffer.len - r.reader.end < max_match_len) {
             r.flushChecksum(&hashed_end);
             const room = r.slide();
             hashed_end = r.reader.end;
             if (room < max_match_len) {
-                // The window cannot take another symbol: the consumer holds
-                // more than it has drained, so a request that needs one fails
-                // closed rather than asserting (README, "Streaming").
+                // The window cannot take another symbol: the consumer has not
+                // drained enough, so a request that needs more room returns
+                // `error.StreamTooLong` instead of asserting.
                 if (added == 0) return error.StreamTooLong;
                 return added;
             }
@@ -454,29 +463,30 @@ fn record(r: *Reader, result: Error!usize) Io.Reader.Error!usize {
     };
 }
 
-/// Fail closed, stickily. The window's unconsumed bytes are dropped: the
-/// README's rule is that no partial output is trusted past the error, so a
-/// failed reader serves the error and nothing else — buffered bytes included.
+/// Record `err` as the sticky failure and return `error.ReadFailed`. The
+/// window's unconsumed bytes are dropped: no decoded output is trusted past an
+/// error, so a failed reader serves the error and nothing else, buffered bytes
+/// included.
 fn fail(r: *Reader, err: Error) Io.Reader.Error {
     r.reader.seek = r.reader.end;
     return internal.reader.fail(Error, &r.state, &r.err, err);
 }
 
-/// The generated entries' fill: `fillWindow`'s detailed errors through
-/// `record`, so every failure is the interface's `error.ReadFailed` with the
-/// detail sticky in `err`. The count is ignored — the data lands in the
-/// window (the VTable's store-in-buffer mode), not in the caller's writer.
+/// The decode hook for the generated entries: runs `fillWindow` and maps its
+/// detailed errors through `record`, so every failure is the interface's
+/// `error.ReadFailed` with the cause sticky in `err`. The returned count is
+/// ignored: the data lands in the window (the VTable's store-in-buffer mode),
+/// not in the caller's writer.
 fn fill(r: *Reader) Io.Reader.Error!usize {
     return r.record(r.fillWindow());
 }
 
-/// The generated entries' rebase hook: make room for `capacity` more
+/// The rebase hook for the generated entries: make room for `capacity` more
 /// buffered bytes by sliding the unconsumed bytes and the retained history to
-/// the front. A slide frees at least `history_len + unconsumed` bytes, so
-/// every request of at most `history_len` bytes is served; a request the
-/// window cannot hold at the consumer's position fails closed with
-/// `error.ReadFailed` (`err == .StreamTooLong`), never an assert (README,
-/// "Streaming").
+/// the front. A slide leaves at least `history_len` bytes of room from the
+/// consumer's position, so every request of at most `history_len` bytes is
+/// served. A request the window cannot hold at the consumer's position
+/// returns `error.ReadFailed` (`err == .StreamTooLong`) instead of asserting.
 fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
     _ = r.slide();
     if (r.reader.buffer.len - r.reader.seek < capacity) {
@@ -552,14 +562,13 @@ fn roundTripWithChecksum(source: []const u8) !void {
 }
 
 test "Reader: the checksum hook folds every decoded byte exactly once, in order" {
-    // README, "Checksum hook": the bytes that enter the window — the literal
-    // store, the match copy, the stored-block copy — are folded as the window
-    // fills, before any slide drops them. The synthetic fold is
-    // order-sensitive: a dropped, doubled, or reordered byte changes the
-    // digest. The sizes span several window fills (64 KiB each); the shapes
-    // cover all three entry paths — text (literals and matches), random
-    // (stored blocks), and a single-byte run (distance-1 overlapping
-    // matches).
+    // The bytes that enter the window (the literal store, the match copy,
+    // the stored-block copy) are folded as the window fills, before any slide
+    // drops them. The synthetic fold is order-sensitive: a dropped, doubled,
+    // or reordered byte changes the digest. The sizes span several window
+    // fills (64 KiB each); the shapes cover all three entry paths: text
+    // (literals and matches), random (stored blocks), and a single-byte run
+    // (distance-1 overlapping matches).
     const gpa = testing.allocator;
     for ([_]usize{ 0, 1, 1000, 65535, 65536, 200_000 }) |len| {
         const source = try makeSource(gpa, len);
@@ -593,8 +602,9 @@ fn makeSource(gpa: mem.Allocator, len: usize) ![]u8 {
 }
 
 test "Reader: the buffer types are the documented sizes" {
-    // README, "Streaming": the Reader's window is 2 * history_len = 64 KiB,
-    // the Writer's buffer is max_block_size + history_len = 98303.
+    // The Reader's window is 2 * history_len = 64 KiB and the Writer's buffer
+    // is max_block_size + history_len = 98303 bytes. Callers size stacks from
+    // these, so a change must be deliberate.
     try testing.expectEqual(@as(usize, 65536), @sizeOf(Buffer));
     try testing.expectEqual(@as(usize, 2 * history_len), @sizeOf(Buffer));
     try testing.expectEqual(@as(usize, 98303), @sizeOf(Writer.Buffer));
@@ -604,9 +614,9 @@ test "Reader: the buffer types are the documented sizes" {
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
-    // README, "API" — `Reader.err`'s type is the `DecompressError` set minus
-    // `BufferTooSmall` (the Reader owns its window), plus the interface's
-    // `ReadFailed`/`EndOfStream` and the contiguity cap's `StreamTooLong`.
+    // `Reader.Error` is the `DecompressError` set minus `BufferTooSmall` (the
+    // Reader owns its window), plus the interface's `ReadFailed`/`EndOfStream`
+    // and the contiguity cap's `StreamTooLong`.
     const mine = @typeInfo(Error).error_set.?;
     for (@typeInfo(decode.DecompressError).error_set.?) |want| {
         if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
@@ -655,8 +665,9 @@ test "Reader: multi-block inputs round-trip" {
 test "Reader: golden golang/go vectors through the streaming reader" {
     // The same fixtures the one-shot decoder is judged against, through the
     // streaming interface: valid streams decode to the golden output and
-    // consume exactly their own bytes; rejected streams fail closed with the
-    // specific error the README's rules pin.
+    // consume exactly their own bytes; rejected streams return
+    // `error.ReadFailed` with the specific error in `err` where the table pins
+    // one.
     const gpa = testing.allocator;
     for (golden.stream_cases) |tc| {
         switch (tc.expect) {
@@ -676,7 +687,8 @@ test "Reader: golden golang/go vectors through the streaming reader" {
                 // The Reader stops at the stream's last byte. Go's vectors
                 // carry at most one byte of padding after it (the "spanning
                 // repeater code" vector's trailing zero), which must NOT be
-                // consumed — `pump` already proved the clean end of stream.
+                // consumed. `decodeInto` already proved the clean end of
+                // stream.
                 try testing.expect(fixed_in.seek <= tc.source.len);
                 try testing.expect(fixed_in.seek + 1 >= tc.source.len);
             },
@@ -709,7 +721,7 @@ test "Reader: golden golang/go vectors through the streaming reader" {
     }
 }
 
-test "Reader: truncated streams fail closed and stay failed" {
+test "Reader: truncated streams fail and stay failed" {
     // Spec: rfc1951-deflate.txt §3.2.3 — the stream ends at BFINAL, so any
     // input that ends before it is `error.Truncated`, never a clean end.
     const gpa = testing.allocator;
@@ -776,11 +788,11 @@ test "Reader: golang/go huffman-* fixtures decode through the stream" {
 }
 
 test "Reader: consumes input exactly through the stream's last byte" {
-    // README, "Streaming" — "The Reader consumes `input` exactly through the
-    // stream's last byte — the final block's partial byte included — and stops
-    // there; bytes after the stream are not consumed." The stream is followed
-    // by marker bytes through the `Io.Reader` interface: the input's position
-    // after the decode is exactly the stream's length.
+    // The Reader consumes `input` exactly through the stream's last byte (the
+    // final block's partial byte included) and stops there; bytes after the
+    // stream are not consumed. Marker bytes follow each stream in the input,
+    // and after the decode the input's position is exactly the stream's
+    // length.
     const gpa = testing.allocator;
     inline for (.{ "", "a", "the quick brown fox jumps over the lazy dog. " ** 40 }) |source| {
         var compressed: Io.Writer.Allocating = .init(gpa);
@@ -835,9 +847,9 @@ test "Reader: consumes input exactly through the stream's last byte" {
 }
 
 test "Reader: a 32-KiB peek is served at any position" {
-    // README, "Streaming" — "Any contiguous request (peek/take family) of at
-    // most 32 KiB is served": the window holds 64 KiB and slides forward
-    // keeping the 32-KiB history tail, so a full-history peek always fits.
+    // Any contiguous request (peek/take family) of at most 32 KiB is served:
+    // the window holds 64 KiB and slides forward keeping the 32-KiB history
+    // tail, so a full-history peek always fits.
     const gpa = testing.allocator;
     const source = try makeSource(gpa, 200_000);
     defer gpa.free(source);
@@ -869,11 +881,11 @@ test "Reader: a 32-KiB peek is served at any position" {
     );
 }
 
-test "Reader: a request past the window fails closed with StreamTooLong" {
-    // README, "Streaming" — "a request beyond what the window can hold at the
-    // consumer's position fails closed with `error.ReadFailed`
-    // (`err == .StreamTooLong`), never an assert". At position 60000 with the
-    // window's retained 32-KiB tail, 40000 contiguous bytes do not fit.
+test "Reader: a request past the window fails with StreamTooLong" {
+    // A request beyond what the window can hold at the consumer's position
+    // returns `error.ReadFailed` (`err == .StreamTooLong`) and never asserts.
+    // At position 60000 with the window's retained 32-KiB tail, 40000
+    // contiguous bytes do not fit.
     const gpa = testing.allocator;
     const source = try makeSource(gpa, 200_000);
     defer gpa.free(source);
@@ -897,12 +909,12 @@ test "Reader: a request past the window fails closed with StreamTooLong" {
     try testing.expectError(error.ReadFailed, r.reader.peek(1));
 }
 
-test "Reader: a consumer scanning for a delimiter past the window fails closed" {
+test "Reader: a consumer scanning for a delimiter past the window fails" {
     // The `fillMore` path (the `peek`/`take`-delimiter family): a consumer
     // scanning for a delimiter inside a line longer than the window asks the
     // machinery for more contiguous bytes than the window can hold beside the
-    // retained history. It must fail closed (`ReadFailed`, `err ==
-    // .StreamTooLong`), never assert and never spin.
+    // retained history. It must return `error.ReadFailed` with `err ==
+    // .StreamTooLong`, never assert and never spin.
     const gpa = testing.allocator;
     const line_len = 100_000;
     const source = try gpa.alloc(u8, 100 + line_len + 1);
@@ -922,7 +934,7 @@ test "Reader: a consumer scanning for a delimiter past the window fails closed" 
     var fixed_in: Io.Reader = .fixed(compressed.written());
     var r: Reader = .init(&fixed_in, &rbuf);
     // `takeDelimiterExclusive` leaves the delimiter buffered; the consumer
-    // steps over it (the snappy regression test's shape).
+    // steps over it.
     try testing.expectEqualStrings("a" ** 99, try r.reader.takeDelimiterExclusive('\n'));
     r.reader.toss(1);
     try testing.expectError(error.ReadFailed, r.reader.takeDelimiterExclusive('\n'));
@@ -955,8 +967,8 @@ test "Reader: a zero-length stream poll does not fail the stream" {
 }
 
 test "Reader: a stream ends cleanly and stickily" {
-    // README, "Streaming" — "`Reader` ends cleanly with `error.EndOfStream`
-    // (sticky) once the final block's output has been consumed."
+    // The reader ends cleanly with `error.EndOfStream`, stickily, once the
+    // final block's output has been consumed.
     const gpa = testing.allocator;
     const source = "the quick brown fox jumps over the lazy dog. " ** 100;
     var compressed: Io.Writer.Allocating = .init(gpa);
@@ -980,8 +992,8 @@ test "Reader: a stream ends cleanly and stickily" {
 
 test "Reader: random consumer machinery sequences stay correct" {
     // Mixed peek/take/discardAll/readSliceAll/stream operations over randomly
-    // chunked streams: the driver class that catches vtable machinery
-    // interactions (contiguity, slide accounting, the sticky end).
+    // chunked streams. This catches interactions in the vtable machinery:
+    // contiguity, slide accounting, the sticky end.
     const gpa = testing.allocator;
     var rng: DefaultPrng = .init(4242);
     const rand = rng.random();
@@ -1058,7 +1070,7 @@ test "Reader: random consumer machinery sequences stay correct" {
     }
 }
 
-test "Reader: a corrupt stream fails closed and stays failed" {
+test "Reader: a corrupt stream fails and stays failed" {
     // Every failure path is sticky and reports the detail beside the coarse
     // `error.ReadFailed`: a bad block type, a bad stored header, a bad
     // distance, and garbage.
@@ -1073,12 +1085,12 @@ test "Reader: a corrupt stream fails closed and stays failed" {
         },
         // §3.2.3 — a match at distance 1 with nothing decoded yet: a distance
         // before the start of the output. BFINAL=1, BTYPE=01, length code 257
-        // (3 bytes), distance code 0. python3's zlib agrees: "invalid distance
+        // (3 bytes), distance code 0. zlib reports this as "invalid distance
         // too far back".
         .{ .source = &[_]u8{ 0x03, 0x02 }, .want = error.InvalidMatch },
         // A truncated stored payload.
         .{ .source = &[_]u8{ 0x01, 0x0C, 0x00, 0xF3, 0xFF, 'h', 'i' }, .want = error.Truncated },
-        // Garbage: a code that decodes to no legal symbol.
+        // Garbage: a dynamic block header whose precode tree is empty.
         .{
             .source = &[_]u8{ 0x05, 0x00, 0x00, 0x00, 0x00 },
             .want = error.InvalidDynamicBlockHeader,
@@ -1097,11 +1109,14 @@ test "Reader: a corrupt stream fails closed and stays failed" {
     }
 }
 
-/// Stream everything from `in` through one flate `Reader` into `out`,
-/// returning the decoded bytes served. Consumes `in` exactly through the
-/// stream's end (the final partial byte included) — bytes after the stream
-/// are left unconsumed. The reader and its window live on this stack frame;
-/// zero allocation.
+/// Decode the raw deflate stream in `in` into `out` and return the number of
+/// bytes written. `in` is consumed exactly through the stream's last byte (the
+/// final partial byte included); bytes after the stream are left unread.
+///
+/// Returns `error.ReadFailed` for a malformed stream or a failing `in`, and
+/// `error.WriteFailed` when `out` fails. The cause of a decode failure is not
+/// reported; use `Reader` directly to read `err`. Allocates nothing: the
+/// `Reader` and its 64-KiB window are locals on the caller's stack.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
     var buf: Buffer = undefined;
     var rr: Reader = .init(in, &buf);

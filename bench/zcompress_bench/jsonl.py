@@ -1,11 +1,11 @@
 """Schema-v1 measurement records: one JSONL file per (arm, round).
 
 A file is a meta record, one sample record per (case, implementation, sample)
-measurement, and an end record. Every fleet driver — the Zig binary
-(bench/zig/bench_zcompress.zig), the Go klauspost driver, the C
-libdeflate/zlib-ng/zstd drivers, and the C++ google/snappy driver — emits
-this exact schema over the exact committed corpus. The parser is the
-contract: a record that does not validate fails the round.
+measurement, and an end record. Every benchmark driver (the Zig binary in
+bench/zig/bench_zcompress.zig, the Go klauspost driver, the C
+libdeflate/zlib-ng/zstd drivers, and the C++ google/snappy driver) emits this
+schema over the same hash-pinned corpus. The parser is the contract: a record
+that does not validate fails the round.
 """
 
 import json

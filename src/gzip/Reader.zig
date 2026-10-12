@@ -1,24 +1,20 @@
-//! gzip.Reader: a decompressing `Io.Reader` over one gzip member (README.md,
-//! "Streaming").
+//! gzip.Reader: a decompressing `Io.Reader` over one gzip member.
 //!
-//! The machinery is the shared container driver's
-//! (`src/internal/container.zig`; `src/internal/README.md`, "The Io codec
-//! pattern book"): the sticky lifecycle (`state` + the detail in `err`), the
-//! zero-length poll, the fill-and-return-0 count, the contiguity failure,
-//! and the trailer-at-the-clean-end funnel all run through
-//! `internal.container.ReaderHooks`, which this module instantiates over its
-//! framing (`framing.zig`). What this module adds is the framing — the
-//! header parse, the trailer check, the CRC-32 — and the member walk
-//! (`streamAll`); `streamMember` is the driver's one-member pump. The member
-//! boundary is the framing's: `input` is consumed exactly through the
-//! trailer's last byte and stops there (OQ2/OQ3).
+//! `init` wraps the input `Io.Reader` and a caller-provided `Buffer`; read
+//! through `&r.reader`. Decoded bytes are served straight from that buffer,
+//! which is also flate's decode window, so there is no second copy. The CRC-32
+//! and length are folded in as bytes enter the window, and the trailer is
+//! checked once, at the end of the body: the reader returns `error.EndOfStream`
+//! only after it matches. `input` is consumed exactly through the trailer's
+//! last byte, so bytes after the member stay unread.
 //!
-//! The window is flate's, re-exported: the caller's `Reader.Buffer` is handed
-//! to the inner `flate.Reader`, and this reader's serving position is that
-//! window's position — one region, one position, no staging copy (OQ6). The
-//! decoded bytes are folded into the container's CRC-32 and length by
-//! flate's checksum hook as they enter the window (OQ1), so the trailer check
-//! at the clean end hashes nothing again.
+//! `streamMember` and `streamAll` are one-call pumps for one member and for a
+//! file of concatenated members. The lifecycle, error recording, and
+//! `Io.Reader` entry points are the shared container driver's
+//! (`src/internal/container.zig`); this file supplies gzip's framing
+//! (`framing.zig`) and the member walk.
+//!
+//! Format: docs/research/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -30,8 +26,8 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-/// The caller-provided window: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[2 * history_len]u8`, 64 KiB.
+/// The caller-provided decode window: flate's `Reader.Buffer`, re-exported,
+/// 64 KiB (`[2 * history_len]u8`). gzip adds no buffer of its own.
 pub const Buffer = flate.Reader.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
@@ -39,20 +35,23 @@ const State = internal.reader.State;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const framing = @import("framing.zig");
-/// The detailed error recorded once `state == .failed` (README, "API"):
-/// the framing's set — flate's decode detail set (minus `BufferTooSmall`,
-/// the window is the caller's and flate owns it) plus this module's header
-/// and trailer entries.
+/// The failures a reader records in `err`: flate's reader errors (a malformed
+/// deflate body, `Truncated`, `StreamTooLong`) plus `BadHeader`,
+/// `HeaderTooLong`, `WrongHeaderChecksum`, `WrongChecksum`, and `WrongSize`.
+/// There is no `BufferTooSmall`: output goes through a fixed window, not a
+/// sized target.
 pub const Error = framing.Error;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
 
 const Reader = @This();
 
+/// The `Io.Reader` interface: read through `&r.reader`.
 reader: Io.Reader,
+/// The flate reader that decodes the body.
 inner: flate.Reader,
-/// The member's input: the header is parsed from it and the trailer read
-/// from it, both at flate's exact positions.
+/// The member's input. The header is parsed from it before the body, and the
+/// trailer is read from it right after the body's last byte.
 input: *Io.Reader,
 /// The header parse (`§2.3.1`), run once, before the first body byte.
 header: framing.Header = .{},
@@ -68,48 +67,57 @@ state: State = .streaming,
 err: ?Error = null,
 
 /// The shared container driver over this module's framing
-/// (`src/internal/container.zig`): the lifecycle funnel, the window
-/// hand-off, the trailer-at-the-clean-end funnel (the wrapper-rebase rule),
-/// and the generated `Io.Reader` entries.
+/// (`src/internal/container.zig`).
 const Hooks = internal.container.ReaderHooks(framing, Reader);
 
-/// Wrap `input` (one gzip member) with `buffer` as the decoded window.
-/// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
-/// member ends cleanly with `error.EndOfStream` once the trailer is verified
-/// and fails closed with `error.ReadFailed` (sticky, details in `err`) on
-/// any malformed header, body, trailer, or input failure. The reader
-/// consumes `input` exactly through the trailer's last byte; bytes after it
-/// are left unconsumed (README, "Streaming").
+/// Create a reader for one gzip member read from `input`, decoding through
+/// `buffer`. Read through `&r.reader` (`stream`, the `read` family, the `peek`
+/// family).
+///
+/// At the end of the member the reader verifies the trailer and then returns
+/// `error.EndOfStream`. A malformed header, body, or trailer, or a failure of
+/// `input`, returns `error.ReadFailed` (and keeps returning it) with the
+/// specific error in `err`. `input` is consumed exactly through the trailer's
+/// last byte, so bytes after the member are left unread. `input` needs a
+/// buffer of at least 3 bytes. Do not move the reader once you have started
+/// using it.
+///
+/// A `peek` or `take` of more than 32 KiB (`flate.encode.history_len`) can fail
+/// with `error.ReadFailed` and `err == .StreamTooLong`, because the window
+/// cannot hold that much contiguously.
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
     return Hooks.init(input, buffer);
 }
 
-/// Stream one complete member from `in` through a stack-buffered `Reader`
-/// into `out`, returning the decoded bytes served. Consumes `in` exactly
-/// through the member's last trailer byte; bytes after it — the next
-/// member's, or garbage — are left unconsumed (README, "Streaming"). Zero
-/// allocation: the window is a stack local.
+/// Decode one member from `in` into `out` and return the number of decoded
+/// bytes. `in` is consumed exactly through the member's last trailer byte, so
+/// anything after it (the next member, or garbage) stays unread.
+///
+/// Returns `error.ReadFailed` for a bad or truncated member or a failure of
+/// `in`, and `error.WriteFailed` for a failure of `out`. The specific error is
+/// not available here; drive a `Reader` to get it. Allocates nothing; the
+/// 64 KiB window and the reader's state are on the stack.
 pub fn streamMember(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
     return Hooks.streamOne(in, out);
 }
 
-/// Stream every member `in` holds — RFC 1952 §2.2: "a gzip file is a
-/// sequence of members" — into `out`, returning the total decoded bytes
-/// served. One member per iteration through the boundary above: the input
-/// position at a member's clean end is the next member's first byte, and a
-/// member that is not present at all is the file's clean end (zero members
-/// served, no error). Garbage where a member should start fails its header
-/// parse — fail closed at interpretation, never silently skipped — and a
-/// member cut off mid-stream fails as `streamMember` would. The walk is
-/// `streamMember`'s semantics per member; for a failure's detail, drive a
-/// `Reader` (or `streamMember`) directly — this pump reports the coarse
-/// `error.ReadFailed`. Zero allocation: each member's window is a stack
-/// local.
+/// Decode every member in `in` into `out` and return the total number of
+/// decoded bytes (RFC 1952 §2.2: a gzip file is a series of members). After
+/// each member it looks at the next byte of `in`: end of input finishes the
+/// walk, so an empty `in` yields zero bytes and no error; any other byte
+/// starts another member, so trailing garbage returns `error.ReadFailed`
+/// (`BadHeader`) instead of being skipped. A member cut short fails as it
+/// does in `streamMember`.
+///
+/// Like `streamMember` it reports only the coarse `error.ReadFailed` or
+/// `error.WriteFailed`; drive a `Reader` to get the specific error. Allocates
+/// nothing; one member's window at a time is on the stack.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
     var served: usize = 0;
     while (true) {
         // A clean end between members is the file's end; any byte where a
-        // member should start is parsed as one, so garbage fails closed.
+        // member should start is parsed as one, so garbage is an error and is
+        // never skipped.
         _ = in.peekByte() catch |err| switch (err) {
             error.EndOfStream => return served,
             else => |e| return e,
@@ -131,8 +139,9 @@ fn decodeInto(r: *Io.Reader, target: []u8) !usize {
     return w.end;
 }
 
-/// Encode `source` with `Writer`, decode it through a `Reader` over `source
-/// ++ markers`, and expect identity with the member boundary intact.
+/// Encode `source` with `Writer`, decode it through a `Reader` over the
+/// member followed by marker bytes, and expect identity with the member
+/// boundary intact.
 fn roundTrip(source: []const u8) !void {
     const gpa = testing.allocator;
     var compressed: Io.Writer.Allocating = .init(gpa);
@@ -171,16 +180,15 @@ fn roundTrip(source: []const u8) !void {
 }
 
 test "Reader: the buffer type is flate's, re-exported" {
-    // README, "Caller-owned buffer types": `Reader.Buffer` is
-    // `flate.Reader.Buffer` — 2 * history_len, 64 KiB (OQ6).
+    // `Reader.Buffer` is `flate.Reader.Buffer`: 2 * history_len, 64 KiB.
     try testing.expectEqual(@as(usize, 65536), @sizeOf(Buffer));
     try testing.expect(Buffer == flate.Reader.Buffer);
     try testing.expectEqual(@as(usize, 98303), @sizeOf(Writer.Buffer));
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
-    // README, "API" — `Reader.err`'s type is the `DecompressError` set minus
-    // `BufferTooSmall` (the window is the caller's), plus the interface's
+    // `Reader.err`'s type is the `DecompressError` set minus `BufferTooSmall`
+    // (output goes through a fixed window), plus the interface's
     // `ReadFailed`/`EndOfStream` and the contiguity cap's `StreamTooLong`.
     const mine = @typeInfo(Error).error_set.?;
     for (@typeInfo(decode.DecompressError).error_set.?) |want| {
@@ -234,7 +242,7 @@ test "Reader: the golden table decodes through the streaming layer" {
     // The same vectors the one-shot decoder is judged against, through the
     // streaming interface: valid members decode to the golden output and
     // consume exactly their own bytes; the trailing bytes of a case are left
-    // unconsumed and the next parse is the pinned outcome (T2/OQ3).
+    // unconsumed and the next parse is the pinned outcome.
     const gpa = testing.allocator;
     const target = try gpa.alloc(u8, 2048 + @as(usize, sentinel.len));
     defer gpa.free(target);
@@ -300,11 +308,11 @@ fn checkAtBoundary(gpa: mem.Allocator, source: []const u8, expect: golden.Expect
 }
 
 test "Reader: a multi-member file is a caller loop at the boundary" {
-    // README, "The wrapping design": one member per stream, and
-    // multi-member composes through `Reader.streamAll` — one member per
-    // iteration at the boundary. The x2 vector decodes member by member,
-    // and the CVE-2022-30631 input (`TestCVE202230631`: an empty member
-    // repeated) walks without accumulating or hanging.
+    // A reader handles one member and stops exactly at its boundary, so
+    // concatenated members are walked one reader (or `streamMember`) at a
+    // time. The x2 vector decodes member by member, and the CVE-2022-30631
+    // input (`TestCVE202230631`: an empty member repeated) walks without
+    // accumulating or hanging.
     const gpa = testing.allocator;
     const x2 = golden.gunzip_cases[3].source;
     var rbuf: Buffer = undefined;
@@ -336,9 +344,9 @@ test "Reader: a multi-member file is a caller loop at the boundary" {
     }
 }
 
-test "Reader: garbage in a member's place fails closed" {
-    // README, "The wrapping design": "garbage in a next member's place fails
-    // `BadHeader` — fail closed at interpretation".
+test "Reader: garbage in a member's place fails" {
+    // Garbage where a member should start is parsed as a header and fails
+    // with `BadHeader`; it is never skipped.
     const garbage = "not a gzip member at all!";
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(garbage);
@@ -352,10 +360,9 @@ test "Reader: garbage in a member's place fails closed" {
 }
 
 test "Reader: a corrupt trailer fails at the clean end, stickily" {
-    // README, "Streaming": "At the body's clean end the reader reads and
-    // verifies the trailer exactly once, and only then reports
-    // `error.EndOfStream`". A mismatch is `error.ReadFailed` with the detail
-    // in `err` (`§2.3.1`, T4).
+    // At the body's end the reader reads and verifies the trailer once, and
+    // only then reports `error.EndOfStream`. A mismatch is `error.ReadFailed`
+    // with the detail in `err` (`§2.3.1`).
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
@@ -380,12 +387,11 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
 
 test "Reader: an over-the-end request still checks the trailer" {
     // The rebase path: a request the window cannot hold at the consumer's
-    // position routes through `rebase`, where flate's sticky end fires
-    // before the trailer is read. The trailer check must run there too —
-    // "verifies the trailer exactly once, and only then reports
-    // `error.EndOfStream`" (README, "Streaming"; RFC 1952 §2.3.1) holds on
-    // every path. Found by the M3 closing review: the input stops 8 bytes short
-    // otherwise, and a corrupted member ends with a clean `EndOfStream`.
+    // position goes through `rebase`, where flate's sticky end fires before
+    // the trailer is read. The trailer check must run there too: a clean
+    // `EndOfStream` always means the trailer was verified (RFC 1952 §2.3.1).
+    // Without the check the input stops 8 bytes short and a corrupted member
+    // ends with a clean `EndOfStream`.
 
     // A member whose decoded size lands the window deep enough that a
     // 30-KiB request overflows the room at the consumer's position.
@@ -395,7 +401,7 @@ test "Reader: an over-the-end request still checks the trailer" {
 
     // The good trailer: the over-the-end request reports the clean end
     // with the input exactly at the member's last byte (the boundary
-    // contract, OQ2) and the state done.
+    // contract) and the state done.
     {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(member[0..len]);
@@ -424,9 +430,8 @@ test "Reader: an over-the-end request still checks the trailer" {
 }
 
 test "Reader: a truncated member is Truncated at every prefix" {
-    // README, "The member format": "A truncated member — header, body, or
-    // trailer — is `error.Truncated`". Every prefix of a real member fails
-    // closed, never decodes cleanly.
+    // A truncated member (header, body, or trailer) is `error.Truncated`:
+    // every prefix of a real member returns an error, never a clean end.
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
     const len = try encode.compress("hello world\n", &member, .{});
@@ -441,10 +446,10 @@ test "Reader: a truncated member is Truncated at every prefix" {
     }
 }
 
-test "Reader: a contiguous request past the window fails closed" {
-    // README, "Streaming": "a request beyond what the window can hold at the
-    // consumer's position fails closed with `error.ReadFailed`
-    // (`err == .StreamTooLong`), never an assert".
+test "Reader: a contiguous request past the window fails" {
+    // A request beyond what the window can hold at the consumer's position
+    // returns `error.ReadFailed` with `err == .StreamTooLong`, never an
+    // assert.
     const gpa = testing.allocator;
     const source = try gpa.alloc(u8, 200_000);
     defer gpa.free(source);
@@ -461,8 +466,8 @@ test "Reader: a contiguous request past the window fails closed" {
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(member.written());
     var r: Reader = .init(&fixed_in, &rbuf);
-    // A full history is always servable (README, "Streaming": "Any
-    // contiguous request of at most 32 KiB is served").
+    // A full history is always servable: any contiguous request of at most
+    // 32 KiB is served.
     try testing.expectEqualSlices(u8, source[0..history_len], try r.reader.peek(history_len));
     // Drain what the pump buffered: the window's guaranteed contiguous room
     // is exactly the retained history.
@@ -487,9 +492,9 @@ test "Reader: a contiguous request past the window fails closed" {
 }
 
 test "Reader: a zero-length poll does not fail the stream" {
-    // The pattern book's zero-length poll: std calls `vtable.stream` at
-    // limit 0 when the buffer is nonempty, and the poll must answer 0
-    // without filling (a fill could fail `StreamTooLong` on a valid stream).
+    // std calls `vtable.stream` at limit 0 when the buffer is nonempty, and
+    // the poll must answer 0 without filling (a fill could fail with
+    // `StreamTooLong` on a valid stream).
     const gpa = testing.allocator;
     var member: [64]u8 = undefined;
     const source = "poll";
@@ -531,9 +536,8 @@ test "Reader: a chunked input refills across the header and the body" {
 }
 
 test "Reader: streamMember consumes one member and leaves the rest" {
-    // README, "Streaming": `Reader.streamMember` consumes one member and
-    // leaves the rest of `in` unconsumed — the same boundary the manual path
-    // keeps.
+    // `Reader.streamMember` consumes one member and leaves the rest of `in`
+    // unconsumed, the same boundary the manual path keeps.
     const gpa = testing.allocator;
     const x2 = golden.gunzip_cases[3].source;
     var fixed_in: Io.Reader = .fixed(x2);
@@ -562,9 +566,8 @@ test "Reader: streamAll walks every member to the input's end" {
 }
 
 test "Reader: streamAll serves zero members from empty input" {
-    // README, "Streaming" — the member walk: a member that is not present
-    // at all is the file's clean end, so an empty input serves zero bytes
-    // and errors nothing.
+    // A member that is not present at all is the file's clean end, so an
+    // empty input serves zero bytes and returns no error.
     var fixed_in: Io.Reader = .fixed("");
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
@@ -572,10 +575,9 @@ test "Reader: streamAll serves zero members from empty input" {
     try testing.expectEqual(@as(usize, 0), out.written().len);
 }
 
-test "Reader: streamAll fails closed where a member should start" {
-    // README, "Streaming" — the member walk: any byte where a member
-    // should start is parsed as one, so trailing garbage fails its header
-    // parse instead of being skipped.
+test "Reader: streamAll fails where a member should start" {
+    // Any byte where a member should start is parsed as one, so trailing
+    // garbage fails its header parse instead of being skipped.
     const gpa = testing.allocator;
     const x2 = golden.gunzip_cases[3].source;
     var framed: [x2.len + 1]u8 = undefined;

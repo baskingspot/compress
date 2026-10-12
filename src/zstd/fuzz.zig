@@ -1,64 +1,27 @@
-//! Fuzz targets for the zstd decoder (RFC 8878), one per layer of the
-//! decode-only surface M4 ships. M5 adds the encoder; until then there is no
-//! in-process encode oracle, so every target's corpus is the CLI-verified
-//! golden fixtures (`golden.zig` records each verdict) and the reference
-//! oracle is the wire itself: the frames' own checksum trailers are the C
-//! library's XXH64 values, and std's `XxHash64` is the second opinion.
+//! Fuzz targets for the zstd decoder (RFC 8878): the one-shot
+//! `decode.decompress` and the streaming `Reader`.
 //!
-//!   - `fuzzGoldenCorpus`: the committed fixture frames through
-//!     `decode.decompress` — identity against the model each fixture's CLI
-//!     verdict pins, the exact / one-below / slack cap boundary, the
-//!     trailing-bytes boundary (markers and a second frame unit are ignored),
-//!     determinism, and the streaming reader's agreement at the exact frame
-//!     boundary; plus the `streamAll` walk over the frame units (concatenated
-//!     frames, skippable-only, garbage after a unit).
-//!   - `fuzzCorruption`: the bad-frame corpus with its pinned errors and
-//!     written floors, then Smith mutations over the good frames — the
-//!     magic, the descriptor (the reserved bit, the dictionary flag, the
-//!     unused bit), the FCS forms and their single-segment window coupling,
-//!     the block header (type, size, Last_Block), the entropy bytes, the
-//!     checksum trailer, truncation at every position, the skippable walk,
-//!     T12's window pair, T13, T14 — with the contract's specific errors
-//!     pinned and the universal property: the one-shot and the streaming
-//!     reader agree (same bytes, or the same named error — the reader's only
-//!     own refusal is `WindowTooLarge`), a clean `Reader` end proves its
-//!     trailer matches the reference XXH64 of its own output at the exact
-//!     frame boundary, and a failure is sticky.
-//!   - `fuzzReaderMachinery`: Smith-chosen consumer op sequences
-//!     (peek/take/discardAll/readSliceAll/stream/poll/over-cap take) over
-//!     known frames with markers after them, the input sometimes chunked at
-//!     the 4-byte contiguity minimum (the documented precondition) — the
-//!     boundary preserved under every op, and the unbounded-request class:
-//!     `over_end_peek` asks past the frame's tail, and `over_buffer_peek`
-//!     asks past the whole buffer so the trailer step runs through the
-//!     codec's `rebase` (the M3 B1 shape, the README's own ask: a clean
-//!     `EndOfStream` must mean the trailer was verified).
-//!   - `fuzzChecksumAccounting`: the XXH64 fold through the one funnel —
-//!     every checksummed fixture's wire trailer (the C library's own value,
-//!     `zstd -t`-verified) must equal std's `XxHash64` over the decoded
-//!     bytes, the empty frame and the multi-block frame included; a
-//!     corrupted trailer byte fails `WrongChecksum` on both the one-shot and
-//!     the reader paths, stickily.
-//!   - `fuzzAmplification`: the declared-size bombs — an RLE block's 128 KiB
-//!     from one byte, a 28-byte frame's 262147, a 4 GiB skippable
-//!     Frame_Size, T14's 2^64-1 declaration, T7's window/block coupling —
-//!     decoded into caps below their decoded length: fail closed
-//!     (`BufferTooSmall`), never write past the cap, never size anything
-//!     from a declaration.
+//! There is no zstd encoder, so nothing here round-trips. Every target starts
+//! from the golden fixtures (`golden.zig`), whose expected output and verdict
+//! were checked against the C `zstd` CLI. A checksummed fixture's trailer is
+//! the C library's XXH64 value, cross-checked against std's `XxHash64`.
 //!
-//! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run
-//! hits ziglang/zig#30655). Every target caps its per-iteration input and
-//! work (`source_max`, `out_max`) so a budget run finishes. The codec
-//! allocates nothing on any decode path and these targets allocate nothing
-//! at all: every buffer is a stack local, so the runner's per-input leak
-//! check is trivially clean.
+//! Targets: `fuzzGoldenCorpus` (the good fixtures), `fuzzCorruption` (bad
+//! frames and mutations of good ones), `fuzzReaderMachinery` (random
+//! `Io.Reader` calls), `fuzzChecksumAccounting` (the XXH64 trailer), and
+//! `fuzzAmplification` (declared-size bombs). Each has a doc comment with the
+//! properties it checks.
+//!
+//! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run hits
+//! ziglang/zig#30655). Every target caps its per-iteration input and work
+//! (`source_max`, `out_max`) so a budget run finishes. Nothing here allocates:
+//! every buffer is a stack local.
 //!
 //! Spec: docs/research/specs/rfc8878-zstd.txt (§3.1 frames, §3.1.1 the frame
 //! and its checksum, §3.1.1.1 the header, §3.1.1.2 the block chain, §3.1.1.3
 //! and §3.1.1.4 the entropy layers and execution, §3.1.2 skippable frames,
-//! §4.1 and §4.2 the FSE and Huffman tables). Contracts: src/zstd/README.md.
-//! The divergences the mutations pin are docs/research/zstd-notes.md §4 (T7,
-//! T9, T12, T13, T14) and the fixtures' verdicts recorded in `golden.zig`.
+//! §4.1 and §4.2 the FSE and Huffman tables). Where this decoder differs from
+//! the C reference, docs/research/zstd-notes.md §4 records the decision.
 
 const std = @import("std");
 const Io = std.Io;
@@ -90,7 +53,7 @@ const Reader = @import("Reader.zig");
 const guard_len: usize = 256;
 
 /// The corpus's widest decoded output: `frame_window_128k`'s 2 * 131072 + 3.
-/// Every output buffer below is this plus `guard_len`.
+/// The targets' one-shot output buffers are this plus `guard_len`.
 const out_max: usize = 262_147;
 
 /// The corpus frames' declared window (`frame_raw`'s Window_Descriptor 0x48:
@@ -104,8 +67,8 @@ const source_max: usize = 1024;
 const mutation_max: usize = 2 * source_max + 64;
 
 /// Marker bytes appended after a frame unit to prove the reader stops at the
-/// unit's last byte (README, "Streaming"): the frame is self-delimiting, so
-/// bytes after it are not the reader's to consume.
+/// unit's last byte: the frame is self-delimiting, so bytes after it are not
+/// the reader's to consume.
 const marker_len: usize = 8;
 const marker_byte: u8 = 0xa5;
 
@@ -146,8 +109,8 @@ fn pump(r: *Io.Reader, w: *Io.Writer, limit: usize) !void {
     }
 }
 
-/// How a corruption-lane pump stopped. `output_full` is the harness's own cap
-/// (a fixed writer), not a codec failure.
+/// How `pumpCapped` stopped. `output_full` is the harness's own cap (a fixed
+/// writer), not a codec failure.
 const Stop = enum { end_of_stream, read_failed, output_full };
 
 const Pumped = struct { served: usize, stop: Stop };
@@ -203,27 +166,24 @@ fn expectStickyFailure(r: *Reader) !void {
     }
 }
 
-/// The guaranteed contiguous request length: `Block_Maximum_Size` — 128 KiB
-/// (README, "Streaming": "any contiguous request ... of at most
-/// Block_Maximum_Size — 128 KiB — is served"). The over-cap ops ask one byte
-/// past it.
+/// The largest contiguous request the reader is guaranteed to serve:
+/// `Block_Maximum_Size`, 128 KiB. The over-cap ops ask one byte past it.
 fn windowTailLen() usize {
     return block.max_block_size;
 }
 
-/// The reader's whole caller buffer — window, block room, and staging: a
-/// request of this size necessarily exceeds the serving region's
-/// `buffer.len - seek` once the consumer has advanced, so the std fill routes
-/// it through the codec's `rebase` (the B1 shape).
+/// The reader's whole caller buffer (window, block room, and staging). A
+/// request of this size exceeds the serving region's `buffer.len - seek` once
+/// the consumer has advanced, so the std fill routes it through the reader's
+/// `rebase`.
 fn bufferLen() usize {
     return @sizeOf(Reader.Buffer(fixture_window_len));
 }
 
 /// The only legal failure of a *valid* frame under a bounded contiguous
 /// request: the serving region cannot hold what the consumer asked for
-/// (README, "Streaming": the contiguous-read cap). Anything else is a
-/// finding. The failure is sticky and reports the detail beside the
-/// interface's coarse error.
+/// (`StreamTooLong`). Any other failure is a bug. The failure is sticky and
+/// reports the detail beside the interface's coarse error.
 fn expectContiguityStop(r: *Reader, err: anyerror) !void {
     try testing.expectEqual(error.ReadFailed, err);
     try testing.expectEqual(Reader.Error.StreamTooLong, r.err.?);
@@ -243,10 +203,10 @@ fn sameErrorName(one_shot: decode.DecompressError, reader_detail: Reader.Error) 
 }
 
 /// The frame's wire trailer, when it has one, must be the low 4 bytes of the
-/// reference XXH64 over the decoded bytes (`§3.1.1`): the golden trailers are
+/// reference XXH64 over the decoded bytes (`§3.1.1`). The golden trailers are
 /// the C library's own values (the CLI verified each with `zstd -t`), and the
-/// reader's clean end means its fold — the one funnel, `recordBlock` — agreed
-/// with exactly these bytes.
+/// reader's clean end means its running hash (`recordBlock`) agreed with
+/// exactly these bytes.
 fn expectTrailerConsistent(
     source: []const u8,
     end: usize,
@@ -332,14 +292,14 @@ const rows = [_]Row{
         .output = .{ .static = "abcdefghIIIIII" },
     },
     .{
-        .desc = "frame_t1",
-        .source = &golden.frame_t1,
-        .output = .{ .static = &golden.t1_literals },
+        .desc = "frame_pair",
+        .source = &golden.frame_pair,
+        .output = .{ .static = &golden.pair_literals },
     },
     .{
-        .desc = "frame_t1_errata",
-        .source = &golden.frame_t1_errata,
-        .output = .{ .static = &golden.t1_errata_literals },
+        .desc = "frame_pair_errata",
+        .source = &golden.frame_pair_errata,
+        .output = .{ .static = &golden.pair_errata_literals },
     },
     .{
         .desc = "frame_treeless",
@@ -549,7 +509,8 @@ const BadRow = struct {
 
 /// The bad-frame corpus (`golden.zig` records the CLI's exit-1 verdict for
 /// each): the pinned error and the written floor the one-shot's tests
-/// establish. T12's window pair, T13, and T14 are rows here.
+/// establish. Rows where the C reference accepts the frame say so in a
+/// comment.
 const bad_rows = [_]BadRow{
     .{ .desc = "empty", .source = "", .err = error.Truncated, .written = 0 },
     .{ .desc = "frame_magic", .source = &golden.frame_magic, .err = error.Truncated, .written = 0 },
@@ -655,8 +616,9 @@ const bad_rows = [_]BadRow{
         .err = error.Truncated,
         .written = 0,
     },
-    // T13 — the empty zero-size Compressed_Block: ours reads the missing
-    // literals header and fails closed; the C reads it as a no-op.
+    // A zero-size Compressed_Block. This decoder looks for the literals
+    // header that is not there and returns an error; the C reference reads
+    // the empty block as a no-op.
     .{
         .desc = "frame_empty_compressed",
         .source = &golden.frame_empty_compressed,
@@ -675,16 +637,17 @@ const bad_rows = [_]BadRow{
         .err = error.ContentSizeMismatch,
         .written = 8,
     },
-    // T14 — FCS 2^64-1: a declaration like any other, checked against the
-    // decode; the C skips it as ZSTD_CONTENTSIZE_UNKNOWN.
+    // Frame_Content_Size 2^64-1: a declaration like any other, checked
+    // against the decode. The C reference skips the check because it reads
+    // this value as ZSTD_CONTENTSIZE_UNKNOWN.
     .{
         .desc = "frame_fcs_max",
         .source = &golden.frame_fcs_max,
         .err = error.ContentSizeMismatch,
         .written = 4,
     },
-    // T12 — the one-byte-past-the-window pair: ours enforces §3.1.1.4's
-    // declared bound where the C's whole-buffer decoder accepts.
+    // A match one byte past the declared window: this decoder enforces
+    // §3.1.1.4's bound where the C's whole-buffer decoder accepts it.
     .{
         .desc = "frame_window_1k_over",
         .source = &golden.frame_window_1k_over,
@@ -727,8 +690,8 @@ const bad_rows = [_]BadRow{
         .err = error.Truncated,
         .written = 0,
     },
-    // §3.1.2's field maximum: 4 GiB of User_Data with three bytes present —
-    // skipped by arithmetic, never staged (the gzip XLEN rule).
+    // §3.1.2's field maximum: 4 GiB of User_Data with three bytes present.
+    // User_Data is skipped by arithmetic, never staged.
     .{
         .desc = "skippable_huge",
         .source = &golden.skippable_huge,
@@ -855,19 +818,19 @@ const WalkKind = enum {
     /// Every frame unit decodes; the served bytes are the model's.
     all,
     /// Nothing but skippable frames (or nothing at all): the clean end with
-    /// zero bytes served (`§3.1.2`, T10).
+    /// zero bytes served (`§3.1.2`).
     zero,
-    /// The first unit decodes, then the walk fails closed on the bytes after
-    /// it (the coarse `error.ReadFailed`; the detail is the walk's own
+    /// The first unit decodes, then the walk returns an error on the bytes
+    /// after it (the coarse `error.ReadFailed`; the detail is the walk's own
     /// reader's).
     first_then_fail,
 };
 
 const WalkRow = struct { desc: []const u8, source: []const u8, output: Output, kind: WalkKind };
 
-/// The walk corpus: the frame-unit cardinalities T10 records — concatenated
-/// frames (the CLI decodes both), skippable-only (the clean end, zero bytes),
-/// and garbage after a unit (fail closed, never silently skipped).
+/// The walk corpus: concatenated frames (the CLI decodes both),
+/// skippable-only input (the clean end, zero bytes), and garbage after a unit
+/// (an error, never silently skipped).
 const walk_rows = [_]WalkRow{
     .{
         .desc = "frame_raw",
@@ -976,8 +939,8 @@ fn expectWalk(row: WalkRow) !void {
     }
 }
 
-/// Seeds for target 1: one per good row — the row index, a cap shape, and a
-/// walk row — so the plain `zig build test` run replays every fixture.
+/// Seeds for `fuzzGoldenCorpus`: one per good row (the row index, a cap shape,
+/// and a walk row), so the plain `zig build test` run replays every fixture.
 const corpus: []const []const u8 = blk: {
     @setEvalBranchQuota(100_000);
     const seeds: [rows.len][24]u8 = init: {
@@ -995,17 +958,18 @@ const corpus: []const []const u8 = blk: {
     break :blk &frozen;
 };
 
-/// Target 1: the whole one-shot decoder over the CLI-verified corpus.
+/// The whole one-shot decoder over the golden corpus.
 ///
-/// Attacks the frame layer's identity on every landed fixture — the Raw/RLE
-/// and compressed blocks, the literals size formats, the sequences modes, the
-/// FCS forms, the window fixtures, the checksum trailer, the skippable walk,
-/// the trailing-bytes rule — through the cap boundary (exact, below, slack),
-/// the sentinel overrun check, determinism, and the streaming reader's
-/// agreement at the exact frame boundary. The corpus is the evidence: each
-/// row's expected bytes are the pinned CLI's own `zstd -d` output
+/// The corpus covers Raw, RLE, and compressed blocks, the literals size
+/// formats, the sequences modes, the Frame_Content_Size forms, the window
+/// fixtures, the checksum trailer, skippable frames, and bytes after the
+/// frame. Each iteration decodes one fixture at the exact cap, below it, and
+/// with slack. It checks that nothing past the cap was written, that a second
+/// decode gives the same bytes, and that the streaming reader serves the same
+/// bytes and stops at the same frame boundary. It also runs one `streamAll`
+/// walk row. The expected bytes are the C CLI's own `zstd -d` output
 /// (`golden.zig`), so the identity check is a differential against the C
-/// library, not against a local encoder (M5's).
+/// library, not against a local encoder.
 fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
     const row = rows[smith.index(rows.len)];
     const shape = rangeAtMost(smith, 0, 3);
@@ -1032,7 +996,7 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, expected, window[0..m]);
     try sentinel.expect(&window, m);
 
-    // Below the decoded length: fail closed, and the cap held.
+    // Below the decoded length: `BufferTooSmall`, and the cap held.
     if (expected.len > 0) {
         const cap = switch (shape) {
             0 => expected.len - 1,
@@ -1055,9 +1019,9 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, expected, window[0..again]);
 
     // The trailing-bytes boundary: markers after a frame unit are not part
-    // of it (`§3.1` defines frames, not files; T10 records the CLI's
-    // reading). A skippable-only run has no frame for the tail to be after:
-    // the markers are the next unit's bytes, and a bad magic fails closed.
+    // of it (`§3.1` defines frames, not files). A skippable-only run has no
+    // frame for the tail to be after: the markers are the next unit's bytes,
+    // and a bad magic is `BadMagic`.
     var framed: [source_max + marker_len]u8 = undefined;
     fastmem.copy(u8, framed[0..row.source.len], row.source);
     fastmem.set(u8, framed[row.source.len..][0..marker_len], marker_byte);
@@ -1098,11 +1062,11 @@ test "zstd fuzz: golden corpus" {
 }
 
 // ---------------------------------------------------------------------------
-// Target 2: the bad-frame corpus and the mutation taxonomy
+// Target 2: the bad-frame corpus and the mutations
 // ---------------------------------------------------------------------------
 
-/// The outcome class a mutation pins (the container lanes' taxonomy, adapted
-/// to the frame layer's names).
+/// The outcome class a mutation pins: the original output, any failure, one
+/// specific error, or `unknown` when only the universal properties apply.
 const Expected = enum {
     /// The mutation must decode to exactly the row's expected output.
     exact_source,
@@ -1114,17 +1078,19 @@ const Expected = enum {
     fail_bad_magic,
     /// `error.ReservedBitSet` (`§3.1.1.1.1.4`).
     fail_reserved_bit,
-    /// `error.DictionaryRequired` (`§3.1.1.1.3`, OQ4).
+    /// `error.DictionaryRequired` (`§3.1.1.1.3`).
     fail_dictionary,
-    /// `error.BlockOversize` (`§3.1.1.2.4`, T7's coupling).
+    /// `error.BlockOversize` (`§3.1.1.2.4`).
     fail_block_oversize,
     /// `error.ReservedBlock` (`§3.1.1.2.2`).
     fail_reserved_block,
     /// `error.ContentSizeMismatch` (`§3.1.1.1.4`).
     fail_content_size,
-    /// `error.WrongChecksum` (`§3.1.1`, T8).
+    /// `error.WrongChecksum` (`§3.1.1`).
     fail_wrong_checksum,
-    /// Fail closed or succeed, with the universal properties checked.
+    /// Success or any failure. Only the universal properties are checked: the
+    /// cap held, the one-shot and the reader agree, and a clean end is
+    /// trailer-verified.
     unknown,
 };
 
@@ -1142,22 +1108,23 @@ const Mutation = enum(u8) {
     /// Cut the unit at a Smith-chosen byte: inside the trailer is
     /// `Truncated` exactly, elsewhere the bits run out first.
     truncate,
-    /// A flip inside the 4-byte Magic_Number (`§3.1`, `§3.1.2`): neither
-    /// family (`BadMagic`). One byte of either magic can never land on the
-    /// other.
+    /// A flip inside the 4-byte Magic_Number (`§3.1`, `§3.1.2`): `BadMagic`,
+    /// except that a flip of a skippable magic's tag nibble stays a valid
+    /// skippable frame. One flipped byte can never turn either family's magic
+    /// into the other's.
     flip_magic,
     /// Descriptor bit 3 (`§3.1.1.1.1.4`): "must ensure it is not set".
     set_reserved_bit,
     /// A Dictionary_ID_Flag bit (`§3.1.1.1.3`): refused at the first ID byte,
     /// before any body byte.
     set_dictionary_flag,
-    /// Descriptor bit 4 (`§3.1.1.1.1.3`): "shall not interpret this bit" —
-    /// the frame decodes identically (ZD7).
+    /// Descriptor bit 4 (`§3.1.1.1.1.3`): "shall not interpret this bit", so
+    /// the frame decodes identically.
     flip_unused_bit,
     /// A flip in the block chain: the body's business (`unknown`).
     flip_body,
     /// A flip inside the checksum trailer: the body is untouched, so the
-    /// check must fail (`§3.1.1`, T8).
+    /// check must fail (`§3.1.1`).
     flip_trailer,
     /// Block type 3 (`§3.1.1.2.2`): "a compliant decoder must reject it".
     block_reserved_type,
@@ -1210,8 +1177,8 @@ fn readFcs(bytes: []const u8) u64 {
 /// non-single-segment frame's window is untouched, so the only new failure is
 /// the size check; a single-segment frame's Window_Size *is* the FCS
 /// (`§3.1.1.1.1.2`), so a smaller declaration can starve Block_Maximum_Size
-/// and fail `BlockOversize` first (T7), while a larger one still ends at the
-/// size check.
+/// and fail `BlockOversize` first, while a larger one still ends at the size
+/// check.
 fn pokeFcs(smith: *Smith, buf: []u8, info: FrameInfo) Mutated {
     const fcs_len = frame.fcsFieldSize(info.header.descriptor);
     if (fcs_len == 0) {
@@ -1240,8 +1207,8 @@ fn pokeFcs(smith: *Smith, buf: []u8, info: FrameInfo) Mutated {
 }
 
 /// Apply one Smith-chosen mutation to the row's frame unit in `buf` and
-/// return the mutated length, the class the contract pins, and the unit's end
-/// in the mutated bytes.
+/// return the mutated length, the outcome class it pins, and the unit's end in
+/// the mutated bytes.
 fn mutate(smith: *Smith, buf: []u8, row: Row) Mutated {
     // The comptime-known prefix lengths below (the skippable-magic arrays)
     // drive fastmem's inline dispatch search past the default comptime
@@ -1263,7 +1230,7 @@ fn mutate(smith: *Smith, buf: []u8, row: Row) Mutated {
             } else if (cut > 0 and cut == info.start) {
                 // The cut removed the whole Zstandard frame and left only
                 // complete skippable frames: the only-skippables clean end
-                // with zero bytes served (`§3.1.2`, T10).
+                // with zero bytes served (`§3.1.2`).
                 expected = .unknown;
             } else if (cut < info.first_block_at) {
                 // Inside a leading skippable frame, the Magic_Number, or the
@@ -1383,7 +1350,7 @@ fn mutate(smith: *Smith, buf: []u8, row: Row) Mutated {
 
 /// The one-shot under the mutated bytes, checked against the mutation's
 /// class. Every decode pre-fills the window with cycling sentinels and proves
-/// the bytes at and past the cap are untouched (the amplification rule).
+/// the bytes at and past the cap are untouched.
 fn checkOneShot(mutated: []const u8, expected_output: []const u8, meta: Mutated, cap: usize) !void {
     var window: [out_max + guard_len]u8 = undefined;
     sentinel.fill(&window);
@@ -1545,7 +1512,7 @@ fn checkReader(
                     Reader.Error.WrongChecksum,
                     info,
                 ),
-                // An unpinned mutation (`unknown`) or a cut member
+                // An unpinned mutation (`unknown`) or a cut frame
                 // (`fail_any`): the detail is the mutation's business. The
                 // agreement check below is the pin.
                 .fail_any, .unknown => {},
@@ -1558,11 +1525,12 @@ fn checkReader(
             } else |err| {
                 if (err != error.BufferTooSmall) {
                     // The reader's only own refusal is the window cap: every
-                    // other detail is the one-shot's, name for name (the
-                    // RLE staging-order divergence the M4 closing review's
-                    // N1 named is fixed — the declared Block_Size is checked
-                    // before the staging read — and its pin flipped, the
-                    // test at the file's end).
+                    // other detail is the one-shot's, name for name. That
+                    // includes an oversized RLE block whose content byte is
+                    // missing: the reader checks the declared Block_Size
+                    // before reading the content, as the one-shot does (the
+                    // oversized-RLE-block test at the end of this file pins
+                    // it).
                     try testing.expect(
                         sameErrorName(err, detail) or
                             detail == Reader.Error.WindowTooLarge,
@@ -1586,8 +1554,8 @@ fn checkReader(
     }
 }
 
-/// The bad-frame lane: every committed negative fixture, one-shot and reader,
-/// with the pinned error and the written floor.
+/// Every committed negative fixture through the one-shot and the reader, with
+/// the pinned error and the written floor.
 fn fuzzBadRows(smith: *Smith) !void {
     const row = bad_rows[smith.index(bad_rows.len)];
     var window: [out_max + guard_len]u8 = undefined;
@@ -1608,18 +1576,18 @@ fn fuzzBadRows(smith: *Smith) !void {
     try expectStickyFailure(&r);
 }
 
-/// Target 2: the bad-frame corpus and the mutation taxonomy.
+/// The bad-frame corpus and Smith-chosen mutations of the good frames.
 ///
-/// Attacks the header parse (the magic, the reserved bit, the dictionary
-/// flag, the unused bit, the FCS forms and the single-segment window
-/// coupling), the block header (the reserved type, Block_Size past
-/// Block_Maximum_Size, Last_Block), the entropy bytes, the checksum trailer,
-/// truncation at every position, and the skippable walk. The property: the
-/// committed fixtures' errors and written floors hold; a mutation's class
-/// holds; the one-shot and the streaming reader agree on the same bytes
-/// (same output, or the same named error, `WindowTooLarge` excepted); a clean
-/// end is trailer-verified at the exact boundary; a failure is sticky; and
-/// the cap held on every failure.
+/// The mutations cover the header parse (the magic, the reserved bit, the
+/// dictionary flag, the unused bit, the Frame_Content_Size forms and the
+/// single-segment window coupling), the block header (the reserved type,
+/// Block_Size past Block_Maximum_Size, Last_Block), the entropy bytes, the
+/// checksum trailer, truncation at every position, and the skippable walk.
+/// The properties: the committed fixtures' errors and written floors hold; a
+/// mutation's class holds; the one-shot and the streaming reader agree on the
+/// same bytes (same output, or the same named error, `WindowTooLarge`
+/// excepted); a clean end is trailer-verified at the exact boundary; a failure
+/// is sticky; and the cap held on every failure.
 fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     if (smith.boolWeighted(1, 3)) {
         try fuzzBadRows(smith);
@@ -1686,8 +1654,8 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     try checkReader(mutated, expected, meta, info, full, full_window[0..out_max]);
 }
 
-/// The rows the mutation lane may pick: those whose unit is a complete
-/// Zstandard frame (the all-skippable row has no header to poke).
+/// The rows the mutations may pick: those whose unit is a complete Zstandard
+/// frame (the all-skippable row has no header to poke).
 const mutable_rows: []const Row = blk: {
     @setEvalBranchQuota(100_000);
     var built: [rows.len]Row = undefined;
@@ -1712,8 +1680,9 @@ fn mutableIndex(comptime desc: []const u8) usize {
     }
 }
 
-/// Seeds for target 2: the bad lane (one seed per bad row) and one mutation
-/// per operator over the row that exercises it.
+/// A `fuzzCorruption` seed that selects the bad row `desc`. `corrupt_corpus`
+/// seeds every bad row, then one mutation per operator (`mutationSeed`) over
+/// the row that exercises it.
 fn badSeed(comptime desc: []const u8) [16]u8 {
     var seed: [16]u8 = undefined;
     mem.writeInt(u64, seed[0..8], 1, .little);
@@ -1767,7 +1736,7 @@ const corrupt_corpus: []const []const u8 = &.{
     &mutationSeed("frame_raw", .set_reserved_bit, 0),
     &mutationSeed("frame_raw", .set_dictionary_flag, 0),
     &mutationSeed("frame_raw", .flip_unused_bit, 0),
-    &mutationSeed("frame_t1", .flip_body, 0),
+    &mutationSeed("frame_pair", .flip_body, 0),
     &mutationSeed("frame_checksum", .flip_trailer, 0),
     &mutationSeed("frame_raw", .block_reserved_type, 0),
     &mutationSeed("frame_raw", .block_oversize, 0),
@@ -1779,21 +1748,20 @@ const corrupt_corpus: []const []const u8 = &.{
     &mutationSeed("frame_checksum", .duplicate_frame, 0),
     &mutationSeed("frame_raw", .skippable_prefix, 0),
     &mutationSeed("frame_raw", .skippable_huge_prefix, 0),
-    // The first budget run's finding, seeded: a single-segment FCS poke that
-    // grows the window past the reader buffer's authorization — the one-shot
-    // fails `ContentSizeMismatch`, the reader `WindowTooLarge` (the recorded
-    // divergence), and both must be the class the mutation pins.
+    // Regression seed: a single-segment Frame_Content_Size poke that grows the
+    // window past what the reader's buffer authorizes. The one-shot fails
+    // `ContentSizeMismatch` and the reader `WindowTooLarge` (the one place the
+    // two paths differ), and both must be the class the mutation pins.
     &mutationSeed("frame_checksum_multi", .poke_fcs, 3),
-    // The second budget run's findings, seeded: a cut exactly at the leading
-    // skippable frame's end — the only-skippables clean end with zero bytes
-    // served, not a failure (T10) — and the zero-byte cut, which is
-    // `Truncated` (no unit began).
+    // Regression seeds: a cut exactly at the leading skippable frame's end,
+    // which is a clean end with zero bytes served and not a failure, and the
+    // zero-byte cut, which is `Truncated` (no unit began).
     &mutationSeed("skippable_around", .truncate, 10),
     &mutationSeed("skippable_prefix", .truncate, 0),
     &mutationSeed("frame_raw", .truncate, 0),
-    // The third budget run's finding, seeded: a flip of the leading
-    // skippable magic's tag nibble leaves a valid skippable frame, so the
-    // walk proceeds and the frame behind it decodes (not `BadMagic`).
+    // Regression seed: a flip of the leading skippable magic's tag nibble
+    // leaves a valid skippable frame, so the walk proceeds and the frame
+    // behind it decodes (not `BadMagic`).
     &mutationSeed("skippable_around", .flip_magic, 0),
 };
 
@@ -1805,8 +1773,8 @@ test "zstd fuzz: corruption" {
 // Target 3: the reader's consumer machinery
 // ---------------------------------------------------------------------------
 
-/// The consumer ops the reader target mixes: the `Io.Reader` surface the
-/// README's "Streaming" section contracts on.
+/// The consumer operations `fuzzReaderMachinery` mixes: the `Io.Reader` calls
+/// a caller can make on the reader.
 const ReadOp = enum(u8) {
     peek,
     take,
@@ -1821,24 +1789,24 @@ const ReadOp = enum(u8) {
     /// room, `StreamTooLong` when it does not — never an assert.
     over_cap_take,
     /// A peek past the cap with no `left` guard: at the frame's tail the
-    /// trailer step must run before the clean end is reported (the M3 B1
-    /// shape; a clean `EndOfStream` always means the trailer was verified).
+    /// trailer must be verified before the clean end is reported (a clean
+    /// `EndOfStream` always means the trailer was verified).
     over_end_peek,
     /// A peek of nearly the whole buffer: past `buffer.len - seek` as soon
     /// as the consumer has advanced, so the std fill routes it through the
-    /// codec's `rebase` — the trailer branch the B1 entry names.
+    /// reader's `rebase`, whose trailer branch must also verify the trailer.
     over_buffer_peek,
 };
 
-/// Target 3: the reader's consumer machinery, Smith-driven.
+/// Smith-chosen sequences of `Io.Reader` calls over the streaming reader.
 ///
-/// Attacks the vtable surface (`peek`/`take`/`discardAll`/`readSliceAll`/
+/// Covers the vtable surface (`peek`/`take`/`discardAll`/`readSliceAll`/
 /// `stream`), the serving region's slide and its retained history, the
-/// contiguity cap, the trailer verification at the clean end through both
-/// `fill` and `rebase`, and the boundary: the frame unit followed by markers
-/// stops exactly at the unit's last byte under every op. The input side is
-/// sometimes a small `Io.Reader.Limited` buffer (at the documented 4-byte
-/// minimum), so the header and the block staging cross fills.
+/// contiguous-request cap, trailer verification at the clean end through both
+/// `fill` and `rebase`, and the frame boundary: a frame unit followed by
+/// markers stops exactly at the unit's last byte under every call. The input
+/// is sometimes an `Io.Reader.Limited` with a small buffer (down to the
+/// reader's 4-byte minimum), so the header and the block staging cross fills.
 fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     const row = rows[smith.index(rows.len)];
     var expected_buf: [out_max]u8 = undefined;
@@ -1856,9 +1824,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
         break :blk row.source.len + marker_len;
     } else row.source.len;
 
-    // The input side: sometimes a chunked reader whose buffer is small — the
-    // documented 4-byte minimum is the frame layer's largest fixed-size read
-    // — so the header and the block staging cross fills.
+    // The input side: sometimes a chunked reader with a small buffer (the
+    // 4-byte minimum is the frame layer's largest fixed-size read), so the
+    // header and the block staging cross fills.
     var chunk_buf: [64]u8 = undefined;
     var fixed_in: Io.Reader = .fixed(framed[0..framed_len]);
     var limited: Io.Reader.Limited = undefined;
@@ -1879,9 +1847,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
         const left = expected.len - pos;
         switch (smith.value(ReadOp)) {
             .peek => {
-                // README, "Streaming": any contiguous request of at most
-                // Block_Maximum_Size is served, so a failure here is the
-                // contiguity stop, not a decode error.
+                // The reader serves any contiguous request of at most
+                // Block_Maximum_Size, so a failure here is the contiguity
+                // stop, not a decode error.
                 const n = @min(left, rangeAtMost(smith, 1, windowTailLen()));
                 if (r.reader.peek(n)) |served| {
                     try testing.expectEqualSlices(u8, expected[pos..][0..n], served);
@@ -1980,7 +1948,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
                     pos += n;
                 } else |err| {
                     // Past what the window can hold at the consumer's
-                    // position: fail closed, stickily, with the contiguity
+                    // position: the read fails, stickily, with the contiguity
                     // detail.
                     try expectContiguityStop(&r, err);
                     dead = true;
@@ -1989,21 +1957,21 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
             },
             .over_end_peek => {
                 // A peek past the contiguity cap with no `left` guard: at
-                // the frame's tail it must run the trailer step before
-                // reporting the clean end (the M3 closing review's blocker:
-                // a clean `EndOfStream` always means the trailer was
-                // verified). The unserved decoded bytes stay in the window;
-                // the epilogue drains them.
+                // the frame's tail it must verify the trailer before
+                // reporting the clean end, because a clean `EndOfStream`
+                // always means the trailer was verified. The unserved
+                // decoded bytes stay in the window; the code after the loop
+                // drains them.
                 const n = windowTailLen() + 1 + rangeAtMost(smith, 0, windowTailLen() - 1);
                 if (r.reader.peek(n)) |served| {
                     try testing.expect(n <= left);
                     try testing.expectEqualSlices(u8, expected[pos..][0..n], served);
                 } else |err| switch (err) {
                     error.EndOfStream => {
-                        // The frame ended through the trailer funnel: the
-                        // clean end is real — no detail, the state done, the
-                        // input stopped exactly at the frame's last byte
-                        // (the plain reader), every unserved decoded byte
+                        // The frame ended through the trailer check, so the
+                        // clean end is real: no detail, state done, the input
+                        // stopped exactly at the frame's last byte (on the
+                        // plain fixed reader), every unserved decoded byte
                         // still in the window.
                         try testing.expectEqual(@as(?Reader.Error, null), r.err);
                         try testing.expectEqual(internal.reader.State.done, r.state);
@@ -2026,9 +1994,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
             },
             .over_buffer_peek => {
                 // A peek of nearly the whole buffer: the std fill routes a
-                // request past `buffer.len - seek` through the codec's
-                // `rebase`, whose trailer branch must run the trailer step
-                // (the B1 shape) rather than pass the frame's end through.
+                // request past `buffer.len - seek` through the reader's
+                // `rebase`, whose trailer branch must verify the trailer
+                // rather than pass the frame's end through.
                 const n = bufferLen() - rangeAtMost(smith, 0, windowTailLen());
                 if (r.reader.peek(n)) |served| {
                     try testing.expect(n <= left);
@@ -2097,8 +2065,8 @@ fn opSeed(
 }
 
 const reader_corpus: []const []const u8 = &.{
-    // The tail pin: one byte consumed, then the whole-buffer peek, which the
-    // std fill routes through the codec's `rebase` (the B1 shape).
+    // The frame tail: one byte consumed, then the whole-buffer peek, which
+    // the std fill routes through the reader's `rebase`.
     &opSeed("frame_checksum", false, &.{
         .{ .op = .take, .param = 0 },
         .{ .op = .over_buffer_peek, .param = 0 },
@@ -2113,7 +2081,7 @@ const reader_corpus: []const []const u8 = &.{
         .{ .op = .over_end_peek, .param = 0 },
     }),
     // A chunked input at the 4-byte minimum over a compressed fixture.
-    &opSeed("frame_t1", true, &.{
+    &opSeed("frame_pair", true, &.{
         .{ .op = .peek, .param = 0 },
         .{ .op = .take, .param = 0 },
         .{ .op = .read_slice_all, .param = 0 },
@@ -2136,9 +2104,9 @@ const reader_corpus: []const []const u8 = &.{
         .{ .op = .take, .param = 0 },
         .{ .op = .poll, .param = 0 },
     }),
-    // The all-skippable run: no frame unit to carry the boundary — the clean
-    // end is the end of the skippable walk (the first budget run's crash
-    // input, seeded).
+    // The all-skippable run: no frame unit to carry the boundary, so the
+    // clean end is the end of the skippable walk (a regression seed: this
+    // input once crashed the target).
     &opSeed("skippable_sixteen", false, &.{}),
 };
 
@@ -2184,16 +2152,14 @@ fn checksumIndex(comptime desc: []const u8) usize {
     }
 }
 
-/// Target 4: the XXH64 fold through the one funnel.
+/// The XXH64 content checksum, intact and corrupted.
 ///
 /// The wire trailer is the C library's own XXH64 value (`§3.1.1`; the CLI
-/// wrote it and `zstd -t` verifies it), so comparing it against std's
-/// `XxHash64` over the decoded bytes is the differential pin the codec's own
-/// tests run — the reader's clean end proves its per-block fold
-/// (`frame.State.recordBlock`) agreed with the same reference over the same
-/// bytes, in order, across blocks. A corrupted trailer byte must fail
-/// `WrongChecksum` on both paths, stickily, with the decoded output's cap
-/// held.
+/// wrote it and `zstd -t` verifies it), so it must equal std's `XxHash64` over
+/// the decoded bytes. The reader's clean end proves its per-block running hash
+/// (`frame.State.recordBlock`) agreed with that reference over the same bytes,
+/// in order, across blocks. A corrupted trailer byte must fail `WrongChecksum`
+/// on both paths, stickily, with the output cap held.
 fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     const row = checksum_rows[smith.index(checksum_rows.len)];
     var expected_buf: [out_max]u8 = undefined;
@@ -2225,10 +2191,11 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     try testing.expectEqualSlices(u8, expected, window[0..n]);
     try sentinel.expect(&window, n);
 
-    // The reader: the same bytes, the clean end's fold against the reference.
+    // The reader: the same bytes, the clean end's running hash against the
+    // reference.
     try expectReaderIdentity(unitOf(row.source), row.source, expected);
 
-    // A corrupted trailer byte fails closed on both paths.
+    // A corrupted trailer byte fails `WrongChecksum` on both paths.
     var corrupted: [source_max]u8 = undefined;
     fastmem.copy(u8, corrupted[0..row.source.len], row.source);
     const at = trailer_at + rangeAtMost(smith, 0, frame.checksum_len - 1);
@@ -2289,12 +2256,12 @@ const BombRow = struct {
         written: usize,
         /// The smallest cap at which the pinned error (rather than the cap
         /// itself) fires: below it the failing declaration does not fit and
-        /// `BufferTooSmall` is the refusal. Measured, not guessed.
+        /// `BufferTooSmall` is the refusal.
         min_cap: usize,
     },
 };
 
-/// The bombs: small members whose declared sizes are orders of magnitude past
+/// The bombs: small frames whose declared sizes are orders of magnitude past
 /// their bytes. The ratio is asserted for the rows that decode.
 const bomb_rows = [_]BombRow{
     // §3.1.1.2.2 — an RLE block: 131072 bytes from a 10-byte frame.
@@ -2349,21 +2316,24 @@ const bomb_rows = [_]BombRow{
         .output = null,
         .fail = .{ .err = error.BlockOversize, .written = 0, .min_cap = 0 },
     },
-    // The window/block coupling (T7): an RLE block of 1025 in a 1 KB window.
+    // The window bounds Block_Maximum_Size (§3.1.1.2.4): an RLE block of 1025
+    // in a 1 KB window.
     .{
         .desc = "frame_oversize_rle",
         .source = &golden.frame_oversize_rle,
         .output = null,
         .fail = .{ .err = error.BlockOversize, .written = 0, .min_cap = 0 },
     },
-    // T7's single-segment form: FCS 4 carrying a 5-byte block.
+    // The same bound in a single-segment frame, whose window is its content
+    // size: FCS 4 carrying a 5-byte block.
     .{
         .desc = "frame_single_segment_oversize",
         .source = &golden.frame_single_segment_oversize,
         .output = null,
         .fail = .{ .err = error.BlockOversize, .written = 0, .min_cap = 0 },
     },
-    // T14 — FCS 2^64-1 against a 4-byte block: a declaration, never a size.
+    // Frame_Content_Size 2^64-1 against a 4-byte block: checked as a
+    // declaration, never used to size anything.
     .{
         .desc = "frame_fcs_max",
         .source = &golden.frame_fcs_max,
@@ -2390,18 +2360,17 @@ fn bombIndex(comptime desc: []const u8) usize {
     }
 }
 
-/// Target 5: the amplification caps.
+/// Declared sizes against the output cap.
 ///
-/// Attacks the declared-size rules the README states ("Amplification
-/// limits"): `target` is a cap, never a promise — every declared size is a
-/// bound the decode fails closed on before the write that would pass the cap
-/// (`BufferTooSmall`), and no declaration sizes anything. A bomb-shaped frame
+/// The one-shot's `target` is a cap, not a promise: every declared size is a
+/// bound the decode checks before the write that would pass the cap (failing
+/// `BufferTooSmall`), and no declaration sizes anything. A bomb-shaped frame
 /// is decoded into caps below its decoded length (including zero and
 /// `len - 1`), at the exact length, and with slack, with the sentinel proving
-/// the cap held; the failure rows pin their error and written floor under
-/// every cap, including a cap smaller than the floor (where the cap itself is
-/// the refusal). The bomb ratio is asserted where the shape pins it: the
-/// member is a small fraction of the bytes it decodes to.
+/// the cap held. The failure rows pin their error and written floor under
+/// every cap, including a cap below `min_cap` (where the cap itself is the
+/// refusal). The frames that decode are asserted to be a small fraction of the
+/// bytes they decode to.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const row = bomb_rows[smith.index(bomb_rows.len)];
     const shape = rangeAtMost(smith, 0, 3);
@@ -2484,7 +2453,7 @@ test "zstd fuzz: amplification caps" {
 }
 
 // ---------------------------------------------------------------------------
-// Contract pins: the deterministic targets `just test` gates too
+// Deterministic tests: fixed inputs, not driven by the fuzzer
 // ---------------------------------------------------------------------------
 
 test "zstd fuzz: the corpus decodes to its models" {
@@ -2523,10 +2492,10 @@ test "zstd fuzz: the bad-frame corpus pins its errors and floors" {
 }
 
 test "zstd fuzz: the reader's 4-byte input precondition" {
-    // README, "Streaming": the reader's input must buffer at least 4 bytes —
-    // the frame layer's largest fixed-size read — or end before then. A
-    // `Limited` at exactly four bytes decodes the checksummed frame
-    // byte-exact; the read is what the precondition exists for.
+    // The reader's input must buffer at least 4 bytes, the frame layer's
+    // largest fixed-size read, or end before then. A `Limited` at exactly four
+    // bytes must still decode the checksummed frame byte-exact: the 4-byte
+    // magic and trailer reads are what the minimum exists for.
     var chunk_buf: [4]u8 = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_checksum);
     var limited: Io.Reader.Limited = .init(&fixed_in, .unlimited, &chunk_buf);
@@ -2543,13 +2512,10 @@ test "zstd fuzz: the reader's 4-byte input precondition" {
 }
 
 test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
-    // The M3 B1 shape (README, "Streaming": "the regression tests drive the
-    // over-the-end shapes on good and corrupted trailers, and the fuzz lane
-    // carries the unbounded-request op"). Consume one byte, then ask for the
-    // whole buffer: the std fill routes the request through the codec's
-    // `rebase`, whose trailer branch must read and verify the trailer before
-    // reporting the clean end — and must fail `WrongChecksum` when the
-    // trailer is corrupt.
+    // Consume one byte, then ask for the whole buffer: the std fill routes the
+    // request through the reader's `rebase`, whose trailer branch must read
+    // and verify the trailer (`§3.1.1`) before reporting the clean end, and
+    // must fail `WrongChecksum` when the trailer is corrupt.
     const buffer_len = bufferLen();
     {
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum);
@@ -2589,7 +2555,8 @@ test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
 
 test "zstd fuzz: the checksum reference pins the empty and multi-block frames" {
     // §3.1.1 — the empty payload's XXH64: std's canonical check value
-    // (`zstd-notes.md` §3), and the trailer the C library wrote for it.
+    // (docs/research/zstd-notes.md §3), and the trailer the C library wrote
+    // for it.
     try testing.expectEqual(
         @as(u64, 0xEF46_DB37_51D8_E999),
         XxHash64.hash(0, ""),
@@ -2611,10 +2578,10 @@ test "zstd fuzz: the checksum reference pins the empty and multi-block frames" {
     );
 }
 
-test "zstd fuzz: the T9 exceed-only table corner" {
-    // docs/research/zstd-notes.md §4 T9: the FSE distribution's symbol-count
-    // rule is the reference's exceed-only reading — a distribution that
-    // spends its budget before the context's last symbol is legal (the
+test "zstd fuzz: the exceed-only table corner" {
+    // §4.1.1 — the FSE distribution's symbol-count rule is the reference's
+    // exceed-only reading (docs/research/zstd-notes.md §4). A distribution
+    // that spends its budget before the context's last symbol is legal (the
     // reference encoder emits them), while a description that runs past its
     // context is corruption. The golden descriptions are the reference
     // encoder's own bytes.
@@ -2638,14 +2605,11 @@ test "zstd fuzz: the T9 exceed-only table corner" {
 }
 
 test "zstd fuzz: an oversized RLE block fails the same way on both paths" {
-    // The M4 closing review's N1, fixed and pinned: an RLE block whose
-    // declared Block_Size is past Block_Maximum_Size with its content byte
-    // missing. The one-shot's declared-size check fires first
-    // (`BlockOversize`, `§3.1.1.2.4`); the reader used to stage the content
-    // first and report the input's end (`Truncated`), a name-only
-    // divergence. The reader's declared-size check now precedes its staging
-    // read, so both paths report `BlockOversize` — the agreement check in
-    // `checkReader` no longer allows the pair.
+    // An RLE block whose declared Block_Size is past Block_Maximum_Size, with
+    // its content byte missing. Both paths must report `BlockOversize`
+    // (`§3.1.1.2.4`): the declared-size check runs before the content is read,
+    // so the reader must not report the input's end (`Truncated`) first.
+    // `checkReader` enforces the same agreement on mutated frames.
     const source = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0xfb, 0xff, 0xff };
     var target: [1024]u8 = undefined;
     sentinel.fill(&target);

@@ -1,8 +1,7 @@
-/* The google/snappy fleet arm (bench/README.md): the pinned canonical snappy
- * implementation (docs/zcompress-plan.md, "Benchmark methodology"), raw
- * blocks only — the format description's block encoding, no framing — both
- * directions over the committed corpus. The rows compare against the zc
- * arm's `snappy/...` rows (bench/zig/bench_zcompress.zig).
+/* The google/snappy arm (bench/README.md): the canonical snappy
+ * implementation, raw blocks only (the format description's block encoding,
+ * no framing), both directions over the corpus. The rows compare against the
+ * zc arm's `snappy/...` rows (bench/zig/bench_zcompress.zig).
  *
  * The timed loop is the codec alone: a `snappy::CompressionContext` is
  * created once in setup and reused, so no WorkingMemory is allocated per

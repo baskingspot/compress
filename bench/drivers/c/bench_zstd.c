@@ -1,18 +1,16 @@
-/* The zstd-c fleet arm (bench/README.md): the pinned facebook/zstd v1.5.7
- * (docs/research/zstd-notes.md §6.1, the native ceiling), whole-buffer
- * ZSTD_decompressDCtx on a reused context — the simple one-shot API shape
- * that matches the zc arm's `zstd/decompress/...` rows
- * (bench/zig/bench_zcompress.zig). Decode-only: M4 is the zstd decode
- * milestone and the zc arm has no encoder, so there is no compress row to
- * compare against.
+/* The zstd-c arm (bench/README.md): the pinned facebook/zstd v1.5.7, the
+ * native reference, using whole-buffer ZSTD_decompressDCtx on a reused
+ * context. This is the simple one-shot API and matches the zc arm's
+ * `zstd/decompress/...` rows (bench/zig/bench_zcompress.zig). Decode only:
+ * zcompress has no zstd encoder, so there is no compress row to compare
+ * against.
  *
- * Window posture: ZSTD_d_windowLogMax pinned to ZSTD_WINDOWLOG_LIMIT_DEFAULT
- * (27, the reference default) — the driver's own posture, recorded so the
- * arm cannot silently accept windows the default build refuses. It is not a
- * mirror of the zc arm: our one-shot has no window cap at all (its history
- * is the destination buffer; src/zstd/README.md, "Benchmarks"), and the
- * corpus frames are single-segment with Window_Size = FCS <= 64 KiB, so
- * every arm's bound accepts them either way.
+ * Window limit: ZSTD_d_windowLogMax is pinned to ZSTD_WINDOWLOG_LIMIT_DEFAULT
+ * (27, the reference default). This is the driver's own setting, recorded so
+ * the arm cannot silently accept windows the default build refuses. It does
+ * not mirror the zc arm: our one-shot has no window cap (its history is the
+ * destination buffer), and the corpus frames are single-segment with
+ * Window_Size = FCS <= 64 KiB, so every arm's limit accepts them either way.
  *
  * Build defines: CBENCH_TARGET (triple string), CBENCH_CPU, ZIG_VERSION,
  * COMPETITOR_VERSION.

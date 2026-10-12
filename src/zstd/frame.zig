@@ -1,135 +1,17 @@
-//! The frame layer of a zstandard frame (`§3.1`): the Magic_Number, the
-//! Frame_Header, the block chain over the landed block layer, the XXH64
-//! Content_Checksum trailer, and the skippable frames that may sit around a
-//! frame.
+//! The frame layer of a Zstandard stream (`§3.1`): the Magic_Number, the
+//! Frame_Header, the block chain, the XXH64 Content_Checksum trailer, and
+//! skippable frames.
 //!
-//! A Zstandard frame is a 4-byte Magic_Number (0xFD2FB528, little-endian), a
-//! 2-14 byte Frame_Header, one or more Data_Blocks, and an optional 4-byte
-//! Content_Checksum (`§3.1.1`, Table 1). A skippable frame is a magic from
-//! 0x184D2A50 to 0x184D2A5F — "All 16 values are valid to identify a
-//! skippable frame" — a 4-byte little-endian Frame_Size, and that many
-//! User_Data bytes, which "simply need to be skipped, and their content
-//! ignored, resuming decoding after the skippable frame" (`§3.1.2`, Table
-//! 19). `classify` is the one place a unit's kind is decided, so every layer
-//! that meets a magic agrees: the one-shot (`decode.zig`) and the streaming
-//! reader both skip skippables and fail `BadMagic` on anything else.
-//!
-//! ## The Frame_Header
-//!
-//! Table 2's field order is the descriptor, an optional Window_Descriptor, an
-//! optional Dictionary_ID, and an optional Frame_Content_Size. The descriptor
-//! (`§3.1.1.1.1`, Table 3, bit 7 highest):
-//!
-//! - bits 7-6 Frame_Content_Size_Flag: FCS_Field_Size 0-or-1 / 2 / 4 / 8
-//!   (Table 4). "When Frame_Content_Size_Flag is 0, FCS_Field_Size depends on
-//!   Single_Segment_Flag: if Single_Segment_Flag is set, FCS_Field_Size is
-//!   1. Otherwise, FCS_Field_Size is 0; Frame_Content_Size is not provided."
-//! - bit 5 Single_Segment_Flag: "In this case, Window_Descriptor byte is
-//!   skipped, but Frame_Content_Size is necessarily present", and Window_Size
-//!   is Frame_Content_Size itself (`§3.1.1.1.2`).
-//! - bit 4 (unused): "A decoder compliant with this specification version
-//!   shall not interpret this bit" (`§3.1.1.1.1.3`) — accepted with either
-//!   value, never read.
-//! - bit 3 (reserved): "Its value must be zero. A decoder compliant with this
-//!   specification version must ensure it is not set"
-//!   (`§3.1.1.1.1.4`) — `ReservedBitSet`.
-//! - bit 2 Content_Checksum_Flag: the 4-byte trailer rides the frame end
-//!   (`§3.1.1.1.1.5`).
-//! - bits 1-0 Dictionary_ID_Flag: DID_Field_Size 0 / 1 / 2 / 4 (Table 5).
-//!   A nonzero flag is `DictionaryRequired`, raised at the first
-//!   Dictionary_ID byte and before any body byte (`§3.1.1.1.3`, `§5`;
-//!   `docs/research/zstd-notes.md` §7 OQ4: fail closed, never skip, never
-//!   misparse).
-//!
-//! Frame_Content_Size is little-endian, and "When FCS_Field_Size is 2, the
-//! offset of 256 is added" — the 2-byte form carries 256-65791 (`§3.1.1.1.4`,
-//! Table 7). "It's allowed to represent a small size (for example, 18) using
-//! any compatible variant", so the size is a *check* on the decode, never a
-//! sizing hint: `recordBlock` enforces it as a running bound and
-//! `checkContentSize` closes it at the frame end (`§8` names the
-//! smaller-than-actual FCS as an attack vector).
-//!
-//! Window_Size (`§3.1.1.1.2`) is `windowLog = 10 + Exponent`, `windowBase =
-//! 1 << windowLog`, `windowAdd = (windowBase / 8) * Mantissa`, `Window_Size =
-//! windowBase + windowAdd` — 1 KB to 3.75 TB, and the descriptor byte always
-//! parses. The *cap* is the caller's: "a decoder is allowed to reject a
-//! compressed frame that requests a memory size beyond the decoder's
-//! authorized range", which is `checkWindow` for the streaming reader
-//! (OQ1 — the caller's buffer type is the authorization). The one-shot
-//! applies no cap: it materializes no window at all, its history is `target`,
-//! and an offset that reaches past the decoded output is `OffsetTooFar`
-//! whatever the header declared.
-//!
-//! ## The composition, and what the streaming reader drives
-//!
-//! `State` is one frame's decode state — the parsed header, the two landed
-//! entropy layers' cross-block states, the frame's decoded length, and the
-//! XXH64 fold — and the frame layer drives it block by block through the
-//! landed `block.decode` hand-off. The one-shot's whole frame is:
-//!
-//! 1. `classify` the magic (`§3.1`), skipping skippable frames (`§3.1.2`);
-//! 2. `parseHeader` the Frame_Header (`§3.1.1.1`);
-//! 3. `state.init(header)` (in place — the table payloads stay undefined
-//!    until a block builds them), then `State.decodeBlock` per block until
-//!    its `last_block`;
-//! 4. `State.checkContentSize` (`§3.1.1.1.4`);
-//! 5. `State.verifyTrailer` on the 4 bytes at the cursor when the header's
-//!    checksum flag is set (`§3.1.1`) — the frame ends at that trailer's
-//!    last byte, and whatever follows it belongs to the next frame unit.
-//!
-//! The streaming reader (`Reader.zig`, the next slice) drives the same state
-//! over its own input, and the pieces are shaped for it:
-//!
-//! - **The header is byte-fed.** `HeaderParser` consumes as much as its
-//!   current field needs, so a reader whose input buffer holds only the 4
-//!   bytes the magic needs parses the 2-14 byte header across `fill` calls;
-//!   it feeds the parser, and an input end before `done()` is its
-//!   `Truncated`. `parseHeader` is the whole-slice convenience over it.
-//! - **The blocks are the reader's.** The reader parses the 3-byte
-//!   Block_Header off its input (`block.parseHeader`), stages the
-//!   Block_Content, and calls `block.decodeContent` itself — its serving
-//!   region slides, so the length it hands that call is the *retained* count
-//!   of frame output in the buffer, not the frame's total.
-//! - **`State.recordBlock` is the one funnel.** It folds the block's output
-//!   into the checksum (OQ7: exactly the bytes the block wrote, once, in
-//!   order), advances the frame's decoded length, and enforces
-//!   Frame_Content_Size's running bound. The reader passes
-//!   `serving[retained_len..][0..bytes_written]`, the one-shot passes
-//!   `target[decoded_len..][0..bytes_written]`; the fold is the same call, so
-//!   no byte escapes the hash by taking a fast path — Raw, RLE, and
-//!   Compressed blocks all land in the output before `recordBlock` sees
-//!   them.
-//! - **The frame end is one place.** `checkContentSize` and `verifyTrailer`
-//!   are the reader's clean-end step, reached from both `fill` and `rebase`
-//!   (`src/internal/README.md`, "A wrapper's rebase routes the inner end
-//!   through the same ending as fill" — the zstd frame checksum rides that
-//!   exact shape): an over-the-end peek or record request at a frame's tail
-//!   must read and verify the trailer before the reader reports its end,
-//!   never pass the inner end through with the trailer unread.
-//!
-//! ## The checksum
-//!
-//! `xxh64.zig` holds the fold state over its own kernel (a port following
-//! std's implementation, the byte count widened to u64 — the B1-prime fix;
-//! `docs/research/zstd-notes.md` §3). The trailer is "the result of the XXH64() hash
-//! function digesting the original (decoded) data as input, and a seed of
-//! zero. The low 4 bytes of the checksum are stored in little-endian format"
-//! (`§3.1.1`); it is read and compared exactly once, at the frame's end, and
-//! a mismatch is `WrongChecksum` — the RFC makes ignoring the checksum
-//! compliant ("It may also ignore informative fields, such as the
-//! checksum", `§2`), every working reference verifies it anyway, and std's
-//! verification is a documented panic, so ours verifies and fails closed
-//! (T8). A decode that fails before the frame end leaves the hash partial
-//! and reports the decode's failure, never the checksum's.
-//!
-//! ## Errors
-//!
-//! The public set is the block layer's composed set plus this layer's own
-//! names — `BadMagic`, `ReservedBitSet`, `DictionaryRequired`,
-//! `ContentSizeMismatch`, `WrongChecksum`, and the `Truncated` the input's
-//! end raises everywhere — and `zstd.decode.DecompressError` is exactly this
-//! set, name for name. `WindowTooLarge` is deliberately *not* here: only a
-//! caller with an authorized window (`checkWindow`) can raise it.
+//! `classify` tells a Zstandard frame from a skippable frame (`§3.1.2`) or
+//! garbage (`BadMagic`). `HeaderParser` parses the Frame_Header incrementally,
+//! so a streaming reader can feed it across reads; `parseHeader` is the
+//! whole-slice form. `State` is one frame's decode state. The one-shot decoder
+//! runs `classify`, `parseHeader`, `State.init`, `State.decodeBlock` until
+//! `last_block`, `State.checkContentSize`, and `State.verifyTrailer` when the
+//! header sets the checksum flag. The streaming reader runs the same steps but
+//! calls `block.decodeContent` and `State.recordBlock` itself, because its
+//! output window slides. `window` holds the Window_Size arithmetic; how large a
+//! window to accept is the caller's call (`checkWindow`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -147,7 +29,8 @@ const xxh64 = @import("xxh64.zig");
 
 /// Everything the frame layer reports: the block layer's composed set plus
 /// this layer's own names. `zstd.decode.DecompressError` is this set, name
-/// for name (`decode.zig` asserts it at comptime).
+/// for name (`decode.zig` asserts it at comptime). `WindowTooLarge` is not in
+/// it: only a caller with its own window limit (`checkWindow`) can raise that.
 pub const Error = error{
     /// `§3.1`, `§3.1.2` — the 4-byte Magic_Number is neither the Zstandard
     /// magic nor one of the 16 skippable magics.
@@ -157,15 +40,16 @@ pub const Error = error{
     ReservedBitSet,
     /// `§3.1.1.1.3`, `§5` — Dictionary_ID_Flag is set: the frame needs a
     /// dictionary this decoder does not have. Raised at the first
-    /// Dictionary_ID byte, before any body byte; never skipped, never
-    /// misparsed (OQ4).
+    /// Dictionary_ID byte, before any body byte; the ID is never skipped or
+    /// interpreted.
     DictionaryRequired,
     /// `§3.1.1.1.4` — Frame_Content_Size against the frame's actual decoded
     /// total: a running bound (`recordBlock`, `§8`'s smaller-than-actual
     /// vector) and a frame-end check (`checkContentSize`).
     ContentSizeMismatch,
-    /// `§3.1.1` — the Content_Checksum trailer does not match the decoded
-    /// bytes' XXH64 (T8: verify, never skip).
+    /// `§3.1.1` — the Content_Checksum trailer does not match the XXH64 of the
+    /// decoded bytes. A trailer that is present is always verified, although
+    /// `§2` allows a decoder to ignore it.
     WrongChecksum,
 } || block.Error;
 
@@ -197,7 +81,9 @@ pub const Kind = enum { zstandard, skippable };
 
 /// Classify the 4 bytes at the front of `source` (`§3.1`, `§3.1.2`): the
 /// Zstandard frame magic, one of the 16 skippable magics, or `BadMagic`.
-/// Fewer than 4 bytes is the input's end, `Truncated`.
+/// Fewer than 4 bytes is the input's end, `Truncated`. The one-shot and the
+/// streaming reader both classify through this, so they agree on what a frame
+/// is.
 pub fn classify(source: []const u8) error{ BadMagic, Truncated }!Kind {
     if (source.len < magic_len) return error.Truncated;
     const value = common.readInt(u32, source[0..magic_len]);
@@ -206,9 +92,9 @@ pub fn classify(source: []const u8) error{ BadMagic, Truncated }!Kind {
     return error.BadMagic;
 }
 
-/// `§3.1.1.1.2`'s Window_Size arithmetic: the four formulas both layers check
-/// a frame against. The descriptor byte always parses — the formulas cannot
-/// fail — and the *cap* on what a caller accepts is `checkWindow`'s.
+/// `§3.1.1.1.2`'s Window_Size arithmetic: the four formulas a frame's window is
+/// computed from. Every descriptor byte parses, so the formulas cannot fail;
+/// the limit on what a caller accepts is `checkWindow`'s.
 pub const window = struct {
     /// `windowLog = 10 + Exponent` — 10 to 41.
     pub fn windowLog(exponent: u5) u6 {
@@ -291,7 +177,9 @@ pub const Header = struct {
     /// Frame_Content_Size itself when Single_Segment_Flag is set.
     window_size: u64,
     /// `§3.1.1.1.4` — Frame_Content_Size; `null` when FCS_Field_Size is 0.
-    /// Single_Segment_Flag makes it necessarily present.
+    /// Single_Segment_Flag makes it necessarily present. It is only checked
+    /// against the decoded length (`State.recordBlock`,
+    /// `State.checkContentSize`), never used to size anything.
     content_size: ?u64,
     /// `§3.1.1.1.1.5` — Content_Checksum_Flag: the 4-byte trailer.
     checksum: bool,
@@ -300,14 +188,12 @@ pub const Header = struct {
     bytes_consumed: usize,
 };
 
-/// The Frame_Header parser (`§3.1.1.1`, Table 2): a byte-fed state machine
-/// over the field order — the descriptor, the Window_Descriptor, the
-/// Dictionary_ID, the Frame_Content_Size. The one-shot drives it over the
-/// whole source, the streaming reader over its buffered chunks, and it stages
-/// nothing: the header is at most 14 bytes and each field accumulates into
-/// its own scalar (the gzip `HeaderParser` shape), so a reader whose input
-/// buffer is only the 4 bytes the magic needs can still parse it byte by
-/// byte.
+/// The Frame_Header parser (`§3.1.1.1`, Table 2): a state machine fed bytes in
+/// field order (the descriptor, the Window_Descriptor, the Dictionary_ID, the
+/// Frame_Content_Size). It stages nothing, since the header is at most 14 bytes
+/// and each field accumulates in its own scalar, so a reader whose input
+/// buffer holds only the magic's 4 bytes can still parse the header across
+/// reads. `parseHeader` drives it over a whole slice.
 pub const HeaderParser = struct {
     stage: Stage = .descriptor,
     /// The Frame_Header_Descriptor byte, once read.
@@ -347,9 +233,9 @@ pub const HeaderParser = struct {
     /// consumes as much as the current field needs; a caller with more input
     /// feeds again (the streaming route), and a caller holding the whole
     /// header feeds once. Every stage of a non-empty slice either consumes a
-    /// byte or fails, so a driver always makes progress; the input's end
-    /// inside the header is the driver's `Truncated` (the parser simply is
-    /// not `done` yet).
+    /// byte or fails, so a driver always makes progress. The input ending
+    /// inside the header is the driver's `Truncated`: the parser is just not
+    /// `done` yet. Fails with `ReservedBitSet` or `DictionaryRequired`.
     pub fn feed(parser: *HeaderParser, bytes: []const u8) Error!usize {
         var consumed: usize = 0;
         while (consumed < bytes.len and parser.stage != .done) {
@@ -388,7 +274,7 @@ pub const HeaderParser = struct {
             .dictionary => {
                 // §3.1.1.1.3 + §5 — the frame references a dictionary. The
                 // refusal lands at the first Dictionary_ID byte, before any
-                // body byte, and no byte of the ID is interpreted (OQ4).
+                // body byte, and no byte of the ID is interpreted.
                 return error.DictionaryRequired;
             },
             .fcs => {
@@ -426,10 +312,11 @@ pub const HeaderParser = struct {
     }
 };
 
-/// Parse a whole Frame_Header from the front of `source` — the bytes *after*
-/// the Magic_Number (`§3.1.1.1`). The one-shot's and the fixtures' form; the
-/// streaming reader drives `HeaderParser` directly. Fewer bytes than the
-/// header needs is the input's end: `Truncated`.
+/// Parse a whole Frame_Header from the front of `source`, the bytes *after*
+/// the Magic_Number (`§3.1.1.1`). The streaming reader drives `HeaderParser`
+/// directly instead. Fewer bytes than the header needs is the input's end:
+/// `Truncated`. The parser's own errors are `ReservedBitSet` and
+/// `DictionaryRequired`.
 pub fn parseHeader(source: []const u8) Error!Header {
     var parser: HeaderParser = .{};
     const consumed = try parser.feed(source);
@@ -447,12 +334,11 @@ pub fn checkWindow(header: Header, max_window_size: u64) error{WindowTooLarge}!v
     if (header.window_size > max_window_size) return error.WindowTooLarge;
 }
 
-/// One frame's decode state, threaded across its blocks (the landed layers'
-/// `State` shape, one level up): the parsed header, the two entropy layers'
-/// cross-block states, the frame's decoded length, and the XXH64 fold.
+/// One frame's decode state, kept across its blocks: the parsed header, the
+/// literals and sequences layers' cross-block states, the decoded length so
+/// far, and the checksum.
 ///
-/// The checksum rides the one per-block emission funnel (OQ7):
-/// `recordBlock` is the only place a decoded byte reaches the hash, and it is
+/// `recordBlock` is the only place decoded bytes reach the checksum, and it is
 /// handed exactly the bytes each block wrote, in order.
 pub const State = struct {
     /// The parsed Frame_Header (`§3.1.1.1`).
@@ -463,25 +349,24 @@ pub const State = struct {
     /// The three decoding tables and the repeat offsets a Repeat_Mode reuses
     /// (`§3.1.1.3`, `§3.1.1.5`), one per frame.
     sequences: sequences.State = .{},
-    /// `§3.1.1` — the decoded bytes' XXH64, folded per block. A flag-off
-    /// frame folds nothing: nothing will be verified.
+    /// `§3.1.1` — the decoded bytes' XXH64, folded per block. A frame without
+    /// the checksum flag folds nothing, since nothing will be verified.
     checksum: xxh64.State = .{},
     /// The frame's decoded length so far: the block layer's `decoded_len` on
-    /// the one-shot's contiguous path, and the frame's running total
-    /// (Frame_Content_Size's bound, `§3.1.1.1.4`) everywhere. u64, not usize:
-    /// a frame's output has no usize bound (a 131 KB RLE stream yields
-    /// 4 GiB+), so the streaming total must not wrap on the 32-bit targets
-    /// — the M4 closing review's blocker: a hostile RLE frame drove the
-    /// total past 2^32 through the reader, a Debug/ReleaseSafe panic and
-    /// ReleaseFast UB on x86-linux/arm-linux/wasm32 (hostile input gets
-    /// error returns, never a crash).
+    /// the one-shot's contiguous path, and the running total that
+    /// Frame_Content_Size is checked against (`§3.1.1.1.4`) everywhere. A
+    /// `u64`, not a `usize`: a frame's output has no `usize` bound (about
+    /// 131 KB of RLE blocks decodes to over 4 GiB), so the total must not wrap
+    /// on 32-bit targets, where a wrap would panic in safe builds and be
+    /// undefined behavior in ReleaseFast. Hostile input gets an error, never a
+    /// crash.
     decoded_len: u64 = 0,
 
-    /// A fresh state for one frame, initialized in place. The layer states
-    /// carry ~10 KiB of table payload that stays undefined until a block
-    /// builds it — a by-value init memcpy'd the whole aggregate, undefined
-    /// payload included (measured ~700 ns per frame on the 32-64 KiB corpus
-    /// shapes).
+    /// Start a new frame in `state`, initializing it in place. A `State` is
+    /// about 16 KiB, mostly decoding-table payload that stays undefined until a
+    /// block builds it. Returning one by value copied the whole aggregate,
+    /// undefined payload included, which was a measurable cost on 32-64 KiB
+    /// frames.
     pub fn init(state: *State, header: Header) void {
         state.header = header;
         state.literals.has_table = false;
@@ -492,14 +377,15 @@ pub const State = struct {
     }
 
     /// Decode one block from the front of `source` (its Block_Header) into
-    /// `target`, recording its output — the one-shot's contiguous step, where
-    /// `target[0..decoded_len]` is the frame's output so far and the frame's
-    /// counter is also the block call's index.
+    /// `target` and record its output. This is the one-shot's step:
+    /// `target[0..decoded_len]` is the frame's output so far, so the frame's
+    /// decoded length is also the block's position in `target`. Returns the
+    /// errors of `block.decode`, plus `ContentSizeMismatch` from `recordBlock`.
     ///
-    /// The streaming reader does not use this one: its serving region slides,
-    /// so it parses the Block_Header off its own input, stages the content,
-    /// and drives `block.decodeContent` with its *retained* length — then
-    /// `recordBlock` below.
+    /// The streaming reader's output window slides, so it does not use this.
+    /// It parses the Block_Header itself, stages the content, calls
+    /// `block.decodeContent` with the length it has retained, and then calls
+    /// `recordBlock`.
     pub fn decodeBlock(state: *State, source: []const u8, target: []u8) Error!block.Section {
         const section = try block.decode(
             source,
@@ -520,17 +406,17 @@ pub const State = struct {
         return section;
     }
 
-    /// Record one decoded block: the OQ7 funnel — the block's output folded
-    /// into the checksum exactly once, in order — the frame's decoded length,
-    /// and Frame_Content_Size's running bound: a frame that has already
-    /// produced more bytes than it declared fails at that block, so a hostile
-    /// header cannot amplify before the frame end (`§3.1.1.1.4`, `§8`'s
-    /// smaller-than-actual vector).
+    /// Record one decoded block: fold its output into the checksum (when the
+    /// frame has one), add its length to the decoded total, and enforce
+    /// Frame_Content_Size as a running bound. A frame that has produced more
+    /// bytes than it declared fails at that block with `ContentSizeMismatch`,
+    /// so a header that understates the size cannot keep the frame decoding
+    /// until its end (`§3.1.1.1.4`, `§8`'s smaller-than-actual vector).
     ///
-    /// `output` is exactly the bytes the block just wrote, and the slice is
-    /// computed with the length that block call used: the one-shot's
-    /// `target[decoded_len..][0..bytes_written]`, the streaming reader's
-    /// `serving[retained_len..][0..bytes_written]`.
+    /// `output` is exactly the bytes the block just wrote, taken with the
+    /// length that block call used: `target[decoded_len..][0..bytes_written]`
+    /// for the one-shot, `serving[retained_len..][0..bytes_written]` for the
+    /// streaming reader. Call it once per block, in order.
     pub fn recordBlock(state: *State, output: []const u8) error{ContentSizeMismatch}!void {
         if (state.header.checksum) state.checksum.update(output);
         state.decoded_len += output.len;
@@ -549,14 +435,17 @@ pub const State = struct {
     }
 
     /// The frame end's trailer step (`§3.1.1`, `§3.1.1.1.1.5`): compare the
-    /// 4-byte Content_Checksum against the folded digest — "The low 4 bytes
-    /// of the checksum are stored in little-endian format" — once, here, and
-    /// fail `WrongChecksum` on a mismatch (T8: verify, never skip).
+    /// 4-byte Content_Checksum against the digest folded so far ("The low 4
+    /// bytes of the checksum are stored in little-endian format") and return
+    /// `WrongChecksum` on a mismatch.
     ///
-    /// The caller gates on the header's checksum flag (a flag-off frame has
-    /// no trailer and folded nothing) and owns the input's end: fewer than
-    /// four bytes is its `Truncated`. std spells the kernel's `final` through
-    /// a mutable receiver, so this is `*State`; it is a read.
+    /// The caller calls this only when the header's checksum flag is set (a
+    /// frame without the flag has no trailer and folded nothing), and passes
+    /// exactly `checksum_len` bytes. Input that ends before the trailer is the
+    /// caller's `Truncated`. A decode that fails earlier never gets here, so it
+    /// reports the decode's error, not the checksum's. `state` is a mutable
+    /// pointer only because `xxh64.State.final` takes one; verifying does not
+    /// change the digest.
     pub fn verifyTrailer(state: *State, trailer: []const u8) error{WrongChecksum}!void {
         assert(state.header.checksum);
         assert(trailer.len == checksum_len);
@@ -589,11 +478,11 @@ fn decodeFrame(bytes: []const u8, target: []u8, progress: *usize) !usize {
     var cursor = magic_len + header.bytes_consumed;
     while (true) {
         const section = state.decodeBlock(bytes[cursor..], target) catch |err| {
-            // A post-write check — Frame_Content_Size's running bound — fails
-            // after the block landed, so the sentinel's floor is the frame's
-            // decoded length, not the last successful block's.
-            // The walk's target bounds the frame's output, so the u64
-            // total always fits the usize this test helper tracks.
+            // A post-write check, Frame_Content_Size's running bound, fails
+            // after the block was written, so the sentinel's floor is the
+            // frame's decoded length, not the last successful block's. The
+            // walk's target bounds the frame's output, so the u64 total always
+            // fits the usize this test helper tracks.
             progress.* = @intCast(state.decoded_len);
             return err;
         };
@@ -615,7 +504,7 @@ fn decodeFrame(bytes: []const u8, target: []u8, progress: *usize) !usize {
 }
 
 /// Decode a fixture frame and check its output, with the sentinel overrun
-/// check every decode test runs (AGENTS.md, "Rules").
+/// check every decode test runs.
 fn expectFrame(bytes: []const u8, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -656,8 +545,7 @@ test "classify reads §3.1's two magic families" {
         try testing.expectEqual(Kind.skippable, try classify(&skippable));
     }
     // The neighbors outside the range: 0x184D2A4F and 0x184D2A60 are
-    // neither family (`docs/research/zstd-notes.md` §5.4's out-of-range
-    // frame; the CLI exits 1 on it).
+    // neither family (the CLI exits 1 on an out-of-range magic).
     try testing.expectError(error.BadMagic, classify(&.{ 0x4f, 0x2a, 0x4d, 0x18 }));
     try testing.expectError(error.BadMagic, classify(&.{
         0x60, 0x2a, 0x4d, 0x18,
@@ -762,7 +650,7 @@ test "window reads §3.1.1.1.2's descriptor arithmetic" {
     try testing.expectEqual(@as(u64, 7 * (1 << 38)), window.windowAdd(31, 7));
 }
 
-test "parseHeader: the unused bit is never interpreted, the reserved bit fails closed" {
+test "parseHeader: the unused bit is never interpreted, the reserved bit fails" {
     // RFC 8878 §3.1.1.1.1.3 — "A decoder compliant with this specification
     // version shall not interpret this bit. It might be used in a future
     // version to signal a property that is not mandatory to properly decode
@@ -794,8 +682,8 @@ test "parseHeader refuses dictionaries at the first Dictionary_ID byte" {
     // RFC 8878 §3.1.1.1.3 — the Dictionary_ID "contains the ID of the
     // dictionary required to properly decode the frame"; §5 leaves
     // acquisition out of band and §2 demands "an unambiguous error code".
-    // OQ4: refused at the first Dictionary_ID byte, before any body byte —
-    // the CLI fails both fixtures with "Dictionary mismatch".
+    // This decoder refuses at the first Dictionary_ID byte, before any body
+    // byte; the CLI fails both fixtures with "Dictionary mismatch".
     try testing.expectError(error.DictionaryRequired, parseHeader(&.{ 0x01, 0x00, 0x2a }));
     try testing.expectError(error.DictionaryRequired, parseHeader(&.{ 0x02, 0x00, 0x2a, 0x2b }));
     try testing.expectError(error.DictionaryRequired, parseHeader(&.{
@@ -874,7 +762,7 @@ test "checkWindow bounds the frame's Window_Size" {
 test "the frame walk decodes the fast-path fixtures" {
     // RFC 8878 §3.1.1.2 — the block chain, and §3.1.1.2.1's Last_Block ends
     // it. Raw and RLE blocks take no entropy path but land in the output (and
-    // so in the checksum funnel) like any other.
+    // so in the checksum) like any other.
     try expectFrame(&golden.frame_raw, "zstd raw");
     try expectFrame(&golden.frame_raw_empty, "");
     try expectFrame(&golden.frame_rle, "AAAAAAAAAA");
@@ -891,13 +779,13 @@ test "the frame walk decodes the fast-path fixtures" {
     try internal.sentinel.expect(&target, written);
 }
 
-test "the frame walk decodes the landed fixture frames" {
+test "the frame walk decodes the golden fixture frames" {
     // RFC 8878 §3.1.1.3 — the compressed blocks' fixtures, framed as whole
-    // frames by the block slice and re-read here through the frame layer: the
-    // T1 pair, the literals families, the sequences pairs, and the
-    // hand-built corners. Each expectation is the CLI's own `zstd -d` bytes.
-    try expectFrame(&golden.frame_t1, &golden.t1_literals);
-    try expectFrame(&golden.frame_t1_errata, &golden.t1_errata_literals);
+    // frames and decoded here through the frame layer: the hand-built Huffman
+    // pair, the literals families, the sequences pairs, and the hand-built
+    // corners. Each expectation is the CLI's own `zstd -d` bytes.
+    try expectFrame(&golden.frame_pair, &golden.pair_literals);
+    try expectFrame(&golden.frame_pair_errata, &golden.pair_errata_literals);
     try expectFrame(&golden.frame_treeless, &.{ 0, 1, 4, 5, 0, 0, 0, 0, 0 });
     try expectFrame(&golden.frame_repeat, &golden.frame_repeat_expected);
     try expectFrame(&golden.frame_temp_offset, &golden.frame_temp_offset_expected);
@@ -935,17 +823,17 @@ test "the frame walk carries the window accounting across blocks" {
     try testing.expectEqual(@as(usize, 2 * 131072 + 3), written);
     try testing.expectEqualSlices(u8, "BBB", target[262144..262147]);
     try internal.sentinel.expect(&target, written);
-    // The addressable-span precision (T12): ten literals move the match
-    // position past the 1 KB window, and the offset reads a byte the
-    // declared window alone would not admit — the CLI decodes it too.
+    // The addressable span: ten literals move the match position past the
+    // 1 KB window, and the offset reads a byte the declared window alone
+    // would not admit. The CLI decodes it too.
     internal.sentinel.fill(&target);
     written = try decodeFrame(&golden.frame_window_1k_span, &target, &progress);
     try testing.expectEqual(@as(usize, 2048 + 10 + 3), written);
     try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
     try internal.sentinel.expect(&target, written);
-    // The one-byte-past siblings: `OffsetTooFar` (T12 — the CLI decodes
-    // both, its whole-buffer decoder checking the bytes it still has rather
-    // than the declared window).
+    // The one-byte-past siblings: `OffsetTooFar`. The CLI decodes both,
+    // because its whole-buffer decoder checks the bytes it still has rather
+    // than the declared window.
     try expectFrameError(error.OffsetTooFar, &golden.frame_window_1k_over);
     try expectFrameError(error.OffsetTooFar, &golden.frame_window_128k_over);
 }
@@ -965,7 +853,7 @@ test "the checksum folds each block's output exactly once, in order" {
     // bytes), and it decodes to the same output.
     try expectFrame(&golden.frame_checksum_off, "abcd");
     // The multi-block CLI frame: 135000 decoded bytes over two compressed
-    // blocks, folded in order (OQ7 — one funnel, no second pass).
+    // blocks, folded in order with no second pass.
     var target: [block.max_block_size * 2]u8 = undefined;
     internal.sentinel.fill(&target);
     var progress: usize = 0;
@@ -974,18 +862,17 @@ test "the checksum folds each block's output exactly once, in order" {
     try testing.expectEqual(expected.len, written);
     try testing.expectEqualSlices(u8, expected, target[0..written]);
     try internal.sentinel.expect(&target, written);
-    // A mismatched trailer is `WrongChecksum` (T8 — verify, never skip; the
-    // CLI exits 1 with "Restored data doesn't match checksum"), and a trailer
-    // cut short is the input's end.
+    // A mismatched trailer is `WrongChecksum` (the CLI exits 1 with
+    // "Restored data doesn't match checksum"), and a trailer cut short is the
+    // input's end.
     try expectFrameError(error.WrongChecksum, &golden.frame_checksum_corrupt);
     try expectFrameError(error.Truncated, &golden.frame_checksum_truncated);
 }
 
 test "the fold is independent of the block boundaries" {
-    // OQ7's discipline, stated as an invariant: the digest over a frame's
-    // blocks in order is the digest over the concatenation, whatever the
-    // boundaries. `recordBlock` is the only path, and it is handed exactly
-    // the bytes each block wrote.
+    // The digest over a frame's blocks in order is the digest over the
+    // concatenation, whatever the boundaries. `recordBlock` is the only path,
+    // and it is handed exactly the bytes each block wrote.
     const first = "the quick brown fox ";
     const second = "jumps over the lazy dog";
     var state: State = undefined;
@@ -1055,7 +942,7 @@ test "the descriptor corners decode as the CLI does" {
     try expectFrameError(error.DictionaryRequired, &golden.frame_dictionary_id);
     try expectFrameError(error.DictionaryRequired, &golden.frame_dictionary_id_wide);
     try expectFrameError(error.Truncated, &golden.frame_dictionary_id_truncated);
-    // §3.1.1.2.4's window/block coupling (T7): a single-segment frame's
+    // §3.1.1.2.4's window/block coupling: a single-segment frame's
     // Window_Size is its FCS, so a block larger than it is `BlockOversize`
     // ("Src size is incorrect" to the C).
     try expectFrameError(error.BlockOversize, &golden.frame_single_segment_oversize);

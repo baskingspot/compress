@@ -1,23 +1,21 @@
-//! zlib.Reader: a decompressing `Io.Reader` over one zlib stream (README.md,
-//! "Streaming").
+//! zlib.Reader: a decompressing `Io.Reader` over one zlib stream.
 //!
-//! The machinery is the shared container driver's
-//! (`src/internal/container.zig`; `src/internal/README.md`, "The Io codec
-//! pattern book"): the sticky lifecycle (`state` + the detail in `err`), the
-//! zero-length poll, the fill-and-return-0 count, the contiguity failure,
-//! and the trailer-at-the-clean-end funnel all run through
-//! `internal.container.ReaderHooks`, which this module instantiates over its
-//! framing (`framing.zig`). What this module adds is the framing — the
-//! two-byte header check, the trailer check, the Adler-32. The stream
-//! boundary is the framing's: `input` is consumed exactly through ADLER32's
-//! last byte and stops there (OQ2, `§2.2`).
+//! `init` takes the input reader and a caller-provided `Reader.Buffer`.
+//! Decoded bytes are served straight from that buffer, which is flate's
+//! decode window: one region and one position, with no staging copy. The
+//! reader checks the 2-byte header before the first body byte, decodes the
+//! deflate body through `flate.Reader`, and at the end of the body reads and
+//! verifies the ADLER32 trailer before it reports `error.EndOfStream`. It
+//! consumes `input` exactly through the trailer's last byte and leaves
+//! whatever follows unread (RFC 1950 §2.2). `streamAll` is the one-call form.
 //!
-//! The window is flate's, re-exported: the caller's `Reader.Buffer` is handed
-//! to the inner `flate.Reader`, and this reader's serving position is that
-//! window's position — one region, one position, no staging copy (OQ6). The
-//! decoded bytes are folded into the container's Adler-32 by flate's checksum
-//! hook as they enter the window (OQ1), so the trailer check at the clean end
-//! hashes nothing again.
+//! The lifecycle (`state`, with the detail in `err`), the window hand-off, and
+//! the `Io.Reader` entries come from the shared container driver
+//! (`src/internal/container.zig`, `ReaderHooks`), instantiated over
+//! `framing.zig`. Flate's checksum hook folds the Adler-32 as decoded bytes
+//! enter the window, so the trailer check at the end hashes nothing again.
+//!
+//! Format: docs/research/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -29,8 +27,8 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-/// The caller-provided window: flate's, re-exported — the container adds no
-/// buffer of its own (OQ6). `[2 * history_len]u8`, 64 KiB.
+/// The caller-provided decode window: flate's `Reader.Buffer`, re-exported.
+/// 64 KiB (`[2 * history_len]u8`); the last 32 KiB of it is match history.
 pub const Buffer = flate.Reader.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
@@ -38,10 +36,11 @@ const State = internal.reader.State;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const framing = @import("framing.zig");
-/// The detailed error recorded once `state == .failed` (README, "API"):
-/// the framing's set — flate's decode detail set (minus `BufferTooSmall`,
-/// the window is the caller's and flate owns it) plus this module's header
-/// and trailer entries.
+/// The failure detail recorded in `err` when the interface returns
+/// `error.ReadFailed`: `BadHeader`, `DictionaryRequired`, and `WrongChecksum`
+/// from this module; `Truncated` and flate's other decode errors;
+/// `StreamTooLong` for a contiguous request the window cannot hold; and
+/// `ReadFailed` when the input reader itself failed.
 pub const Error = framing.Error;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
@@ -50,8 +49,9 @@ const Reader = @This();
 
 reader: Io.Reader,
 inner: flate.Reader,
-/// The stream's input: the header is read from it and the trailer read from
-/// it, both at flate's exact positions.
+/// The stream's input. The header and trailer are read from it directly, at
+/// the exact byte positions flate's reader leaves it at; the body is read
+/// through `inner`.
 input: *Io.Reader,
 /// The header check (`§2.2`), run once, before the first body byte.
 header: framing.Header = .pending,
@@ -67,28 +67,40 @@ state: State = .streaming,
 err: ?Error = null,
 
 /// The shared container driver over this module's framing
-/// (`src/internal/container.zig`): the lifecycle funnel, the window
-/// hand-off, the trailer-at-the-clean-end funnel (the wrapper-rebase rule),
-/// and the generated `Io.Reader` entries.
+/// (`src/internal/container.zig`): the lifecycle, the window hand-off, the
+/// trailer check at the end of the body (on both the fill and the rebase
+/// path), and the generated `Io.Reader` entries.
 const Hooks = internal.container.ReaderHooks(framing, Reader);
 
-/// Wrap `input` (one zlib stream) with `buffer` as the decoded window.
-/// Consume through `&r.reader` (`stream`, `read`-family, `peek`-family); the
-/// stream ends cleanly with `error.EndOfStream` once the trailer is verified
-/// and fails closed with `error.ReadFailed` (sticky, details in `err`) on any
-/// malformed header, body, trailer, or input failure. The reader consumes
-/// `input` exactly through ADLER32's last byte; bytes after it are "not part
-/// of the zlib stream" (`§2.2`) and are left unconsumed (README,
-/// "Streaming").
+/// Start decoding the zlib stream in `input`, with `buffer` as the decode
+/// window. Read decoded bytes through `&r.reader` (`stream`, `take`, `peek`,
+/// and the rest of the `Io.Reader` interface). After the last body byte the
+/// reader verifies the trailer and then reports `error.EndOfStream`. A
+/// malformed header, body, or trailer, or a failing `input`, makes the
+/// interface return `error.ReadFailed` from then on; the cause is in `r.err`.
+///
+/// The reader consumes `input` exactly through ADLER32's last byte and leaves
+/// the bytes after it unread (`§2.2`: they "are not part of the zlib
+/// stream"). The trailer is checked only when the reader is asked for bytes
+/// past the last decoded one, so read to `error.EndOfStream`; output served
+/// before then is unverified.
+///
+/// `input`'s buffer must hold at least 3 bytes, or the input must end sooner.
+/// A contiguous read (`peek`, `take`) of up to 32 KiB is always served; a
+/// larger one can fail with `error.ReadFailed` and
+/// `err == error.StreamTooLong`. Do not move the `Reader` after its first
+/// read.
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
     return Hooks.init(input, buffer);
 }
 
-/// Stream one complete zlib stream from `in` through a stack-buffered
-/// `Reader` into `out`, returning the decoded bytes served. Consumes `in`
-/// exactly through the stream's last trailer byte; bytes after it are left
-/// unconsumed (README, "Streaming"). Zero allocation: the window is a stack
-/// local.
+/// Decode one zlib stream from `in` into `out` and return the number of
+/// decoded bytes written. `in` is consumed exactly through the stream's last
+/// trailer byte; anything after it is left unread. Returns
+/// `error.ReadFailed` for a malformed stream or a failing `in` (the cause is
+/// not reported; use a `Reader` to see `err`) and `error.WriteFailed` if `out`
+/// fails. Uses about 68 KiB of stack (the 64 KiB window plus 4 KiB of reader
+/// state). Allocates nothing.
 pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
     return Hooks.streamOne(in, out);
 }
@@ -106,8 +118,9 @@ fn decodeInto(r: *Io.Reader, target: []u8) !usize {
     return w.end;
 }
 
-/// Encode `source` with `Writer`, decode it through a `Reader` over `source
-/// ++ markers`, and expect identity with the stream boundary intact.
+/// Encode `source` with `Writer`, decode it through a `Reader` over the stream
+/// followed by marker bytes, and expect identity with the stream boundary
+/// intact.
 fn roundTrip(source: []const u8) !void {
     const gpa = testing.allocator;
     var compressed: Io.Writer.Allocating = .init(gpa);
@@ -148,17 +161,16 @@ fn roundTrip(source: []const u8) !void {
 }
 
 test "Reader: the buffer type is flate's, re-exported" {
-    // README, "Caller-owned buffer types": `Reader.Buffer` is
-    // `flate.Reader.Buffer` — 2 * history_len, 64 KiB (OQ6).
+    // `Reader.Buffer` is `flate.Reader.Buffer`: 2 * history_len, 64 KiB.
     try testing.expectEqual(@as(usize, 65536), @sizeOf(Buffer));
     try testing.expect(Buffer == flate.Reader.Buffer);
     try testing.expectEqual(@as(usize, 98303), @sizeOf(Writer.Buffer));
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
-    // README, "API" — `Reader.err`'s type is the `DecompressError` set minus
-    // `BufferTooSmall` (the window is the caller's), plus the interface's
-    // `ReadFailed`/`EndOfStream` and the contiguity cap's `StreamTooLong`.
+    // `Reader.Error` is the `DecompressError` set minus `BufferTooSmall` (the
+    // decode window is fixed), plus the interface's `ReadFailed` and
+    // `EndOfStream` and the contiguity cap's `StreamTooLong`.
     const mine = @typeInfo(Error).error_set.?;
     for (@typeInfo(decode.DecompressError).error_set.?) |want| {
         if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
@@ -211,7 +223,7 @@ test "Reader: the golden table decodes through the streaming layer" {
     // The same vectors the one-shot decoder is judged against, through the
     // streaming interface: valid streams decode to the golden output and
     // consume exactly their own bytes; the trailing bytes of a case are left
-    // unconsumed and the next parse is the pinned outcome (ZD7).
+    // unconsumed and the next parse is the pinned outcome.
     const gpa = testing.allocator;
     const target = try gpa.alloc(u8, 2048 + @as(usize, sentinel.len));
     defer gpa.free(target);
@@ -277,12 +289,11 @@ fn checkAtBoundary(gpa: mem.Allocator, source: []const u8, expect: golden.Expect
 }
 
 test "Reader: a doubled stream is a caller loop at the boundary" {
-    // README, "Streaming": the reader consumes `input` exactly through
-    // ADLER32's last byte and stops; nothing in the format promises a second
-    // stream follows, but the exact consumption exposes the boundary — a
-    // caller loop decodes what the first reader left. The golden table's
-    // "stream x2" case pins the same shape (a fresh reader at the boundary
-    // decodes the second stream).
+    // The reader consumes `input` exactly through ADLER32's last byte and
+    // stops. Nothing in the format promises a second stream follows, but the
+    // exact consumption exposes the boundary: a caller loop decodes what the
+    // first reader left. The golden table's "stream x2" case pins the same
+    // shape (a fresh reader at the boundary decodes the second stream).
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "hello, zlib";
@@ -307,10 +318,10 @@ test "Reader: a doubled stream is a caller loop at the boundary" {
     try testing.expectEqual(2 * len, fixed_in.seek);
 }
 
-test "Reader: garbage in a stream's place fails closed" {
-    // README, "Contracts": decode fails closed at the first invalid byte.
-    // The garbage is at least a full header, so the header check is what
-    // rejects it (a shorter prefix is a truncated header instead).
+test "Reader: garbage in a stream's place fails" {
+    // Decoding returns an error at the first invalid byte. The garbage is at
+    // least a full header, so the header check is what rejects it (a shorter
+    // prefix is a truncated header instead).
     const garbage = "not a zlib stream at all!";
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(garbage);
@@ -326,9 +337,8 @@ test "Reader: garbage in a stream's place fails closed" {
 test "Reader: the dictionary refusal is sticky and before any body byte" {
     // RFC 1950 §2.3 — rejecting an FDICT stream is conformant when the
     // embedding format has no dictionary registry; the four DICTID bytes are
-    // never read, never decoded as deflate data (ZD3/ZD4, T6). The refusal
-    // arrives at the header, so a valid-looking body behind it is never
-    // touched.
+    // never read, never decoded as deflate data. The refusal arrives at the
+    // header, so a valid-looking body behind it is never touched.
     const source = &golden.dictionary_stream; // the Go "dictionary" vector
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(source);
@@ -345,10 +355,9 @@ test "Reader: the dictionary refusal is sticky and before any body byte" {
 }
 
 test "Reader: a corrupt trailer fails at the clean end, stickily" {
-    // README, "Streaming": "At the body's clean end the reader reads and
-    // verifies ADLER32 exactly once, and only then reports
-    // `error.EndOfStream`". A mismatch is `error.ReadFailed` with the detail
-    // in `err` (`§2.3`, T4).
+    // At the body's clean end the reader reads and verifies ADLER32 exactly
+    // once, and only then reports `error.EndOfStream`. A mismatch is
+    // `error.ReadFailed` with the detail in `err` (`§2.3`).
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
@@ -373,12 +382,11 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
 test "Reader: an over-the-end request still checks the trailer" {
     // The rebase path: a request the window cannot hold at the consumer's
     // position routes through `rebase`, where flate's sticky end fires
-    // before the trailer is read. The trailer check must run there too —
-    // "verifies the trailer exactly once, and only then reports
-    // `error.EndOfStream`" (README, "Streaming") holds on every path, and
-    // RFC 1950 §2.3 requires the ADLER32 check unconditionally. Found by
-    // the M3 closing review: the input stops 4 bytes short otherwise, and
-    // a corrupted stream ends with a clean `EndOfStream`.
+    // before the trailer is read. The trailer check must run there too: the
+    // reader verifies the trailer exactly once, and only then reports
+    // `error.EndOfStream`, on every path, and RFC 1950 §2.3 requires the
+    // ADLER32 check unconditionally. Without it the input stops 4 bytes short
+    // and a corrupted stream ends with a clean `EndOfStream`.
 
     // A stream whose decoded size lands the window deep enough that a
     // 30-KiB request overflows the room at the consumer's position.
@@ -416,9 +424,9 @@ test "Reader: an over-the-end request still checks the trailer" {
 }
 
 test "Reader: a truncated stream is Truncated at every prefix" {
-    // README, "The stream format": a truncated stream — header, body, or
-    // trailer — is `error.Truncated`. Every prefix of a real stream fails
-    // closed, never decodes cleanly.
+    // A truncated stream (header, body, or trailer) is `error.Truncated`.
+    // Every prefix of a real stream returns an error, and none decodes
+    // cleanly.
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
     const len = try encode.compress("hello world\n", &stream, .{});
@@ -433,10 +441,9 @@ test "Reader: a truncated stream is Truncated at every prefix" {
     }
 }
 
-test "Reader: a contiguous request past the window fails closed" {
-    // README, "Streaming": "a request beyond what the window can hold at the
-    // consumer's position fails closed with `error.ReadFailed`
-    // (`err == .StreamTooLong`), never an assert".
+test "Reader: a contiguous request past the window fails" {
+    // A request beyond what the window can hold at the consumer's position
+    // returns `error.ReadFailed` (`err == .StreamTooLong`), never an assert.
     const gpa = testing.allocator;
     const source = try gpa.alloc(u8, 200_000);
     defer gpa.free(source);
@@ -453,8 +460,8 @@ test "Reader: a contiguous request past the window fails closed" {
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(stream.written());
     var r: Reader = .init(&fixed_in, &rbuf);
-    // A full history is always servable (README, "Streaming": "Any
-    // contiguous request of at most 32 KiB is served").
+    // A full history is always servable (any contiguous request of at most
+    // 32 KiB is served).
     try testing.expectEqualSlices(u8, source[0..history_len], try r.reader.peek(history_len));
     // Drain what the pump buffered: the window's guaranteed contiguous room
     // is exactly the retained history.
@@ -467,8 +474,8 @@ test "Reader: a contiguous request past the window fails closed" {
     );
     // Drain everything the pump buffered, so only the retained history stands
     // behind the next request: a whole-window request cannot fit beside it
-    // (a slide retains exactly `history_len` bytes). Fail closed with the
-    // contiguity detail, stickily.
+    // (a slide retains exactly `history_len` bytes). The reader fails with
+    // the contiguity detail, stickily.
     try r.reader.discardAll(r.reader.end - r.reader.seek);
     try testing.expect(r.reader.end > history_len);
     try testing.expectError(error.ReadFailed, r.reader.peek(@sizeOf(Buffer)));
@@ -479,9 +486,9 @@ test "Reader: a contiguous request past the window fails closed" {
 }
 
 test "Reader: a zero-length poll does not fail the stream" {
-    // The pattern book's zero-length poll: std calls `vtable.stream` at
-    // limit 0 when the buffer is nonempty, and the poll must answer 0
-    // without filling (a fill could fail `StreamTooLong` on a valid stream).
+    // The zero-length poll: std calls `vtable.stream` at limit 0 when the
+    // buffer is nonempty, and the poll must answer 0 without filling (a fill
+    // could fail `StreamTooLong` on a valid stream).
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "poll";
@@ -523,8 +530,8 @@ test "Reader: a chunked input refills across the header and the body" {
 }
 
 test "Reader: streamAll consumes one stream and leaves the rest" {
-    // README, "Streaming": `Reader.streamAll` consumes one stream and leaves
-    // the rest of `in` unconsumed — the same boundary the manual path keeps.
+    // `Reader.streamAll` consumes one stream and leaves the rest of `in`
+    // unconsumed, the same boundary the manual path keeps.
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "hello, zlib";

@@ -1,8 +1,8 @@
-//! External-oracle-lane harness: the driver behind `just zlib-oracle`, which
-//! cross-checks this module against python3's `zlib` (the C reference) in
-//! both directions (docs/research/containers-notes.md §5.5). It is a test
-//! tool, not part of the codec's surface: the codec itself (src/zlib/README.md)
-//! has no allocator anywhere.
+//! Command-line harness behind `just zlib-oracle`, which cross-checks this
+//! module against python3's `zlib` (the C reference) in both directions;
+//! `scripts/zlib_oracle.py` drives it. It is a test tool, not part of the
+//! codec: it reads whole files into an arena allocator, which the codec
+//! itself never does.
 //!
 //! Usage:
 //!   zlib-oracle decode <stream-file> <cap-bytes> > out

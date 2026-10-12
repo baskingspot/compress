@@ -1,39 +1,22 @@
-//! Raw DEFLATE (RFC 1951) encoder — the fast level: fixed-Huffman blocks over
-//! a klauspost-L1-class match finder, with a stored-block fallback so no block
-//! ever expands past its stored form (`§3.2.4`).
+//! Raw DEFLATE (RFC 1951) encoder, the fast level. `compress` splits the input
+//! into blocks of at most 65535 bytes and encodes each as fixed-Huffman symbols
+//! from a greedy match finder, or as a stored block when that is smaller
+//! (`§3.2.4`), so the output never exceeds `maxCompressedLength`. Every stream
+//! ends with an empty final fixed block (`03 00`); no data block carries BFINAL.
 //!
-//! The match finder (src/flate/README.md, "Encoder"; flate-notes.md §5.1): one
-//! single-slot `[1 << 15]u32` table keyed by the klauspost lineage's 5-byte
-//! hash (`prime5bytes`), greedy — no lazy matching — with a 4-byte confirm, the
-//! snappy-style accelerating skip, backward extension into the preceding
-//! literals, minimum match 4, and a 32768-byte distance cap (`§3.2.5`). The
-//! finder's window is the block's 32-KiB history followed by the block itself,
-//! so matches cross block boundaries exactly as the format allows (`§3.2.3`).
+//! The finder follows klauspost/compress level 1: a single-slot table of
+//! `1 << 15` absolute stream positions keyed by a 5-byte hash, a 4-byte
+//! confirm, an accelerating skip, backward extension into the preceding
+//! literals, minimum match 4, and a 32768-byte distance cap (`§3.2.5`). Its
+//! window is a block's 32 KiB of history followed by the block, so matches
+//! cross block boundaries as the format allows (`§3.2.3`).
 //!
-//! The bit writer has exactly two write operations, named for the packing rule
-//! each implements (`§3.1.1`): `writeBits` (a non-Huffman data element,
-//! LSB-of-value first — block headers, extra bits, stored LEN/NLEN) and
-//! `writeCode` (a Huffman code, MSB-of-code first; the code tables below store
-//! the wire bits pre-reversed). Mixing them up is the T1 bug: invisible to a
-//! self-round-trip, fatal to interop — which is why `just flate-oracle` decodes
-//! our output with python3's zlib.
-//!
-//! Every stream ends with a final empty fixed block, `03 00` — BFINAL=1,
-//! BTYPE=01, EOB — and no data block carries BFINAL (README, "Divergences"
-//! T4).
-//!
-//! Zero heap allocation: the finder table is a comptime-sized `[1 << 15]u32`
-//! (128 KiB) stack local or Writer field, zeroed once per stream through
-//! `fastmem.set` (a `@splat` lowers to the scalar compiler-rt memset on
-//! aarch64 — the snappy encoder's 3x lesson). Entries are absolute stream
-//! positions (wrapping u32), so the table persists across a stream's blocks
-//! — a stale entry fails the distance cap — and each block pays only a
-//! strided priming pass over its history, not a re-zero of the table.
+//! The streaming `Writer` is built on `BitWriter`, `compressBlockStream`,
+//! `emitStoredBlock`, and `writeFinalEmptyBlock`, which are public for it.
 //!
 //! Format: docs/research/specs/rfc1951-deflate.txt
 //! Lineage: klauspost/compress `flate/level1.go` (`fastEncL1`) and
-//! `flate/fast_encoder.go`, via the shape of this repo's snappy encoder;
-//! attribution in THIRD_PARTY.md.
+//! `flate/fast_encoder.go`; attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -61,26 +44,24 @@ pub const max_block_size: usize = 65535;
 /// structural.
 pub const history_len: usize = 32768;
 
-/// Worst-case compressed size for `input_len` bytes (README, "Contracts"):
-/// every block costs at most 5 bytes of stored header beyond its input
-/// (`§3.2.4`), and the stream always ends with a 2-byte final empty block.
-/// Size `target` to this before `compress`.
+/// Worst-case compressed size for `input_len` bytes:
+/// `input_len + 5 * ceil(input_len / max_block_size) + 2`. Every block costs at
+/// most 5 bytes of stored-block header beyond its input (`§3.2.4`), and every
+/// stream ends with a 2-byte empty block. Size `target` to this before
+/// `compress`.
 pub fn maxCompressedLength(input_len: usize) usize {
     return input_len + 5 * ((input_len + max_block_size - 1) / max_block_size) + 2;
 }
 
-/// The finder table: `[1 << 15]u32` single-slot entries = 128 KiB of
-/// comptime-sized stack scratch (README, "Stack").
+/// The finder table has `1 << 15` single-slot `u32` entries, 128 KiB.
 const table_bits = 15;
 const table_size = 1 << table_bits;
 
-/// The match-finder table. An entry is the *absolute* stream position
-/// (wrapping u32) of the newest scanned position with that hash; a stale
-/// entry fails `matchCandidate`'s distance cap, so a table persists across a
-/// stream's blocks with no per-block zeroing — std's persistent Lookup
-/// (flate-notes.md §8, `Compress.zig:66-80`). Callers zero it once per
-/// stream (`fastmem.set`) and prime each block's history at
-/// `stream_prime_stride`.
+/// The match-finder table. An entry is the absolute stream position (wrapping
+/// `u32`) of the newest scanned position with that hash. A stale entry fails
+/// `matchCandidate`'s distance cap, so one table persists across a stream's
+/// blocks with no per-block zeroing. Callers zero it once per stream
+/// (`fastmem.set`) and prime each block's history at `stream_prime_stride`.
 pub const FinderTable = [table_size]u32;
 
 /// History priming density for the streaming/one-shot block sequence: every
@@ -90,8 +71,7 @@ pub const FinderTable = [table_size]u32;
 /// long matches while dividing the priming pass's cost.
 const stream_prime_stride: usize = 1;
 
-/// The klauspost-lineage 5-byte hash multiplier — the flate L1 sibling of the
-/// snappy encoder's `prime6bytes` (flate-notes.md §5.1).
+/// The 5-byte hash multiplier from klauspost/compress's level-1 encoder.
 const prime5bytes: u64 = 889523592379;
 
 /// Hash the low 5 bytes of `u` to a table index: the 5 bytes into the high 40
@@ -111,17 +91,17 @@ inline fn load32(source: []const u8, pos: usize) u32 {
     return readInt(u32, source[pos..][0..4]);
 }
 
-/// Minimum match length the finder emits: 3-byte matches cost a length symbol
-/// and a distance symbol for three bytes, so the fast level starts at 4
-/// (README, "Encoder"). The *format*'s shortest length is 3 (`§3.2.5`), which
-/// is what the emitter's chunking and its assert use.
+/// Minimum match length the finder emits: a 3-byte match costs a length symbol
+/// and a distance symbol for three bytes, so the fast level starts at 4. The
+/// format's shortest length is 3 (`§3.2.5`), which is what the emitter's
+/// chunking and its assert use.
 const min_match_len: usize = 4;
 
 /// `§3.2.5` — the shortest codable match length: length code 257.
 const min_length: usize = 3;
 
 /// Trailing bytes a block reserves so the 8-byte loads and the 3-position hash
-/// cascade stay in bounds — klauspost's `inputMargin` (flate-notes.md §5.1).
+/// cascade stay in bounds (klauspost's `inputMargin`).
 const input_margin: usize = 11;
 
 /// Blocks below this size skip match finding entirely (klauspost's
@@ -181,8 +161,8 @@ const LengthSymbol = struct { symbol: u16, extra_bits: u5, extra_value: u16 };
 /// `§3.2.5` — length -> its symbol and extra bits, derived at comptime from the
 /// base/extra table above. Index = the length (3-258); 0-2 are unused. Code
 /// 284's entry covers 227-258 by the table's own arithmetic, and code 285
-/// overwrites 258 with zero extra bits — which is what the encoder emits: 258
-/// is code 285, the one code with no extra bits (README, "Encoder"; T5).
+/// overwrites 258 with zero extra bits, which is what the encoder emits: 258
+/// is code 285, the one code with no extra bits.
 const length_symbols: [max_match_len + 1]LengthSymbol = blk: {
     var table: [max_match_len + 1]LengthSymbol = undefined;
     for (length_base, length_extra, 0..) |base, extra, i| {
@@ -232,6 +212,14 @@ fn distanceSymbol(distance: usize) DistanceSymbol {
 /// pending partial byte, which is what lets the streaming `Writer` emit one
 /// block at a time: a block's bits continue at the previous block's bit
 /// offset.
+///
+/// It has exactly two write operations, named for the packing rule each
+/// implements: `writeBits` for a non-Huffman data element (LSB-of-value first:
+/// block headers, extra bits, stored LEN/NLEN) and `writeCode` for a Huffman
+/// code (MSB-of-code first; the code tables store the wire bits pre-reversed).
+/// Mixing them up can survive a round trip through our own decoder if both
+/// sides share the mistake, but every other decoder misreads the stream, which
+/// is why `just flate-oracle` decodes our output with python3's `zlib`.
 pub const BitWriter = struct {
     target: []u8,
     /// Whole bytes written into `target`.
@@ -262,7 +250,7 @@ pub const BitWriter = struct {
 
     /// Write a data element that is not a Huffman code, LSB-of-value first
     /// (`§3.1.1`): the block header, extra bits, stored LEN/NLEN. Extra bits
-    /// are an ordinary element, so they go out LSB first — T1; `§3.2.5`'s
+    /// are an ordinary element, so they go out LSB first; `§3.2.5`'s
     /// "most-significant bit first" sentence describes the numeral.
     fn writeBits(self: *BitWriter, value: u32, n: u5) error{BufferTooSmall}!void {
         assert(n <= 32);
@@ -282,8 +270,8 @@ pub const BitWriter = struct {
     }
 
     /// Flush whole bytes into `target`. `error.BufferTooSmall` when the target
-    /// is exhausted — which cannot happen when `target` is sized via
-    /// `maxCompressedLength` (README, "Contracts").
+    /// is exhausted, which cannot happen when `target` is sized with
+    /// `maxCompressedLength`.
     fn flushBytes(self: *BitWriter) error{BufferTooSmall}!void {
         while (self.bit_count >= 8) {
             if (self.pos == self.target.len) return error.BufferTooSmall;
@@ -302,8 +290,7 @@ pub const BitWriter = struct {
         if (pad != 0) try self.writeBits(0, pad);
     }
 
-    /// Flush the final partial byte, zero-padded (README, "The stream
-    /// format").
+    /// Flush the final partial byte, padded with zero bits.
     pub fn finish(self: *BitWriter) error{BufferTooSmall}!void {
         if (self.bit_count == 0) return;
         if (self.pos == self.target.len) return error.BufferTooSmall;
@@ -368,8 +355,8 @@ fn matchLength(source: []const u8, a: usize, b: usize, limit: usize) usize {
 }
 
 /// Emit `literal` as fixed-Huffman literal codes. Returns false when the
-/// payload would reach the stored form's payload — `§3.2.4`'s 32 + 8 x len bits
-/// — at which point the block is stored instead (README, "Encoder").
+/// payload would reach the stored form's payload (`§3.2.4`'s 32 + 8 x len
+/// bits), at which point the caller stores the block instead.
 ///
 /// The check runs before the write, so a bailing block has never written past
 /// the stored form's own bytes.
@@ -429,13 +416,15 @@ fn emitMatch(
     }
 }
 
-/// `§3.2.4` — a stored block: BFINAL and BTYPE=00, then skip to the next byte
-/// boundary, then LEN and NLEN (u16 little-endian, NLEN the one's complement of
-/// LEN) and LEN raw bytes. This is the fallback that makes
-/// `maxCompressedLength` provable: no block ever exceeds its stored form.
+/// `§3.2.4` — emit `block` (at most `max_block_size` bytes) as a stored block:
+/// BFINAL clear and BTYPE=00, then skip to the next byte boundary, then LEN and
+/// NLEN (u16 little-endian, NLEN the one's complement of LEN) and LEN raw bytes.
+/// `error.BufferTooSmall` if the target cannot hold it. This is the fallback
+/// that makes `maxCompressedLength` provable: no block ever exceeds its stored
+/// form.
 pub fn emitStoredBlock(w: *BitWriter, block: []const u8) error{BufferTooSmall}!void {
     assert(block.len <= max_block_size);
-    try w.writeBits(0, 1); // BFINAL: the ending carries it (README, T4)
+    try w.writeBits(0, 1); // BFINAL clear: the final empty block ends the stream
     try w.writeBits(0, 2); // BTYPE = 00, stored
     try w.alignToByte();
     const len: u16 = @intCast(block.len);
@@ -468,19 +457,18 @@ fn primeTable(
 }
 
 /// Encode one block's payload as fixed-Huffman symbols, greedily. Returns
-/// false when the payload reached the stored form's payload (the README's bail
-/// threshold) — the caller rewinds and stores the block.
+/// false when the payload reached the stored form's payload (`§3.2.4`'s
+/// 32 + 8 x len bits); the caller rewinds and stores the block.
 ///
 /// The scan cascade is the klauspost `fastEncL1` shape: hash three positions
 /// per step, confirm 4 bytes, extend backwards over the literals already
 /// scanned and forwards to the block's end, and accelerate the skip as the
 /// distance since the last emit grows.
 ///
-/// `table` is the caller's (see `FinderTable`): the streaming Writer and the
+/// `table` is the caller's (see `FinderTable`): the streaming `Writer` and the
 /// one-shot `compress` persist one table across the stream's blocks, so the
-/// per-block cost is the history prime alone, never a 128-KiB re-zero; `base`
-/// is the absolute stream position of `source[0]`. `compressBlock` (the pub
-/// block-at-a-time entry) passes a fresh, densely primed table.
+/// per-block cost is the history prime alone, never a 128-KiB re-zero. `base`
+/// is the absolute stream position of `source[0]`.
 fn encodeFixedBlock(
     source: []const u8,
     block_start: usize,
@@ -493,9 +481,9 @@ fn encodeFixedBlock(
 ) error{BufferTooSmall}!bool {
     const block_len = block_end - block_start;
     // §3.2.4 — the stored alternative's payload is 32 + 8 x len bits; a block
-    // is emitted fixed only while its payload stays below that (README,
-    // "Encoder"). The end-of-block symbol is part of the payload and is always
-    // emitted last, so its 7 bits are reserved up front.
+    // is emitted fixed only while its payload stays below that. The
+    // end-of-block symbol is part of the payload and is always emitted last,
+    // so its 7 bits are reserved up front.
     const payload_limit: u64 = @as(u64, block_len) * 8 + 32;
     var payload: u64 = fixed_literal_codes[256].len;
 
@@ -605,21 +593,22 @@ fn encodeFixedBlock(
     return true;
 }
 
-/// `§3.2.3`, README "Divergences" T4 — the final empty fixed block every
-/// stream ends with: BFINAL=1, BTYPE=01, end-of-block (`03 00` at a byte
-/// boundary). One function, so the one-shot and streaming encoders cannot
-/// drift: no data block carries BFINAL, which is what makes a mid-stream
-/// `flush` safe.
+/// `§3.2.3` — the final empty fixed block every stream ends with: BFINAL=1,
+/// BTYPE=01, end-of-block (`03 00` at a byte boundary). One function, so the
+/// one-shot and streaming encoders cannot drift. No data block carries BFINAL,
+/// which is what makes a mid-stream `flush` safe.
 pub fn writeFinalEmptyBlock(w: *BitWriter) error{BufferTooSmall}!void {
     try w.writeBits(1, 1);
     try w.writeBits(1, 2);
     try w.writeCode(fixed_literal_codes[256]);
 }
 
-/// The streaming Writer's block encode: the shared block path over the
-/// Writer's persistent table (zeroed once per stream), with the stream's
-/// priming stride. `base` is the absolute stream position of `source[0]` —
-/// the Writer's window base.
+/// Encode `source[block_start..block_end]` as one block (fixed Huffman, or
+/// stored when that is smaller) through `w`, for the streaming `Writer`. A
+/// match may reach back into `source[0..block_start]`, up to 32768 bytes.
+/// `table` is the `Writer`'s: zeroed once per stream and reused across blocks.
+/// `base` is the absolute stream position of `source[0]` (the `Writer`'s window
+/// base). Returns `error.BufferTooSmall` if `w`'s target cannot hold the block.
 pub fn compressBlockStream(
     source: []const u8,
     block_start: usize,
@@ -641,9 +630,8 @@ pub fn compressBlockStream(
 }
 
 /// The block-at-a-time encode over a caller-managed finder table: the shared
-/// internal entry behind `compressBlock` (fresh table, dense prime), the
-/// one-shot `compress`, and the streaming Writer (persistent table,
-/// `stream_prime_stride`). `base` is the absolute stream position of
+/// entry behind the one-shot `compress` and the streaming `Writer`
+/// (`compressBlockStream`). `base` is the absolute stream position of
 /// `source[0]`; entries older than the window fail the distance cap, so the
 /// table needs no clearing between blocks.
 fn compressBlockStateful(
@@ -659,8 +647,8 @@ fn compressBlockStateful(
     const start = w.snapshot();
 
     // §3.2.3 — BFINAL is clear on every data block: the stream ends with a
-    // final empty fixed block (README, "Divergences" T4). BTYPE = 01, whose
-    // two bits go out LSB-of-value first.
+    // final empty fixed block. BTYPE = 01, whose two bits go out
+    // LSB-of-value first.
     try w.writeBits(0, 1);
     try w.writeBits(1, 2);
 
@@ -682,15 +670,16 @@ fn compressBlockStateful(
     }
 }
 
-/// Compression level. Every numeric zlib-style level is addressable
-/// (`.{ .level = .@"5" }`); pretty names reserve the tuned modes:
+/// Compression level. Numeric zlib-style levels are accepted
+/// (`.{ .level = .@"5" }`) alongside the named ones:
 ///
-///   - `.fast` — the fixed-Huffman match-finding mode, the tuned default.
-///   - `.ratio` — dynamic Huffman (the later ratio mode). Unimplemented
-///     today: selecting it is `error.Unimplemented`, never silent aliasing.
-///   - `.@"0"` — stored blocks only, the format's passthrough level.
-///   - `.@"1"`..`.@"9"` — the numeric levels; today they all tune to
-///     `.fast` until more tuned modes exist (stated, not hidden).
+///   - `.fast`: fixed-Huffman blocks from the match finder, or a stored block
+///     when that is smaller. The default.
+///   - `.ratio`: reserved for a dynamic-Huffman encoder that is not
+///     implemented yet. Selecting it is `error.Unimplemented` (a `Writer` made
+///     with it fails every write); it never falls back to another level.
+///   - `.@"0"`: stored blocks only, the format's passthrough level.
+///   - `.@"1"` to `.@"9"`: the same as `.fast`.
 pub const Level = enum {
     fast,
     ratio,
@@ -711,13 +700,15 @@ pub const Options = struct {
     level: Level = .fast,
 };
 
-/// Compress `source` as one raw deflate stream into `target`. Returns bytes
-/// written; `error.BufferTooSmall` when `target` is too small — size it via
-/// `maxCompressedLength`. Zero heap allocation.
+/// Compress `source` as one raw deflate stream into `target` and return the
+/// number of bytes written. A `target` of `maxCompressedLength(source.len)`
+/// always suffices; a smaller one may return `error.BufferTooSmall`, leaving
+/// `target` partly written. `error.Unimplemented` for `.ratio`.
 ///
-/// The stream is self-delimiting: BFINAL on the final empty block ends it
-/// (`§3.2.3`), and every data block is fixed Huffman or stored. The same
-/// input and options always produce the same bytes.
+/// The stream ends with an empty final block (BFINAL, `§3.2.3`), and every data
+/// block is fixed Huffman or stored. The same input and options always produce
+/// the same bytes. Allocates nothing, but keeps a 128 KiB match-finder table on
+/// the stack.
 pub fn compress(
     source: []const u8,
     target: []u8,
@@ -730,7 +721,8 @@ pub fn compress(
 
     // One finder table for the whole stream, zeroed once (`FinderTable`):
     // entries are absolute source positions, so the per-block cost is the
-    // strided history prime alone.
+    // strided history prime alone. `fastmem.set` rather than `@splat`: a splat
+    // lowers to the scalar compiler-rt memset on aarch64.
     var table: FinderTable = undefined;
     fastmem.set(u32, &table, 0);
 
@@ -757,22 +749,21 @@ pub fn compress(
     try writeFinalEmptyBlock(&w);
     try w.finish();
 
-    // The README's sizing contract, as a postcondition: the stored fallback
-    // and the block split keep every stream inside `maxCompressedLength`.
+    // The sizing contract, as a postcondition: the stored fallback and the
+    // block split keep every stream inside `maxCompressedLength`.
     assert(w.pos <= maxCompressedLength(source.len));
     return w.pos;
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Every decode goes through the landed decoder (decode.zig), with the
+// Tests. Every decode goes through the decoder (decode.zig), with the
 // sentinel overrun rule: the target is pre-filled and the bytes past the
 // decoded length must be untouched.
 // ---------------------------------------------------------------------------
 
-/// Compress `input`, check the sizing contract and the T4 ending, then decode
-/// with the landed decoder and prove the bytes past the decoded length are
-/// untouched (`golden.checkDecode`: exact-cap, then slack, both sentinel-
-/// checked).
+/// Compress `input`, check the sizing contract and the final empty block, then
+/// decode and prove the bytes past the decoded length are untouched
+/// (`golden.checkDecode`: exact-cap, then slack, both sentinel-checked).
 fn roundTrip(input: []const u8) !void {
     const allocator = testing.allocator;
     const bound = maxCompressedLength(input.len);
@@ -810,10 +801,10 @@ test "compress: the stored-only level emits stored blocks" {
     // stored (`§3.2.4`) — no match finding, no huffman codes.
     var comp: [64]u8 = undefined;
     const n = try compress("hello, flate!", &comp, .{ .level = .@"0" });
-    // 1 header byte (BFINAL=0, BTYPE=00, pad — our ending carries BFINAL,
-    // README T4) + LEN/NLEN (4) + 13 data + the 03 00 ending (2) = 20.
-    // zlib's level 0 sets BFINAL on the stored block instead (19) — both
-    // are valid streams; ours shares the single T4 ending with every level.
+    // 1 header byte (BFINAL=0, BTYPE=00, pad; our ending carries BFINAL) +
+    // LEN/NLEN (4) + 13 data + the 03 00 ending (2) = 20. zlib's level 0 sets
+    // BFINAL on the stored block instead (19); both are valid streams, and ours
+    // shares one ending with every level.
     try testing.expectEqual(@as(usize, 20), n);
     var decoded: [16]u8 = undefined;
     const dn = try decode.decompress(comp[0..n], &decoded);
@@ -903,9 +894,9 @@ test "matchCandidate: a garbage-filled table stays exact on the windowed path" {
 
 test "compress: empty input is the final empty block" {
     // Spec: rfc1951-deflate.txt §3.2.3 — "BFINAL is set if and only if this is
-    // the last block of the data set", and README "Divergences" T4: the stream
-    // ends with the empty fixed block `03 00`. Spec: §3.2.6 — the fixed
-    // end-of-block code is seven zero bits.
+    // the last block of the data set"; our stream ends with the empty fixed
+    // block `03 00`. Spec: §3.2.6 — the fixed end-of-block code is seven zero
+    // bits.
     var target: [4]u8 = undefined;
     const n = try compress("", &target, .{});
     try testing.expectEqual(@as(usize, 2), n);
@@ -917,8 +908,8 @@ test "compress: empty input is the final empty block" {
 }
 
 test "compress: maxCompressedLength formula" {
-    // README, "Contracts": input_len + 5 * ceil(input_len / 65535) + 2, with
-    // §3.2.4's 65535-byte stored LEN cap as the block size.
+    // input_len + 5 * ceil(input_len / 65535) + 2, with §3.2.4's 65535-byte
+    // stored LEN cap as the block size.
     try testing.expectEqual(@as(usize, 2), maxCompressedLength(0));
     try testing.expectEqual(@as(usize, 1 + 5 + 2), maxCompressedLength(1));
     try testing.expectEqual(@as(usize, 65535 + 5 + 2), maxCompressedLength(65535));
@@ -1002,11 +993,10 @@ test "compress: many blocks round trip (1 MiB)" {
 }
 
 test "compress: maxCompressedLength bounds every emission" {
-    // README, "Contracts" — "`compress` never expands past it": every emission
-    // fits a target of exactly `maxCompressedLength`, across the block-boundary
-    // sizes and the adversarial shapes (a compressible block followed by an
-    // incompressible one, which is where the stored fallback's alignment is
-    // worst).
+    // `compress` never writes past `maxCompressedLength`: every emission fits a
+    // target of exactly that size, across the block-boundary sizes and the
+    // adversarial shapes (a compressible block followed by an incompressible
+    // one, which is where the stored fallback's alignment is worst).
     const allocator = testing.allocator;
     const sizes = [_]usize{
         0,     1,     2,     3,     4,      13,     100,    1024,
@@ -1052,7 +1042,7 @@ test "compress: maxCompressedLength bounds every emission" {
 }
 
 test "compress: a target smaller than the output is BufferTooSmall" {
-    // README, "API" — `error.BufferTooSmall` when `target` is too small.
+    // `error.BufferTooSmall` when `target` is too small.
     var target: [2]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, compress("hello, flate!", &target, .{}));
     // ... and the empty stream is the smallest legal output.
@@ -1060,8 +1050,7 @@ test "compress: a target smaller than the output is BufferTooSmall" {
 }
 
 test "compress: deterministic" {
-    // README, "Encoder" — "the same input and the same block split produce the
-    // same bytes".
+    // The same input and the same block split produce the same bytes.
     const allocator = testing.allocator;
     const input = try golden.makeShape(allocator, .mixed, 70000);
     defer allocator.free(input);
@@ -1178,7 +1167,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
     // Spec: docs/research/flate-notes.md §3.2, stream 1 — "literal 'A', match
     // length 20 (code 269 = base 19 + extra 1) at distance 1 (code 0), EOB",
     // packed as `73 c4 06 00` with BFINAL set on that block. Our encoder never
-    // sets BFINAL on a data block (T4), so the same tokens are `72 c4 06 00`
+    // sets BFINAL on a data block, so the same tokens are `72 c4 06 00`
     // followed by the final empty block: the packing — header bits, the
     // MSB-of-code literal and length codes, and the LSB-of-value length extra
     // bits — is byte-exact otherwise. The finder produces exactly these
@@ -1206,8 +1195,8 @@ test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-f
     // golden.zig hex with BFINAL set on the block. Our greedy finder cannot
     // produce this token sequence (on a run of 'A' it takes the longer match at
     // distance 1), so the tokens are emitted directly here: this is the
-    // distance-side T1 pin — an MSB-first reading of those extra bits would
-    // give distance 73, past the 70-byte history.
+    // distance-side extra-bit-order pin. An MSB-first reading of those extra
+    // bits would give distance 73, past the 70-byte history.
     var target: [128]u8 = undefined;
     var w: BitWriter = .{ .target = &target };
     try w.writeBits(1, 1); // BFINAL, matching the notes' stream
@@ -1242,9 +1231,9 @@ test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-f
 }
 
 test "emit: long matches split at 258 with a legal tail" {
-    // README, "Encoder" — "Long matches split at 258 with the final chunk kept
-    // >= 3: the last chunk drops to 255 when a 258 would leave a 1- or 2-byte
-    // tail, which cannot be coded (the shortest length symbol is 3)".
+    // Long matches split at 258 with the final chunk kept >= 3: the last chunk
+    // drops to 255 when a 258 would leave a 1- or 2-byte tail, which cannot be
+    // coded (the shortest length symbol is 3).
     // §3.2.5 — 258 is code 285, the one length code with zero extra bits.
     try testing.expectEqual(@as(u16, 285), length_symbols[258].symbol);
     try testing.expectEqual(@as(u5, 0), length_symbols[258].extra_bits);

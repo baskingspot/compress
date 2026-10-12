@@ -1,17 +1,17 @@
-//! Standalone Snappy block codec. Imports only `std` and `fastmem`.
+//! Snappy codec: a block encoder and decoder, plus a streaming `Reader` and
+//! `Writer` over `std.Io`. Depends on `std`, `fastmem`, and the shared
+//! `src/internal/` helpers; allocates nothing.
 //!
-//! The public surface is four names — everything else composes through
-//! their namespaces:
+//!   - `snappy.encode`: `compressBlock`, `maxCompressedLength`,
+//!     `max_block_size`.
+//!   - `snappy.decode`: `decompressBlock`, `decompressedBlockLength`,
+//!     `DecompressError`.
+//!   - `snappy.Writer` and `snappy.Reader`: the streaming layer over a framed
+//!     stream of length-prefixed blocks (`Buffer`, `init`, `finish`,
+//!     `streamAll`).
 //!
-//!   - `snappy.encode` — the block encoder: `encode.compressBlock`,
-//!     `encode.maxCompressedLength`, `encode.max_block_size`.
-//!   - `snappy.decode` — the block decoder: `decode.decompressBlock`,
-//!     `decode.decompressedBlockLength`, `decode.DecompressError`.
-//!   - `snappy.Reader` / `snappy.Writer` — the streaming `Io` layer over
-//!     the framed stream: `Reader.Buffer`, `Reader.streamAll`,
-//!     `Writer.scratch_len`, `finish`, and the interfaces themselves.
-//!
-//! Contracts live in `README.md` (the module's API document).
+//! Format: https://github.com/google/snappy/blob/main/format_description.txt
+//! Usage, sizing, and the stream framing: `README.md`.
 
 const std = @import("std");
 

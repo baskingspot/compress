@@ -1,10 +1,10 @@
-"""The fleet correctness gate: every arm's --check matrix on every box.
+"""The correctness gate: every arm's --check matrix on every box.
 
-Cross-builds the four arms per target, uploads them with the generated
-corpus (verified against the committed hashes before anything is uploaded),
-and runs each driver's correctness matrix (round trip plus reference-blob
-decode for every case) without CPU isolation. The gate of a benchmark run:
-a box whose drivers do not pass never measures.
+Cross-builds the arms per target, uploads them with the generated corpus
+(verified against the committed hashes before anything is uploaded), and runs
+each driver's correctness matrix (round trip plus reference-blob decode for
+every case) without CPU isolation. Run it before a measurement: a box whose
+drivers fail should not be measured.
 """
 
 import json

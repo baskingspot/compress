@@ -1,40 +1,16 @@
-//! zstd.decode: the one-shot frame decoder (README, "API").
+//! The one-shot zstd decoder: `decompress` decodes one frame from a byte slice
+//! into a byte slice.
 //!
-//! `decompress` locates exactly one Zstandard frame in `source` and decodes
-//! it into `target`, returning the decoded length. The boundary rule is the
-//! M3 one, mapped over: leading skippable frames are consumed and ignored
-//! (`§3.1.2`), the frame is located by exact consumption — the block chain's
-//! Last_Block and, when the flag is set, the 4-byte Content_Checksum trailer
-//! (`§3.1.1`) — and bytes after the frame are ignored. The one-shot reports
-//! no consumed count, so a boundary-aware caller drives `zstd.Reader` (the
-//! next slice): the C's `ZSTD_decompress` and klauspost's `DecodeAll` walk
-//! every frame in one call, and ours does not — a multi-frame file's tail is
-//! the caller's loop, exactly as gzip's one-shot treats a second member.
+//! The decoded output is the match history, so no window buffer is needed
+//! (`§3.1.1.4`: an offset that reaches before `target[0]` is `OffsetTooFar`,
+//! and `WindowTooLarge` is not in the error set). `target` is a limit, not a
+//! promise: nothing is written past it, and Frame_Content_Size is checked
+//! against the decoded length rather than used to size anything
+//! (`§3.1.1.1.4`).
 //!
-//! The one-shot needs no window buffer: the decoded output *is* the history,
-//! and every match offset is bounded by it (`§3.1.1.4` — an offset that
-//! reaches before `target[0]` is `OffsetTooFar`), so `WindowTooLarge` is not
-//! in the error set. `target` is a cap, never a promise: the decode writes
-//! only into it and fails `BufferTooSmall` before an overflowing write, and
-//! `Frame_Content_Size` — optional (`§3.1.1.1.4`), and absent from most
-//! frames — is checked *against* the decode, never trusted for it.
-//!
-//! The cardinality rules are the CLI's own (T10): a zero-byte input is
-//! `Truncated` (no frame unit began — the gzip decision mapped over), and so
-//! is a partial magic or a header cut short; a stream of only skippable
-//! frames is the clean end with zero bytes served.
-//!
-//! ## The namespace
-//!
-//! Beyond `decompress`, `max_block_size`, and `DecompressError`, the layer
-//! types the decoder is built from stay reachable, named, and stable (the
-//! flate precedent: `BitReader`, `copyMatch`): `frame` (the magic, the frame
-//! header, the block chain, the checksum trailer, skippable frames), `block`
-//! (the 3-byte block header, the Raw/RLE/Compressed dispatch, sequence
-//! execution, the checksum funnel), `literals`, `sequences`, `fse`, and the
-//! `window` arithmetic both layers check a frame against. They are public
-//! because the one-shot and the streaming reader are composed from them and
-//! the golden and fuzz lanes pin the same functions.
+//! The layer namespaces `frame`, `block`, `literals`, `sequences`, `fse`, and
+//! `window` are public because `zstd.Reader` is built from the same code and
+//! the tests exercise it directly.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -57,9 +33,9 @@ const common = @import("common.zig");
 pub const frame = @import("frame.zig");
 /// `§3.1.1.1.2`'s Window_Size arithmetic.
 pub const window = frame.window;
-/// The one-shot decoder's error set (README, "API"): the frame layer's
-/// composed set — the frame header's names, the block chain's, and the two
-/// entropy layers' — name for name.
+/// The errors `decompress` returns: `frame.Error`, name for name. It covers
+/// the frame header's, the block layer's, and the literals and sequences
+/// layers' errors.
 pub const DecompressError = frame.Error;
 /// The FSE tables (`§4.1`), shared by the sequences section and the Huffman
 /// weights.
@@ -72,11 +48,11 @@ pub const literals = @import("literals.zig");
 pub const sequences = @import("sequences.zig");
 
 comptime {
-    // The README's vocabulary (README, "API") is this set, name for name:
-    // a layer that invents an error name fails the build here rather than at
-    // review, and a name the document promises but no layer raises is dead
-    // surface. The set is the frame layer's composed one, so this is also the
-    // assertion that the frame layer's set did not drift.
+    // The decoder's public error names are this list, name for name. Adding or
+    // removing an error in any layer fails the build here, so the set callers
+    // match on cannot change by accident. The set is the frame layer's
+    // composed one, so this also asserts that the frame layer's set did not
+    // drift.
     const vocabulary = [_][]const u8{
         "BufferTooSmall",
         "BadMagic",
@@ -116,21 +92,37 @@ comptime {
 /// Decode one Zstandard frame from `source` into `target` and return the
 /// decoded length.
 ///
-/// Leading skippable frames are consumed and ignored (`§3.1.2`); the frame is
-/// located by exact consumption and bytes after it are ignored (see the
-/// module doc). `target` is a cap: the decode writes only into it and fails
-/// `BufferTooSmall` before an overflowing write.
+/// Leading skippable frames (`§3.1.2`) are skipped. The frame ends after its
+/// last block, or after the 4-byte Content_Checksum when the header sets the
+/// checksum flag. Bytes after the frame are ignored and the number of bytes
+/// consumed is not reported, so this reads one frame only, where the C
+/// reference's `ZSTD_decompress` and klauspost's `DecodeAll` decode every
+/// concatenated frame. For concatenated frames, or to learn where a frame
+/// ended, use `zstd.Reader`.
+///
+/// Input with no frame in it is `Truncated`: empty input, a partial magic, or
+/// a header cut short. Input that holds only skippable frames decodes to zero
+/// bytes. Other errors are `DecompressError`'s, for example `BadMagic`,
+/// `DictionaryRequired`, `ContentSizeMismatch` when the decoded length differs
+/// from a declared Frame_Content_Size, and `WrongChecksum` when the trailer
+/// does not match.
+///
+/// `target` limits the output: a frame that would write past it fails with
+/// `BufferTooSmall` before the write. On any error `target` may hold partial
+/// output, which must not be used. A Compressed block keeps a 128 KiB literals
+/// scratch on the stack and the frame state is about 16 KiB. Nothing is
+/// allocated.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     var cursor: usize = 0;
     // §3.1.2 — "skippable frames simply need to be skipped, and their
     // content ignored, resuming decoding after the skippable frame".
     while (true) {
         const kind = frame.classify(source[cursor..]) catch |err| switch (err) {
-            // The input's end, before any frame unit's magic. A zero-byte
-            // input is `Truncated` — no frame unit began (the gzip decision
-            // mapped over) — and so is a partial magic or one after a
-            // skippable frame; a stream of *only* skippable frames is the
-            // clean end with zero bytes served (T10, the CLI's own behavior).
+            // The input ends before any frame's magic. A zero-byte input is
+            // `Truncated` (no frame began), and so is a partial magic,
+            // including one after a skippable frame. An input of only
+            // skippable frames is a clean end with zero bytes served, as with
+            // the CLI.
             error.Truncated => {
                 if (cursor > 0 and cursor == source.len) return 0;
                 return error.Truncated;
@@ -149,8 +141,8 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     state.init(header);
     // §3.1.1.2 — "Each frame must have at least 1 block, but there is no
     // upper limit on the number of blocks per frame": the chain ends at the
-    // Last_Block flag, and every block lands in `target` through the state's
-    // one funnel (the checksum fold and the Frame_Content_Size bound).
+    // Last_Block flag, and `decodeBlock` records each block's output in the
+    // checksum and the Frame_Content_Size bound.
     while (true) {
         const section = try state.decodeBlock(source[cursor..], target);
         cursor += section.bytes_consumed;
@@ -162,8 +154,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     // §3.1.1 — "The content checksum is the result of the XXH64() hash
     // function digesting the original (decoded) data as input, and a seed of
     // zero. The low 4 bytes of the checksum are stored in little-endian
-    // format": read and compared once, at the frame's end (T8 — verify,
-    // never skip).
+    // format": read and compared once, at the frame's end.
     if (header.checksum) {
         if (source.len - cursor < frame.checksum_len) return error.Truncated;
         try state.verifyTrailer(source[cursor..][0..frame.checksum_len]);
@@ -174,10 +165,10 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
 }
 
 /// One skippable frame's length from its front (`§3.1.2`): the 4-byte magic,
-/// the 4-byte Frame_Size — "the size, in bytes, of the following User_Data" —
-/// and that many bytes. The User_Data is never staged: a 4 GiB Frame_Size
-/// costs the walk and no memory (the gzip XLEN rule), and a frame cut inside
-/// it is the input's end, `Truncated`.
+/// the 4-byte Frame_Size ("the size, in bytes, of the following User_Data"),
+/// and that many bytes. The User_Data is never read, so even a 4 GiB
+/// Frame_Size costs no memory, and a frame cut inside it is the input's end,
+/// `Truncated`.
 fn skippableLength(source: []const u8) error{Truncated}!usize {
     const head_len = frame.magic_len + frame.frame_size_len;
     if (source.len < head_len) return error.Truncated;
@@ -195,9 +186,8 @@ fn skippableLength(source: []const u8) error{Truncated}!usize {
 // verified with the pinned zstd v1.5.7.
 // ---------------------------------------------------------------------------
 
-/// Decode `source` into a fresh sentinel-filled target, check the output and
-/// the bytes past it, and return the decoded length — the shape every decode
-/// test runs (AGENTS.md, "Rules").
+/// Decode `source` into a fresh sentinel-filled target and check the output and
+/// the bytes past it: the shape every decode test runs.
 fn expectDecode(source: []const u8, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -208,8 +198,8 @@ fn expectDecode(source: []const u8, expected: []const u8) !void {
 /// Decode `source` into a sentinel-filled target expecting `err`, and prove
 /// the decode wrote exactly `written` bytes before failing: the bytes past
 /// that still hold their sentinel. A frame whose earlier blocks decoded
-/// leaves their output behind — the caller must not use it (README,
-/// "Corruption"), and the byte the failing check refused was never written.
+/// leaves their output behind, which a caller must not use, and the byte the
+/// failing check refused was never written.
 fn expectDecodeError(err: DecompressError, source: []const u8, written: usize) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -218,11 +208,11 @@ fn expectDecodeError(err: DecompressError, source: []const u8, written: usize) !
 }
 
 test "the layer types are reachable through the decode namespace" {
-    // README, "API": the layer types the decoder is built from stay
-    // reachable, named, and stable — the one-shot and the streaming reader
-    // are composed from them and the golden and fuzz lanes pin the same
-    // functions. Referencing every public decl of each also keeps the
-    // surface honest: a decl that no longer composes fails here.
+    // The layer types the decoder is built from stay reachable under
+    // `decode`: the one-shot and the streaming reader are composed from them,
+    // and the golden and fuzz tests exercise the same functions. Referencing
+    // every public decl of each also keeps the surface honest: a decl that no
+    // longer compiles fails here.
     testing.refAllDecls(frame);
     testing.refAllDecls(block);
     testing.refAllDecls(literals);
@@ -232,17 +222,17 @@ test "the layer types are reachable through the decode namespace" {
     try testing.expectEqual(block.max_block_size, max_block_size);
 }
 
-test "decompress decodes the landed whole-frame fixtures" {
+test "decompress decodes the golden whole-frame fixtures" {
     // RFC 8878 §3.1.1 — the frame layer's fixtures end to end through the
     // public entry point: the fast paths, the window fixtures, and every
-    // landed slice's fixtures framed. Each expectation is the CLI's own
+    // entropy-layer fixture framed. Each expectation is the CLI's own
     // `zstd -d` output (golden.zig records the verdicts).
     try expectDecode(&golden.frame_raw, "zstd raw");
     try expectDecode(&golden.frame_raw_empty, "");
     try expectDecode(&golden.frame_rle, "AAAAAAAAAA");
     try expectDecode(&golden.frame_multi, "abcdefghIIIIII");
-    try expectDecode(&golden.frame_t1, &golden.t1_literals);
-    try expectDecode(&golden.frame_t1_errata, &golden.t1_errata_literals);
+    try expectDecode(&golden.frame_pair, &golden.pair_literals);
+    try expectDecode(&golden.frame_pair_errata, &golden.pair_errata_literals);
     try expectDecode(&golden.frame_treeless, &.{ 0, 1, 4, 5, 0, 0, 0, 0, 0 });
     try expectDecode(&golden.frame_repeat, &golden.frame_repeat_expected);
     try expectDecode(&golden.frame_temp_offset, &golden.frame_temp_offset_expected);
@@ -272,7 +262,7 @@ test "decompress decodes the CLI's multi-block checksummed frame" {
     const expected = golden.frame_checksum_multi_text ** 3000;
     try expectDecode(&golden.frame_checksum_multi, expected);
     // The same frame with its trailer byte flipped: the decode succeeds byte
-    // for byte and then fails closed on the checksum (T8).
+    // for byte and then returns `WrongChecksum`.
     var corrupt: [golden.frame_checksum_multi.len]u8 = undefined;
     fastmem.copy(u8, &corrupt, &golden.frame_checksum_multi);
     corrupt[corrupt.len - 1] ^= 0xff;
@@ -328,8 +318,8 @@ test "decompress skips skippable frames and resumes after them" {
     // a frame between them all decode to the frame's output.
     try expectDecode(&golden.skippable_prefix, "zstd raw");
     try expectDecode(&golden.skippable_around, "zstd raw");
-    // §3.1.2 + T10 — a stream of only skippable frames is the clean end with
-    // zero bytes served (the CLI decodes all sixteen to zero bytes cleanly).
+    // §3.1.2 — a stream of only skippable frames is the clean end with zero
+    // bytes served (the CLI decodes all sixteen to zero bytes cleanly).
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     try testing.expectEqual(@as(usize, 0), try decompress(&golden.skippable_sixteen, &target));
@@ -344,18 +334,17 @@ test "decompress skips skippable frames and resumes after them" {
 }
 
 test "decompress ignores bytes after the frame" {
-    // RFC 8878 §3.1 defines frames, not files; T10 records the CLI's
-    // trailing-bytes behavior and the one-shot's rule is the M3 member
-    // boundary: one frame by exact consumption, the rest untouched. A
-    // multi-frame file's tail is `Reader.streamAll`'s walk.
+    // RFC 8878 §3.1 defines frames, not files. The one-shot's rule is one
+    // frame by exact consumption, the rest untouched. A multi-frame file's
+    // tail is `Reader.streamAll`'s walk.
     try expectDecode(&golden.frame_trailing_garbage, "zstd raw");
     try expectDecode(&golden.frame_two_frames, "zstd raw");
 }
 
 test "decompress's cardinality rules for the empty and short inputs" {
-    // T10 — the gzip decision mapped over: a zero-byte input is `Truncated`
-    // (no frame unit began; the CLI fails "unexpected end of file"), and so
-    // is a partial magic or one after skippable frames.
+    // A zero-byte input is `Truncated` (no frame began; the CLI fails
+    // "unexpected end of file"), and so is a partial magic or one after
+    // skippable frames.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     try testing.expectError(error.Truncated, decompress(&.{}, &target));
@@ -369,7 +358,7 @@ test "decompress's cardinality rules for the empty and short inputs" {
     try internal.sentinel.expect(&target, 0);
 }
 
-test "decompress fails closed on the negative corners" {
+test "decompress fails on the negative corners" {
     // RFC 8878 §3.1.1.2.4 (Block_Maximum_Size), §3.1.1.2.2 (the reserved
     // block), §3.1.1.3.1.1 (a literals section with no header), §3.1.1.3.2.1
     // (a sequences section cut inside its fields), §3.1.1.1.4 (the FCS
@@ -404,8 +393,8 @@ test "decompress fails closed on the negative corners" {
     // against the decode like any other, with nothing sized from it.
     try expectDecodeError(error.ContentSizeMismatch, &golden.frame_fcs_max, 4);
     // The one-byte-past-the-window pair: ours enforces §3.1.1.4's declared
-    // bound and refuses what the CLI's whole-buffer decoder accepts (T12).
-    // Two 1 KB (128 KB) RLE blocks decoded before the offending match.
+    // bound and refuses what the CLI's whole-buffer decoder accepts. Two 1 KB
+    // (128 KB) RLE blocks decoded before the offending match.
     try expectDecodeError(error.OffsetTooFar, &golden.frame_window_1k_over, 2048);
     try expectDecodeError(error.OffsetTooFar, &golden.frame_window_128k_over, 262144);
 }
@@ -473,11 +462,11 @@ test "decompress's history is the output, so a match cannot reach before it" {
     try testing.expectEqual(@as(usize, 2048 + 3), written);
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
-    // The addressable-span precision (T12): ten literals put the match
-    // position ten bytes past the window, so offset 1025 reads a byte of the
-    // second RLE block — accepted here and by the pinned CLI alike, because
-    // the bound is the addressable span (the history region plus the block's
-    // own writes), not Window_Size alone.
+    // The addressable span: ten literals put the match position ten bytes
+    // past the window, so offset 1025 reads a byte of the second RLE block.
+    // It is accepted here and by the pinned CLI alike, because the bound is
+    // the addressable span (the history region plus the block's own writes),
+    // not Window_Size alone.
     internal.sentinel.fill(&target);
     const span = try decompress(&golden.frame_window_1k_span, &target);
     try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);

@@ -1,5 +1,6 @@
-"""Machine-readable results and compact human reports. Ported shapes from
-fastmem_bench/report.py; the goal and stability tables do not port."""
+"""Machine-readable results and compact human reports. Adapted from
+fastmem_bench/report.py; fastmem's goal and stability tables are not carried
+over."""
 
 import json
 import math

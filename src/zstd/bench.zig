@@ -1,10 +1,11 @@
 //! zstd decoder benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
 //!
-//! Decode-only until M5 (there is no zcompress zstd encoder): the rows decode
-//! the fleet corpus's reference frames — the pinned zstd CLI v1.5.7 at level 1
-//! over the shared shapes, generated into `bench/corpus-gen/` by `just corpus`
-//! — so the local rows are the fleet's `zstd/decompress` cells, byte for byte.
-//! Throughput is MB/s over the *decompressed* size, the fleet's metric.
+//! Decode only: the encoder is not implemented yet. Each row decodes a
+//! reference frame written by the zstd CLI v1.5.7 over the shared corpus
+//! shapes (level 1, except the entropy shapes in `Shape`). `just corpus`
+//! generates the frames into `bench/corpus-gen/`, and the harness in `bench/`
+//! decodes the same files, so a local row and a harness row measure the same
+//! input. Throughput is MB/s over the *decompressed* size.
 //!
 //! Output is benchstat-friendly:
 //! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
@@ -16,10 +17,10 @@ const Io = std.Io;
 const bench = @import("benchmark");
 const zstd = @import("zcompress").zstd;
 
-/// The corpus shapes, mirroring the fleet corpus generator
-/// (bench/zig/corpus.zig) and the sibling codec benches. The entropy pair
-/// (`words`, `skewlit`) generates its `.zst` blobs at CLI level 19 — the
-/// Huffman-literals rows.
+/// The corpus shapes: the same set as the corpus generator
+/// (`bench/zig/corpus.zig`) and the other codecs' benches. The entropy pair
+/// (`words`, `skewlit`) is generated at CLI level 19, so its frames carry
+/// Huffman-coded literals; the other shapes are level 1.
 const Shape = enum {
     text,
     random,
@@ -62,8 +63,8 @@ fn readCorpus(allocator: Allocator, io: Io, name: []const u8) ![]u8 {
 }
 
 /// Decompress benchmarks: one sub-benchmark per corpus case. The frame is
-/// loaded and verified once (the decode must reproduce the raw shape exactly,
-/// the fleet driver's own gate), then decoded repeatedly.
+/// loaded and checked once (the decode must reproduce the raw shape exactly,
+/// as in the `bench/` harness), then decoded repeatedly.
 pub fn benchmarkZstdDecompress(b: *bench.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
         inline for (std.enums.values(Shape)) |shape| {
@@ -81,7 +82,7 @@ pub fn benchmarkZstdDecompress(b: *bench.B) !void {
                     defer bb.allocator.free(blob);
                     const back = try bb.allocator.alloc(u8, raw.len);
                     defer bb.allocator.free(back);
-                    // The fleet gate: the reference blob decodes to the raw shape.
+                    // The reference blob must decode to the raw shape.
                     const verified = try zstd.decode.decompress(blob, back);
                     if (verified != raw.len or !std.mem.eql(u8, back, raw))
                         return error.CorpusMismatch;

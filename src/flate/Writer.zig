@@ -1,26 +1,18 @@
-//! flate.Writer: a compressing `Io.Writer` producing a raw deflate stream
-//! (README.md, "Streaming").
+//! flate.Writer: a compressing `Io.Writer` that produces a raw deflate stream
+//! (RFC 1951) at the `fast` or stored-only (`@"0"`) level. The caller provides
+//! the `Buffer`; nothing is allocated. `streamAll` compresses a whole input in
+//! one call.
 //!
-//! Uncompressed writes accumulate in the caller-provided `Buffer`, whose
-//! front is the retained match history and whose remainder is the
-//! accumulation block. As the block fills, `drain` emits whole
-//! `max_block_size` blocks through the encoder's per-block path
-//! (`encode.compressBlockStream`, the streaming half of the shared block
-//! encoder the one-shot `compress` uses); the compressed-output scratch is a
-//! comptime-sized stack local and the finder table a Writer field, so the
-//! full encode path allocates nothing.
+//! Input accumulates in `Buffer` and is emitted as blocks of up to
+//! `max_block_size` bytes when the buffer fills, and on `flush` and `finish`.
+//! Matches reach back across block boundaries (`§3.2.3`) into the last 32 KiB
+//! of earlier input, which the buffer retains as history.
 //!
-//! History reaches back across emitted blocks (`§3.2.3`): a block's finder
-//! window is the retained 32-KiB tail of the previously emitted bytes
-//! followed by the block itself. History is a ratio input on this side, never
-//! a correctness one — a rebase the caller's capacity request leaves no room
-//! for simply drops it (README, "Streaming").
+//! Every stream ends with a final empty fixed block (`03 00` when the data
+//! before it ends on a byte boundary). No data block carries BFINAL, so `flush`
+//! mid-stream is always safe. The stream is complete only after `finish`.
 //!
-//! The stream's bit offset carries across blocks: the pending partial byte
-//! lives in `bits`/`bit_count` between emissions, so a block's first header
-//! bit continues where the previous block's last bit ended (`§3.1.1`). Every
-//! stream ends with the final empty fixed block `encode.writeFinalEmptyBlock`
-//! emits — the one-shot encoder's own ending (README, "Divergences" T4).
+//! Format: docs/research/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -34,10 +26,10 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
-/// The optional checksum hook's type (`Checksum.zig`, README "Checksum
-/// hook"): a container's state plus its byte-fold function, named here so a
-/// container can name it through this namespace (type identity across build
-/// modules) and assign it to `checksum` before the first write.
+/// The checksum hook's type: a container's state plus its byte-fold function
+/// (`Checksum.zig`). It is re-exported here so a container can name it
+/// through this namespace (one type across build modules) and assign it to
+/// `checksum` before the first write.
 pub const Checksum = @import("Checksum.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
@@ -46,10 +38,10 @@ const history_len = encode.history_len;
 const flate_reader = @import("Reader.zig");
 const golden = @import("golden.zig");
 
-/// The caller-provided buffer: the uncompressed accumulation block
-/// (`max_block_size`) plus the retained match history (`history_len`). The
-/// history sits at the front and the block after it, so the encoder's window
-/// — history followed by block — is one contiguous slice.
+/// The caller-provided buffer, 98303 bytes: the uncompressed accumulation
+/// block (`max_block_size`) plus the retained match history (`history_len`).
+/// The history sits at the front and the block after it, so the encoder's
+/// window (history followed by block) is one contiguous slice.
 pub const Buffer = [max_block_size + history_len]u8;
 
 /// The compressed-output scratch for one block: the exact worst case
@@ -63,16 +55,17 @@ const ending_len = (7 + 10 + 7) / 8;
 
 const Writer = @This();
 
+/// The `Io.Writer` interface: write the uncompressed bytes through `&w.writer`.
 writer: Io.Writer,
+/// The sink the compressed stream is written to.
 output: *Io.Writer,
+/// The options given to `init`, fixed for the stream's lifetime.
 options: encode.Options,
-/// The container's checksum hook, updated with each emitted block's
-/// uncompressed bytes (`emitBlock`, the single funnel every emitted byte
-/// passes through). Null — the raw module's only use — costs one predictable
-/// check per emitted block and nothing per byte (README, "Checksum hook").
-/// Set it before the first write: a hook set mid-stream sees only the blocks
-/// emitted after it, and the container reads its own state when the stream
-/// ends (this module writes no trailer and finalizes nothing).
+/// Optional checksum hook, handed each emitted block's uncompressed bytes,
+/// each byte exactly once and in stream order. A container sets it before the
+/// first write: a hook set mid-stream sees only the blocks emitted after it.
+/// The container reads its own state after `finish`. Null costs one check per
+/// emitted block and nothing per byte. This module writes no trailer.
 checksum: ?Checksum = null,
 /// The caller's buffer in full: `buffer[0..block_start]` is the retained
 /// history, `buffer[block_start..]` the accumulating block. The embedded
@@ -81,8 +74,8 @@ buffer: *Buffer,
 /// The match-finder table, persistent across the stream's blocks
 /// (`encode.FinderTable`): entries are absolute stream positions, so a block
 /// pays a strided priming pass over its history, never a 128-KiB re-zero.
-/// Absent until the first compressed block — a stored-only stream never pays
-/// for it at all.
+/// Null until the first block that runs the match finder, so a stored-only
+/// stream never initializes it.
 table: ?encode.FinderTable = null,
 /// The absolute stream position of `buffer[0]` (wrapping u32, matching the
 /// table entries): `compact` advances it by the bytes it drops from the
@@ -91,25 +84,32 @@ window_base: u32 = 0,
 /// Where the buffered block begins — the history length, since the history
 /// is exactly the bytes before the block.
 block_start: usize = 0,
-/// The stream's pending bits, LSB first, carried across blocks so each
-/// block's bits continue at the previous block's bit offset.
+/// The stream's pending bits, LSB first (`§3.1.1`), carried across blocks so
+/// each block's bits continue at the previous block's bit offset.
 bits: u64 = 0,
 /// Valid bits in `bits` (0-7 between emissions).
 bit_count: u6 = 0,
 
 /// The shared writer machinery (`src/internal/writer.zig`): the generated
 /// `Io.Writer` entries and the poisoned `finish`, over this writer's
-/// `emitBlock` and its `03 00` ending hook.
+/// `emitBlock` and `writeEnding`.
 const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 
-/// Wrap `output` (the compressed-stream sink) with `buffer` as the
-/// accumulation window and `options` fixed for the stream's lifetime — the
-/// level is not re-read mid-stream (changing `options` on the struct is not
-/// a supported operation).
+/// Start a deflate stream into `output`, accumulating input in `buffer`.
+/// `options` are fixed for the stream's lifetime; changing `w.options`
+/// afterwards is not supported. Write through `&w.writer`, then call
+/// `finish`.
+///
+/// `options.level == .ratio` is not implemented: the returned writer is
+/// poisoned, so every write and `finish` returns `error.WriteFailed`.
+///
+/// Stack: a `Writer` holds the 128-KiB match-finder table, and `Buffer` is
+/// 98303 bytes, so place both with that in mind. Each block emission also
+/// uses about 64 KiB of stack for its compressed-output scratch.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
-    // The reserved seat: `.ratio` is Unimplemented, never silent aliasing
-    // (README, "API"). Poisoning the interface makes every write and finish
-    // report `error.WriteFailed`, matching `streamAll`'s rejection.
+    // `.ratio` is reserved and not implemented, and must not silently alias
+    // another level. Poisoning the interface makes every write and `finish`
+    // return `error.WriteFailed`; `streamAll` rejects it up front.
     if (options.level == .ratio) {
         return .{
             .writer = .failing,
@@ -130,19 +130,21 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
     };
 }
 
-/// Complete the stream: emit the buffered partial block, then the final empty
-/// fixed block, then flush `output`. Terminal — the writer is poisoned
-/// afterwards, and a failed or finished writer reports `error.WriteFailed`
-/// instead of a false success. The shared machinery
-/// (`src/internal/writer.zig`) owns the poison check, the block emission, and
-/// the flush; `writeEnding` is this codec's ending.
+/// Complete the stream: emit the buffered partial block, write the final
+/// empty fixed block, and flush `output`. The stream is complete only after
+/// this call, and the writer is unusable afterwards.
+///
+/// Returns `error.WriteFailed` if `output` fails. A writer that already failed
+/// or already finished also returns `error.WriteFailed`, so a truncated stream
+/// is never reported as complete.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
     return Hooks.finish(w);
 }
 
-/// README, "Divergences" T4 — BFINAL=1, BTYPE=01, end-of-block, at the
-/// stream's current bit offset: the same ending the one-shot encoder emits,
-/// from the same function.
+/// Write the stream's last block: an empty fixed-Huffman block (BFINAL=1,
+/// BTYPE=01, end-of-block code) at the stream's current bit offset, then pad
+/// to a byte boundary. The one-shot encoder ends its streams with the same
+/// bytes, from the same function.
 fn writeEnding(w: *Writer) Io.Writer.Error!void {
     var tail: [ending_len]u8 = undefined;
     var bw: encode.BitWriter = .{
@@ -160,20 +162,19 @@ fn writeEnding(w: *Writer) Io.Writer.Error!void {
 /// Emit the first `emit_len` bytes of the buffered block as one deflate
 /// block, then slide the window past them: the emitted bytes become history,
 /// so nothing moves until the block region runs out of room behind
-/// `max_block_size` (`compact`). The shared writer machinery's contract
-/// (`src/internal/writer.zig`): the unemitted tail ends at the front of the
-/// block region (`writer.end -= emit_len`), which is what `rebase`'s
-/// preserved tail relies on. A no-op when `emit_len` is zero.
+/// `max_block_size` (`compact`). The generated entries in
+/// `src/internal/writer.zig` rely on the unemitted tail ending up at the front
+/// of the block region (`writer.end -= emit_len`); `rebase`'s preserved tail
+/// is that tail. A no-op when `emit_len` is zero.
 fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     assert(emit_len <= w.writer.end);
     if (emit_len == 0) return;
     const block_end = w.block_start + emit_len;
-    // The checksum hook (README, "Checksum hook"): this is the single funnel
-    // every emitted byte passes through — `drain`, `flush`, `rebase`, and
-    // `finish` all call it — so the block's uncompressed bytes reach the
-    // container's state here, in stream order, exactly once, before the
-    // encoder and before any slide moves them. Null when unset: one
-    // predictable check per emitted block, nothing per byte.
+    // The checksum hook: every emitted byte passes through this function
+    // (`drain`, `flush`, `rebase`, and `finish` all call it), so the
+    // container's state sees the block's uncompressed bytes here, in stream
+    // order, exactly once, before the encoder runs and before any slide moves
+    // them. Null when unset: one check per emitted block, nothing per byte.
     if (w.checksum) |checksum| checksum.update(w.buffer[w.block_start..block_end]);
     var scratch: [scratch_len]u8 = undefined;
     var bw: encode.BitWriter = .{
@@ -211,8 +212,7 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
 }
 
 /// Slide the history and the buffered block to the front of the window,
-/// trimming the history to `history_len` (README, "Streaming": history is a
-/// ratio input here, so a request that leaves no room for it drops it). The
+/// trimming the history to `history_len`, the farthest a match can reach. The
 /// caller re-derives the block region from `block_start`.
 fn compact(w: *Writer) void {
     const block_len = w.writer.end;
@@ -226,13 +226,13 @@ fn compact(w: *Writer) void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Every decode goes through the landed one-shot decoder (decode.zig),
-// with the sentinel overrun rule: the target is pre-filled and the bytes past
-// the decoded length must be untouched.
+// Tests. Every decode goes through the one-shot decoder (decode.zig), with
+// the sentinel overrun rule: the target is pre-filled and the bytes past the
+// decoded length must be untouched.
 // ---------------------------------------------------------------------------
 
-/// Encode `source` through `Writer`, check the T4 ending, decode with the
-/// one-shot decoder, expect identity with the sentinel rule enforced
+/// Encode `source` through `Writer`, check the final empty block, decode with
+/// the one-shot decoder, expect identity with the sentinel rule enforced
 /// (`golden.checkDecode`: exact-cap, then slack, both sentinel-checked).
 fn roundTrip(source: []const u8) !void {
     const gpa = testing.allocator;
@@ -252,9 +252,8 @@ fn roundTrip(source: []const u8) !void {
 
 test "Writer: empty input is the final empty block" {
     // Spec: rfc1951-deflate.txt §3.2.3 — "BFINAL is set if and only if this
-    // is the last block of the data set"; README "Divergences" T4 — the
-    // stream ends with the empty fixed block `03 00`, the same bytes the
-    // one-shot `compress("")` emits.
+    // is the last block of the data set". The stream ends with the empty
+    // fixed block `03 00`, the same bytes the one-shot `compress("")` emits.
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
@@ -264,9 +263,10 @@ test "Writer: empty input is the final empty block" {
 }
 
 test "Writer: no data block carries BFINAL" {
-    // Spec: rfc1951-deflate.txt §3.2.3 — BFINAL marks the last block, and
-    // README "Divergences" T4 keeps it off every data block: the stream's
-    // first block header has BFINAL clear, and the stream still decodes.
+    // Spec: rfc1951-deflate.txt §3.2.3 — BFINAL marks the last block. The
+    // writer keeps it off every data block and sets it only on the final
+    // empty block: the stream's first block header has BFINAL clear, and the
+    // stream still decodes.
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
@@ -299,10 +299,10 @@ test "Writer: round trips across block boundaries" {
 }
 
 test "Writer: blocks are maximal and the split follows the block size" {
-    // "Full blocks stay maximal" (README, "Streaming"): incompressible input
-    // cannot beat the stored form, so sixteen exactly-full blocks are stored
-    // and the stream is exactly `input + 5 * blocks + 2` — which only holds if
-    // the split is exactly `max_block_size`.
+    // Full blocks stay maximal: incompressible input cannot beat the stored
+    // form, so sixteen exactly-full blocks are stored and the stream is
+    // exactly `input + 5 * blocks + 2` bytes, which only holds if the split is
+    // exactly `max_block_size`.
     const gpa = testing.allocator;
     const source = try golden.makeShape(gpa, .random, 16 * max_block_size);
     defer gpa.free(source);
@@ -316,9 +316,8 @@ test "Writer: blocks are maximal and the split follows the block size" {
     try testing.expectEqual(source.len + 5 * 16 + 2, out.written().len);
 
     // The split follows the block size, not the caller's write boundaries: the
-    // same bytes in odd-sized chunks produce the same stream (README,
-    // "Encoder": the streaming split follows the caller's writes *and
-    // flushes*, and neither carries a flush here).
+    // same bytes in odd-sized chunks produce the same stream. A flush would
+    // end a block early; this test makes none.
     var chunked: Io.Writer.Allocating = .init(gpa);
     defer chunked.deinit();
     var w2: Writer = .init(&chunked.writer, &buf, .{});
@@ -362,9 +361,8 @@ test "Writer: history reaches back across emitted blocks" {
 }
 
 test "Writer: flush mid-stream emits the partial block and stays usable" {
-    // README, "Streaming": "`flush` mid-stream emits the buffered partial
-    // block and keeps the writer usable. It is always safe, because no data
-    // block carries BFINAL."
+    // `flush` mid-stream emits the buffered partial block and keeps the
+    // writer usable. It is always safe, because no data block carries BFINAL.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -392,9 +390,9 @@ test "Writer: flush mid-stream emits the partial block and stays usable" {
 test "Writer: writableSliceGreedy on a full block emits, never drops" {
     // The `File.Reader` simple-mode stream feeds a Writer through
     // `writableSliceGreedy` + `advance` (a direct write into the block
-    // region), which lands on `rebase` when the region is full. A regression:
-    // rebase once freed space by discarding the buffered block instead of
-    // emitting it, silently dropping a whole block of input.
+    // region), which lands on `rebase` when the region is full. `rebase` must
+    // free space by emitting the buffered block; discarding it would silently
+    // drop a whole block of input.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -509,8 +507,8 @@ test "Writer: the stored-only level emits stored blocks through the stream" {
 }
 
 test "Writer: the ratio level is rejected, never silently aliased" {
-    // The reserved seat: `.ratio` poisons the writer at init (README,
-    // "API"): every write and finish report `error.WriteFailed`.
+    // `.ratio` is reserved and not implemented: it poisons the writer at
+    // init, so every write and `finish` returns `error.WriteFailed`.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -551,10 +549,10 @@ test "Writer: a failed or finished writer never reports a false success" {
 
 test "Writer: random write machinery sequences stay correct" {
     // Mixed writeSplatAll/writeVecAll/splatBytesAll/writableSliceGreedy+
-    // advance/writeByte/flush sequences: the driver class that catches drain
-    // and rebase accounting under the full vtable contract (multi-slice data
-    // with splat, partial straddling takes, direct-slice writes onto a full
-    // block region).
+    // advance/writeByte/flush sequences. This catches drain and rebase
+    // accounting errors under the full vtable contract: multi-slice data with
+    // splat, partial straddling takes, direct-slice writes onto a full block
+    // region.
     const gpa = testing.allocator;
     var rng: DefaultPrng = .init(99);
     const rand = rng.random();
@@ -616,7 +614,7 @@ test "Writer: random write machinery sequences stay correct" {
         }
         try w.finish();
 
-        // Decode with the landed one-shot decoder — independent of Reader.
+        // Decode with the one-shot decoder, independent of Reader.
         const target = try gpa.alloc(u8, expect.items.len + sentinel.len);
         defer gpa.free(target);
         sentinel.fill(target);
@@ -628,7 +626,7 @@ test "Writer: random write machinery sequences stay correct" {
 }
 
 test "Writer: golden decoded outputs encode to streams the decoder verifies" {
-    // Encode each golden `want` through Writer and decode it with the landed
+    // Encode each golden `want` through Writer and decode it with the
     // one-shot decoder (the golden-verified path), independent of Reader: the
     // framing must parse and the bytes must reproduce.
     for (golden.stream_cases) |tc| {
@@ -676,14 +674,13 @@ test "Writer: every length and distance code round trips through the stream" {
 }
 
 test "Writer: the checksum hook folds every emitted byte exactly once, in order" {
-    // README, "Checksum hook": the hook rides `emitBlock`, the single funnel
-    // every emitted byte passes through — `drain`, `flush`, `rebase`, and
-    // `finish` all call it — so the block's uncompressed bytes reach the
-    // container's state in stream order, exactly once. The synthetic fold is
-    // order-sensitive: a dropped, doubled, or reordered byte changes the
-    // digest. The write mix is the random-machinery driver's (multi-slice
-    // splat, direct-slice writes onto a full block, flushes), with the hook
-    // set.
+    // The hook rides `emitBlock`, which every emitted byte passes through
+    // (`drain`, `flush`, `rebase`, and `finish` all call it), so the block's
+    // uncompressed bytes reach the container's state in stream order, exactly
+    // once. The synthetic fold is order-sensitive: a dropped, doubled, or
+    // reordered byte changes the digest. The write mix is the same as the
+    // random-machinery test's (multi-slice splat, direct-slice writes onto a
+    // full block, flushes), with the hook set.
     const gpa = testing.allocator;
     var rng: DefaultPrng = .init(0x5EED_1234);
     const rand = rng.random();
@@ -786,10 +783,9 @@ test "Writer: the checksum hook folds multi-block streams and changes no byte" {
 }
 
 test "Writer: the checksum hook folds a rebased direct-slice write in order" {
-    // `rebase` (the `writableSliceGreedy` path, README "Streaming") emits the
-    // front of a partly written block and preserves the tail as the block: the
-    // fold must cover the emitted front and the later-emitted tail, once each,
-    // in order.
+    // `rebase` (the `writableSliceGreedy` path) emits the front of a partly
+    // written block and preserves the tail as the block: the fold must cover
+    // the emitted front and the later-emitted tail, once each, in order.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -815,9 +811,9 @@ test "Writer: the checksum hook folds a rebased direct-slice write in order" {
     try testing.expectEqual(golden.TestChecksum.fold(&expect), digest.value);
 }
 
-/// Write `source` through `w` in 999-byte chunks, flushing every seventh
-/// write, then finish: the split follows the block size, not the write
-/// boundaries (README, "Streaming").
+/// Write `source` through `w` in 999-byte chunks, flushing after every
+/// seventh write, then finish. The chunking is fixed, so two writers fed the
+/// same source emit the same blocks.
 fn pumpChunked(w: *Writer, source: []const u8) !void {
     var pos: usize = 0;
     var writes: usize = 0;
@@ -831,10 +827,14 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
     try w.finish();
 }
 
-/// Stream everything from `in` through one flate `Writer` into `out`,
-/// returning the bytes consumed and encoded. Consumes `in` exactly through
-/// its end, then finishes the stream (the `03 00` ending + flush). The
-/// writer and its window live on this stack frame; zero allocation.
+/// Compress everything `in` yields into one complete raw deflate stream in
+/// `out`, and return the number of input bytes consumed. The stream is
+/// finished and `out` is flushed before the call returns.
+///
+/// Returns `error.ReadFailed` if `in` fails or if `options.level` is `.ratio`
+/// (checked before any work), and `error.WriteFailed` if `out` fails.
+/// Allocates nothing: the `Writer`, its `Buffer`, and the block scratch are
+/// locals on the caller's stack, about 288 KiB at the peak.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
@@ -844,8 +844,8 @@ pub fn streamAll(
     var buf: Buffer = undefined;
     var ww: Writer = .init(out, &buf, options);
     const n = try in.streamRemaining(&ww.writer);
-    // The stream is not done until finish: the final partial block and the
-    // `03 00` ending are load-bearing (README, "Divergences" T4).
+    // The stream is not complete until `finish`, which emits the final partial
+    // block and the closing empty block.
     try ww.finish();
     return n;
 }

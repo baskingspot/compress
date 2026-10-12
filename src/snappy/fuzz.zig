@@ -10,9 +10,9 @@
 //!   - `fuzzStreamMachinery`: Smith-chosen `Io.Writer` operation sequences
 //!     against an expected-bytes model, then decoded and compared.
 //!   - `fuzzFramingCorruption`: truncations, byte flips, and poked length
-//!     prefixes on valid streams; `Reader` must fail closed (stickily) or
+//!     prefixes on valid streams; `Reader` must return a sticky error or
 //!     serve exactly what an independent framing parse of the same bytes
-//!     says — never panic, hang, or write outside its buffer.
+//!     says, and never panic, hang, or write outside its buffer.
 //!
 //! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run
 //! hits ziglang/zig#30655). Every target caps its per-iteration input
@@ -22,7 +22,8 @@
 //! covers.
 //!
 //! Spec: docs/research/specs/snappy-format-description.txt (§1 varint
-//! preamble, §2 tags). Framing: src/snappy/README.md, "Streaming".
+//! preamble, §2 tags). Framing: a `u32-le` compressed length before each raw
+//! block, as written by `Writer.zig`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -480,10 +481,9 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
 /// the whole buffer parsed; false at the first framing or block error, with
 /// the bytes decoded before it still in `plain`.
 ///
-/// The rules are README.md's ("Streaming"): a 4-byte prefix with a length in
-/// `[1, scratch_len]`, that many block bytes, and a block whose declared
-/// decoded length fits one block. The block decode itself is shared with
-/// `Reader` — that layer has its own target.
+/// The rules: a 4-byte prefix with a length in `[1, scratch_len]`, that many
+/// block bytes, and a block whose declared decoded length fits one block. The
+/// block decode itself is shared with `Reader`; that layer has its own target.
 fn referenceDecode(stream: []const u8, plain: *Io.Writer.Allocating) !bool {
     var block_buf: [block_max]u8 = undefined;
     var pos: usize = 0;
@@ -508,7 +508,7 @@ fn referenceDecode(stream: []const u8, plain: *Io.Writer.Allocating) !bool {
 /// Attacks truncation at any offset (mid-prefix, mid-block, mid-stream), byte
 /// flips inside blocks and prefixes, declared lengths poked past the staging
 /// region, appended garbage, and stream duplication. The property: the reader
-/// either fails closed (`ReadFailed`, sticky) or serves exactly the bytes an
+/// either returns `ReadFailed` (sticky) or serves exactly the bytes an
 /// independent framing parse of the same buffer produces, and it never
 /// panics, stalls, or writes outside its buffer.
 fn fuzzFramingCorruption(_: void, smith: *Smith) anyerror!void {

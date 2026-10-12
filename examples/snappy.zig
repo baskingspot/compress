@@ -1,15 +1,11 @@
 //! Snappy example CLI: `snappy encode [FILE|-] > out`,
 //! `snappy decode [FILE|-] > out`. Shared scaffolding in `examples/cli.zig`.
 //!
-//! This is the thin-pump shape the streaming layer enables: `encode` wraps
-//! stdout in a `snappy.Writer` and pumps stdin into it; `decode` wraps stdin
-//! in a `snappy.Reader` and pumps it into stdout. The framing
-//! (`u32-le compressed_length + raw block`, split at `snappy.encode.max_block_size`)
-//! is the package's stream format — it lives in `src/snappy/` (see
-//! `snappy.Reader`/`snappy.Writer` and `src/snappy/README.md`), not here.
-//!
-//! Both pumps are stack-buffered end to end: the whole encode/decode path
-//! allocates nothing.
+//! `encode` runs the input through `snappy.Writer.streamAll`, and `decode`
+//! runs it through `snappy.Reader.streamAll`. The stream format (each raw
+//! block behind a little-endian `u32` compressed length, blocks split at
+//! `snappy.encode.max_block_size`) belongs to the snappy package, not to this
+//! file. Both directions use stack buffers and allocate nothing.
 
 const std = @import("std");
 const Io = std.Io;

@@ -1,27 +1,23 @@
-//! Raw DEFLATE (RFC 1951) decoder: one-shot inflate over caller-owned buffers,
-//! zero heap allocation, fail-closed on every malformed stream.
+//! Raw DEFLATE (RFC 1951) decoder. `decompress` inflates one stream from a
+//! slice into a caller-owned buffer with no heap allocation, and returns an
+//! error for every malformed stream.
 //!
-//! Shape: a resumable LSB-first bit reader (`§3.1.1`), canonical Huffman
-//! decode tables (`§3.2.2`) for the fixed (`§3.2.6`) and dynamic (`§3.2.7`)
-//! blocks, stored blocks at any alignment (`§3.2.4`), and matches decoded in
-//! place into `target` — the one-shot path's history *is* the output buffer,
-//! so a distance before the start of the output is `error.InvalidMatch`
-//! (`§3.2.3`).
+//! Matches are decoded in place into `target`, which is also the history, so a
+//! distance before the start of the output is `error.InvalidMatch` (`§3.2.3`).
+//! The streaming `Reader` shares the rest of this file: the canonical Huffman
+//! tables (`HuffmanDecoder`, the fixed tables), the dynamic-header parser, the
+//! length and distance code tables, and `copyMatch`.
 //!
-//! The three packing rules of `§3.1.1` are the format's number-one corruption
-//! risk, and the two Huffman paths are deliberately spelled differently:
-//! Huffman codes are read MSB-of-code first (a code's wire bits are the *low*
-//! bits of its table index), everything else — the 3 header bits, extra bits,
-//! LEN/NLEN — is read LSB-of-value first. Extra bits are an ordinary data
-//! element (T1 in src/flate/README.md, "Divergences"); `§3.2.5`'s
-//! "most-significant bit first" sentence describes the numeral, not the wire.
+//! Bit order is the format's main trap (`§3.1.1`). Huffman codes are read
+//! MSB-of-code first (a code's wire bits are the low bits of its table index);
+//! everything else, including the 3 header bits, extra bits, and LEN/NLEN, is
+//! read LSB-of-value first. `§3.2.5`'s "most-significant bit first" sentence
+//! for extra bits describes the numeral, not the wire order.
 //!
 //! Format: docs/research/specs/rfc1951-deflate.txt
-//!
-//! Lineage: the two-level decode table (a `lookup_bits`-wide primary table
-//! plus a chained chase for longer codes) follows zlib's `doc/algorithm.txt`
-//! and Zig std's `std.compress.flate.Decompress.zig` (MIT), reimplemented in
-//! this package's shape; see THIRD_PARTY.md.
+//! Lineage: the two-level decode table (a primary table plus a chained chase
+//! for longer codes) follows zlib's `doc/algorithm.txt` and Zig's
+//! `std.compress.flate.Decompress`, reimplemented here; see THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -32,10 +28,9 @@ const fastmem = @import("fastmem");
 const common = @import("common.zig");
 const readInt = common.readInt;
 
-/// Every decode failure, in detail (src/flate/README.md, "API"). `decompress`
-/// returns this set; the streaming `Reader` (a later lane) reports the coarse
-/// `error.ReadFailed` through the `Io` interface and records the specific
-/// failure beside it.
+/// Why a stream failed to decode. `decompress` returns these directly. The
+/// streaming `Reader` reports `error.ReadFailed` through the `Io.Reader`
+/// interface and records the specific error in `Reader.err`.
 pub const DecompressError = error{
     /// `decompress` only: `target` cannot hold the decoded output.
     BufferTooSmall,
@@ -45,7 +40,9 @@ pub const DecompressError = error{
     InvalidBlockType,
     /// NLEN != one's complement of LEN (`§3.2.4`).
     WrongStoredBlockNlen,
-    /// A malformed dynamic header (`§3.2.7`).
+    /// A malformed dynamic header (`§3.2.7`): HLIT above 286, HDIST above 30,
+    /// a repeat code with nothing to repeat or running past the lengths, or an
+    /// empty precode tree.
     InvalidDynamicBlockHeader,
     /// Kraft sum > 1 (`§3.2.2`).
     OversubscribedHuffmanTree,
@@ -53,16 +50,17 @@ pub const DecompressError = error{
     IncompleteHuffmanTree,
     /// A literal/length tree with no code for 256 (`§3.2.7`).
     MissingEndOfBlockCode,
-    /// A code that decodes to no legal symbol.
+    /// A code that decodes to no legal symbol: the unused code of a one-code
+    /// tree, or a reserved symbol (length symbols 286-287, distance codes
+    /// 30-31).
     InvalidCode,
     /// A distance before the start of the output (`§3.2.3`).
     InvalidMatch,
 };
 
-/// The tree-construction failures — everything `build` reports (`§3.2.2`'s
-/// Kraft rule, `§3.2.7`'s header rules). Narrower than the full decode set so
-/// both bit sources can call it: the streaming `Reader`'s error set is the
-/// decode set minus `BufferTooSmall`.
+/// The errors `build` can return (`§3.2.2`'s Kraft rule, `§3.2.7`'s header
+/// rules): a subset of `DecompressError`, narrow enough that both the one-shot
+/// decoder and the streaming `Reader` can fold it into their own error sets.
 pub const TreeError = error{
     OversubscribedHuffmanTree,
     IncompleteHuffmanTree,
@@ -76,13 +74,13 @@ pub const TreeError = error{
 const codegen_order = [19]u5{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15 };
 
 /// `§3.2.5` — the longest match a length symbol can declare (length code 285
-/// is 258). Both sides read it: the decoder stops this far short of a full
-/// window, and the encoder's 258-split keeps a legal tail.
+/// is 258). The streaming `Reader` keeps this much room free in its window
+/// before decoding a symbol, and the encoder splits longer matches at it.
 pub const max_match_len: usize = 258;
 
-/// `§3.2.5` — length code 257-285 bases (index = code - 257). Public, and
-/// read by the encoder too: one spelling of the RFC's tables for both sides
-/// (encode.zig aliases them).
+/// `§3.2.5` — length code 257-285 bases (index = code - 257). The encoder reads
+/// this and the other three code tables (encode.zig aliases them), so both
+/// sides share one spelling of the RFC's tables.
 pub const length_base = [29]u16{
     3,  4,  5,  6,  7,  8,  9,  10, 11,  13,  15,  17,  19,  23,  27,
     31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258,
@@ -120,10 +118,9 @@ const max_peek_bits: u6 = 56;
 /// `error.Truncated`, so a truncated stream can never decode a symbol out of
 /// padding.
 const BitReader = struct {
-    /// The error set the slice-backed reader produces: the whole decode set.
-    /// Named `ErrorSet` (not `Error`) because the streaming `Reader`'s bit
-    /// source shadows it with a wider set, and Zig's file scope has no
-    /// `ErrorSet` to collide with.
+    /// The error set of this bit source: the whole decode set. The generic
+    /// decode helpers return `Bits.ErrorSet`, and the streaming `Reader`'s bit
+    /// source supplies a wider one (reading its input can fail).
     pub const ErrorSet = DecompressError;
 
     source: []const u8,
@@ -211,18 +208,21 @@ pub const TreeKind = enum {
     precode,
 };
 
-/// Canonical Huffman decode table (`§3.2.2`): a `lookup_bits`-wide primary
-/// table plus a chained chase for longer codes.
+/// Canonical Huffman decode table (`§3.2.2`) for an alphabet of `alphabet_size`
+/// symbols with codes up to `max_bits` long: a `lookup_bits`-wide primary table
+/// plus a chained chase for longer codes. `kind` selects which structural rules
+/// `build` enforces.
 ///
-/// A code's *wire* bits are read MSB-of-code first (`§3.1.1`), so bit 0 of a
+/// A code's wire bits are read MSB-of-code first (`§3.1.1`), so bit 0 of a
 /// table index is the first bit on the wire and the index's low `len` bits are
 /// the code. `lookup[i]` packs `(symbol << 4) | code_len`; `code_len == 0`
 /// marks a primary slot whose codes are all longer than `lookup_bits` (the
 /// chain head is in the same field), and `invalid` marks a slot no code
-/// matches — `error.InvalidCode`.
-/// Public because the streaming `Reader` (Reader.zig) builds the same tables
-/// and decodes through the same code: the two layers differ in where the bits
-/// come from and where the output goes, not in the tree machinery.
+/// matches (`error.InvalidCode`).
+///
+/// Public because the streaming `Reader` builds the same tables and decodes
+/// through the same code: the two layers differ in where the bits come from and
+/// where the output goes, not in the tree machinery.
 pub fn HuffmanDecoder(
     comptime alphabet_size: usize,
     comptime max_bits: u5,
@@ -248,17 +248,21 @@ pub fn HuffmanDecoder(
         // Undefined until `build`: construction is always followed by `build`
         // (the fixed tables at comptime, dynamic tables per block), and `build`
         // rewrites `lookup` in full. `chain` entries for symbols with code
-        // length 0 are never read — `decode` chases only symbols a build
+        // length 0 are never read: `decode` chases only symbols a build
         // linked into a chain head. An `@splat` default here would be a second
         // full fill per build, through the scalar compiler-rt memset on
-        // aarch64 (the snappy encoder's 3x lesson, encode.zig).
+        // aarch64.
         lookup: [table_size]u16 = undefined,
         chain: [alphabet_size]Chain = undefined,
 
-        /// Build the table from `lens` (code length per symbol, in symbol
-        /// order; 0 = "does not occur", `§3.2.7`). `error.Oversubscribed
-        /// HuffmanTree` / `error.IncompleteHuffmanTree` /
-        /// `error.MissingEndOfBlockCode` per the README's decided rules.
+        /// Build the table from `lens`: the code length of each symbol, in
+        /// symbol order, with 0 meaning the symbol does not occur (`§3.2.7`).
+        /// Returns `error.OversubscribedHuffmanTree` for a set that over-fills
+        /// the code space, `error.IncompleteHuffmanTree` for one that leaves
+        /// code space unused (a single 1-bit code is allowed),
+        /// `error.MissingEndOfBlockCode` for a literal/length set with no code
+        /// for 256, and `error.InvalidDynamicBlockHeader` for an empty precode
+        /// set. A distance set may be empty.
         pub fn build(self: *Self, lens: []const u4) TreeError!void {
             assert(lens.len <= alphabet_size);
             assert(kind != .literal_length or lens.len > 256);
@@ -313,12 +317,12 @@ pub fn HuffmanDecoder(
             }
         }
 
-        /// Decode one symbol: peek `max_bits`, resolve the code, consume its
-        /// length. `error.InvalidCode` for a bit pattern no code matches.
-        /// `Bits` is the bit source the caller spells out — this file's
-        /// `BitReader` over a slice, the streaming `Reader`'s over its input
-        /// (whose reads can fail), the fuzz lane's `RefBits` — with `peek`,
-        /// `take`, and an `ErrorSet`.
+        /// Decode one symbol: peek `max_bits`, resolve the code, and consume
+        /// its length. `error.InvalidCode` for a bit pattern no code matches.
+        /// `Bits` is the bit source, spelled out by the caller: a type with
+        /// `peek`, `take`, and an `ErrorSet`, such as this file's `BitReader`
+        /// over a slice, the streaming `Reader`'s over its input (whose reads
+        /// can fail), or the reference bit source in the fuzz tests.
         pub fn decode(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
             // The primary table is indexed by the next `lookup_bits` bits,
             // which is exactly the code for codes no longer than that.
@@ -350,13 +354,15 @@ fn wireBits(code: u16, len: u5) u16 {
     return @bitReverse(code) >> @intCast(16 - @as(u6, len));
 }
 
-/// Reject the code-length sets no decoder may accept, and the two shapes the
-/// reference lineage pins (README, "Divergences" T2/T3):
+/// Reject the code-length sets a decoder must not accept:
 ///
-///   - oversubscribed always (Kraft sum > 1, implied by `§3.2.2`);
-///   - incomplete unless the only code is a single 1-bit code — zlib's
-///     `inftrees.c` rule, Go's `huffmanDecoder.init`, std's `checkCompleteness`;
-///   - an empty literal/length tree (no code for 256) or an empty precode tree.
+///   - oversubscribed sets (Kraft sum > 1, implied by `§3.2.2`);
+///   - incomplete sets, unless the only code is a single 1-bit code (`§3.2.7`;
+///     zlib's `inftrees.c`, Go's `huffmanDecoder.init`, and std's
+///     `checkCompleteness` make the same exception);
+///   - a literal/length set with no code for 256, and an empty precode set.
+///
+/// An empty distance set is legal: "the data is all literals" (`§3.2.7`).
 fn checkLengths(comptime kind: TreeKind, lens: []const u4) TreeError!void {
     var count: [16]u16 = @splat(0);
     var max: u4 = 0;
@@ -382,8 +388,16 @@ fn checkLengths(comptime kind: TreeKind, lens: []const u4) TreeError!void {
     if (kind == .literal_length and lens[256] == 0) return error.MissingEndOfBlockCode;
 }
 
+/// Decode table for the literal/length alphabet: 288 symbols, codes up to 15
+/// bits, a 9-bit primary table. Symbols 286-287 are reserved (`§3.2.6`) and
+/// callers reject them.
 pub const LitDecoder = HuffmanDecoder(288, 15, 9, .literal_length);
+/// Decode table for the distance alphabet: 32 symbols, codes up to 15 bits, a
+/// 9-bit primary table. Codes 30-31 are reserved (`§3.2.6`) and callers reject
+/// them.
 pub const DistDecoder = HuffmanDecoder(32, 15, 9, .distance);
+/// Decode table for a dynamic header's code-length (precode) alphabet: 19
+/// symbols, codes up to 7 bits, a 7-bit primary table.
 pub const PrecodeDecoder = HuffmanDecoder(19, 7, 7, .precode);
 
 /// `§3.2.6` — the fixed literal/length code lengths. Values 286-287 "will
@@ -414,6 +428,7 @@ pub const fixed_literal: LitDecoder = blk: {
     break :blk decoder;
 };
 
+/// `§3.2.6` — the fixed distance table, built at compile time.
 pub const fixed_distance: DistDecoder = blk: {
     @setEvalBranchQuota(10_000);
     var decoder: DistDecoder = .{};
@@ -423,15 +438,17 @@ pub const fixed_distance: DistDecoder = blk: {
     break :blk decoder;
 };
 
-/// Decompress one raw deflate stream from `source` into `target`, which is a
-/// cap: returns the decoded length, or `error.BufferTooSmall`. Zero heap
-/// allocation; the one-shot path's match history is `target` itself, so a
-/// match may reach back across block boundaries (`§3.2.3`) but never before
-/// the start of the output. Bytes after the final block in `source` are
-/// ignored: BFINAL self-delimits the stream (`§3.2.3`).
+/// Decompress one raw deflate stream from `source` into `target` and return
+/// the decoded length. `target` is a cap, not a size hint: the stream does not
+/// record its decoded length, so size `target` from what you know about the
+/// data, or stream with `Reader`. If the output does not fit, returns
+/// `error.BufferTooSmall` before writing past `target`.
 ///
-/// The block loop: one block per iteration, BFINAL ends it. Pure per-block
-/// logic lives in the helpers.
+/// Decoding stops at the first block with BFINAL set; bytes after it in
+/// `source` are ignored (`§3.2.3`). A malformed or truncated stream returns the
+/// matching `DecompressError`, and after any error `target` may hold a partial
+/// prefix of the output that must not be used. Allocates nothing and uses a few
+/// KiB of stack for the dynamic block's Huffman tables.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     var br: BitReader = .init(source);
     var out_pos: usize = 0;
@@ -469,10 +486,10 @@ pub const BlockType = enum(u2) { stored = 0, fixed = 1, dynamic = 2, reserved = 
 /// `§3.2.4` — a stored block: byte-aligned, LEN and NLEN (u16 LE, NLEN the
 /// one's complement of LEN), then LEN raw bytes.
 ///
-/// A payload cut short copies what is there and then fails closed, the
-/// reference readers' behavior (Go's `TestReaderTruncated` pins the partial
-/// output): the prefix written is a prefix of the true output, and the caller
-/// must not trust `target` after any error.
+/// A payload cut short copies the bytes that are present and then returns
+/// `error.Truncated`, as the reference readers do (Go's `TestReaderTruncated`
+/// pins the partial output). The prefix written is a prefix of the true output,
+/// and the caller must not trust `target` after any error.
 fn decodeStoredBlock(br: *BitReader, target: []u8, out_pos: *usize) DecompressError!void {
     try br.alignToByte();
     const header_pos: usize = @intCast(br.bit_pos / 8);
@@ -529,9 +546,11 @@ fn decodeCompressedBlock(
     }
 }
 
-/// `§3.2.5` — length = base + extra, computed *unclamped* (README, "Divergences"
-/// T5): code 284 with extra bits 31 is 258, even though the table states 284's
-/// range as 227-257, because the whole reference lineage computes it that way.
+/// `§3.2.5` — read a match length: base + extra, computed without clamping. Code
+/// 284 with extra bits 31 is 258, even though the table states 284's range as
+/// 227-257, because zlib, Go, and std all decode it that way. `symbol` is a
+/// length symbol (257-285); `Bits` is a bit source, as in
+/// `HuffmanDecoder.decode`.
 pub fn decodeLength(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet!usize {
     const index: usize = symbol - 257;
     const extra = length_extra[index];
@@ -539,7 +558,8 @@ pub fn decodeLength(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet!u
     return length_base[index] + bits;
 }
 
-/// `§3.2.5` — distance = base + extra, unclamped; the result is 1-32768.
+/// `§3.2.5` — read a match distance: base + extra for a distance symbol
+/// (0-29), which is 1-32768.
 pub fn decodeDistance(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet!usize {
     const index: usize = symbol;
     const extra = distance_extra[index];
@@ -547,9 +567,14 @@ pub fn decodeDistance(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet
     return distance_base[index] + bits;
 }
 
-/// `§3.2.7` — the dynamic header: HLIT, HDIST, HCLEN, the scrambled precode
-/// lengths, then HLIT+HDIST code lengths as one sequence that repeat codes may
-/// carry across the literal/distance boundary.
+/// `§3.2.7` — read a dynamic block's header from `br` and build its literal/length
+/// and distance tables: HLIT, HDIST, HCLEN, the precode lengths in their
+/// scrambled order, then the HLIT + HDIST code lengths as one sequence that a
+/// repeat code may carry across the literal/distance boundary. Returns
+/// `error.Truncated` if the input ends; `error.InvalidDynamicBlockHeader` for
+/// HLIT above 286, HDIST above 30, an empty precode set, or a repeat with
+/// nothing to repeat or running past the lengths; and the `TreeError`s for an
+/// invalid code-length set.
 pub fn readDynamicHeader(
     comptime Bits: type,
     br: *Bits,
@@ -560,7 +585,7 @@ pub fn readDynamicHeader(
     const hdist: usize = @as(usize, @intCast(try br.take(5))) + 1;
     const hclen: usize = @as(usize, @intCast(try br.take(4))) + 4;
     // §3.2.7's parentheticals read wider, but no base/extra values exist past
-    // 285/29 and the reference lineage caps both alphabets (T3).
+    // 285/29, and zlib, Go, and std cap both alphabets.
     if (hlit > 286 or hdist > 30) return error.InvalidDynamicBlockHeader;
 
     var precode_lens: [19]u4 = @splat(0);
@@ -666,7 +691,7 @@ test "bit reader: §3.1 multi-byte numbers are least-significant byte first" {
 
 test "bit reader: peek past the end reads zeros, take fails" {
     // Spec: rfc1951-deflate.txt §3.1.1 — a peek is not a read; only `take`
-    // consumes, and a truncated stream must fail closed.
+    // consumes, and a truncated stream must return an error.
     var br: BitReader = .init(&[_]u8{0xFF});
     try testing.expectEqual(@as(u64, 0xFF), try br.peek(8));
     try testing.expectEqual(@as(u64, 0xFF), try br.peek(15)); // high bits read as zero
@@ -727,8 +752,8 @@ test "decompress: empty input is truncated" {
 }
 
 test "decompress: target too small for a stored block" {
-    // README, "Contracts" — `target` is a cap and a stream that does not fit
-    // is `error.BufferTooSmall`, reported before the overflowing write.
+    // `target` is a cap: a stream that does not fit is `error.BufferTooSmall`,
+    // reported before the overflowing write.
     const source = [_]u8{ 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
     var target: [2]u8 = undefined;
     try testing.expectError(error.BufferTooSmall, decompress(&source, &target));
@@ -783,8 +808,8 @@ test "copyMatch: every distance and length combination" {
 }
 
 test "checkLengths: oversubscribed and incomplete sets" {
-    // README, "Divergences" T2 — oversubscribed always rejected; incomplete
-    // rejected unless the longest code is 1 bit.
+    // Spec: rfc1951-deflate.txt §3.2.2, §3.2.7 — oversubscribed sets are always
+    // rejected; incomplete sets are rejected unless the longest code is 1 bit.
     // Kraft sum 1/2 + 1/4 + 1/8 + 1/8 = 1 is complete.
     const complete = [_]u4{ 1, 2, 3, 3 };
     try checkLengths(.distance, &complete);
@@ -803,8 +828,9 @@ test "checkLengths: oversubscribed and incomplete sets" {
 }
 
 test "checkLengths: literal/length trees need a code for 256" {
-    // README, "Divergences" T2 — missing EOB is rejected up front, at table
-    // build; an empty precode tree is the same situation one level up.
+    // Spec: rfc1951-deflate.txt §3.2.7 — a literal/length tree with no code for
+    // 256 is rejected up front, at table build, because no block could end; an
+    // empty precode tree is the same situation one level up.
     var lens: [288]u4 = @splat(0);
     lens[0] = 1;
     lens[1] = 1; // complete, but no code for 256
