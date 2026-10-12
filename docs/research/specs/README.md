@@ -9,6 +9,7 @@ the spec. When still in doubt, read the spec again.
 | rfc1950-zlib.txt | https://www.rfc-editor.org/rfc/rfc1950.txt | 2026-10-08 |
 | rfc1951-deflate.txt | https://www.rfc-editor.org/rfc/rfc1951.txt | 2026-10-08 |
 | rfc1952-gzip.txt | https://www.rfc-editor.org/rfc/rfc1952.txt | 2026-10-08 |
+| rfc7932-brotli.txt | https://www.rfc-editor.org/rfc/rfc7932.txt | 2026-10-12 |
 | rfc8878-zstd.txt | https://www.rfc-editor.org/rfc/rfc8878.txt | 2026-10-08 |
 | snappy-format-description.txt | https://github.com/google/snappy/blob/main/format_description.txt | 2026-10-08 |
 

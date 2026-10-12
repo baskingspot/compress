@@ -50,6 +50,9 @@
               # The 32-bit proof lane (`just check-32`): wasmtime runs the
               # wasm32-wasi probe where the large-total wraps are observable.
               wasmtime
+              # The conformance lanes' reference CLI (brotli-notes.md's verified
+              # incantations): the same tag as the C reference pin.
+              brotli
               # The conformance lanes' reference CLIs (zstd-notes.md's verified
               # incantations, the gzip oracle's streaming rows): the flake pins
               # the oracles, not the box. zlib-the-library needs no system dep —
