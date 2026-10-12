@@ -82,12 +82,13 @@ sizing question.
    zstd dicts (rejected on decode, nonexistent on encode), brotli's
    static dictionary (the M6 research owns the decision). User-supplied
    dictionaries are a cross-codec feature, not one codec's gap.
-3. **Dictionary training**: the tool side — given a corpus of samples,
-   produce a tuned dictionary (the content selection + the pre-seeded
-   entropy tables; the `zstd --train` equivalent). Not started; it
-   depends on the zstd encoder (training seeds entropy tables, so no
-   encoder, no training) and the dictionary format work above it.
-   Slots after dictionary use in the milestone order.
+3. **Dictionary training** (low priority, orthogonal): the tool side —
+   given a corpus of samples, produce a tuned dictionary. Orthogonal to
+   codec support: the `zstd` CLI can generate trained dictionaries today,
+   so the requirement on zcompress is *consuming* them — the dictionary
+   format as an API (`load`/parse the CLI-produced dictionary, hand it to
+   the encoder and decoder). The in-repo trainer (the COVER-style corpus
+   selection) is a nice-to-have after that, not a dependency.
 4. **flate's level distinctness**: 1–9 are the same encoder. gzip and
    zlib inherit the plateau. The middle levels (lazy matching, dynamic
    block emission) are the classic flate ladder — unbuilt. The real
