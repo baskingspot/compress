@@ -24,8 +24,8 @@ const XxHash64 = std.hash.XxHash64;
 const DefaultPrng = std.Random.DefaultPrng;
 const builtin = @import("builtin");
 
-const fastmem = @import("fastmem");
-
+const internal = @import("../internal/root.zig");
+const ArrayBuffer = internal.array_buffer.ArrayBuffer;
 const readInt = @import("common.zig").readInt;
 
 /// `§3.1.1` — the seed: "a seed of zero".
@@ -259,9 +259,7 @@ pub const State = struct {
     /// The four accumulators, seeded with zero (`§3.1.1`).
     accumulator: Accumulator = .init(seed),
     /// The under-one-stripe tail: the bytes not yet folded into the accumulators.
-    /// Always under 32 bytes, so `usize` here is bounded by the stripe.
-    buf: [32]u8 = undefined,
-    buf_len: usize = 0,
+    buf: ArrayBuffer(u8, 32) = undefined,
     /// The running total: **u64** — a checksummed frame past 2^32 is
     /// legitimate (the CLI writes them), and this count must not wrap on
     /// any target.
@@ -273,20 +271,22 @@ pub const State = struct {
     /// because the buffered tail enters `final` through `buf_len` and an eager
     /// count would count it twice.
     pub fn update(self: *State, input: []const u8) void {
-        if (input.len < 32 - self.buf_len) {
-            fastmem.copy(u8, self.buf[self.buf_len..][0..input.len], input);
-            self.buf_len += input.len;
+        if (input.len < self.buf.remainingCapacity()) {
+            self.buf.appendSliceAssumeCapacity(input);
             return;
         }
 
         var i: usize = 0;
 
-        if (self.buf_len > 0) {
-            i = 32 - self.buf_len;
-            fastmem.copy(u8, self.buf[self.buf_len..][0..i], input[0..i]);
-            self.accumulator.processStripe(self.buf[0..32]);
+        if (self.buf.len > 0) {
+            // The count that follows adds `i` input bytes, so it must read
+            // the pre-append buffered count; the append moves `buf.len`.
+            const previously_buffered = self.buf.len;
+            i = self.buf.remainingCapacity();
+            self.buf.appendSliceAssumeCapacity(input[0..i]);
+            self.accumulator.processStripe(self.buf.constSlice());
             // The previously buffered bytes, now stripe-processed.
-            self.byte_count += self.buf_len;
+            self.byte_count += previously_buffered;
         }
 
         i += self.accumulator.processStripes(input[i..]);
@@ -294,8 +294,8 @@ pub const State = struct {
         self.byte_count += i;
 
         const remaining_bytes = input[i..];
-        fastmem.copy(u8, self.buf[0..remaining_bytes.len], remaining_bytes);
-        self.buf_len = remaining_bytes.len;
+        self.buf.clear();
+        self.buf.appendSliceAssumeCapacity(remaining_bytes);
     }
 
     /// The trailer's value (`§3.1.1`): "The low 4 bytes of the checksum are
@@ -307,19 +307,17 @@ pub const State = struct {
         else
             self.accumulator.merge();
 
-        return @truncate(finalizeTail(unfinished, self.byte_count, self.buf[0..self.buf_len]));
+        return @truncate(finalizeTail(unfinished, self.byte_count, self.buf.constSlice()));
     }
 };
 
 /// The one-shot digest `XXH64(bytes, seed)`. The frame paths fold through
 /// `State` instead; this form is for the tests.
 pub fn xxh64(seed_value: u64, bytes: []const u8) u64 {
-    if (bytes.len < 32) {
-        return finalizeTail(seed_value +% prime_5, 0, bytes);
-    }
-    var accumulator: Accumulator = .init(seed_value);
-    const i = accumulator.processStripes(bytes);
-    return finalizeTail(accumulator.merge(), @intCast(i), bytes[i..]);
+    if (bytes.len < 32) return finalizeTail(seed_value +% prime_5, 0, bytes);
+    var acc: Accumulator = .init(seed_value);
+    const i = acc.processStripes(bytes);
+    return finalizeTail(acc.merge(), @intCast(i), bytes[i..]);
 }
 
 // ---------------------------------------------------------------------------

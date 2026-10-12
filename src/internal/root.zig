@@ -20,6 +20,9 @@ pub const writer = @import("writer.zig");
 /// Integer access with a fixed byte order (`Int`, `little`, `big`): the
 /// `readInt` and `writeInt` that each codec's `common.zig` binds.
 pub const int = @import("int.zig");
+/// Fixed-capacity buffer backed by an array (`ArrayBuffer`): the
+/// `buffer + len` pair with assert-checked appends and resizes.
+pub const array_buffer = @import("array_buffer.zig");
 /// The driver shared by container codecs over an inner codec (`ReaderHooks`,
 /// `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`). Each container
 /// supplies its own framing type.
