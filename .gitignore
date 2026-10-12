@@ -10,3 +10,8 @@ zig-out/
 *.core
 core
 core.[0-9]*
+*.out
+*.o
+*.zst
+*.z
+*.snappy
