@@ -236,9 +236,13 @@ fn headerBits(source: []const u8, len: usize) u40 {
 /// loop; only a Compressed block updates it, and Raw, RLE, and Treeless
 /// blocks leave it alone.
 pub const State = struct {
-    /// `null` until the frame's first Compressed_Literals_Block decodes;
+    /// The frame's one decode table; meaningful only once `has_table` —
+    /// undefined until then, so initializing the frame state pays for no
+    /// 4 KB zeroing (a measured per-frame memset).
+    table: huff0.DecodeTable = undefined,
+    /// `false` until the frame's first Compressed_Literals_Block decodes;
     /// Treeless before that is `TreelessLiteralsFirst`.
-    table: ?huff0.DecodeTable = null,
+    has_table: bool = false,
 };
 
 /// One decoded literals section.
@@ -330,6 +334,7 @@ fn decodeCompressed(
     // The state the next block sees is a table whose own block decoded
     // whole; a failed decode leaves the frame failed, never a partial state.
     state.table = table;
+    state.has_table = true;
     return .{
         .bytes = target[0..header.regenerated_size],
         .bytes_consumed = header.header_len + compressed_size,
@@ -349,10 +354,9 @@ fn decodeTreeless(
     const compressed_size: usize = header.compressed_size;
     if (compressed_size > content.len) return error.LiteralsTooLarge;
     // The pointer capture, not a copy: `state.table` is the frame's one
-    // 4-KiB tree, and a Treeless block must read it in place (the M4 closing
-    // review's N4 — `orelse` on the optional copies it into a local).
-    const table = if (state.table) |*table| table else return error.TreelessLiteralsFirst;
-    try decodeStreams(header, content[0..compressed_size], target, table);
+    // 4-KiB tree, and a Treeless block must read it in place.
+    if (!state.has_table) return error.TreelessLiteralsFirst;
+    try decodeStreams(header, content[0..compressed_size], target, &state.table);
     return .{
         .bytes = target[0..header.regenerated_size],
         .bytes_consumed = header.header_len + compressed_size,
@@ -412,22 +416,21 @@ fn decodeFourStreams(
     // Regenerated_Size." (The last slice runs to the target's end, so its
     // length is `Regenerated_Size - 3 * segment_len`.)
     const segment_len = (target.len + 3) / 4;
-    try huff0.decodeStream(
+    try huff0.decodeFourStreams(
         table,
-        streams[stream1_start..stream2_start],
-        target[0..segment_len],
+        &.{
+            streams[stream1_start..stream2_start],
+            streams[stream2_start..stream3_start],
+            streams[stream3_start..stream4_start],
+            streams[stream4_start..],
+        },
+        &.{
+            target[0..segment_len],
+            target[segment_len .. 2 * segment_len],
+            target[2 * segment_len .. 3 * segment_len],
+            target[3 * segment_len ..],
+        },
     );
-    try huff0.decodeStream(
-        table,
-        streams[stream2_start..stream3_start],
-        target[segment_len .. 2 * segment_len],
-    );
-    try huff0.decodeStream(
-        table,
-        streams[stream3_start..stream4_start],
-        target[2 * segment_len .. 3 * segment_len],
-    );
-    try huff0.decodeStream(table, streams[stream4_start..], target[3 * segment_len ..]);
 }
 
 /// Hand-built literals sections over the T1 tree (`golden.t1_tree`), each
@@ -690,7 +693,7 @@ test "a compressed section's Regenerated_Size beyond the target fails closed" {
         decode(&golden.t1_literals_section, &small, &state),
     );
     try internal.sentinel.expect(&small, 0);
-    try testing.expect(state.table == null);
+    try testing.expect(!state.has_table);
 }
 
 test "decodeCompressed decodes the T1 pair's one-stream sections" {
@@ -706,7 +709,7 @@ test "decodeCompressed decodes the T1 pair's one-stream sections" {
     try testing.expectEqual(golden.t1_literals_section.len, section.bytes_consumed);
     try internal.sentinel.expect(&target, section.bytes.len);
     // The Compressed block's tree is the state the next block sees.
-    try testing.expect(state.table != null);
+    try testing.expect(state.has_table);
 
     var errata_target: [16]u8 = undefined;
     internal.sentinel.fill(&errata_target);

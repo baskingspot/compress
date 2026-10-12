@@ -145,7 +145,8 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     // begins.
     const header = try frame.parseHeader(source[cursor..]);
     cursor += header.bytes_consumed;
-    var state: frame.State = .init(header);
+    var state: frame.State = undefined;
+    state.init(header);
     // §3.1.1.2 — "Each frame must have at least 1 block, but there is no
     // upper limit on the number of blocks per frame": the chain ends at the
     // Last_Block flag, and every block lands in `target` through the state's

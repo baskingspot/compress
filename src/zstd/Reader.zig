@@ -539,7 +539,10 @@ fn readHeader(r: *Reader) Error!void {
     // caller's buffer is the authorization, checked once, before any block
     // byte is read (OQ1).
     try frame.checkWindow(header, r.window_len);
-    r.frame_state = .init(header);
+    // In place through the optional's payload: the layer states' ~10 KiB of
+    // table payload stays undefined until a block builds it (frame.State.init).
+    r.frame_state = @as(frame.State, undefined);
+    r.frame_state.?.init(header);
     r.phase = .blocks;
 }
 

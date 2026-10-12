@@ -331,6 +331,65 @@ const predefined_tables: [alphabet_count]fse.Table = blk: {
     break :blk tables;
 };
 
+/// One sequences-loop decoding cell (`§3.1.1.3.2.1.2`): the FSE transition
+/// fused with the code's value data. A sequence's decode is then one load
+/// per alphabet instead of two dependent ones (state -> entry -> symbol,
+/// then symbol -> code), and the one cell serves both the value read and
+/// the state update, which the unfused `codeOf`/`State.update` pair loads
+/// twice (the reference's `ZSTD_seqSymbol` shape).
+const SeqEntry = struct {
+    /// The code's Baseline: the value is `baseline + extra bits read`.
+    baseline: u32,
+    /// The FSE Baseline: the next state is `transition + num_bits read`.
+    transition: u16,
+    /// The code's Number_of_Bits — the extra bits read for the value.
+    extra_bits: u5,
+    /// The FSE state's Num_Bits — consumed at the state update.
+    num_bits: u5,
+};
+
+/// A sequences decoding table: the FSE table's `1 << log` cells, each fused
+/// with the alphabet's code.
+const SeqTable = struct {
+    /// The table's Accuracy_Log (`§4.1`): a state indexes the first
+    /// `1 << log` cells.
+    log: u5,
+    entries: [fse.table_size_max]SeqEntry,
+
+    /// The cell a state value indexes.
+    fn entry(self: *const SeqTable, state: u16) SeqEntry {
+        assert(state < @as(u16, 1) << @intCast(self.log));
+        return self.entries[state];
+    }
+};
+
+/// Fuse an FSE decoding table with an alphabet's code table. Every symbol
+/// the table holds is in the alphabet (the description reader's
+/// symbol_value_max bound, RLE's byte check, the comptime distributions).
+fn fuseTable(table: *const fse.Table, codes: []const Code) SeqTable {
+    var fused: SeqTable = .{ .log = table.log, .entries = undefined };
+    for (table.entries[0 .. @as(usize, 1) << @intCast(table.log)], 0..) |cell, i| {
+        const code = codes[cell.symbol];
+        fused.entries[i] = .{
+            .baseline = code.baseline,
+            .transition = cell.baseline,
+            .extra_bits = code.extra_bits,
+            .num_bits = cell.num_bits,
+        };
+    }
+    return fused;
+}
+
+/// The Predefined_Mode tables, fused at comptime — a Predefined alphabet
+/// costs no per-block work.
+const predefined_seq_tables: [alphabet_count]SeqTable = blk: {
+    var tables: [alphabet_count]SeqTable = undefined;
+    for (alphabet_specs, 0..) |spec, index| {
+        tables[index] = fuseTable(&predefined_tables[index], spec.codes);
+    }
+    break :blk tables;
+};
+
 /// `§3.1.1.3.2.1` — "RLE_Mode: The table description consists of a single
 /// byte, which contains the symbol's value. This symbol will be used for all
 /// sequences." One cell read with zero bits, so the state never moves (the
@@ -412,12 +471,18 @@ pub fn parseHeader(source: []const u8) Error!Header {
 /// Compressed_Block are skipped; they do not contribute to offset history"),
 /// and a zero-count section leaves it alone.
 pub const State = struct {
+    /// Storage for the tables a block builds (the FSE_Compressed and RLE
+    /// modes); undefined until a mode writes a cell, so `init` pays for no
+    /// zeroing — the per-frame `@splat(null)` over three table payloads was
+    /// a measured ~10 KB memset per frame.
+    built: [alphabet_count]SeqTable = undefined,
     /// The table each alphabet last decoded with, `null` until the frame's
     /// first sequences section with a nonzero count. "The table used in the
     /// previous Compressed_Block with Number_Of_Sequences > 0 will be used
     /// again ... It also includes Predefined_Mode ... and RLE_Mode", so every
-    /// mode stores its resolved table here.
-    tables: [alphabet_count]?fse.Table = @splat(null),
+    /// mode stores its resolved table here — Predefined by pointer to the
+    /// comptime table (no per-block copy), the built modes into `built`.
+    tables: [alphabet_count]?*const SeqTable = @splat(null),
     /// Repeated_Offset1/2/3 "sorted in recency order, with Repeated_Offset1
     /// meaning 'most recent one'" (`§3.1.1.5`), seeded {1, 4, 8} "for the
     /// first block ... unless a dictionary is used" (dictionaries are
@@ -467,7 +532,7 @@ pub fn decode(
     // §3.1.1.3.2 — the layout is the header, then "[Literals_Length_Table]
     // [Offset_Table] [Match_Length_Table]", then the bitstream, which is the
     // section's remaining bytes.
-    var tables: [alphabet_count]*const fse.Table = undefined;
+    var tables: [alphabet_count]*const SeqTable = undefined;
     const bitstream = source[try resolveTables(source, header, modes, state, &tables)..];
     const written = try executeSequences(
         bitstream,
@@ -519,7 +584,7 @@ fn resolveTables(
     header: Header,
     modes: Modes,
     state: *State,
-    tables: *[alphabet_count]*const fse.Table,
+    tables: *[alphabet_count]*const SeqTable,
 ) Error!usize {
     var cursor = header.count_len + 1;
     assert(cursor <= source.len);
@@ -529,7 +594,7 @@ fn resolveTables(
         // A description never reads past the bytes it was handed, so the
         // next table's slice and the bitstream's start are in the section.
         assert(cursor <= source.len);
-        tables[@intFromEnum(alphabet)] = &state.tables[@intFromEnum(alphabet)].?;
+        tables[@intFromEnum(alphabet)] = state.tables[@intFromEnum(alphabet)].?;
     }
     return cursor;
 }
@@ -553,7 +618,8 @@ fn resolveTable(
         .predefined => {
             // "A predefined FSE ... distribution table is used, as defined in
             // Section 3.1.1.3.2.2. No distribution table will be present."
-            state.tables[index] = predefined_tables[index];
+            // The comptime table is immutable and shared: point, never copy.
+            state.tables[index] = &predefined_seq_tables[index];
             return 0;
         },
         .rle => {
@@ -565,7 +631,8 @@ fn resolveTable(
             // (`ZSTD_buildSeqTable`'s `symbol > max` check); the table such a
             // byte describes is not one of this context's.
             if (symbol > spec.symbol_value_max) return error.MalformedFseTable;
-            state.tables[index] = rleTable(symbol);
+            state.built[index] = fuseTable(&rleTable(symbol), spec.codes);
+            state.tables[index] = &state.built[index];
             return 1;
         },
         .fse => {
@@ -577,10 +644,12 @@ fn resolveTable(
                 spec.symbol_value_max,
                 spec.accuracy_log_max,
             );
-            state.tables[index] = fse.buildTable(
+            const fse_table = fse.buildTable(
                 description.counts[0..description.symbol_count],
                 description.accuracy_log,
             );
+            state.built[index] = fuseTable(&fse_table, spec.codes);
+            state.tables[index] = &state.built[index];
             return description.bytes_consumed;
         },
         .repeat => {
@@ -601,7 +670,7 @@ fn resolveTable(
 fn executeSequences(
     bitstream: []const u8,
     sequence_count: u32,
-    tables: *const [alphabet_count]*const fse.Table,
+    tables: *const [alphabet_count]*const SeqTable,
     repeat_offsets: *[3]u32,
     literals_bytes: []const u8,
     target: []u8,
@@ -612,40 +681,59 @@ fn executeSequences(
     // finally Match_Length_State", each reading its table's Accuracy_Log bits
     // from the section's tail.
     var reader: bits.BackwardReader = try .init(bitstream);
-    var states: [alphabet_count]fse.State = undefined;
+    var states: [alphabet_count]u16 = undefined;
     for (description_order) |alphabet| {
-        states[@intFromEnum(alphabet)] = .init(&reader, tables[@intFromEnum(alphabet)]);
+        // "To obtain the initial state value, consume Accuracy_Log bits from
+        // the stream as a little-endian value" (`§4.1`).
+        states[@intFromEnum(alphabet)] =
+            reader.readBits(tables[@intFromEnum(alphabet)].log);
     }
 
     var produced: usize = 0;
     var literals_consumed: usize = 0;
     var sequence_index: u32 = 0;
     while (sequence_index < sequence_count) : (sequence_index += 1) {
-        const codes = readCodes(&reader, tables, &states);
+        // §3.1.1.3.2.1.2 — the sequence's symbol cells: "Decoding starts by
+        // reading the Number_of_Bits required to decode offset. It does the
+        // same for Match_Length and then for Literals_Length." The fused
+        // cell is one load per alphabet and serves the state update too.
+        const offset_cell = tables[@intFromEnum(Alphabet.offsets)]
+            .entry(states[@intFromEnum(Alphabet.offsets)]);
+        const match_cell = tables[@intFromEnum(Alphabet.match_lengths)]
+            .entry(states[@intFromEnum(Alphabet.match_lengths)]);
+        const literal_cell = tables[@intFromEnum(Alphabet.literals_lengths)]
+            .entry(states[@intFromEnum(Alphabet.literals_lengths)]);
+        const offset_value = offset_cell.baseline + readExtra(&reader, offset_cell.extra_bits);
+        const match_length = match_cell.baseline + readExtra(&reader, match_cell.extra_bits);
+        const literals_length = literal_cell.baseline + readExtra(&reader, literal_cell.extra_bits);
         // A read past the stream's start: the section promised more bits than
         // it holds, which is the exact-consumption rule read the other way.
         if (reader.overran()) return error.InvalidBitStream;
-        const offset = try resolveOffset(codes.literals_length, codes.offset_value, repeat_offsets);
+        const offset = try resolveOffset(literals_length, offset_value, repeat_offsets);
         const written = history_len + produced;
         assert(written <= target.len);
         produced += try executeSequence(
-            codes.literals_length,
-            codes.match_length,
+            literals_length,
+            match_length,
             offset,
             literals_bytes,
             literals_consumed,
             target,
             written,
         );
-        literals_consumed += codes.literals_length;
+        literals_consumed += literals_length;
         // §3.1.1.3.2.1.2 — "If it is not the last sequence in the block, the
         // next operation is to update states ... Literals_Length_State is
         // updated, followed by Match_Length_State, and then Offset_State."
+        // §4.1: "the decoder should consume Num_Bits bits from the stream as
+        // a little-endian value and add it to Baseline."
         if (sequence_index + 1 < sequence_count) {
-            for (update_order) |alphabet| {
-                const index = @intFromEnum(alphabet);
-                states[index].update(&reader, tables[index]);
-            }
+            states[@intFromEnum(Alphabet.literals_lengths)] =
+                literal_cell.transition + reader.readBits(literal_cell.num_bits);
+            states[@intFromEnum(Alphabet.match_lengths)] =
+                match_cell.transition + reader.readBits(match_cell.num_bits);
+            states[@intFromEnum(Alphabet.offsets)] =
+                offset_cell.transition + reader.readBits(offset_cell.num_bits);
         }
     }
     // "At the end, the bitstream shall be entirely consumed; otherwise, the
@@ -660,64 +748,12 @@ fn executeSequences(
     return produced;
 }
 
-/// The three code values of one sequence (`§3.1.1.3.2.1.1`), with their
-/// extra bits already added.
-const Codes = struct {
-    literals_length: u32,
-    match_length: u32,
-    offset_value: u32,
-};
-
-/// Read one sequence's codes and extra bits (`§3.1.1.3.2.1.2`): "Decoding
-/// starts by reading the Number_of_Bits required to decode offset. It does
-/// the same for Match_Length and then for Literals_Length."
-fn readCodes(
-    reader: *bits.BackwardReader,
-    tables: *const [alphabet_count]*const fse.Table,
-    states: *const [alphabet_count]fse.State,
-) Codes {
-    const offset = codeOf(.offsets, states, tables);
-    const match = codeOf(.match_lengths, states, tables);
-    const literal = codeOf(.literals_lengths, states, tables);
-    return .{
-        .offset_value = offset.baseline + readExtra(reader, offset.extra_bits),
-        .match_length = match.baseline + readExtra(reader, match.extra_bits),
-        .literals_length = literal.baseline + readExtra(reader, literal.extra_bits),
-    };
-}
-
-/// The code one alphabet's state names, through its table
-/// (`§4.1`: "The next symbol in the stream is the Symbol indicated in the
-/// table for that state").
-fn codeOf(
-    alphabet: Alphabet,
-    states: *const [alphabet_count]fse.State,
-    tables: *const [alphabet_count]*const fse.Table,
-) Code {
-    const index = @intFromEnum(alphabet);
-    const symbol = states[index].symbol(tables[index]);
-    // Every table this layer builds spans its alphabet — the distributions
-    // and the description reader are both bounded by symbol_value_max, and
-    // RLE_Mode checks its byte — so the code table lookup cannot go past.
-    assert(symbol <= specOf(alphabet).symbol_value_max);
-    return specOf(alphabet).codes[symbol];
-}
-
 /// Read one code's extra bits (`§3.1.1.3.2.1.1`'s Number_of_Bits). The
-/// backward reader takes at most 11 bits at a time, so a wider field — the
-/// offset alphabet's codes go to 31 — is read in chunks, the first chunk
-/// holding the value's high bits (the reader assembles most significant
-/// first).
+/// backward reader's 64-bit window covers the widest field — the offset
+/// alphabet's 31 — in one read, most significant bit first.
 fn readExtra(reader: *bits.BackwardReader, count: u5) u32 {
     assert(count <= offset_code_max);
-    if (count <= bits.max_read_bits) return reader.readBits(count);
-    var value: u32 = reader.readBits(bits.max_read_bits);
-    var remaining: u5 = count - bits.max_read_bits;
-    while (remaining > bits.max_read_bits) {
-        value = (value << bits.max_read_bits) | reader.readBits(bits.max_read_bits);
-        remaining -= bits.max_read_bits;
-    }
-    return (value << remaining) | reader.readBits(remaining);
+    return reader.readBits32(count);
 }
 
 /// `§3.1.1.4` + `§3.1.1.5` — the offset a sequence's offset_value selects,
@@ -1090,7 +1126,8 @@ test "resolveTable stores every mode's table for Repeat_Mode" {
     );
     try testing.expectEqual(@as(usize, 1), try resolveTable(.offsets, &.{7}, .rle, &state));
     const rle = state.tables[@intFromEnum(Alphabet.offsets)].?;
-    try testing.expectEqual(@as(u8, 7), rle.entry(0).symbol);
+    try testing.expectEqual(offset_codes[7].baseline, rle.entry(0).baseline);
+    try testing.expectEqual(offset_codes[7].extra_bits, rle.entry(0).extra_bits);
     try testing.expectEqual(@as(u5, 0), rle.entry(0).num_bits);
     // One past each alphabet's last code (31, 35, 52).
     try testing.expectError(

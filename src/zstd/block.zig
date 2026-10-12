@@ -641,7 +641,7 @@ test "Raw and RLE blocks leave the frame's cross-block state alone" {
         decoded_len += section.bytes_written;
         if (section.last_block) break;
     }
-    try testing.expect(literals_state.table == null);
+    try testing.expect(!literals_state.has_table);
     try testing.expect(sequences_state.tables[0] == null);
     try testing.expect(sequences_state.tables[1] == null);
     try testing.expect(sequences_state.tables[2] == null);

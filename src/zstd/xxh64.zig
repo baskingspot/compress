@@ -38,8 +38,12 @@ const mem = std.mem;
 const rotl = std.math.rotl;
 const testing = std.testing;
 const assert = std.debug.assert;
+const x86 = std.Target.x86;
+const builtin = @import("builtin");
 
 const fastmem = @import("fastmem");
+
+const readInt = @import("common.zig").readInt;
 
 /// `§3.1.1` — the seed: "a seed of zero".
 pub const seed: u64 = 0;
@@ -58,46 +62,91 @@ fn round(acc: u64, lane: u64) u64 {
     return b *% prime_1;
 }
 
-/// The four-lane accumulator, one stripe (32 bytes) at a time.
-const Accumulator = struct {
-    acc1: u64,
-    acc2: u64,
-    acc3: u64,
-    acc4: u64,
+/// The four-lane accumulator, one stripe (32 bytes) at a time. The lanes
+/// are the algorithm's own geometry — four independent wrapping
+/// multiply/rotate chains — so the access pattern IS parallel lanes; the
+/// only question is the instruction shape, and it is per-model:
+///
+/// - **Scalar** (the default): four independent 3-op chains saturate the
+///   integer multipliers. On aarch64 the explicit `@Vector(4, u64)` form
+///   compiles to 2x2-lane SVE2 (mla.d/xar/mul.d) — two serial chains of
+///   higher latency, measured 9.2 vs 18.7 GB/s in the decode path on
+///   neoverse_v3 (the same shape LLVM's SLP chooses without the pin, which
+///   is what the barriers below exist to prevent).
+/// - **Vector** (AVX-512DQ+VL): the round is `vpmullq/vpaddq/vprolq/vpmullq`
+///   per 32-byte stripe — 4 vector ops for all four lanes (verified in the
+///   sapphirerapids disassembly), against the scalar form's 8 discrete
+///   multiplies per stripe.
+const Accumulator = if (use_vector_lanes) VectorAccumulator else ScalarAccumulator;
 
-    fn init(seed_value: u64) Accumulator {
+/// The vector lane form pays only where a true 64-bit vector multiply
+/// exists: AVX-512DQ (vpmullq) with VL (the four lanes ride one ymm).
+/// Everywhere else — baseline x86_64 synthesizes the multiply from
+/// vpmuludq, aarch64's SVE2 splits it into two serial 2-lane chains — the
+/// scalar form wins (measured on neoverse_v3; disassembly on x86_64).
+const use_vector_lanes = builtin.cpu.arch == .x86_64 and
+    x86.featureSetHas(builtin.cpu.features, .avx512dq) and
+    x86.featureSetHas(builtin.cpu.features, .avx512vl);
+
+/// The four-lane accumulator, one stripe (32 bytes) at a time.
+const ScalarAccumulator = struct {
+    acc: [4]u64,
+
+    fn init(seed_value: u64) ScalarAccumulator {
         return .{
-            .acc1 = seed_value +% prime_1 +% prime_2,
-            .acc2 = seed_value +% prime_2,
-            .acc3 = seed_value,
-            .acc4 = seed_value -% prime_1,
+            .acc = .{
+                seed_value +% prime_1 +% prime_2,
+                seed_value +% prime_2,
+                seed_value,
+                seed_value -% prime_1,
+            },
         };
     }
 
-    fn processStripe(self: *Accumulator, buf: []const u8) void {
-        self.acc1 = round(self.acc1, mem.readInt(u64, buf[0..8], .little));
-        self.acc2 = round(self.acc2, mem.readInt(u64, buf[8..16], .little));
-        self.acc3 = round(self.acc3, mem.readInt(u64, buf[16..24], .little));
-        self.acc4 = round(self.acc4, mem.readInt(u64, buf[24..32], .little));
+    fn processStripe(self: *ScalarAccumulator, buf: []const u8) void {
+        inline for (0..4) |i| {
+            self.acc[i] = round(self.acc[i], readInt(u64, buf[i * 8 ..][0..8]));
+        }
     }
 
     /// The whole stripes of `input`, returning how many bytes were
     /// consumed (a multiple of 32, the rest is the caller's tail).
-    fn processStripes(self: *Accumulator, input: []const u8) usize {
+    ///
+    /// The four lanes run as locals (value semantics keep them in registers
+    /// across the loop whatever the caller's context), unrolled four
+    /// stripes per iteration — the sweet spot on neoverse_v3 (x8 spills,
+    /// x2 pays full loop overhead). The lane loads pass through
+    /// optimization barriers because the lanes are isomorphic scalar chains
+    /// and LLVM SLP-packs them into 2x u64 SVE2 (mla.d/xar/mul.d) when this
+    /// is inlined into a big caller: two serial chains of higher latency
+    /// instead of four independent scalar ones — measured 9.4 vs 18.7 GB/s
+    /// in the decode path on neoverse_v3. No current target has a fast
+    /// 64-bit vector multiply (AVX-512DQ aside), so scalar is the right
+    /// shape everywhere; the barriers pin it.
+    fn processStripes(self: *ScalarAccumulator, input: []const u8) usize {
+        var acc = self.acc;
         var i: usize = 0;
-        while (i + 32 <= input.len) : (i += 32) {
-            self.processStripe(input[i..][0..32]);
+        while (i + 128 <= input.len) : (i += 128) {
+            inline for (0..4) |half| foldStripe(&acc, input[i + 32 * half ..][0..32]);
         }
+        while (i + 32 <= input.len) : (i += 32) foldStripe(&acc, input[i..][0..32]);
+        self.acc = acc;
         return i;
     }
 
-    fn merge(self: *Accumulator) u64 {
-        var acc = rotl(u64, self.acc1, 1) +% rotl(u64, self.acc2, 7) +%
-            rotl(u64, self.acc3, 12) +% rotl(u64, self.acc4, 18);
-        acc = mergeAccumulator(acc, self.acc1);
-        acc = mergeAccumulator(acc, self.acc2);
-        acc = mergeAccumulator(acc, self.acc3);
-        acc = mergeAccumulator(acc, self.acc4);
+    inline fn foldStripe(acc: *[4]u64, stripe: *const [32]u8) void {
+        var lane: [4]u64 = undefined;
+        inline for (0..4) |j| lane[j] = readInt(u64, stripe[j * 8 ..][0..8]);
+        // Batched, not per-lane interleaved: barriers between the
+        // loads cost real throughput (measured 18.1 -> 14.8 GB/s).
+        mem.doNotOptimizeAway(lane);
+        inline for (0..4) |j| acc[j] = round(acc[j], lane[j]);
+    }
+
+    fn merge(self: *ScalarAccumulator) u64 {
+        var acc = rotl(u64, self.acc[0], 1) +% rotl(u64, self.acc[1], 7) +%
+            rotl(u64, self.acc[2], 12) +% rotl(u64, self.acc[3], 18);
+        inline for (0..4) |i| acc = mergeAccumulator(acc, self.acc[i]);
         return acc;
     }
 
@@ -108,6 +157,82 @@ const Accumulator = struct {
     }
 };
 
+/// The four-lane accumulator as one `@Vector(4, u64)` (see the `Accumulator`
+/// selection note): the round is all wrapping mul/add/rotl, expressible on
+/// vectors with no per-lane shuffles — the lanes never interact until
+/// `merge`.
+const VectorAccumulator = struct {
+    lanes: LaneVec,
+
+    fn init(seed_value: u64) VectorAccumulator {
+        // The per-lane seed offsets: +P1+P2, +P2, +0, -P1.
+        const offsets: LaneVec = .{
+            @as(u64, prime_1) +% @as(u64, prime_2),
+            prime_2,
+            0,
+            @as(u64, 0) -% @as(u64, prime_1),
+        };
+        return .{ .lanes = @as(LaneVec, @splat(seed_value)) +% offsets };
+    }
+
+    fn processStripe(self: *VectorAccumulator, buf: []const u8) void {
+        self.lanes = roundVec(self.lanes, loadStripe(buf[0..32]));
+    }
+
+    /// The whole stripes of `input`, returning how many bytes were
+    /// consumed (a multiple of 32, the rest is the caller's tail).
+    fn processStripes(self: *VectorAccumulator, input: []const u8) usize {
+        var lanes = self.lanes;
+        var i: usize = 0;
+        while (i + 128 <= input.len) : (i += 128) {
+            inline for (0..4) |half| {
+                lanes = roundVec(lanes, loadStripe(input[i + 32 * half ..][0..32]));
+            }
+        }
+        while (i + 32 <= input.len) : (i += 32) {
+            lanes = roundVec(lanes, loadStripe(input[i..][0..32]));
+        }
+        self.lanes = lanes;
+        return i;
+    }
+
+    fn merge(self: *VectorAccumulator) u64 {
+        // rotl per lane by 1, 7, 12, 18, then the scalar merge chain.
+        const u7x4 = @Vector(4, u7);
+        const rots: u7x4 = .{ 1, 7, 12, 18 };
+        const rotated = (self.lanes << @as(@Vector(4, u6), @intCast(rots))) |
+            (self.lanes >> @as(@Vector(4, u6), @intCast(@as(u7x4, @splat(64)) - rots)));
+        var acc = @reduce(.Add, rotated);
+        const arr: [4]u64 = self.lanes;
+        inline for (0..4) |k| acc = mergeAccumulator(acc, arr[k]);
+        return acc;
+    }
+
+    fn mergeAccumulator(acc: u64, other: u64) u64 {
+        const a = acc ^ round(0, other);
+        const b = a *% prime_1;
+        return b +% prime_4;
+    }
+};
+
+/// The accumulator's lane vector.
+const LaneVec = @Vector(4, u64);
+
+/// The four lanes of one 32-byte stripe; the wire lanes are little-endian,
+/// so a big-endian host swaps within each lane.
+inline fn loadStripe(stripe: *const [32]u8) LaneVec {
+    const raw: LaneVec = @bitCast(stripe.*);
+    return if (builtin.cpu.arch.endian() == .little) raw else @byteSwap(raw);
+}
+
+/// The vector round: `rotl(acc + lane * P2, 31) * P1` on all four lanes.
+inline fn roundVec(acc: LaneVec, lanes: LaneVec) LaneVec {
+    const u6x4 = @Vector(4, u6);
+    const a = acc +% lanes *% @as(LaneVec, @splat(prime_2));
+    const b = (a << @as(u6x4, @splat(31))) | (a >> @as(u6x4, @splat(33)));
+    return b *% @as(LaneVec, @splat(prime_1));
+}
+
 /// The finalize step over the tail (always under 32 bytes).
 fn finalizeTail(unfinished: u64, byte_count: u64, partial: []const u8) u64 {
     assert(partial.len < 32);
@@ -115,12 +240,12 @@ fn finalizeTail(unfinished: u64, byte_count: u64, partial: []const u8) u64 {
 
     var i: usize = 0;
     while (i + 8 <= partial.len) : (i += 8) {
-        acc ^= round(0, mem.readInt(u64, partial[i..][0..8], .little));
+        acc ^= round(0, readInt(u64, partial[i..][0..8]));
         acc = rotl(u64, acc, 27) *% prime_1;
         acc +%= prime_4;
     }
     if (i + 4 <= partial.len) {
-        acc ^= @as(u64, mem.readInt(u32, partial[i..][0..4], .little)) *% prime_1;
+        acc ^= @as(u64, readInt(u32, partial[i..][0..4])) *% prime_1;
         acc = rotl(u64, acc, 23) *% prime_2;
         acc +%= prime_3;
         i += 4;
@@ -231,6 +356,29 @@ test "xxh64: the canonical check value" {
     );
 }
 
+test "xxh64: both lane forms agree on the stripe path" {
+    // The comptime selection (`use_vector_lanes`) picks one accumulator per
+    // target; both forms are pinned here on every host, so the form a
+    // target does NOT select stays differentially tested. Drive the stripe
+    // loops directly (multiples of 32 exercise processStripes end to end,
+    // the 32-byte residue covers processStripe's flush shape).
+    var bytes: [1024]u8 = undefined;
+    var rng: std.Random.DefaultPrng = .init(0x1A3E_5EED);
+    rng.random().bytes(&bytes);
+    var len: usize = 32;
+    while (len <= bytes.len) : (len += 32) {
+        var scalar: ScalarAccumulator = .init(seed);
+        var vector: VectorAccumulator = .init(seed);
+        try testing.expectEqual(
+            scalar.processStripes(bytes[0..len]),
+            vector.processStripes(bytes[0..len]),
+        );
+        scalar.processStripe(bytes[0..32]);
+        vector.processStripe(bytes[0..32]);
+        try testing.expectEqual(scalar.merge(), vector.merge());
+    }
+}
+
 test "xxh64: the differential sweep against std's kernel" {
     // Every length class and every 32-byte boundary crossing, deterministic
     // bytes: the kernel must agree with the reference oracle exactly
@@ -274,7 +422,7 @@ test "xxh64: the golden frames' trailers" {
     const expected: u32 = blk: {
         const frame_bytes = golden.frame_checksum;
         const trailer = frame_bytes[frame_bytes.len - 4 ..];
-        break :blk mem.readInt(u32, trailer[0..4], .little);
+        break :blk readInt(u32, trailer[0..4]);
     };
     // golden.frame_checksum decodes to "abcd" (the literals 61 62 63 64);
     // the trailer is the low 4 bytes of XXH64("abcd", 0), little-endian.

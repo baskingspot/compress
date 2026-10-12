@@ -849,12 +849,12 @@ is the history), so the window slide is the streaming layer's concern, not
 the fleet corpus's.
 
 The zstd rows live in the **fleet driver** (`bench/zig/bench_zcompress.zig`,
-`just bench-run`; `bench/README.md`, "Rows"), not in a `src/zstd/bench.zig`:
-M4 ships no local bench file — the fleet harness is where the zstd rows are
-wired, and the perf wave can add a local file when there is a codec to tune
-(the other codecs' local benches are `src/<codec>/bench.zig`, wired into
-`zig build bench`). The rows are the `<codec>/<direction>/<shape>/<size>`
-case IDs:
+`just bench-run`; `bench/README.md`, "Rows"); the perf wave added the local
+`src/zstd/bench.zig`, wired into `zig build bench` like the other codecs',
+decoding the same `bench/corpus-gen/` reference frames so the local rows are
+the fleet's `zstd/decompress` cells byte for byte (decode-only, so the file
+reads the corpus from disk at setup — `just corpus` first). The rows are the
+`<codec>/<direction>/<shape>/<size>` case IDs:
 
 - `zstd/decompress/...` — the one-shot decode per shape and size on the `zc`
   arm, and `std.compress.zstd` decoding the same blobs **in the same binary**

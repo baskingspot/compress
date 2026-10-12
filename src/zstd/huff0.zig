@@ -296,6 +296,54 @@ pub fn decodeStream(table: *const DecodeTable, source: []const u8, target: []u8)
     if (!reader.isConsumed()) return error.BitstreamNotConsumed;
 }
 
+/// The four-stream layout's decode (`§3.1.1.3.1.6`): four independent
+/// backwards streams, each exactly `targets[i].len` symbols, each exactly
+/// consumed. `targets[3]` may be up to 3 symbols shorter than the others
+/// (`§3.1.1.3.1.6`'s last-stream rule).
+///
+/// The four streams are decoded in lockstep: the per-symbol chain — peek
+/// window, table lookup, skip — is serial within one stream, so interleaving
+/// the four independent streams fills the latency (the reference's
+/// HUF_decompress4X interleave; measured ~2x on literals-heavy blocks over
+/// decoding the streams serially). Each stream's bulk runs in the fused
+/// loop; the first three streams' tails past the fourth's length decode
+/// serially, and every stream's exact-consumption check is unchanged.
+pub fn decodeFourStreams(
+    table: *const DecodeTable,
+    sources: *const [4][]const u8,
+    targets: *const [4][]u8,
+) Error!void {
+    assert(targets[0].len >= targets[3].len);
+    assert(targets[1].len >= targets[3].len);
+    assert(targets[2].len >= targets[3].len);
+    var readers: [4]bits.BackwardReader = undefined;
+    for (sources, 0..) |source, j| readers[j] = try .init(source);
+
+    // The fused bulk: `targets[3].len` rounds of one symbol per stream. A
+    // two-symbols-per-stream unroll measured a wash (the per-stream chains
+    // stay serial; the four streams already fill the pipe).
+    for (0..targets[3].len) |i| {
+        inline for (0..4) |j| {
+            const cell = table.entries[readers[j].peekBits(table.max_bits)];
+            readers[j].skipBits(cell.num_bits);
+            targets[j][i] = cell.symbol;
+        }
+    }
+    // The tails: streams 1-3 owe at most 3 more symbols each.
+    for (0..3) |j| {
+        for (targets[j][targets[3].len..]) |*byte| {
+            const cell = table.entries[readers[j].peekBits(table.max_bits)];
+            readers[j].skipBits(cell.num_bits);
+            byte.* = cell.symbol;
+        }
+    }
+    // Per stream, the same end contract as `decodeStream`, in stream order.
+    for (&readers) |*reader| {
+        if (reader.overran()) return error.InvalidBitStream;
+        if (!reader.isConsumed()) return error.BitstreamNotConsumed;
+    }
+}
+
 /// The index of the highest set bit; `value` must be nonzero.
 inline fn highBit(value: u32) u5 {
     assert(value != 0);

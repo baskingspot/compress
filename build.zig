@@ -347,10 +347,29 @@ pub fn build(b: *Build) void {
         );
         probe32_step.dependOn(&install_probe32.step);
 
+        // The zstd bench (src/zstd/bench.zig): decode-only until M5, over
+        // the fleet corpus's reference frames (bench/corpus-gen/, `just
+        // corpus`), so the local rows are the fleet's zstd/decompress cells.
+        const zstd_bench_root = b.createModule(.{
+            .root_source_file = b.path("src/zstd/bench.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zcompress", .module = zcompress_mod },
+                .{ .name = "fastmem", .module = fastmem_mod },
+            },
+        });
+        const run_zstd_bench = benchmark.addRunTest(b, .{
+            .dependency = benchmark_dep,
+            .root_module = zstd_bench_root,
+        });
+        if (b.args) |args| run_zstd_bench.addArgs(args);
+
         const bench_step = b.step("bench", "Run codec benchmarks (use -Doptimize=ReleaseFast)");
         bench_step.dependOn(&run_snappy_bench.step);
         bench_step.dependOn(&run_flate_bench.step);
         bench_step.dependOn(&run_gzip_bench.step);
         bench_step.dependOn(&run_zlib_bench.step);
+        bench_step.dependOn(&run_zstd_bench.step);
     }
 }

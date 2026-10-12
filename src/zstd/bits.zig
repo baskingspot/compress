@@ -32,10 +32,15 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
-/// The most bits one read takes: a 9-bit FSE accuracy log, an 11-bit Huffman
-/// code, or a 9-bit `§4.1.1` Table 20 field (`2 * threshold - 1` is at most
-/// `2 * 256 - 1`).
+/// The most bits one narrow read takes: a 9-bit FSE accuracy log, an 11-bit
+/// Huffman code, or a 9-bit `§4.1.1` Table 20 field (`2 * threshold - 1` is
+/// at most `2 * 256 - 1`).
 pub const max_read_bits: u5 = 11;
+
+/// The most bits one wide read takes: the offset alphabet's extra-bits
+/// fields go to 31 (`§3.1.1.3.2.1.1`). A refill leaves the backward reader
+/// holding at least 57 bits, so even the widest read never refills twice.
+pub const max_read_bits_wide: u5 = 31;
 
 /// The forward reader (`§4.1.1`): fields are read little-endian from the
 /// first byte's low bit up.
@@ -98,12 +103,26 @@ pub const ForwardReader = struct {
 };
 
 /// The backward reader (`§4.1`, `§4.2.2`).
+///
+/// The bit window is cached: `container` holds the stream bits
+/// `[remaining_bits - held, remaining_bits - 1]` with the next bit to read
+/// top-aligned at bit 63 and zeros below the held bits, so a peek is a shift
+/// and `skipBits` a shift-and-subtract; `refill`'s one 8-byte load
+/// amortizes over the 57+ bits it covers. Reloading per read instead — the
+/// same load with no cache — serializes every symbol's load address on the
+/// previous read's consume; the cache is the reference's `BIT_DStream`
+/// container shape (reload-per-read measured against it on the
+/// sequence-heavy corpus: 98 µs vs 83 µs per 64 KiB frame at level 19).
 pub const BackwardReader = struct {
     source: []const u8,
     /// The write-order index one past the next bit to read — the number of
     /// bits not yet consumed. It goes negative when a read runs past the
     /// stream's start; those bits read as zero.
     remaining_bits: i32,
+    /// The next `held` stream bits, top-aligned; zeros below.
+    container: u64,
+    /// How many container bits are real stream bits (0-64).
+    held: u7,
 
     /// The last byte's highest set bit is the final 1 bit (`§4.2.2`); a last
     /// byte of zero has no start bit at all.
@@ -114,49 +133,98 @@ pub const BackwardReader = struct {
         // Bits below the final 1 bit of the last byte, plus every bit of the
         // bytes before it: `§4.2.2`'s "between 0 and 7 useful bits".
         const useful: i32 = @intCast(8 * (source.len - 1) + highBit(last));
-        return .{ .source = source, .remaining_bits = useful };
+        return .{
+            .source = source,
+            .remaining_bits = useful,
+            .container = 0,
+            .held = 0,
+        };
     }
 
     /// The next `count` bits, without consuming them. The first bit read is
     /// the value's most significant bit; bits past the stream's start read
     /// as zero.
-    pub fn peekBits(self: BackwardReader, count: u5) u16 {
+    pub fn peekBits(self: *BackwardReader, count: u5) u16 {
         assert(count <= max_read_bits);
-        var value: u16 = 0;
-        var taken: u5 = 0;
-        var remaining = self.remaining_bits;
-        while (taken < count) {
-            if (remaining <= 0) {
-                // Past the stream's start: the missing bits are zero, which
-                // is exactly the overflow condition the callers test for
-                // (`§4.2.1.2`).
-                value <<= @intCast(count - taken);
-                break;
-            }
-            const position: u32 = @intCast(remaining - 1);
-            const in_byte: u5 = @intCast(position & 7);
-            const available = in_byte + 1;
-            const take = @min(available, count - taken);
-            // The bits of a byte are consumed from its most significant end
-            // down, so the chunk is the byte's top `take` bits at `in_byte`.
-            const chunk = @as(u16, self.source[position >> 3] >> @intCast(available - take)) &
-                mask(take);
-            value = (value << @intCast(take)) | chunk;
-            taken += take;
-            remaining -= take;
+        return @intCast(self.peekWindow(count));
+    }
+
+    /// The next `count` bits, without consuming them — the wide form for the
+    /// sequences section's extra bits (up to 31, `§3.1.1.3.2.1.1`).
+    pub fn peekBits32(self: *BackwardReader, count: u5) u32 {
+        assert(count <= max_read_bits_wide);
+        return @intCast(self.peekWindow(count));
+    }
+
+    /// The window both peeks share: the container's top `count` bits. The
+    /// container is zero below its held bits, so a read wider than what is
+    /// held — only possible once the whole stream is held — zero-fills,
+    /// which is exactly the overflow condition the callers test for
+    /// (`§4.2.1.2`).
+    fn peekWindow(self: *BackwardReader, count: u6) u64 {
+        if (count == 0) return 0;
+        if (self.held < count) self.refill();
+        // count >= 1 above, so the right shift is 33-63 — a u7
+        // intermediate, because 64 itself escapes a u6.
+        return self.container >> @intCast(@as(u7, 64) - count);
+    }
+
+    /// Reload the container to cover the 57-64 stream bits ending at the
+    /// current position (fewer near the stream's start, where the load
+    /// zero-pads and `held` caps at what the stream holds).
+    fn refill(self: *BackwardReader) void {
+        // Past the stream's start nothing is left to load, and the
+        // container's stale bits must not read again.
+        if (self.remaining_bits <= 0) {
+            self.container = 0;
+            self.held = 0;
+            return;
         }
-        return value;
+        if (self.remaining_bits <= self.held) return;
+        const position: u32 = @intCast(self.remaining_bits - 1);
+        const byte = position >> 3;
+        const bit: u3 = @intCast(position & 7);
+        // The 8 bytes ending at `byte`, little-endian, put the next bit at
+        // window bit 56 + bit; the left shift top-aligns it at bit 63. Near
+        // the stream's start a partial load shifted to the top keeps the
+        // same math, and the zero fill below is the read-as-zero rule.
+        const window: u64 = if (byte >= 7)
+            std.mem.readInt(u64, self.source[byte - 7 ..][0..8], .little)
+        else blk: {
+            var w: u64 = 0;
+            for (self.source[0 .. byte + 1], 0..) |b, j| w |= @as(u64, b) << @intCast(8 * j);
+            break :blk w << @intCast(8 * (7 - byte));
+        };
+        self.container = window << @intCast(7 - bit);
+        self.held = @intCast(@min(self.remaining_bits, @as(i32, 57) + bit));
     }
 
     /// Consume `count` bits.
     pub fn skipBits(self: *BackwardReader, count: u5) void {
-        assert(count <= max_read_bits);
+        assert(count <= max_read_bits_wide);
         self.remaining_bits -= count;
+        // A peek refills until `held >= count` or everything left is held,
+        // so a skip past the held bits is always a skip past the stream's
+        // start; the left shift keeps the next unconsumed bit top-aligned.
+        if (count <= self.held) {
+            self.container <<= count;
+            self.held -= count;
+        } else {
+            self.container = 0;
+            self.held = 0;
+        }
     }
 
     /// Read `count` bits.
     pub fn readBits(self: *BackwardReader, count: u5) u16 {
         const value = self.peekBits(count);
+        self.skipBits(count);
+        return value;
+    }
+
+    /// Read `count` bits — the wide form (`peekBits32`).
+    pub fn readBits32(self: *BackwardReader, count: u5) u32 {
+        const value = self.peekBits32(count);
         self.skipBits(count);
         return value;
     }
