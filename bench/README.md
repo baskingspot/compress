@@ -7,8 +7,9 @@ methodology").
 
 The harness ports fastmem's (`~/code/fastmem-zig/bench/`, design:
 `docs/bench-design.md` there): `ec2bench/` is the generic EC2 fleet core,
-copied verbatim; `zcompress_bench/` is the zcompress adapter — the suite,
-the cross builds, the schema, the analysis.
+copied from fastmem's and kept free of benchmark-specific code;
+`zcompress_bench/` is the zcompress adapter — the suite, the cross builds,
+the schema, the analysis.
 
 ## Arms
 
@@ -26,10 +27,10 @@ via systemd; `ec2bench/isolation.py`):
 | `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 (the notes' pinned tag, docs/research/zstd-notes.md §6.1) whole-buffer `ZSTD_decompressDCtx`, decode-only | cmake (`build/cmake`, static lib, no programs/tests/threads) with a zig-cc wrapper, per target/CPU over the zon-pinned source tree |
 | `aa` | the `zc` binary again | the A/A noise floor | — |
 
-The three C arms' sources are pinned in `bench/build.zig.zon` (release-tarball
-url+hash, lazy) — the bench tool's own build root, the ztls `conformance/`
-shape: the harness's competitors are the harness's concern, and the root
-package's zon stays clean. `zig build bench-vendor` (the repo root's step
+The four native arms' sources are pinned in `bench/build.zig.zon`
+(release-tarball url+hash, lazy) — the bench tool's own build root, the ztls
+`conformance/` shape: the harness's competitors are the harness's concern,
+and the root package's zon stays clean. `zig build bench-vendor` (the repo root's step
 delegates to `bench/build.zig`) materializes them under
 `bench/zig-out/bench-src/<name>/`, hash-verified by zig's own fetcher, so the
 harness never downloads or unpacks a tarball itself. Keeping the
@@ -71,6 +72,9 @@ committed hashes and fails loudly when the generated directory is missing
 (run `just corpus`) or disagrees; a run without a verified corpus refuses.
 Each driver's meta record carries the SHA-256 of every raw file it read;
 the parser rejects a round whose hashes disagree with the committed corpus.
+The manifest records one `tree_sha256` over the verified anchor (names and
+digests, sorted) beside the per-file hashes: the run's single corpus
+identity, for cross-run comparison without the bytes.
 
 ## Schema v1 (the JSONL contract)
 
@@ -122,16 +126,22 @@ just bench-ls                 # show the fleet
 just bench-test               # correctness gate: every arm's --check on every box
 just bench-run --rounds 5 --label m3   # the measurement
 just b analyze <run-dir>      # re-analyze a run without AWS/SSH/builds
-just bench watch <run-dir>    # via `just b watch`: exit when summary.json exists
+just b watch <run-dir>        # exit when summary.json exists
 just bench-down               # terminate the fleet
-just bench-check              # ruff + ty over the harness
+just bench-check              # uv format + uv check over the harness
 ```
 
 A run directory (`bench-results/<run-id>/`) holds the manifest (seed,
-schedule, corpus hashes, competitor pins, build cache keys and binary
-SHA-256s, git provenance), per-target raw rounds and host facts, the
-summary.json, and report.md. The committed claim lives under
-`docs/results/<run-id>/`.
+schedule, the corpus tree hash and per-file hashes, competitor pins, build
+cache keys and binary SHA-256s, git provenance), per-target raw rounds and
+host facts, the summary.json, and report.md. The uploaded binaries and the
+generated corpus do NOT land there: both regenerate from the pins the
+manifest records (the content-addressed revisions, the binary SHA-256s, the
+corpus hashes and the committed anchor), so the run directory holds only
+the non-regenerable evidence — the trimmed-past-runs shape is the harness's
+default. A correctness run (`bench test`) holds each arm's
+`check.json`/`check.exit`/`check.stderr` per target plus its summary. The
+committed claim lives under `docs/results/<run-id>/`.
 
 ## Dropped in the port
 

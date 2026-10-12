@@ -5,18 +5,17 @@ module are the point: independent gzip implementations verifying ours in
 both directions (our encode -> its decode, its encode -> our decode), over
 generated shapes and the CLI rows; the gzip/gunzip 1.14 CLIs join as the
 reference file-tool pair. Run via `just gzip-oracle`; python3 comes from the
-flake. Incantations verified in docs/research/containers-notes.md §5.5.
+flake. Incantations verified in docs/research/containers-notes.md §5.5;
+shared plumbing: scripts/oracle_common.py.
 """
 
 import gzip
-import os
-import random
 import subprocess
-import tempfile
 import zlib
-from pathlib import Path
 
-root = Path(__file__).resolve().parent.parent
+import oracle_common as common
+
+root = common.ROOT
 harness = root / "zig-out/bin/gzip-oracle"
 
 # Our emitted-header policy (README, "The member format", OQ7): FLG=0,
@@ -28,49 +27,16 @@ XFL_BY_LEVEL = {str(n): 4 if n <= 1 else 2 if n == 9 else 0 for n in range(10)} 
 
 def our_compress(data: bytes, level: str = "fast") -> bytes:
     """Our encoder, through the oracle harness: one gzip member."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        p = subprocess.run([str(harness), "encode", path, level], capture_output=True, check=False)
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our encoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "encode", data, level)
 
 
 def our_decompress(member: bytes, cap: int) -> bytes:
     """Our one-shot decoder, through the oracle harness."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(member)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our decoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "decode", member, str(cap))
 
 
 def our_decompress_fails(member: bytes, cap: int) -> bool:
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(member)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        return p.returncode != 0
-    finally:
-        os.unlink(path)
+    return common.run_harness(harness, "decode", member, str(cap)).returncode != 0
 
 
 def python_decompress(member: bytes) -> bytes:
@@ -86,13 +52,7 @@ def zlib_member(data: bytes, level: int) -> bytes:
 
 
 def example(args, data: bytes) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["zig", "build", "example-gzip", "--"] + args,
-        cwd=root,
-        input=data,
-        capture_output=True,
-        check=False,
-    )
+    return common.run_example("gzip", args, data)
 
 
 def check_header(member: bytes, level: str) -> None:
@@ -103,23 +63,16 @@ def check_header(member: bytes, level: str) -> None:
     assert member[9] == 255, f"OS {member[9]} (T1: 255)"
 
 
+# The generated conformance shapes (oracle_common.SHAPES): the same bytes in
+# every lane.
+shapes = common.SHAPES
+text = shapes["text"]
+long_text = shapes["long text (multi-block)"]
+
 # 1. Our encode -> the C reference's decode, every level, over the shapes.
-rng = random.Random(20261009)
-text = (b"the quick brown fox jumps over the lazy dog. " * 200)[:8192]
-random_bytes = bytes(rng.randrange(256) for _ in range(4096))
-rle = b"\x5a" * 3000 + b"\x00" * 5 + b"q" * 130000  # spans a 64 KiB block split
-long_text = b"the quick brown fox jumps over the lazy dog. " * 6000  # 264 KB
-empty = b""
-shapes = (
-    ("empty", empty),
-    ("text", text),
-    ("random", random_bytes),
-    ("rle", rle),
-    ("long text (multi-block)", long_text),
-)
 levels = ("fast", "0", "1", "6", "9")
 rows = 0
-for desc, data in shapes:
+for desc, data in shapes.items():
     for level in levels:
         member = our_compress(data, level)
         check_header(member, level)
@@ -133,7 +86,7 @@ for desc, data in shapes:
 
 # 2. The C reference's encode -> our decode (levels 0, 1, 6, 9), and the
 #    CPython module's emission (OS=255) -> our decode.
-for desc, data in shapes:
+for desc, data in shapes.items():
     for level in (0, 1, 6, 9):
         member = zlib_member(data, level)
         got = our_decompress(member, len(data) + 1)
@@ -171,7 +124,7 @@ assert our_decompress_fails(bytes(corrupt), len(text) + 1), "a wrong FHCRC must 
 rows += 2
 
 # 5. The gzip/gunzip 1.14 CLI lane: the reference file tools both directions.
-for desc, data in shapes:
+for desc, data in shapes.items():
     p = subprocess.run(["gzip", "-c"], input=data, capture_output=True, check=False)
     assert p.returncode == 0, f"gzip -c ({desc})"
     cli_member = p.stdout

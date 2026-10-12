@@ -54,9 +54,9 @@ def check_target(  # noqa: PLR0917 — the target lifecycle stays together
     box.ready(config.project["image_version"])
     remote = f"{config.project['remote_dir'].rstrip('/')}/{path.name}-{name}"
     box.run(f"mkdir -p {shlex.quote(remote)}")
-    box.upload(corpus_dir, remote)
-    # The local generated tree is corpus-gen/; the remote contract is <remote>/corpus.
-    box.run(f"mv {shlex.quote(remote + '/' + corpus_dir.name)} {shlex.quote(remote + '/corpus')}")
+    # The corpus lands AS <remote>/corpus (its contents, not the local
+    # corpus-gen/ directory name): the drivers' --corpus contract.
+    box.upload_contents(corpus_dir, f"{remote}/corpus")
     local = path / name
     results: dict[str, Any] = {}
     for arm in ARMS:
@@ -130,7 +130,7 @@ def test_fleet(config: Config, targets: tuple[str, ...], launch: bool, ttl: str 
         {
             "kind": "correctness",
             "source_hash": source_hash(config.root),
-            "corpus": corpus.hashes,
+            "corpus": {"tree_sha256": corpus.tree_sha256, "hashes": corpus.hashes},
             "zig_version": subprocess.run(
                 ["zig", "version"],
                 capture_output=True,

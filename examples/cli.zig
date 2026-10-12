@@ -4,7 +4,8 @@
 //! codec and provides streaming `encode`/`decode` pumps. This file owns
 //! everything the codecs share: argument parsing, input (a file, or stdin
 //! via `-` or no argument) as an `Io.File.Reader`, stdout, and error
-//! handling.
+//! handling. A codec with no encoder yet leaves `encode` null and the CLI
+//! reports the direction as usage.
 //!
 //! Usage (per codec): `<codec> encode [FILE|-] > out`, `<codec> decode [FILE|-] > out`.
 //! Errors propagate to an error return trace with a nonzero exit code.
@@ -17,12 +18,18 @@ const mem = std.mem;
 const Allocator = mem.Allocator;
 const process = std.process;
 
+/// The uniform streaming pump both directions share: the whole input in, the
+/// codec's stream out (encode) or the decoded bytes out (decode).
+pub const StreamFn = *const fn (arena: Allocator, in: *Io.Reader, out: *Io.Writer) anyerror!void;
+
 pub const Codec = struct {
     name: []const u8,
-    /// Encode the whole input and write the encoded stream to `out`.
-    encode: *const fn (arena: Allocator, in: *Io.Reader, out: *Io.Writer) anyerror!void,
+    /// Encode the whole input and write the encoded stream to `out`. Null for
+    /// a codec with no encoder yet (zstd until M5): the CLI reports the
+    /// direction as usage, and the codec's error surface never carries it.
+    encode: ?StreamFn = null,
     /// Decode a stream produced by `encode` and write the decoded bytes.
-    decode: *const fn (arena: Allocator, in: *Io.Reader, out: *Io.Writer) anyerror!void,
+    decode: StreamFn,
 };
 
 const Mode = enum {
@@ -35,17 +42,17 @@ pub fn run(codec: Codec, init: process.Init) !u8 {
     const arena = init.arena.allocator();
 
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len < 2) return usage(codec.name);
+    if (args.len < 2) return usage(codec);
 
     const cmd = args[1];
     const rest = args[2..];
 
-    const mode = stringToEnum(Mode, cmd) orelse return usage(codec.name);
+    const mode = stringToEnum(Mode, cmd) orelse return usage(codec);
 
     const path: ?[]const u8 = switch (rest.len) {
         0 => null,
         1 => if (mem.eql(u8, rest[0], "-")) null else rest[0],
-        else => return usage(codec.name),
+        else => return usage(codec),
     };
 
     const input: Io.File = if (path) |p| try Io.Dir.cwd().openFile(io, p, .{
@@ -64,14 +71,38 @@ pub fn run(codec: Codec, init: process.Init) !u8 {
     defer writer.flush() catch {};
 
     const op = switch (mode) {
-        .encode => codec.encode,
+        .encode => codec.encode orelse return usage(codec),
         .decode => codec.decode,
     };
     try op(arena, reader, writer);
     return 0;
 }
 
-fn usage(name: []const u8) u8 {
-    print("usage: {s} encode|decode [FILE|-] > out\n", .{name});
+/// The round trip every codec's example test drives: `text` through the
+/// codec's own pumps, decoded back, bytes required. A codec without an
+/// encoder (zstd) cannot call it.
+pub fn expectRoundTrip(codec: Codec, text: []const u8) !void {
+    const encode = codec.encode orelse return error.NoEncoder;
+    const testing = std.testing;
+
+    var compressed: Io.Writer.Allocating = .init(testing.allocator);
+    defer compressed.deinit();
+    var in: Io.Reader = .fixed(text);
+    try encode(testing.allocator, &in, &compressed.writer);
+
+    var plain: Io.Writer.Allocating = .init(testing.allocator);
+    defer plain.deinit();
+    var z: Io.Reader = .fixed(compressed.written());
+    try codec.decode(testing.allocator, &z, &plain.writer);
+
+    try testing.expectEqualStrings(text, plain.written());
+}
+
+fn usage(codec: Codec) u8 {
+    if (codec.encode != null) {
+        print("usage: {s} encode|decode [FILE|-] > out\n", .{codec.name});
+    } else {
+        print("usage: {s} decode [FILE|-] > out (decode-only)\n", .{codec.name});
+    }
     return 1;
 }

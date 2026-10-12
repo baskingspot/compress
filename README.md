@@ -5,8 +5,9 @@ of [klauspost/compress](https://github.com/klauspost/compress), usability in
 the class of `std.compress`.
 
 Codecs land one at a time, each shippable alone. snappy (raw block), flate
-(raw deflate), and the gzip and zlib containers over flate are in the
-library; zstd and lzw are in the plan's build order.
+(raw deflate), the gzip and zlib containers over flate, and the zstd
+decoder are in the library; the zstd encoder and lzw are in the plan's
+build order.
 [`docs/zcompress-plan.md`](docs/zcompress-plan.md) is the plan — milestones,
 methodology, and the source-of-truth decisions.
 

@@ -1,6 +1,7 @@
 # Examples
 
-One CLI per codec, over a file argument or stdin, writing to stdout:
+One CLI per codec — snappy, flate, gzip, zlib, zstd — over a file argument
+or stdin, writing to stdout:
 
 ```sh
 zig build example-snappy -- encode README.md > /tmp/out.snappy
@@ -14,8 +15,13 @@ Or via just: `just example snappy encode README.md > /tmp/out.snappy`.
 Shared scaffolding lives in `examples/cli.zig`: argument parsing (`encode` /
 `decode`, one optional path, `-` or no path for stdin), the input as an
 `Io.File.Reader`, and stdout as an `Io.File.Writer`. A codec's example file
-names the codec and provides streaming `encode`/`decode` pumps over that
-scaffolding — stack-buffered, allocation-free end to end.
+declares one `cli.Codec` — its name and its streaming pumps — and both `main`
+and the round-trip test run that declaration. The pumps are stack-buffered,
+allocation-free end to end; zstd's decode is the one divergence, its 8 MiB
+default window comes from the run's arena (`examples/zstd.zig`).
+
+zstd is decode-only until M5 adds the encoder: `cli.Codec.encode` is null
+there, and `zstd encode` reports usage.
 
 The framing is the codec package's, not the example's (snappy's:
 `src/snappy/README.md`, "Streaming"). The examples exist to feel the codec

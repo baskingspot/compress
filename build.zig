@@ -245,9 +245,42 @@ pub fn build(b: *Build) void {
     bench_vendor.setCwd(b.path("bench"));
     bench_vendor_step.dependOn(&bench_vendor.step);
 
-    // Benchmarks. The benchmark dependency is lazy: b.lazyImport fetches it
-    // on the first `zig build bench` and returns null meanwhile, so the
-    // codec modules and the test step build without it.
+    // The 32-bit proof probe (src/zstd/probe32.zig): the large-total frames
+    // driven on a usize=32 target, where their wraps are observable.
+    // wasm32-wasi, ReleaseSafe (a wrap panics), an explicit 8 MiB stack (the
+    // window buffer rides it); `just check-32` runs it under wasmtime. It is
+    // a correctness gate, not a bench artifact, so it lives outside the lazy
+    // benchmark-import block below: its module and step never ride the bench
+    // dependency's graph.
+    const probe32_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .wasi,
+    });
+    const probe32_mod = b.createModule(.{
+        .root_source_file = b.path("src/zstd/probe32.zig"),
+        .target = probe32_target,
+        .optimize = .ReleaseSafe,
+    });
+    probe32_mod.addImport("fastmem", fastmem_mod);
+    probe32_mod.addImport("zcompress", zcompress_mod);
+    const probe32_exe = b.addExecutable(.{
+        .name = "zstd-probe32",
+        .root_module = probe32_mod,
+    });
+    probe32_exe.stack_size = 8 * 1024 * 1024;
+    const install_probe32 = b.addInstallArtifact(probe32_exe, .{});
+    const probe32_step = b.step(
+        "probe32",
+        "Build the 32-bit proof probe (wasm32-wasi; run under wasmtime)",
+    );
+    probe32_step.dependOn(&install_probe32.step);
+
+    // Benchmarks. The benchmark dependency is lazy in the zon: while it is
+    // unfetched, b.lazyImport returns null and no bench step is defined. The
+    // call itself still marks the dependency needed, and the build runner
+    // fetches every marked lazy dependency on any invocation (the
+    // bench/build.zig precedent) — so a cold cache's first `zig build`,
+    // whatever the step, fetches benchmark before this block runs again.
     if (b.lazyImport(@This(), "benchmark")) |benchmark| {
         // The dependency is lazy in the zon, so it must come through
         // lazyDependency. lazyImport already confirmed it is fetched, so
@@ -318,34 +351,6 @@ pub fn build(b: *Build) void {
             .root_module = zlib_bench_root,
         });
         if (b.args) |args| run_zlib_bench.addArgs(args);
-
-        // The 32-bit proof probe (src/zstd/probe32.zig): the large-total
-        // frames driven on a usize=32 target, where their wraps are
-        // observable. wasm32-wasi, ReleaseSafe (a wrap panics), an explicit
-        // 8 MiB stack (the window buffer rides it); `just check-32` runs it
-        // under wasmtime.
-        const probe32_target = b.resolveTargetQuery(.{
-            .cpu_arch = .wasm32,
-            .os_tag = .wasi,
-        });
-        const probe32_mod = b.createModule(.{
-            .root_source_file = b.path("src/zstd/probe32.zig"),
-            .target = probe32_target,
-            .optimize = .ReleaseSafe,
-        });
-        probe32_mod.addImport("fastmem", fastmem_mod);
-        probe32_mod.addImport("zcompress", zcompress_mod);
-        const probe32_exe = b.addExecutable(.{
-            .name = "zstd-probe32",
-            .root_module = probe32_mod,
-        });
-        probe32_exe.stack_size = 8 * 1024 * 1024;
-        const install_probe32 = b.addInstallArtifact(probe32_exe, .{});
-        const probe32_step = b.step(
-            "probe32",
-            "Build the 32-bit proof probe (wasm32-wasi; run under wasmtime)",
-        );
-        probe32_step.dependOn(&install_probe32.step);
 
         // The zstd bench (src/zstd/bench.zig): decode-only until M5, over
         // the fleet corpus's reference frames (bench/corpus-gen/, `just

@@ -1,8 +1,9 @@
 //! zstd example CLI: `zstd decode [FILE|-] > out`. Shared scaffolding in
 //! `examples/cli.zig`.
 //!
-//! Decode-only until M5 adds the encoder direction (README, "API"): `decode`
-//! is the frame walk the codec owns — `Reader.streamAll`, RFC 8878 §3.1: the
+//! Decode-only until M5 adds the encoder direction (README, "API"): the CLI
+//! leaves `encode` null and reports the direction as usage, and `decode` is
+//! the frame walk the codec owns — `Reader.streamAll`, RFC 8878 §3.1: the
 //! output of the decompression is the concatenation of the frames, one unit
 //! per iteration at the boundary contract's exact position (skippable frames
 //! consumed and ignored, `§3.1.2`; a unit that is not present is the file's
@@ -29,20 +30,9 @@ const cli = @import("cli");
 const zstd = @import("zcompress").zstd;
 
 pub fn main(init: std.process.Init) !u8 {
-    return cli.run(.{
-        .name = "zstd",
-        .encode = encode,
-        .decode = decode,
-    }, init);
-}
-
-/// M5 adds the fast encoder; until then the encode direction reports the
-/// missing half of the surface (the CLI's error trace names it).
-fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
-    _ = arena;
-    _ = in;
-    _ = out;
-    return error.EncodeNotImplemented;
+    // No `encode`: M5 adds the fast encoder, and `cli.run` reports the
+    // missing direction as usage until then.
+    return cli.run(.{ .name = "zstd", .decode = decode }, init);
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {

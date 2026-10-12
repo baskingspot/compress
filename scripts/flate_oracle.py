@@ -4,17 +4,14 @@ Python's zlib is the point: an independent raw-deflate implementation
 verifying ours in both directions (our encode -> its decode, its encode ->
 our decode), over the golang fixture pairs, generated shapes, and streaming
 rows through the CLI. Run via `just flate-oracle`; python3 comes from the
-flake.
+flake. Shared plumbing: scripts/oracle_common.py.
 """
 
-import os
-import random
-import subprocess
-import tempfile
 import zlib
-from pathlib import Path
 
-root = Path(__file__).resolve().parent.parent
+import oracle_common as common
+
+root = common.ROOT
 harness = root / "zig-out/bin/flate-oracle"
 testdata = root / "src/flate/testdata"
 
@@ -30,7 +27,7 @@ def make_raw(level, strategy=zlib.Z_DEFAULT_STRATEGY):
     return compress
 
 
-shapes = (
+raw_shapes = (
     ("stored (level 0)", make_raw(0)),
     ("huffman-only", make_raw(6, zlib.Z_HUFFMAN_ONLY)),
     ("level 1", make_raw(1)),
@@ -41,50 +38,17 @@ shapes = (
 
 def our_decompress(raw: bytes, cap: int) -> bytes:
     """Our decoder, through the oracle harness: raw deflate, target cap."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our decoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "decode", raw, str(cap))
 
 
 def our_decompress_fails(raw: bytes, cap: int) -> bool:
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(raw)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        return p.returncode != 0
-    finally:
-        os.unlink(path)
+    return common.run_harness(harness, "decode", raw, str(cap)).returncode != 0
 
 
 def our_compress(data: bytes) -> bytes:
     """Our encoder, through the oracle harness: the raw deflate stream for
     `data`."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        p = subprocess.run([str(harness), "encode", path], capture_output=True, check=False)
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our encoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "encode", data)
 
 
 def python_decompress(raw: bytes) -> bytes:
@@ -96,7 +60,7 @@ def check(desc: str, data: bytes, cap: int) -> None:
     """Both directions: an oracle-compressed stream decodes to `data` in our
     decoder, our encoder's stream decodes to `data` in the oracle, and the
     oracle itself round-trips the same bytes."""
-    for shape, compress in shapes:
+    for shape, compress in raw_shapes:
         raw = compress(data)
         assert python_decompress(raw) == data, f"oracle round trip ({desc}, {shape})"
         got = our_decompress(raw, cap)
@@ -114,6 +78,10 @@ def check(desc: str, data: bytes, cap: int) -> None:
     # ending's BTYPE bit.
     assert ours[-1] == 0x00, f"our encode ({desc}): final byte {ours[-1]:#x}"
 
+
+# The generated conformance shapes (oracle_common.SHAPES): the same bytes in
+# every lane.
+shapes = common.SHAPES
 
 # 1. The committed golang/go pairs: `.golden` is a single non-final block,
 #    so verbatim it must fail closed, and with BFINAL set on that block it
@@ -138,19 +106,10 @@ assert pairs == 9, f"expected 9 testdata pairs, found {pairs}"
 for inp in sorted(testdata.glob("*.in")):
     check(inp.name, inp.read_bytes(), len(inp.read_bytes()) + 1)
 
-# 3. Generated shapes: text, random, single-byte runs, and a long text
-#    that spans several 64-KiB blocks (the encoder's cross-block matches).
-rng = random.Random(20261008)
-text = (b"the quick brown fox jumps over the lazy dog. " * 200)[:8192]
-random_bytes = bytes(rng.randrange(256) for _ in range(4096))
-rle = b"\x5a" * 3000 + b"\x00" * 5 + b"q" * 130000  # spans a 64 KiB block split
-long_text = b"the quick brown fox jumps over the lazy dog. " * 6000  # 264 KB
-for desc, data in (
-    ("text", text),
-    ("random", random_bytes),
-    ("rle", rle),
-    ("long text (multi-block)", long_text),
-):
+# 3. The generated shapes: empty, text, random, single-byte runs, and a long
+#    text that spans several 64-KiB blocks (the encoder's cross-block
+#    matches).
+for desc, data in shapes.items():
     check(desc, data, len(data) + 1)
 
 
@@ -160,21 +119,15 @@ for desc, data in (
 #    decode of the streaming encoder's stream, the same both-directions
 #    rule as the one-shot lane above.
 def example(args, data):
-    p = subprocess.run(
-        ["zig", "build", "example-flate", "--"] + args,
-        cwd=root,
-        input=data,
-        capture_output=True,
-        check=False,
-    )
-    if p.returncode != 0:
-        raise AssertionError(f"example-flate {args} failed: {p.stderr.decode().strip()}")
-    return p.stdout
+    result = common.run_example("flate", args, data)
+    if result.returncode != 0:
+        raise AssertionError(f"example-flate {args} failed: {result.stderr.decode().strip()}")
+    return result.stdout
 
 
 streaming = (
-    ("streaming multi-block text", long_text),
-    ("streaming stored blocks", random_bytes),
+    ("streaming multi-block text", shapes["long text (multi-block)"]),
+    ("streaming stored blocks", shapes["random"]),
 )
 for desc, data in streaming:
     raw = example(["encode", "-"], data)
@@ -182,9 +135,9 @@ for desc, data in streaming:
     back = example(["decode", "-"], raw)
     assert back == data, f"example round trip ({desc}): {len(back)} bytes, want {len(data)}"
 
-fixture_inputs = len(list(testdata.glob("*.in"))) + 4
+fixture_inputs = len(list(testdata.glob("*.in"))) + len(shapes)
 print(
     "flate-oracle: "
-    f"{pairs} fixture pairs + {fixture_inputs} inputs x {len(shapes)} raw-deflate shapes, "
+    f"{pairs} fixture pairs + {fixture_inputs} inputs x {len(raw_shapes)} raw-deflate shapes, "
     f"both directions, + {len(streaming)} streaming rows through the CLI: OK"
 )

@@ -112,8 +112,20 @@ class Box:
         raise TimeoutError(f"{self.instance_id}: SSH/image deadline: {last_error}")
 
     def upload(self, source: Path, destination: str) -> None:
+        """Copy `source` into `destination` as `<destination>/<source.name>`."""
+        self._upload(str(source), destination)
+
+    def upload_contents(self, source: Path, destination: str) -> None:
+        """Copy the contents of the directory `source` into `destination`.
+
+        The destination names the directory directly: no post-upload rename
+        depends on the local directory's basename.
+        """
+        self._upload(str(source) + "/", destination)
+
+    def _upload(self, source: str, destination: str) -> None:
         self.run(f"mkdir -p {shlex.quote(destination)}")
-        self._rsync(str(source), f"{self.destination}:{destination}/")
+        self._rsync(source, f"{self.destination}:{destination}/")
 
     def download(self, source: str, destination: Path) -> None:
         destination.mkdir(parents=True, exist_ok=True)

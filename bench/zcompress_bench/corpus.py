@@ -22,10 +22,19 @@ class Corpus:
     dir: Path
     # The ten raw files, name to SHA-256 hex.
     hashes: dict[str, str]
-    # Every file, reference blobs included.
-    all_hashes: dict[str, str]
     # The committed SHA256SUMS text (the trust anchor).
     sums: str
+    # One hash over every verified file (names and digests, sorted): the
+    # corpus's identity in the manifest, without the bytes.
+    tree_sha256: str
+
+
+def tree_hash(recorded: dict[str, str]) -> str:
+    """One hash over the verified anchor: name and digest per file, sorted."""
+    digest = hashlib.sha256()
+    for name in sorted(recorded):
+        digest.update(f"{name}  {recorded[name]}\n".encode())
+    return digest.hexdigest()
 
 
 def load(root: Path) -> Corpus:
@@ -53,4 +62,4 @@ def load(root: Path) -> Corpus:
     raw = {name: digest for name, digest in recorded.items() if "." not in name}
     if len(raw) != 10:
         raise ValueError(f"{anchor}: expected 10 raw corpus files, found {len(raw)}")
-    return Corpus(directory, raw, recorded, sums)
+    return Corpus(directory, raw, sums, tree_hash(recorded))

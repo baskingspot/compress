@@ -139,7 +139,11 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
             "schedule_method": "seeded-balanced-latin-square",
             "binary_args": binary_args,
             "minimum_effect": effect,
-            "corpus": {"hashes": corpus.hashes, "sha256sums": corpus.sums},
+            "corpus": {
+                "tree_sha256": corpus.tree_sha256,
+                "hashes": corpus.hashes,
+                "sha256sums": corpus.sums,
+            },
             "config": {"project": config.project, "targets": config.targets},
         }
     )

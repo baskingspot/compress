@@ -5,17 +5,16 @@ zlib implementation verifying ours in both directions (our encode -> its
 decode, its encode -> our decode), over generated shapes and the CLI
 streaming rows, plus the FDICT refusal cases, the FLEVEL/FCHECK emissions,
 and the exact stream boundary. Run via `just zlib-oracle`; python3 comes from
-the flake. Incantations verified in docs/research/containers-notes.md §5.5.
+the flake. Incantations verified in docs/research/containers-notes.md §5.5;
+shared plumbing: scripts/oracle_common.py.
 """
 
-import os
-import random
 import subprocess
-import tempfile
 import zlib
-from pathlib import Path
 
-root = Path(__file__).resolve().parent.parent
+import oracle_common as common
+
+root = common.ROOT
 harness = root / "zig-out/bin/zlib-oracle"
 
 # Our emitted-header policy (README, "The stream format", OQ7): CMF 0x78
@@ -27,61 +26,23 @@ FLEVEL_BY_LEVEL = {"fast": 2, "0": 0, "1": 0, "2": 1, "5": 1, "6": 2, "9": 3}
 
 def our_compress(data: bytes, level: str = "fast") -> bytes:
     """Our encoder, through the oracle harness: one zlib stream."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-        p = subprocess.run([str(harness), "encode", path, level], capture_output=True, check=False)
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our encoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "encode", data, level)
 
 
 def our_decompress(stream: bytes, cap: int) -> bytes:
     """Our one-shot decoder, through the oracle harness."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(stream)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        if p.returncode != 0:
-            raise AssertionError(
-                f"our decoder failed ({p.returncode}): {p.stderr.decode().strip()}"
-            )
-        return p.stdout
-    finally:
-        os.unlink(path)
+    return common.harness_output(harness, "decode", stream, str(cap))
 
 
 def our_decompress_error(stream: bytes, cap: int) -> str:
     """Our one-shot decoder's error name, through the oracle harness."""
-    fd, path = tempfile.mkstemp()
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(stream)
-        p = subprocess.run(
-            [str(harness), "decode", path, str(cap)], capture_output=True, check=False
-        )
-        assert p.returncode != 0, "expected a decoder failure"
-        return p.stderr.decode().strip().removeprefix("zlib-oracle: ")
-    finally:
-        os.unlink(path)
+    result = common.run_harness(harness, "decode", stream, str(cap))
+    assert result.returncode != 0, "expected a decoder failure"
+    return result.stderr.decode().strip().removeprefix("zlib-oracle: ")
 
 
 def example(args, data: bytes) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["zig", "build", "example-zlib", "--"] + args,
-        cwd=root,
-        input=data,
-        capture_output=True,
-        check=False,
-    )
+    return common.run_example("zlib", args, data)
 
 
 def check_header(stream: bytes, level: str) -> None:
@@ -95,23 +56,16 @@ def check_trailer(stream: bytes, data: bytes) -> None:
     assert int.from_bytes(stream[-4:], "big") == zlib.adler32(data), "big-endian ADLER32"
 
 
+# The generated conformance shapes (oracle_common.SHAPES): the same bytes in
+# every lane.
+shapes = common.SHAPES
+text = shapes["text"]
+long_text = shapes["long text (multi-block)"]
+
 # 1. Our encode -> the C reference's decode, every level, over the shapes.
-rng = random.Random(20261009)
-text = (b"the quick brown fox jumps over the lazy dog. " * 200)[:8192]
-random_bytes = bytes(rng.randrange(256) for _ in range(4096))
-rle = b"\x5a" * 3000 + b"\x00" * 5 + b"q" * 130000  # spans a 64 KiB block split
-long_text = b"the quick brown fox jumps over the lazy dog. " * 6000  # 264 KB
-empty = b""
-shapes = (
-    ("empty", empty),
-    ("text", text),
-    ("random", random_bytes),
-    ("rle", rle),
-    ("long text (multi-block)", long_text),
-)
 levels = ("fast", "0", "1", "6", "9")
 rows = 0
-for desc, data in shapes:
+for desc, data in shapes.items():
     for level in levels:
         stream = our_compress(data, level)
         check_header(stream, level)
@@ -122,7 +76,7 @@ for desc, data in shapes:
 # 2. The C reference's encode -> our decode: `zlib.compress` and the
 #    `compressobj` form, levels {-1, 0, 1, 6, 9} (-1 is the reference's
 #    default-compression level, FLEVEL 2).
-for desc, data in shapes:
+for desc, data in shapes.items():
     for level in (-1, 0, 1, 6, 9):
         stream = zlib.compress(data, level)
         got = our_decompress(stream, len(data) + 1)

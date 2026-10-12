@@ -59,9 +59,9 @@ def execute(
     remote = config.project["remote_dir"].rstrip("/") + "/" + path.name
     progress("upload corpus and binaries")
     box.run(f"mkdir -p {shlex.quote(remote)}")
-    box.upload(corpus_dir, remote)
-    # The local generated tree is corpus-gen/; the remote contract is <remote>/corpus.
-    box.run(f"mv {shlex.quote(remote + '/' + corpus_dir.name)} {shlex.quote(remote + '/corpus')}")
+    # The corpus lands AS <remote>/corpus (its contents, not the local
+    # corpus-gen/ directory name): the drivers' --corpus contract.
+    box.upload_contents(corpus_dir, f"{remote}/corpus")
     by_arm = dict(builds)
     if aa:
         by_arm["aa"] = builds["zc"]
@@ -116,7 +116,17 @@ def execute(
             finally:
                 stop_isolated(box, path.name)
     finally:
-        box.download(remote, destination)
+        # Only the rounds land in the run directory: the uploaded binaries
+        # and corpus are regenerable from the pins, and the manifest carries
+        # their hashes (the provenance).
+        try:
+            box.run(f"test -d {shlex.quote(remote + '/raw')}")
+        except Box.RemoteError:
+            # A failure before the raw tree exists has nothing to fetch —
+            # its own error stands as the run's.
+            pass
+        else:
+            box.download(f"{remote}/raw", destination / "raw")
     return {
         "cpu": cpu,
         "schedule": schedule,

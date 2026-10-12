@@ -271,7 +271,7 @@ from the model guide; they are never copied from another repo's roster.
 
 - A lane's review runs at the same time as its correctness gate. Only the
   merge waits for both.
-- A fleet run gets a watcher: a delegate agent runs `bench watch <run-dir>`
+- A fleet run gets a watcher: a delegate agent runs `just b watch <run-dir>`
   and exits when `summary.json` exists. The parent never polls.
 
 ## Git

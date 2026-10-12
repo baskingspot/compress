@@ -14,17 +14,19 @@
 const std = @import("std");
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
-const testing = std.testing;
 
 const cli = @import("cli");
 const snappy = @import("zcompress").snappy;
 
+/// The codec's CLI surface: `main` runs it, the test drives the same pumps.
+const codec: cli.Codec = .{
+    .name = "snappy",
+    .encode = encode,
+    .decode = decode,
+};
+
 pub fn main(init: std.process.Init) !u8 {
-    return cli.run(.{
-        .name = "snappy",
-        .encode = encode,
-        .decode = decode,
-    }, init);
+    return cli.run(codec, init);
 }
 
 fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
@@ -38,16 +40,5 @@ fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
 }
 
 test "example: streaming round-trip" {
-    var compressed: Io.Writer.Allocating = .init(testing.allocator);
-    defer compressed.deinit();
-
-    var in: Io.Reader = .fixed("hello hello hello, streaming snappy round-trip");
-    try encode(testing.allocator, &in, &compressed.writer);
-
-    var plain: Io.Writer.Allocating = .init(testing.allocator);
-    defer plain.deinit();
-    var z: Io.Reader = .fixed(compressed.written());
-    try decode(testing.allocator, &z, &plain.writer);
-
-    try testing.expectEqualStrings("hello hello hello, streaming snappy round-trip", plain.written());
+    try cli.expectRoundTrip(codec, "hello hello hello, streaming snappy round-trip");
 }
