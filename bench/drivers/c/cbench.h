@@ -42,6 +42,7 @@
 /* The corpus generator's shape set (bench/zig/corpus.zig): the entropy
  * pair's .zst blobs are the pinned CLI at level 19. */
 static const char *const shapes[] = {"text", "random", "html", "rle", "mixed", "words", "skewlit"};
+static const size_t shapes_len = sizeof shapes / sizeof *shapes;
 static const size_t shape_sizes[] = {32 * 1024, 64 * 1024};
 static const char *const codecs[] = CBENCH_CODECS;
 static const char *const directions[] = CBENCH_DIRECTIONS;
@@ -285,7 +286,7 @@ static void run_check(struct cbench_options *o)
     int checked = 0;
     size_t count = !strcmp(o->suite, "quick") ? 1 : 2;
     impl_setup();
-    for (size_t s = 0; s < 5 && !*detail; s++) {
+    for (size_t s = 0; s < shapes_len && !*detail; s++) {
         for (size_t z = 0; z < count && !*detail; z++) {
             struct cbench_case c;
             load_case(o, shapes[s], shape_sizes[z], &c);
@@ -316,7 +317,7 @@ static void write_meta(struct cbench_options *o)
            "\"sample_ms\":%ld,\"impls\":[\"%s\"],\"corpus\":{",
            ARM, TOOL, COMPETITOR_VERSION, ZIG_VERSION, CBENCH_TARGET, CBENCH_CPU,
            o->suite, o->seed, o->samples, o->sample_ms, IMPL);
-    for (size_t s = 0; s < 5; s++) {
+    for (size_t s = 0; s < shapes_len; s++) {
         for (size_t z = 0; z < 2; z++) {
             char base[128], hex[65];
             size_t n;
@@ -366,7 +367,7 @@ static void run_measure(struct cbench_options *o)
     write_meta(o);
     impl_setup();
     uint64_t start = now_ns();
-    for (size_t s = 0; s < 5; s++) {
+    for (size_t s = 0; s < shapes_len; s++) {
         for (size_t z = 0; z < count; z++) {
             struct cbench_case c;
             load_case(o, shapes[s], shape_sizes[z], &c);
