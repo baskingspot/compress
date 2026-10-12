@@ -1,4 +1,4 @@
-//! Bitstream readers for the zstd entropy layers.
+//! Bitstream readers and writers for the zstd entropy layers.
 //!
 //! `ForwardReader` reads the FSE table description, the one zstd bitstream that
 //! runs forward, from the first byte's least significant bit (`§4.1.1`).
@@ -6,6 +6,12 @@
 //! streams) read the others from the last byte toward the first (`§4.1`,
 //! `§4.2.2`). The last byte's highest set bit is a marker, not data; the stream
 //! is the bits below it, read most significant bit first.
+//!
+//! `ForwardWriter` and `BackwardWriter` are the encoders' exact inverses: a
+//! field written at a position is read back as the same value, so the bytes a
+//! writer produces are the bytes the matching reader consumes. The backward
+//! writer owns the end marker (`close`), which is why every stream it writes
+//! has a nonzero last byte (ZE7).
 //!
 //! The backward readers keep an exact bit position. A read past the start of the
 //! stream returns zeros and leaves `remainingBits` negative instead of failing,
@@ -388,6 +394,213 @@ fn mask(count: u5) u16 {
 fn highBit(value: u8) u3 {
     assert(value != 0);
     return @intCast(7 - @clz(value));
+}
+
+/// `(1 << count) - 1` for `count` up to 32.
+fn mask64(count: u5) u64 {
+    return (@as(u64, 1) << @intCast(count)) - 1;
+}
+
+/// The forward writer (`§4.1.1`): fields go out little-endian from the first
+/// byte's low bit up, the exact inverse of `ForwardReader`.
+///
+/// The description writer is its only user today, so it stays small: a field
+/// is at most 16 bits (`Table 20`'s widest), and a byte leaves the accumulator
+/// as soon as it is full.
+pub const ForwardWriter = struct {
+    target: []u8,
+    /// Whole bytes written to `target`.
+    written: usize = 0,
+    /// Pending bits, lowest first: bit 0 is the next bit on the wire.
+    bits: u32 = 0,
+    /// Pending bits in `bits`, below 8 outside `writeBits`.
+    bit_count: u5 = 0,
+
+    pub fn init(target: []u8) ForwardWriter {
+        return .{ .target = target };
+    }
+
+    /// Write the low `count` bits of `value`, least significant bit first.
+    /// `error.BufferTooSmall` when `target` is exhausted.
+    pub fn writeBits(self: *ForwardWriter, value: u16, count: u5) error{BufferTooSmall}!void {
+        assert(count <= 16);
+        assert(self.bit_count < 8);
+        assert(count == 16 or value >> @intCast(count) == 0);
+        self.bits |= @as(u32, value) << self.bit_count;
+        self.bit_count += count;
+        while (self.bit_count >= 8) {
+            if (self.written == self.target.len) return error.BufferTooSmall;
+            self.target[self.written] = @truncate(self.bits);
+            self.written += 1;
+            self.bits >>= 8;
+            self.bit_count -= 8;
+        }
+    }
+
+    /// Flush the final partial byte, zero-filled above its bits: "The
+    /// bitstream consumes a round number of bytes. Any remaining bit within
+    /// the last byte is simply unused" (`§4.1.1`).
+    pub fn finish(self: *ForwardWriter) error{BufferTooSmall}!void {
+        if (self.bit_count == 0) return;
+        if (self.written == self.target.len) return error.BufferTooSmall;
+        self.target[self.written] = @truncate(self.bits);
+        self.written += 1;
+        self.bits = 0;
+        self.bit_count = 0;
+    }
+
+    /// The bytes the stream occupies: whole bytes before `finish`, the
+    /// rounded-up byte count after it.
+    pub fn bytesWritten(self: *const ForwardWriter) usize {
+        return self.written + @intFromBool(self.bit_count != 0);
+    }
+};
+
+/// The backward writer for FSE-coded and Huffman-coded streams (`§4.1`,
+/// `§4.2.2`): the exact inverse of `BackwardReader` and `BackwardFastReader`.
+///
+/// The caller writes its fields in the reverse of the order the decoder reads
+/// them, each field's low bit at the lowest free position; `close` writes the
+/// final 1 bit and the zero fill. The bits a reader returns for a field are
+/// the bits the writer passed, so the two are inverses bit for bit — the
+/// property the round-trip tests pin.
+pub const BackwardWriter = struct {
+    target: []u8,
+    /// Whole bytes written to `target`.
+    written: usize = 0,
+    /// Pending bits, lowest first: bit 0 is the next bit on the wire.
+    bits: u64 = 0,
+    /// Pending bits in `bits`. A flush keeps it below 8, and the widest field
+    /// is 31 bits, so no field ever straddles a flush it cannot fit.
+    bit_count: u6 = 0,
+
+    pub fn init(target: []u8) BackwardWriter {
+        return .{ .target = target };
+    }
+
+    /// Write the low `count` bits of `value`, least significant bit at the
+    /// lowest free position. The widest field is the offset alphabet's 31
+    /// extra bits (`§3.1.1.3.2.1.1`); a Huffman code and an FSE state are at
+    /// most 11. `error.BufferTooSmall` when `target` is exhausted.
+    pub fn writeBits(self: *BackwardWriter, value: u32, count: u5) error{BufferTooSmall}!void {
+        assert(count <= max_read_bits_wide);
+        if (@as(u32, self.bit_count) + count > flush_bits) try self.flushBytes();
+        assert(@as(u32, self.bit_count) + count <= 64);
+        self.bits |= (@as(u64, value) & mask64(count)) << @intCast(self.bit_count);
+        self.bit_count += count;
+    }
+
+    /// Close the stream (`§4.2.2`): "The last bit is used as a marker to
+    /// signal the end of the stream", and the bits above it are zero fill.
+    /// The last byte is therefore never zero (ZE7).
+    pub fn close(self: *BackwardWriter) error{BufferTooSmall}!void {
+        try self.writeBits(1, 1);
+        const bytes = (self.bit_count + 7) / 8;
+        if (self.written + bytes > self.target.len) return error.BufferTooSmall;
+        var index: usize = 0;
+        while (index < bytes) : (index += 1) {
+            self.target[self.written + index] = @truncate(self.bits >> @intCast(8 * index));
+        }
+        self.written += bytes;
+        self.bits = 0;
+        self.bit_count = 0;
+    }
+
+    /// The stream's length in bytes; meaningful once `close` has run.
+    pub fn bytesWritten(self: *const BackwardWriter) usize {
+        assert(self.bit_count == 0);
+        return self.written;
+    }
+
+    /// Flush once the pending bits reach this: with a field of at most 31
+    /// bits and a sub-byte remainder of at most 7, the widest write still
+    /// fits the container, and a flush never has more than 7 whole bytes.
+    const flush_bits: u32 = 56;
+
+    /// Move the whole pending bytes into `target`, keeping the sub-byte
+    /// remainder. Flushing early never changes the stream's bits, only when
+    /// bytes leave the accumulator.
+    fn flushBytes(self: *BackwardWriter) error{BufferTooSmall}!void {
+        const bytes = self.bit_count >> 3;
+        if (self.written + bytes > self.target.len) return error.BufferTooSmall;
+        var index: usize = 0;
+        while (index < bytes) : (index += 1) {
+            self.target[self.written + index] = @truncate(self.bits >> @intCast(8 * index));
+        }
+        self.written += bytes;
+        self.bits >>= @intCast(8 * bytes);
+        self.bit_count &= 7;
+    }
+};
+
+test "BackwardWriter and BackwardReader are inverses, field for field" {
+    // RFC 8878 §4.1 — a field written at a position reads back as the same
+    // value: the writer's low bit is the reader's last bit of the field. The
+    // sweep covers every width a stream uses (1 to 31 bits) and a stream long
+    // enough to flush mid-field several times.
+    var rng: std.Random.DefaultPrng = .init(0xBACC);
+    var target: [256]u8 = undefined;
+    for (0..200) |_| {
+        var writer = BackwardWriter.init(&target);
+        var fields: [64]struct { value: u32, count: u5 } = undefined;
+        const count = rng.random().uintLessThan(usize, fields.len) + 1;
+        for (fields[0..count]) |*field| {
+            const width = rng.random().uintLessThan(u5, max_read_bits_wide) + 1;
+            field.* = .{
+                .value = rng.random().uintLessThan(u32, @as(u32, 1) << width),
+                .count = width,
+            };
+            try writer.writeBits(field.value, field.count);
+        }
+        try writer.close();
+        const stream = target[0..writer.bytesWritten()];
+        // The last byte carries the end marker, so it is never zero.
+        try testing.expect(stream[stream.len - 1] != 0);
+        var reader = try BackwardReader.init(stream);
+        // The reader meets the fields in the reverse of the write order.
+        for (fields[0..count], 0..) |_, index| {
+            const last = fields[count - 1 - index];
+            try testing.expectEqual(last.value, reader.readBits32(last.count));
+        }
+        try testing.expect(reader.isConsumed());
+    }
+}
+
+test "ForwardWriter and ForwardReader are inverses" {
+    // RFC 8878 §4.1.1 — the description's bitstream: a field written at a
+    // position reads back as the same value, and the byte count rounds up.
+    var target: [32]u8 = undefined;
+    var writer = ForwardWriter.init(&target);
+    try writer.writeBits(0b1011, 4);
+    try writer.writeBits(0b0101, 4);
+    try writer.writeBits(0b100, 3);
+    try writer.writeBits(0b00110, 5);
+    // The description writer's zero-run shortcut is one 16-bit write of
+    // eight 3-valued 2-bit flags; the reader takes them two bits at a time.
+    try writer.writeBits(0xffff, 16);
+    try writer.finish();
+    var reader = ForwardReader.init(target[0..writer.bytesWritten()]);
+    try testing.expectEqual(@as(u16, 0b1011), reader.readBits(4));
+    try testing.expectEqual(@as(u16, 0b0101), reader.readBits(4));
+    try testing.expectEqual(@as(u16, 0b100), reader.readBits(3));
+    try testing.expectEqual(@as(u16, 0b00110), reader.readBits(5));
+    for (0..8) |_| try testing.expectEqual(@as(u16, 3), reader.readBits(2));
+    try testing.expectEqual(@as(usize, 4), reader.bytesConsumed());
+    try testing.expectEqual(@as(usize, 4), writer.bytesWritten());
+}
+
+test "the writers stop at the target's end" {
+    // The encoders' targets are caller-sized, so an exhausted target is an
+    // error, never a write past it.
+    var none: [0]u8 = undefined;
+    var forward = ForwardWriter.init(&none);
+    try testing.expectError(error.BufferTooSmall, forward.writeBits(0xff, 8));
+    var backward = BackwardWriter.init(&none);
+    try testing.expectError(error.BufferTooSmall, backward.close());
+    var one: [1]u8 = undefined;
+    var tight = BackwardWriter.init(&one);
+    try tight.writeBits(0, 8);
+    try testing.expectError(error.BufferTooSmall, tight.close());
 }
 
 test "ForwardReader reads fields little-endian from the first byte's low bit" {

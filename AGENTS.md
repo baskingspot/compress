@@ -63,8 +63,14 @@ it before you change a kernel or make a performance claim.
   streaming `Io` layer (one frame per reader with the exact boundary visible,
   the multi-frame `streamAll` walk — see `src/zstd/README.md`);
   `golden.zig` shares the reference fixtures across every layer's tests.
-  Decoder-only: the namespace is `{Reader, decode}`; `encode.zig` and
-  `Writer.zig` do not exist yet. `bench.zig` is the local decode benchmark; the
+  The encoder's entropy layers: `fse_compress.zig` the normalization, the
+  encode-side table, and the `§4.1.1` description writer; `huff0_compress.zig`
+  the tree builder, the weight-series writer, and the Huffman streams;
+  `sequences_compress.zig` the sequences section and its interleaved
+  bitstream; `literals_compress.zig` the literals ladder; `bits.zig` also
+  carries their writer inverses. Decoder-first: the public namespace is
+  `{Reader, decode}`; `encode.zig` and `Writer.zig` do not exist yet.
+  `bench.zig` is the local decode benchmark; the
   fleet rows live in `bench/zig/bench_zcompress.zig` (`just bench-run`). Fuzz
   targets are in `fuzz.zig`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the

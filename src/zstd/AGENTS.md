@@ -114,6 +114,36 @@ is "no error name except `BufferTooSmall` is reachable on our own output"), its
 the C v1.5.7's unless a `TE` row says otherwise; the notes' §0 records the C
 checkout and the survey tooling.
 
+- **The entropy writers (landed).** `fse_compress.zig`, `huff0_compress.zig`,
+  `sequences_compress.zig`, `literals_compress.zig`, and the writer inverses in
+  `bits.zig` (`ForwardWriter`, `BackwardWriter`). Each layer round-trips
+  through the landed decoder, and three of them are pinned against the C's own
+  bytes: `writeDescription` reproduces `golden.zig`'s recorded
+  `FSE_writeNCount` output for two real distributions and the weights fixture,
+  `writeTree` reproduces the RFC's worked example and the recorded
+  `HUF_compressWeights` series, and `sequences_compress.write` reproduces a
+  real `zstd -5` frame's Predefined-mode section byte for byte. The encode
+  table's `step` is the C's `FSE_encodeSymbol` (the inverse of
+  `fse.State.update`: the source state, its Num_Bits, and
+  `destination - baseline`), and its start state is `FSE_initCState2`'s — the
+  smallest state whose cell holds the symbol. Three deliberate departures,
+  all on the writer's side: the tree sort keeps natural symbol order among
+  equal counts where the C's bucket sort is unstable (deterministic output);
+  the four-stream floor is errata 7297's 6 regenerated literals, not the C's
+  12-literal cost heuristic (a 10-literal four-stream section is legal and the
+  fixture carries one); and the `bits.zig` writers cap a field at 31 bits and
+  flush whole bytes only, which changes when bytes leave the accumulator but
+  never the stream's bits.
+- **Repeat_Mode is unreachable without a dictionary.** The C's fast-level
+  ladder selects Repeat only while the previous table is `FSE_repeat_valid`
+  (`zstd_compress_sequences.c:187-191`), and the only promotion to `valid` is
+  `ZSTD_dictNCountRepeat`'s, from a *dictionary's* entropy tables
+  (`zstd_compress.c:5044-5058`): a frame built without one never carries the
+  mode, and the survey's level-1 output never does either. The writer
+  implements the mode (its sections round-trip, `Resolved` models the
+  decoder's four resolutions) and the dispatch keeps the C's precondition,
+  with `State.repeat_valid` the seat a dictionary would set. Do not "fix" the
+  branch to fire: that would leave the CLI's byte class.
 - **The match finder (EQ1, EQ2).** Greedy, the C's `ZSTD_fast` shape: a
   single-slot position-only `u32` table, last writer wins
   (`zstd_fast.c:271-272`); `hashLog = min(15, windowLog + 1)`
