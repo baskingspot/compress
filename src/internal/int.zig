@@ -2,9 +2,9 @@
 //! `writeInt` helpers (README.md). A codec's `common.zig` binds its one wire
 //! endianness — little-endian for flate, gzip, and snappy; big-endian for
 //! zlib — and re-exports the names, so call sites carry no endian argument
-//! (the per-codec `common.zig` shape, with one body instead of four).
-//! zstd's decoder-only `common.zig` still carries its own copy; it is a
-//! follower for a later pass, not a second home.
+//! (the per-codec `common.zig` shape, with one body for every codec).
+//! zstd's decoder-only `common.zig` binds `little` for `readInt` alone;
+//! M5's encoder adds the `writeInt` mirror there.
 //!
 //! The operations are `std.mem`'s, bound: the width comes from `T`, the
 //! byte order from the namespace.

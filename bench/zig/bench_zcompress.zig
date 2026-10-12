@@ -40,7 +40,9 @@ const build_options = @import("build_options");
 const std_flate = std.compress.flate;
 const std_zstd = std.compress.zstd;
 
-const shapes = [_][]const u8{ "text", "random", "html", "rle", "mixed" };
+// The corpus generator's shapes (bench/zig/corpus.zig), in its enum order:
+// the entropy pair's `.zst` blobs are the CLI at level 19.
+const shapes = [_][]const u8{ "text", "random", "html", "rle", "mixed", "words", "skewlit" };
 const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
 const codecs = [_][]const u8{ "flate", "gzip", "zlib", "snappy", "zstd" };
 const directions = [_][]const u8{ "compress", "decompress" };

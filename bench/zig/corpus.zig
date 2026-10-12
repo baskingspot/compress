@@ -12,12 +12,14 @@
 //! blobs, so every implementation's decoder sees identical input bytes.
 //!
 //! The `.zst` blobs invert the family's pattern (M4 has no zstd encoder):
-//! the pinned zstd CLI (v1.5.7, the flake) at `zstd_cli_level` produces the
-//! frames — level 1 matches the harness-wide fast class — and this
-//! generator verifies each one byte-exact with our decoder
-//! (`zstd.zstd.decode.decompress`) before writing it. Every run checks the
-//! CLI's own version first (`zstd_cli_version`), so a different PATH binary
-//! fails the run rather than silently rewriting the corpus.
+//! the pinned zstd CLI (v1.5.7, the flake) at the shape's `zstdLevel`
+//! produces the frames — level 1 matches the harness-wide fast class, and
+//! the entropy shapes (`words`, `skewlit`) take level 19, whose matcher
+//! leaves the literals to the Huffman streams the level-1 rows never
+//! exercise — and this generator verifies each one byte-exact with our
+//! decoder (`zstd.zstd.decode.decompress`) before writing it. Every run
+//! checks the CLI's own version first (`zstd_cli_version`), so a different
+//! PATH binary fails the run rather than silently rewriting the corpus.
 //!
 //! Generation is correct-or-fails: after writing every file the generator
 //! checks the result against the committed anchor file by file and fails
@@ -44,6 +46,12 @@ pub const Shape = enum {
     html, // tag-heavy markup (compressible, short matches)
     rle, // single-byte run (extreme RLE)
     mixed, // structured + random (realistic-ish record batch)
+    // The entropy pair (the wave-2 corpus revision): literals-heavy shapes
+    // whose `.zst` blobs the CLI writes at level 19, so the frames carry
+    // real FSE-described Huffman tables and four-stream literals — the
+    // decode path the fast-class shapes starve.
+    words, // dictionary-word text (compressible, literals-heavy)
+    skewlit, // skewed-distribution bytes (Huffman-literals-heavy)
 };
 
 pub const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
@@ -56,11 +64,26 @@ const default_dir = "bench/corpus-gen";
 /// generated file is checked against it before anything trusts the bytes.
 const committed_sums_path = "bench/corpus/SHA256SUMS";
 
-/// The recorded zstd CLI level of the corpus's `.zst` reference blobs
-/// (src/zstd/README.md, "Benchmarks"). The CLI's own default is 3; level 1
-/// is the fast class every other arm's rows measure (zc `.fast`,
+/// The recorded zstd CLI level of the fast-class shapes' `.zst` reference
+/// blobs (src/zstd/README.md, "Benchmarks"). The CLI's own default is 3;
+/// level 1 is the fast class every other arm's rows measure (zc `.fast`,
 /// klauspost/libdeflate/zlib-ng level 1).
 const zstd_cli_level = "-1";
+
+/// The level the entropy shapes' `.zst` blobs generate at: level 19's
+/// matcher spends itself on matches a dictionary-word or skewed-literal
+/// shape barely offers, so the literals go out Huffman-coded under a real
+/// FSE-described table — the entropy path the fleet's level-1 rows are
+/// cold on.
+const zstd_cli_level_entropy = "-19";
+
+/// The zstd CLI level a shape's `.zst` blob generates at.
+fn zstdLevel(shape: Shape) []const u8 {
+    return switch (shape) {
+        .words, .skewlit => zstd_cli_level_entropy,
+        else => zstd_cli_level,
+    };
+}
 
 /// The pinned zstd CLI version the `.zst` reference blobs come from (v1.5.7,
 /// the flake — src/zstd/README.md, "Benchmarks"): every run checks
@@ -88,8 +111,50 @@ pub fn makeShape(shape: Shape, buf: []u8) void {
             var rng: DefaultPrng = .init(0x5A4BEEF);
             for (buf, 0..) |*b, i| b.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(i)));
         },
+        .words => {
+            // Dictionary-word text: a small fixed vocabulary, PRNG-chosen
+            // word by word and space-joined. The words repeat but the
+            // sequences rarely do, so the compressor's wins come from the
+            // literals' skew, not long matches.
+            var rng: DefaultPrng = .init(0xD1C710);
+            var i: usize = 0;
+            while (i < buf.len) {
+                const word = dictionary[rng.random().uintLessThan(usize, dictionary.len)];
+                const n = @min(word.len, buf.len - i);
+                fastmem.copy(u8, buf[i..][0..n], word[0..n]);
+                i += n;
+                if (i < buf.len) {
+                    buf[i] = ' ';
+                    i += 1;
+                }
+            }
+        },
+        .skewlit => {
+            // Skewed literals: uniform bytes squared into a 64-value
+            // range, so the distribution piles up at low values (12.5% of
+            // bytes are 0) — ~5.6 bits/byte of entropy, compressible
+            // almost only through the literals' entropy coding.
+            var rng: DefaultPrng = .init(0x5CEBE1);
+            for (buf) |*b| {
+                const x: u16 = rng.random().int(u8);
+                b.* = @truncate(x * x >> 10);
+            }
+        },
     }
 }
+
+/// The `words` shape's vocabulary: 64 common English words, fixed, so the
+/// shape is the same bytes on every host.
+const dictionary = [_][]const u8{
+    "the",  "of",    "and",  "a",     "to",    "in",    "is",   "you",
+    "that", "it",    "he",   "was",   "for",   "on",    "are",  "as",
+    "with", "his",   "they", "at",    "be",    "this",  "have", "from",
+    "or",   "one",   "had",  "by",    "word",  "but",   "not",  "what",
+    "all",  "were",  "we",   "when",  "your",  "can",   "said", "there",
+    "use",  "an",    "each", "which", "she",   "do",    "how",  "their",
+    "if",   "will",  "up",   "other", "about", "out",   "many", "then",
+    "them", "these", "so",   "some",  "her",   "would", "make", "like",
+};
 
 fn fill(buf: []u8, phrase: []const u8) void {
     var i: usize = 0;
@@ -134,7 +199,7 @@ pub fn main(init: std.process.Init) !void {
             try writeBlob(io, arena, dir, &sums, base_name, "gz", target, zcompress.gzip.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "zz", target, zcompress.zlib.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, zcompress.snappy.encode.compressBlock(raw, target));
-            try writeZstdBlob(io, arena, dir, dir_path, base_name, raw);
+            try writeZstdBlob(io, arena, dir, dir_path, shape, base_name, raw);
         }
     }
 
@@ -188,22 +253,23 @@ fn writeBlob(
     try writeFile(io, arena, dir, sums, blob_name, target[0..n]);
 }
 
-/// Compress `raw` with the pinned zstd CLI at `zstd_cli_level` and write
-/// the frame as `<base_name>.zst` — but only after OUR decoder reproduces
-/// the raw bytes exactly (the inverse verification of the family's pattern:
-/// the reference tool encodes, our decoder is the gate). The manifest entry
-/// is added by the sorted `.zst` pass in main.
+/// Compress `raw` with the pinned zstd CLI at the shape's `zstdLevel` and
+/// write the frame as `<base_name>.zst` — but only after OUR decoder
+/// reproduces the raw bytes exactly (the inverse verification of the
+/// family's pattern: the reference tool encodes, our decoder is the gate).
+/// The manifest entry is added by the sorted `.zst` pass in main.
 fn writeZstdBlob(
     io: Io,
     arena: Allocator,
     dir: Io.Dir,
     dir_path: []const u8,
+    shape: Shape,
     base_name: []const u8,
     raw: []const u8,
 ) !void {
     const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, base_name });
     const result = try std.process.run(arena, io, .{
-        .argv = &.{ "zstd", "-q", "--no-progress", zstd_cli_level, "-c", "--", path },
+        .argv = &.{ "zstd", "-q", "--no-progress", zstdLevel(shape), "-c", "--", path },
     });
     switch (result.term) {
         .exited => |code| if (code != 0) {

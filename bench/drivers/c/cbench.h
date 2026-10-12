@@ -39,7 +39,9 @@
 #define CBENCH_DIRECTION_COUNT 2
 #endif
 
-static const char *const shapes[] = {"text", "random", "html", "rle", "mixed"};
+/* The corpus generator's shape set (bench/zig/corpus.zig): the entropy
+ * pair's .zst blobs are the pinned CLI at level 19. */
+static const char *const shapes[] = {"text", "random", "html", "rle", "mixed", "words", "skewlit"};
 static const size_t shape_sizes[] = {32 * 1024, 64 * 1024};
 static const char *const codecs[] = CBENCH_CODECS;
 static const char *const directions[] = CBENCH_DIRECTIONS;

@@ -62,6 +62,13 @@ fn round(acc: u64, lane: u64) u64 {
     return b *% prime_1;
 }
 
+const U7X4 = @Vector(4, u7);
+const U6X4 = @Vector(4, u6);
+
+/// The accumulator's lane vector.
+const LaneVec = @Vector(4, u64);
+const Lane = [4]u64;
+
 /// The four-lane accumulator, one stripe (32 bytes) at a time. The lanes
 /// are the algorithm's own geometry — four independent wrapping
 /// multiply/rotate chains — so the access pattern IS parallel lanes; the
@@ -90,7 +97,7 @@ const use_vector_lanes = builtin.cpu.arch == .x86_64 and
 
 /// The four-lane accumulator, one stripe (32 bytes) at a time.
 const ScalarAccumulator = struct {
-    acc: [4]u64,
+    acc: Lane,
 
     fn init(seed_value: u64) ScalarAccumulator {
         return .{
@@ -134,8 +141,8 @@ const ScalarAccumulator = struct {
         return i;
     }
 
-    inline fn foldStripe(acc: *[4]u64, stripe: *const [32]u8) void {
-        var lane: [4]u64 = undefined;
+    inline fn foldStripe(acc: *Lane, stripe: *const [32]u8) void {
+        var lane: Lane = undefined;
         inline for (0..4) |j| lane[j] = readInt(u64, stripe[j * 8 ..][0..8]);
         // Batched, not per-lane interleaved: barriers between the
         // loads cost real throughput (measured 18.1 -> 14.8 GB/s).
@@ -198,12 +205,11 @@ const VectorAccumulator = struct {
 
     fn merge(self: *VectorAccumulator) u64 {
         // rotl per lane by 1, 7, 12, 18, then the scalar merge chain.
-        const u7x4 = @Vector(4, u7);
-        const rots: u7x4 = .{ 1, 7, 12, 18 };
-        const rotated = (self.lanes << @as(@Vector(4, u6), @intCast(rots))) |
-            (self.lanes >> @as(@Vector(4, u6), @intCast(@as(u7x4, @splat(64)) - rots)));
+        const rots: U7X4 = .{ 1, 7, 12, 18 };
+        const rotated = (self.lanes << @as(U6X4, @intCast(rots))) |
+            (self.lanes >> @as(U6X4, @intCast(@as(U7X4, @splat(64)) - rots)));
         var acc = @reduce(.Add, rotated);
-        const arr: [4]u64 = self.lanes;
+        const arr: Lane = self.lanes;
         inline for (0..4) |k| acc = mergeAccumulator(acc, arr[k]);
         return acc;
     }
@@ -215,9 +221,6 @@ const VectorAccumulator = struct {
     }
 };
 
-/// The accumulator's lane vector.
-const LaneVec = @Vector(4, u64);
-
 /// The four lanes of one 32-byte stripe; the wire lanes are little-endian,
 /// so a big-endian host swaps within each lane.
 inline fn loadStripe(stripe: *const [32]u8) LaneVec {
@@ -227,9 +230,8 @@ inline fn loadStripe(stripe: *const [32]u8) LaneVec {
 
 /// The vector round: `rotl(acc + lane * P2, 31) * P1` on all four lanes.
 inline fn roundVec(acc: LaneVec, lanes: LaneVec) LaneVec {
-    const u6x4 = @Vector(4, u6);
     const a = acc +% lanes *% @as(LaneVec, @splat(prime_2));
-    const b = (a << @as(u6x4, @splat(31))) | (a >> @as(u6x4, @splat(33)));
+    const b = (a << @as(U6X4, @splat(31))) | (a >> @as(U6X4, @splat(33)));
     return b *% @as(LaneVec, @splat(prime_1));
 }
 

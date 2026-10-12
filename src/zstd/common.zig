@@ -7,14 +7,12 @@
 //! argument (the gzip/zlib `common.zig` shape).
 //!
 //! M4 is decoder-only, so `readInt` is the whole surface; M5's encoder adds
-//! the `writeInt` mirror.
+//! the `writeInt` mirror. The body is `internal.int`'s, bound here.
 
-const mem = @import("std").mem;
+const internal = @import("../internal/root.zig");
 
 /// Reads an integer from memory with bit count specified by T.
 /// The bit count of T must be evenly divisible by 8.
 /// This function cannot fail and cannot cause undefined behavior.
 /// Forces little-endianness.
-pub inline fn readInt(comptime T: type, buffer: *const [@divExact(@typeInfo(T).int.bits, 8)]u8) T {
-    return mem.readInt(T, buffer, .little);
-}
+pub const readInt = internal.int.little.readInt;

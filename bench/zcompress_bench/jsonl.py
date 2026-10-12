@@ -16,7 +16,10 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 SCHEMA = 1
-SHAPES = ("text", "random", "html", "rle", "mixed")
+# The corpus generator's shape set (bench/zig/corpus.zig), in its order —
+# the entropy pair's `.zst` blobs are the pinned CLI at level 19. A corpus
+# revision extends this list and the anchor in the same commit.
+SHAPES = ("text", "random", "html", "rle", "mixed", "words", "skewlit")
 SIZES = (32768, 65536)
 SHA256_HEX = r"^[0-9a-f]{64}$"
 
@@ -57,7 +60,7 @@ class Meta(Record):
             raise ValueError("Duplicate implementation in meta")
         expected = {f"{shape}-{size}" for shape in SHAPES for size in SIZES}
         if set(self.corpus) != expected:
-            raise ValueError("Meta corpus must hash the ten raw corpus files")
+            raise ValueError("Meta corpus must hash exactly the anchor's raw corpus files")
         for name, digest in self.corpus.items():
             if not re.fullmatch(SHA256_HEX, digest):
                 raise ValueError(f"Corpus hash for {name} is not SHA-256 hex")
@@ -69,7 +72,7 @@ class Sample(Record):
     case: str
     codec: Literal["flate", "gzip", "zlib", "snappy", "zstd"]
     direction: Literal["compress", "decompress"]
-    shape: Literal["text", "random", "html", "rle", "mixed"]
+    shape: Literal["text", "random", "html", "rle", "mixed", "words", "skewlit"]
     size: int
     impl: str = Field(min_length=1)
     sample: int = Field(ge=0)

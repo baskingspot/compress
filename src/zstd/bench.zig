@@ -17,13 +17,17 @@ const bench = @import("benchmark");
 const zstd = @import("zcompress").zstd;
 
 /// The corpus shapes, mirroring the fleet corpus generator
-/// (bench/zig/corpus.zig) and the sibling codec benches.
+/// (bench/zig/corpus.zig) and the sibling codec benches. The entropy pair
+/// (`words`, `skewlit`) generates its `.zst` blobs at CLI level 19 — the
+/// Huffman-literals rows.
 const Shape = enum {
     text,
     random,
     html,
     rle,
     mixed,
+    words,
+    skewlit,
 };
 
 /// The two corpus sizes.
@@ -62,7 +66,7 @@ fn readCorpus(allocator: Allocator, io: Io, name: []const u8) ![]u8 {
 /// the fleet driver's own gate), then decoded repeatedly.
 pub fn benchmarkZstdDecompress(b: *bench.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
-        inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
+        inline for (std.enums.values(Shape)) |shape| {
             _ = try b.run(caseName(size, shape), struct {
                 fn run(bb: *bench.B) !void {
                     var threaded: Io.Threaded = .init_single_threaded;

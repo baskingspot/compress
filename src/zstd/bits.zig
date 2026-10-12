@@ -32,6 +32,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
+const readInt = @import("common.zig").readInt;
+
 /// The most bits one narrow read takes: a 9-bit FSE accuracy log, an 11-bit
 /// Huffman code, or a 9-bit `§4.1.1` Table 20 field (`2 * threshold - 1` is
 /// at most `2 * 256 - 1`).
@@ -189,7 +191,7 @@ pub const BackwardReader = struct {
         // the stream's start a partial load shifted to the top keeps the
         // same math, and the zero fill below is the read-as-zero rule.
         const window: u64 = if (byte >= 7)
-            std.mem.readInt(u64, self.source[byte - 7 ..][0..8], .little)
+            readInt(u64, self.source[byte - 7 ..][0..8])
         else blk: {
             var w: u64 = 0;
             for (self.source[0 .. byte + 1], 0..) |b, j| w |= @as(u64, b) << @intCast(8 * j);
@@ -246,6 +248,144 @@ pub const BackwardReader = struct {
         return self.remaining_bits == 0;
     }
 };
+
+/// The lean backward reader for the Huffman streams (`§4.2.2`): the same
+/// exact-position contract as `BackwardReader`, in the reference's
+/// `BIT_DStream` shape — the container is the window's bytes *unshifted*
+/// and `used` counts the window bits already consumed, so a peek is two
+/// shifts and a skip is one add; the reload walks the window toward the
+/// stream's start and is the caller's cadence, not a per-peek branch.
+///
+/// The Huffman loops reload once per batch of five symbols (five 11-bit
+/// codes = 55 bits, always under a fresh window's 57-64), so the batch's
+/// peeks and skips carry no checks at all. The measured difference against
+/// `BackwardReader`'s top-aligned container (whose skip shifts the
+/// container, serializing the next peek behind it): 0.93 vs 1.34 ns/symbol
+/// on the level-19 literals streams (neoverse_v3, the corpus's `skewlit`
+/// shape's streams). The FSE layers keep
+/// `BackwardReader` (its wide peeks and auto-refill are the shape the
+/// sequences loop is tuned around).
+pub const BackwardFastReader = struct {
+    source: []const u8,
+    /// The window's lowest byte in the stream; the container holds
+    /// `source[pos..][0..8]` little-endian, zero-padded past the stream's
+    /// end (the padding above the final 1 bit reads as zero, `§4.2.2`).
+    pos: usize,
+    /// The window's bytes, little-endian; the next unread bit is bit
+    /// `63 - used`.
+    container: u64,
+    /// Window bits consumed from the top. May reach 64 only at the stream's
+    /// start (the whole stream held); past it reads are the caller's bug or
+    /// a corrupt stream the end checks catch.
+    used: u32,
+    /// The bits not yet consumed; negative once a read ran past the
+    /// stream's start. The exact end contract's counter.
+    remaining_bits: i32,
+
+    /// The last byte's highest set bit is the final 1 bit (`§4.2.2`); a
+    /// last byte of zero has no start bit at all.
+    pub fn init(source: []const u8) error{MissingStartBit}!BackwardFastReader {
+        if (source.len == 0) return error.MissingStartBit;
+        const last = source[source.len - 1];
+        if (last == 0) return error.MissingStartBit;
+        const useful: i32 = @intCast(8 * (source.len - 1) + highBit(last));
+        const pos = source.len -| 8;
+        // The window's top is the last byte's bit 7 (loadWindow top-aligns
+        // a short stream); skip the zero padding above the final 1 bit and
+        // the flag itself.
+        const used: u32 = 8 - @as(u32, highBit(last)); // padding + flag
+        return .{
+            .source = source,
+            .pos = pos,
+            .container = loadWindow(source, pos),
+            .used = used,
+            .remaining_bits = useful,
+        };
+    }
+
+    /// The bits not yet consumed; negative once a read ran past the
+    /// stream's start.
+    pub fn remainingBits(self: BackwardFastReader) i32 {
+        return self.remaining_bits;
+    }
+
+    /// A read ran past the stream's start (`§4.2.1.2`'s overflow).
+    pub fn overran(self: BackwardFastReader) bool {
+        return self.remaining_bits < 0;
+    }
+
+    /// Every bit consumed and none left over: the exact end `§4.2.2`
+    /// demands.
+    pub fn isConsumed(self: BackwardFastReader) bool {
+        return self.remaining_bits == 0;
+    }
+
+    /// A reload's guarantee: with at least `batch_bits` unconsumed, a
+    /// `reload` leaves at least 57 window bits live (the window refills to
+    /// 64 minus the sub-byte remainder), and a batch of reads summing under
+    /// `batch_bits` never needs a check.
+    pub const batch_bits: i32 = 55;
+
+    /// Walk the window toward the stream's start past the consumed bytes.
+    pub fn reload(self: *BackwardFastReader) void {
+        const drop = @min(self.used >> 3, self.pos);
+        self.pos -= drop;
+        self.used -= drop * 8;
+        self.container = loadWindow(self.source, self.pos);
+    }
+
+    /// The next `count` bits without consuming them, the batch form: the
+    /// caller's `reload` covered the whole batch, so no check runs here.
+    /// The first bit read is the value's most significant bit.
+    pub fn peekFast(self: *const BackwardFastReader, count: u6) u16 {
+        assert(count >= 1);
+        assert(count <= max_read_bits);
+        assert(self.used + count <= 64);
+        return @intCast((self.container << @intCast(self.used)) >> @intCast(@as(u7, 64) - count));
+    }
+
+    /// Consume `count` bits a `peekFast` returned: one add per counter.
+    pub fn skipFast(self: *BackwardFastReader, count: u6) void {
+        assert(count <= max_read_bits);
+        self.used += count;
+        self.remaining_bits -= count;
+    }
+
+    /// The next `count` bits without consuming them, the careful form for
+    /// the stream's last partial batch: reloads when the window cannot
+    /// cover the read. Past the stream's start the window is the whole
+    /// stream and reads zero-fill — the corrupt stream's symbols come out
+    /// of the padding and the end checks catch the overrun, exactly as
+    /// `BackwardReader`'s; the clamp only keeps the shift defined past it.
+    pub fn peekBits(self: *BackwardFastReader, count: u5) u16 {
+        assert(count >= 1);
+        assert(count <= max_read_bits);
+        if (self.used > 64 - @as(u32, max_read_bits)) self.reload();
+        // The whole stream held and drained: the read-as-zero rule
+        // (`§4.2.1.2`), exact — the differential sweep against
+        // `BackwardReader` pins it.
+        if (self.used >= 64) return 0;
+        return @intCast((self.container << @intCast(self.used)) >> @intCast(@as(u7, 64) - count));
+    }
+
+    /// Consume `count` bits a `peekBits` returned.
+    pub fn skipBits(self: *BackwardFastReader, count: u5) void {
+        assert(count <= max_read_bits);
+        self.used += count;
+        self.remaining_bits -= count;
+    }
+};
+
+/// The 8 stream bytes at `pos`, little-endian. A short stream's window is
+/// top-aligned: the bytes past the stream's end (above the final 1 bit) are
+/// the zero padding `§4.2.2` gives them, and the bytes below the stream's
+/// start read as the zero fill an overrun reads.
+inline fn loadWindow(source: []const u8, pos: usize) u64 {
+    if (pos + 8 <= source.len) return readInt(u64, source[pos..][0..8]);
+    var window: u64 = 0;
+    for (source[pos..], 0..) |b, j| window |= @as(u64, b) << @intCast(8 * j);
+    return window << @intCast(8 * (8 - (source.len - pos)));
+}
 
 /// `(1 << count) - 1`, for `count` up to `max_read_bits`.
 fn mask(count: u5) u16 {
@@ -342,4 +482,65 @@ test "BackwardReader: reads past the stream's start are zero and overrun" {
     try testing.expectEqual(@as(u16, 0b0_0000_0000), reader.readBits(10));
     try testing.expectEqual(@as(i32, -13), reader.remainingBits());
     try testing.expect(!reader.isConsumed());
+}
+
+test "BackwardFastReader: the lean reader agrees with BackwardReader bit for bit" {
+    // The differential sweep: pseudo-random streams (valid start bit, every
+    // length class across the 8-byte window), pseudo-random read widths —
+    // both readers must return the same bits, the same remaining count, and
+    // the same overrun/consumed verdicts, past the stream's start included
+    // (the read-as-zero rule and the exact end contract, §4.2.2).
+    var rng: std.Random.DefaultPrng = .init(0xB17E);
+    var source: [40]u8 = undefined;
+    for (0..200) |_| {
+        const len = rng.random().uintLessThan(usize, source.len) + 1;
+        rng.random().bytes(source[0..len]);
+        // A nonzero last byte: the start bit both readers anchor on.
+        source[len - 1] |= @as(u8, 1) << rng.random().int(u3);
+        var slow = try BackwardReader.init(source[0..len]);
+        var fast = try BackwardFastReader.init(source[0..len]);
+        try testing.expectEqual(slow.remainingBits(), fast.remainingBits());
+        // Reads run well past the start: the overrun side is the contract's
+        // interesting half.
+        while (true) {
+            const count = rng.random().uintLessThan(u5, max_read_bits) + 1;
+            try testing.expectEqual(slow.peekBits(count), fast.peekBits(count));
+            slow.skipBits(count);
+            fast.skipBits(count);
+            try testing.expectEqual(slow.remainingBits(), fast.remainingBits());
+            try testing.expectEqual(slow.overran(), fast.overran());
+            if (slow.remainingBits() < -32) break;
+        }
+        try testing.expectEqual(slow.isConsumed(), fast.isConsumed());
+    }
+}
+
+test "BackwardFastReader: the batch cadence matches the careful path" {
+    // §4.2.2 — a stream decoded in reload-separated batches must equal the
+    // same stream decoded carefully, bits and end position alike.
+    var rng: std.Random.DefaultPrng = .init(0xBA7C4);
+    var source: [64]u8 = undefined;
+    for (0..100) |_| {
+        const len = rng.random().uintLessThan(usize, source.len) + 1;
+        rng.random().bytes(source[0..len]);
+        source[len - 1] |= @as(u8, 1) << rng.random().int(u3);
+        var batched = try BackwardFastReader.init(source[0..len]);
+        var careful = try BackwardFastReader.init(source[0..len]);
+        while (batched.remainingBits() >= BackwardFastReader.batch_bits) {
+            batched.reload();
+            for (0..5) |_| {
+                const count = rng.random().uintLessThan(u5, max_read_bits) + 1;
+                try testing.expectEqual(careful.peekBits(count), batched.peekFast(count));
+                careful.skipBits(count);
+                batched.skipFast(count);
+            }
+        }
+        while (!careful.overran()) {
+            const count = rng.random().uintLessThan(u5, max_read_bits) + 1;
+            try testing.expectEqual(careful.peekBits(count), batched.peekBits(count));
+            careful.skipBits(count);
+            batched.skipBits(count);
+        }
+        try testing.expectEqual(careful.remainingBits(), batched.remainingBits());
+    }
 }

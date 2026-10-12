@@ -279,21 +279,71 @@ pub fn buildTable(tree: *const Tree) DecodeTable {
     return table;
 }
 
+/// The batched bulk step: identical to the safe peek/decode/skip, over the
+/// reader's fast paths — the caller's `reload` covered the whole batch
+/// (`bits.BackwardFastReader.batch_bits`: five symbols take at most 55
+/// bits), so the peek's refill check and the skip's held check are provably
+/// dead inside the batch and drop out (the reference's
+/// `BIT_lookBitsFast`/`BIT_skipBits` cadence).
+inline fn decodeSymbolFast(
+    table: *const DecodeTable,
+    reader: *bits.BackwardFastReader,
+    byte: *u8,
+) void {
+    const cell = table.entries[reader.peekFast(table.max_bits)];
+    reader.skipFast(cell.num_bits);
+    byte.* = cell.symbol;
+}
+
+/// The careful step: the full checks, for the stream's last partial batch.
+inline fn decodeSymbolSafe(
+    table: *const DecodeTable,
+    reader: *bits.BackwardFastReader,
+    byte: *u8,
+) void {
+    const cell = table.entries[reader.peekBits(table.max_bits)];
+    reader.skipBits(cell.num_bits);
+    byte.* = cell.symbol;
+}
+
+/// The per-stream end contract (`§4.2.2`): "If a bitstream is not entirely
+/// and exactly consumed, hence reaching exactly its beginning position with
+/// all bits consumed, the decoding process is considered faulty."
+inline fn checkConsumed(reader: *const bits.BackwardFastReader) Error!void {
+    if (reader.overran()) return error.InvalidBitStream;
+    if (!reader.isConsumed()) return error.BitstreamNotConsumed;
+}
+
 /// Decode one Huffman-coded stream backwards into `target` (`§4.2.2`):
 /// exactly `target.len` symbols, and then the stream must be exactly
 /// consumed.
 pub fn decodeStream(table: *const DecodeTable, source: []const u8, target: []u8) Error!void {
-    var reader: bits.BackwardReader = try .init(source);
-    for (target) |*byte| {
-        const cell = table.entries[reader.peekBits(table.max_bits)];
-        reader.skipBits(cell.num_bits);
-        byte.* = cell.symbol;
+    return decodeStreamImpl(table, source, target);
+}
+
+// The body stays outlined: the batched loop is a few hundred instructions,
+// and keeping it out of the block-decode chain's inlining budget held the
+// literals win steadier across builds (measured on the entropy rows).
+noinline fn decodeStreamImpl(
+    table: *const DecodeTable,
+    source: []const u8,
+    target: []u8,
+) Error!void {
+    var reader: bits.BackwardFastReader = try .init(source);
+    var pos: usize = 0;
+    // The batched bulk: one reload per five symbols; a stream with fewer
+    // than `batch_bits` left finishes on the careful path.
+    while (pos + 5 <= target.len and
+        reader.remainingBits() >= bits.BackwardFastReader.batch_bits)
+    {
+        reader.reload();
+        inline for (0..5) |_| {
+            decodeSymbolFast(table, &reader, &target[pos]);
+            pos += 1;
+        }
     }
-    // "If a bitstream is not entirely and exactly consumed, hence reaching
-    // exactly its beginning position with all bits consumed, the decoding
-    // process is considered faulty."
-    if (reader.overran()) return error.InvalidBitStream;
-    if (!reader.isConsumed()) return error.BitstreamNotConsumed;
+    for (target[pos..]) |*byte| decodeSymbolSafe(table, &reader, byte);
+    try checkConsumed(&reader);
 }
 
 /// The four-stream layout's decode (`§3.1.1.3.1.6`): four independent
@@ -305,10 +355,22 @@ pub fn decodeStream(table: *const DecodeTable, source: []const u8, target: []u8)
 /// window, table lookup, skip — is serial within one stream, so interleaving
 /// the four independent streams fills the latency (the reference's
 /// HUF_decompress4X interleave; measured ~2x on literals-heavy blocks over
-/// decoding the streams serially). Each stream's bulk runs in the fused
-/// loop; the first three streams' tails past the fourth's length decode
-/// serially, and every stream's exact-consumption check is unchanged.
+/// decoding the streams serially). The bulk runs in batches of five symbols
+/// per stream per reload (the `decodeSymbolFast` cadence), all four streams
+/// in lockstep — one symbol per peek, so the streams never desynchronize;
+/// the tail past the fourth stream's length and the last partial batch run
+/// the careful path, and every stream's exact-consumption check is
+/// unchanged.
 pub fn decodeFourStreams(
+    table: *const DecodeTable,
+    sources: *const [4][]const u8,
+    targets: *const [4][]u8,
+) Error!void {
+    return decodeFourStreamsImpl(table, sources, targets);
+}
+
+// Outlined for the same reason as `decodeStreamImpl`.
+noinline fn decodeFourStreamsImpl(
     table: *const DecodeTable,
     sources: *const [4][]const u8,
     targets: *const [4][]u8,
@@ -316,32 +378,35 @@ pub fn decodeFourStreams(
     assert(targets[0].len >= targets[3].len);
     assert(targets[1].len >= targets[3].len);
     assert(targets[2].len >= targets[3].len);
-    var readers: [4]bits.BackwardReader = undefined;
-    for (sources, 0..) |source, j| readers[j] = try .init(source);
+    var readers: [4]bits.BackwardFastReader = undefined;
+    inline for (0..4) |j| readers[j] = try .init(sources[j]);
 
-    // The fused bulk: `targets[3].len` rounds of one symbol per stream. A
-    // two-symbols-per-stream unroll measured a wash (the per-stream chains
-    // stay serial; the four streams already fill the pipe).
-    for (0..targets[3].len) |i| {
+    // The fused bulk, batched: while the shortest target owes five symbols
+    // and every stream still has a batch's bits, one reload per stream per
+    // five symbols. A stream under `batch_bits` drops the whole round
+    // to the careful path — a stream's bits run out only within its last
+    // bytes, so the careful finish is a handful of symbols.
+    var i: usize = 0;
+    bulk: while (i + 5 <= targets[3].len) {
         inline for (0..4) |j| {
-            const cell = table.entries[readers[j].peekBits(table.max_bits)];
-            readers[j].skipBits(cell.num_bits);
-            targets[j][i] = cell.symbol;
+            if (readers[j].remainingBits() < bits.BackwardFastReader.batch_bits) break :bulk;
         }
+        inline for (0..4) |j| readers[j].reload();
+        inline for (0..5) |_| {
+            inline for (0..4) |j| decodeSymbolFast(table, &readers[j], &targets[j][i]);
+            i += 1;
+        }
+    }
+    // The last partial batch, still in lockstep.
+    while (i < targets[3].len) : (i += 1) {
+        inline for (0..4) |j| decodeSymbolSafe(table, &readers[j], &targets[j][i]);
     }
     // The tails: streams 1-3 owe at most 3 more symbols each.
     for (0..3) |j| {
-        for (targets[j][targets[3].len..]) |*byte| {
-            const cell = table.entries[readers[j].peekBits(table.max_bits)];
-            readers[j].skipBits(cell.num_bits);
-            byte.* = cell.symbol;
-        }
+        for (targets[j][targets[3].len..]) |*byte| decodeSymbolSafe(table, &readers[j], byte);
     }
     // Per stream, the same end contract as `decodeStream`, in stream order.
-    for (&readers) |*reader| {
-        if (reader.overran()) return error.InvalidBitStream;
-        if (!reader.isConsumed()) return error.BitstreamNotConsumed;
-    }
+    for (&readers) |*reader| try checkConsumed(reader);
 }
 
 /// The index of the highest set bit; `value` must be nonzero.

@@ -31,7 +31,9 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
-var shapes = []string{"text", "random", "html", "rle", "mixed"}
+// The corpus generator's shape set (bench/zig/corpus.zig); the entropy
+// pair's .zst blobs are the pinned CLI at level 19.
+var shapes = []string{"text", "random", "html", "rle", "mixed", "words", "skewlit"}
 var sizes = []int{32 * 1024, 64 * 1024}
 var codecs = []string{"flate", "gzip", "zlib", "snappy", "zstd"}
 var directions = []string{"compress", "decompress"}
