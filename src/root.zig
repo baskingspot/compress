@@ -7,6 +7,12 @@
 
 const std = @import("std");
 
+/// brotli (RFC 7932) decoder: one-shot `decode.decompress` and the streaming
+/// `Reader`. The decoder lands in layers — the bit reader and the stream
+/// header and meta-block ladder are in place, and the public surface follows
+/// with the layers that compose it. API: `src/brotli/README.md`. Format:
+/// docs/research/specs/rfc7932-brotli.txt.
+pub const brotli = @import("brotli/root.zig");
 /// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
 /// and the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
 /// allocation. API: `src/flate/README.md`. Format:
@@ -34,6 +40,7 @@ pub const zlib = @import("zlib/root.zig");
 pub const zstd = @import("zstd/root.zig");
 
 test {
+    _ = brotli;
     _ = flate;
     _ = snappy;
     _ = gzip;
