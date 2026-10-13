@@ -27,6 +27,8 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const bits = @import("bits.zig");
+const common = @import("common.zig");
+const readInt = common.readInt;
 const fse_compress = @import("fse_compress.zig");
 const golden = @import("golden.zig");
 const huff0 = @import("huff0.zig");
@@ -71,14 +73,42 @@ pub const Histogram = struct {
     max_symbol: u16 = 0,
     largest: u32 = 0,
 
-    /// Count `source`'s bytes.
+    /// `HIST_FAST_THRESHOLD` (`hist.c:152`): below it the simple count wins
+    /// (the parallel lanes' 4-KiB zeroing would cost more than the count).
+    const fast_threshold = 1500;
+
+    /// Count `source`'s bytes — the C's `HIST_count` shape
+    /// (`hist.c:33-64,68-144`): the counting itself is branch-free, with
+    /// `max_symbol` and `largest` derived in one pass over the 256 counts
+    /// afterwards; at or above the threshold four parallel lanes break the
+    /// store-to-load dependency a repeated byte would otherwise serialize.
     pub fn count(source: []const u8) Histogram {
         var histogram: Histogram = .{};
-        for (source) |byte| {
-            histogram.counts[byte] += 1;
-            if (byte > histogram.max_symbol) histogram.max_symbol = byte;
-            if (histogram.counts[byte] > histogram.largest) {
-                histogram.largest = histogram.counts[byte];
+        if (source.len == 0) return histogram;
+        if (source.len < fast_threshold) {
+            for (source) |byte| histogram.counts[byte] += 1;
+        } else {
+            var lanes: [4][symbol_count_max]u32 = @splat(@splat(0));
+            var index: usize = 0;
+            while (index + 16 <= source.len) : (index += 16) {
+                inline for (0..4) |word_index| {
+                    const word = readInt(u32, source[index + 4 * word_index ..][0..4]);
+                    lanes[0][@as(u8, @truncate(word))] += 1;
+                    lanes[1][@as(u8, @truncate(word >> 8))] += 1;
+                    lanes[2][@as(u8, @truncate(word >> 16))] += 1;
+                    lanes[3][@as(u8, @truncate(word >> 24))] += 1;
+                }
+            }
+            while (index < source.len) : (index += 1) lanes[0][source[index]] += 1;
+            for (0..symbol_count_max) |symbol| {
+                histogram.counts[symbol] = lanes[0][symbol] + lanes[1][symbol] +
+                    lanes[2][symbol] + lanes[3][symbol];
+            }
+        }
+        for (histogram.counts, 0..) |count_of, symbol| {
+            if (count_of != 0) {
+                histogram.max_symbol = @intCast(symbol);
+                if (count_of > histogram.largest) histogram.largest = count_of;
             }
         }
         return histogram;
@@ -493,8 +523,14 @@ fn writeCompressedWeights(target: []u8, weights: []const u8) fse_compress.Error!
 /// then the single 1-bit end mark and the zero fill
 /// (`HUF_compress1X_usingCTable_internal`, `huf_compress.c:1053-1155`).
 /// Returns the stream's length.
+///
+/// The loop runs on a `bits.BackwardAccumulator`: the writer's fields would
+/// spill to the stack across its flush call (a store-load round trip per
+/// symbol), so the hot loop carries the accumulator in registers instead.
+/// The emitted bytes are the writer's, exactly.
 pub fn writeStream(target: []u8, source: []const u8, table: *const Table) Error!usize {
-    var writer = bits.BackwardWriter.init(target);
+    var accumulator: bits.BackwardAccumulator = .init;
+    var written: usize = 0;
     var index = source.len;
     while (index > 0) {
         index -= 1;
@@ -502,10 +538,9 @@ pub fn writeStream(target: []u8, source: []const u8, table: *const Table) Error!
         // Every literal must have a code: the caller built the tree from this
         // very source.
         assert(code.len > 0);
-        try writer.writeBits(code.bits, code.len);
+        try accumulator.add(target, &written, code.bits, code.len);
     }
-    try writer.close();
-    return writer.bytesWritten();
+    return accumulator.close(target, &written);
 }
 
 /// Write the four-stream layout (`§3.1.1.3.1.6`,

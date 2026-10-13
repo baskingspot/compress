@@ -135,7 +135,7 @@ that step), the tiny class's 100- and 1024-byte text, a
 600 KB text frame (windowed, five blocks), and the scan-exit input (below).
 The CLI's verdicts on all twelve: `zstd -d -c` byte-exact, `zstd -t` clean,
 CPython 3.14 `compression.zstd` byte-exact. A byte comparison outside those
-sets can still hit the deliberate differences (TE8, TE9, TE11 below).
+sets can still hit the deliberate differences (TE8, TE11 below).
 
 - **The entropy writers (landed).** `fse_compress.zig`, `huff0_compress.zig`,
   `sequences_compress.zig`, `literals_compress.zig`, and the writer inverses in
@@ -156,7 +156,13 @@ sets can still hit the deliberate differences (TE8, TE9, TE11 below).
   12-literal cost heuristic (a 10-literal four-stream section is legal and the
   fixture carries one); and the `bits.zig` writers cap a field at 31 bits and
   flush whole bytes only, which changes when bytes leave the accumulator but
-  never the stream's bits.
+  never the stream's bits. The two hot bitstream loops (the Huffman literals
+  streams, the sequences bitstream) run on `bits.BackwardAccumulator`, the
+  register-resident twin: the same flush discipline, but the writer struct's
+  fields no longer spill to the stack across a flush call per field
+  (measured: the Huffman stream loop dropped from a byte-at-a-time flush and
+  a store-load round trip per symbol to one 8-byte store per flush, ~2.5x on
+  the literals-heavy rows).
 - **Repeat_Mode is unreachable without a dictionary.** The C's fast-level
   ladder selects Repeat only while the previous table is `FSE_repeat_valid`
   (`zstd_compress_sequences.c:187-191`), and the only promotion to `valid` is
@@ -213,8 +219,11 @@ sets can still hit the deliberate differences (TE8, TE9, TE11 below).
   FCS-sized Block_Maximum_Size. The empty input is one raw 0-size Last_Block
   plus the trailer (13 bytes, the CLI's empty frame).
 - **The literals ladder (EQ4).** Raw below 64 literals (fast strategies; 6 with
-  a reusable tree — `zstd_compress_literals.c:114-127`) or when Huffman misses
-  minGain (`:187-191`); RLE for one-byte literals (`:81-107,192-201`);
+  a reusable tree — `zstd_compress_literals.c:114-127`), when Huffman misses
+  minGain (`:187-191`), or when one of `HUF_compress_internal`'s two early
+  bails fires — the block-layer-armed `suspectUncompressible` two-sample check
+  and the flat-histogram `largest <= (srcSize >> 7) + 4` check
+  (`huf_compress.c:1366-1384`, TE9); RLE for one-byte literals (`:81-107,192-201`);
   Compressed with a tree description — one stream below 256 literals, four
   above, the 3/4/5-byte header by the 1-KiB/16-KiB thresholds (`:140,142`), the
   split at `(Regenerated_Size+3)/4` (`huf_compress.c:1168-1215`); Treeless when
@@ -340,9 +349,10 @@ sets can still hit the deliberate differences (TE8, TE9, TE11 below).
   (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of literals, 512
   KiB of sequence list — `max_block_size / 3 + 1` twelve-byte sequences, the
   `min_match_length` bound — plus the writers' workspaces); the README carries
-  the figure. The bisect, re-run on aarch64 macOS (ReleaseFast, 600 KiB and
-  1.5 MiB text inputs, a thread spawned at a given `stack_size`): `compress`
-  805 KiB (809 KiB Debug), `compressBuffered` 37 KiB (41 KiB Debug),
+  the figure. The bisect (ReleaseFast, 600 KiB and 1.5 MiB inputs, a thread
+  spawned at a given `stack_size`): `compress` was 805 KiB on aarch64 macOS,
+  re-measured at 810 KiB on aarch64 Linux after the four-lane histogram
+  added its 4 KiB workspace; `compressBuffered` 37 KiB (41 KiB Debug),
   `Writer.streamAll` 37 KiB (57 KiB Debug), against a 3-KiB floor for an empty
   thread — so the two buffered forms are the KiB-scale paths, and the figure is
   flat in the input size. `Writer.Buffer(19)` is 1507336 bytes (1.44 MiB):
@@ -461,16 +471,20 @@ the record of what the divergence was.
   << windowLog)`, the C's pre-1.5.7 shape and the survey's 1-MiB observation
   (8 blocks of 128 KiB); a frame may therefore carry fewer, larger blocks
   than the CLI's on split-triggering data.
-- **TE9 — the literals heuristics are the landed writer's.** `literals_compress`
-  carries the C's ladder (the 64/6-literal floor, minGain, RLE, the 1/4-stream
-  split) but not `HUF_compress_internal`'s two early bails — the
-  `largest <= (srcSize >> 7) + 4` histogram check and the
-  `suspectUncompressible` first/last-4096 sample (`huf_compress.c:1251-1252,
-  1366-1379`). Both turn a Huffman win the C judges not worth taking into Raw
-  literals; where the win is real, our frame is *smaller* than the CLI's (a
-  256-KiB text with one high byte per line: 6796 bytes against the CLI's
-  7399). The corpus shapes never reach either bail, and the oracle lane's
-  parity rows avoid the class; the frames still decode identically.
+- **TE9 — the literals heuristics (resolved: the bails are ported).** The
+  divergence was that `literals_compress` carried the C's ladder without
+  `HUF_compress_internal`'s two early bails — the `largest <= (srcSize >> 7)
+  + 4` histogram check and the `suspectUncompressible` first/last-4096 sample
+  (`huf_compress.c:1251-1252, 1366-1379`, armed by the block layer's
+  `nbSeq == 0 or litSize / nbSeq >= 20`, `zstd_compress.c:2886,2924`). Where
+  a bail sacrificed a real Huffman win, our frame was *smaller* than the
+  CLI's (a 256-KiB text with one high byte per line: 6796 bytes against the
+  CLI's 7399). The M5 encode perf pass ranked the missing sample check its
+  #1 lever (the incompressible 64-KiB rows ran the full entropy ladder the C
+  skips), so both bails are now ported with the C's exact thresholds
+  (40960-byte floor, `largestTotal <= 68`, `largest <= (srcSize >> 7) + 4`),
+  and that input class now matches the CLI's bytes. The corpus shapes never
+  reach either bail, so the pinned fixtures are untouched.
 - **TE10 — the old-decoder workaround is not emitted.** The C returns 0 (a Raw
   block) when the last FSE description is 2 bytes and the sequences bitstream
   is 1 byte, to dodge a zstd ≤ 1.3.4 decoder bug (`zstd_compress.c:2985-2996`).

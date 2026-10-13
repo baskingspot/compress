@@ -29,6 +29,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 
 const readInt = @import("common.zig").readInt;
+const writeInt = @import("common.zig").writeInt;
 
 /// The most bits one narrow read takes: a 9-bit FSE accuracy log, an 11-bit
 /// Huffman code, or a 9-bit `§4.1.1` Table 20 field (`2 * threshold - 1` is
@@ -535,6 +536,104 @@ pub const BackwardWriter = struct {
         self.bit_count &= 7;
     }
 };
+
+/// A register-resident `BackwardWriter` for the hot bitstream loops (the
+/// Huffman literals streams, the sequences bitstream): the same accumulate
+/// and flush-whole-bytes discipline, with the state carried in the loop's
+/// locals. A `BackwardWriter`'s fields spill to the stack across its flush
+/// call — a store-load round trip per field — which the hot loops cannot
+/// afford; this shape costs a shift-or per field and one 8-byte store per
+/// flush. The bytes produced are the writer's, exactly: the flush fires at
+/// the same pending-bit bound and moves only whole bytes, so the bit stream
+/// — and therefore the byte stream — is identical. The 8-byte store can
+/// leave up to 7 scratch bytes past the whole bytes; the next store or the
+/// close's end-mark byte (which always writes at least one) overwrites them,
+/// so only bytes past the returned length can ever hold scratch.
+pub const BackwardAccumulator = struct {
+    /// Pending bits, lowest first: bit 0 is the next bit on the wire.
+    bits: u64,
+    /// Pending bits in `bits`, at most `flush_bits` between fields.
+    bit_count: u32,
+
+    pub const init: BackwardAccumulator = .{ .bits = 0, .bit_count = 0 };
+
+    /// `BackwardWriter.writeBits`: append the low `count` bits of `value`,
+    /// flushing first when they would not fit. `written` is the count of
+    /// whole bytes already in `target`, threaded by the caller.
+    pub inline fn add(
+        self: *BackwardAccumulator,
+        target: []u8,
+        written: *usize,
+        value: u32,
+        count: u6,
+    ) error{BufferTooSmall}!void {
+        assert(count <= max_read_bits_wide);
+        if (self.bit_count + count > BackwardWriter.flush_bits) {
+            const bytes = self.bit_count >> 3;
+            if (written.* + 8 <= target.len) {
+                writeInt(u64, target[written.*..][0..8], self.bits);
+            } else {
+                if (written.* + bytes > target.len) return error.BufferTooSmall;
+                for (0..bytes) |index| {
+                    target[written.* + index] = @truncate(self.bits >> @intCast(8 * index));
+                }
+            }
+            written.* += bytes;
+            self.bits >>= @intCast(8 * bytes);
+            self.bit_count &= 7;
+        }
+        assert(self.bit_count + count <= 64);
+        self.bits |= (@as(u64, value) & mask64(@intCast(count))) << @intCast(self.bit_count);
+        self.bit_count += count;
+    }
+
+    /// `BackwardWriter.close`: the single 1-bit end mark, then the zero fill
+    /// to the byte boundary, so the last byte is never zero. Returns the
+    /// stream's length in bytes.
+    pub inline fn close(
+        self: *BackwardAccumulator,
+        target: []u8,
+        written: *usize,
+    ) error{BufferTooSmall}!usize {
+        // writeBits(1, 1): the bound can be met exactly, and the mark still
+        // fits the container without a flush (bit_count is at most 56).
+        self.bits |= @as(u64, 1) << @intCast(self.bit_count);
+        self.bit_count += 1;
+        const bytes = (self.bit_count + 7) / 8;
+        if (written.* + bytes > target.len) return error.BufferTooSmall;
+        for (0..bytes) |index| {
+            target[written.* + index] = @truncate(self.bits >> @intCast(8 * index));
+        }
+        return written.* + bytes;
+    }
+};
+
+test "BackwardAccumulator and BackwardWriter produce the same bytes" {
+    // The accumulator is the writer's register-resident twin: over random
+    // field series of every width a stream carries, both byte sequences and
+    // both lengths agree, and the bytes past the accumulator's scratch
+    // stores end up written over or past the length.
+    var rng: std.Random.DefaultPrng = .init(0xACC0);
+    const random = rng.random();
+    var expected: [512]u8 = undefined;
+    var target: [512]u8 = undefined;
+    for (0..200) |_| {
+        var writer: BackwardWriter = .init(&expected);
+        var acc: BackwardAccumulator = .init;
+        var written: usize = 0;
+        const count = random.uintLessThan(usize, 64) + 1;
+        for (0..count) |_| {
+            const width = random.uintLessThan(u5, max_read_bits_wide) + 1;
+            const value = random.uintLessThan(u32, @as(u32, 1) << @intCast(width));
+            try writer.writeBits(value, width);
+            try acc.add(&target, &written, value, width);
+        }
+        try writer.close();
+        const length = try acc.close(&target, &written);
+        try testing.expectEqual(writer.bytesWritten(), length);
+        try testing.expectEqualSlices(u8, expected[0..length], target[0..length]);
+    }
+}
 
 test "BackwardWriter and BackwardReader are inverses, field for field" {
     // RFC 8878 §4.1 — a field written at a position reads back as the same

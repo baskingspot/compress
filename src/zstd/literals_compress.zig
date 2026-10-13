@@ -6,8 +6,11 @@
 //! `write` is the inverse of `literals.decode`, ladder for ladder
 //! (`ZSTD_compressLiterals`, `zstd_compress_literals.c:129-235`): Raw below
 //! the C's 64-literal floor (the 6-literal floor needs a dictionary-validated
-//! tree, which this package cannot have) or when Huffman does not pay the
-//! minGain margin; RLE for one-byte literals; Compressed with a tree
+//! tree, which this package cannot have), when Huffman does not pay the
+//! minGain margin, or when one of `HUF_compress_internal`'s two early bails
+//! fires — the suspect two-sample check the block layer arms
+//! (`huf_compress.c:1366-1380`) and the flat-histogram check (`:1384`); RLE
+//! for one-byte literals; Compressed with a tree
 //! description and one stream below 256 literals, four above, the header's
 //! 3/4/5-byte form by the 1-KiB/16-KiB thresholds; Treeless when the previous
 //! block's tree still validates and is cheaper than a new description. The
@@ -68,8 +71,35 @@ fn minGain(source_len: usize) usize {
     return (source_len >> 6) + 2;
 }
 
+/// `SUSPECT_INCOMPRESSIBLE_SAMPLE_SIZE` and `SUSPECT_INCOMPRESSIBLE_SAMPLE_RATIO`
+/// (`huf_compress.c:1251-1252`): a block the caller flags as suspect pays two
+/// 4-KiB sample histograms before the full one — but only at or above
+/// `4096 * 10` literals, so blocks under that size skip the sample entirely.
+const suspect_sample_size = 4096;
+const suspect_sample_ratio = 10;
+/// The sample's verdict (`huf_compress.c:1378`): the two samples' largest
+/// counts summed at or below this bound means the literals are too flat to
+/// Huffman-code, and the Raw form goes out without the full histogram.
+const suspect_sample_largest_max = ((2 * suspect_sample_size) >> 7) + 4;
+
+/// `HIST_count_simple`'s return value over one sample (`huf_compress.c:1371-1376`):
+/// the largest single-symbol count. The symbol ids do not feed the verdict.
+fn largestCount(sample: []const u8) u32 {
+    // A plain count, not `Histogram.count`: at 4 KiB the four-lane path's
+    // zeroing and fold cost more than the lane parallelism saves (measured).
+    var counts: [256]u32 = @splat(0);
+    for (sample) |byte| counts[byte] += 1;
+    var largest: u32 = 0;
+    for (counts) |count| largest = @max(largest, count);
+    return largest;
+}
+
 /// Write one literals section for `source`, updating `state` when the section
-/// is Compressed. Returns the section's length.
+/// is Compressed. Returns the section's length. `suspect_uncompressible` is
+/// the block layer's flag (`zstd_compress.c:2924`: no sequences, or at least
+/// 20 literals per sequence), which arms the two-sample fast path below — the
+/// C's way of not paying a full histogram and tree build for literals a flat
+/// distribution will send out Raw anyway.
 ///
 /// Every path writes at most `source.len + 3` bytes (the Raw form), so a
 /// target sized for that cannot overflow; a smaller one fails
@@ -77,8 +107,22 @@ fn minGain(source_len: usize) usize {
 /// attempt leaves its scratch bytes in `target` before the Raw form is
 /// written over them, so the bytes past the returned length are unspecified
 /// (the C's `HUF_compress` writes into the caller's buffer the same way).
-pub fn write(source: []const u8, target: []u8, state: *State) Error!usize {
+pub fn write(
+    source: []const u8,
+    target: []u8,
+    state: *State,
+    suspect_uncompressible: bool,
+) Error!usize {
     if (source.len < min_literals_to_compress) return writeRaw(source, target);
+
+    // `HUF_compress_internal`'s suspect fast path (`huf_compress.c:1366-1380`):
+    // sample the first and last 4 KiB; a flat enough pair means Raw without
+    // the full histogram, the tree build, or the streams.
+    if (suspect_uncompressible and source.len >= suspect_sample_size * suspect_sample_ratio) {
+        const largest_total = largestCount(source[0..suspect_sample_size]) +
+            largestCount(source[source.len - suspect_sample_size ..]);
+        if (largest_total <= suspect_sample_largest_max) return writeRaw(source, target);
+    }
 
     const histogram = huff0_compress.Histogram.count(source);
     if (histogram.largest == source.len) {
@@ -88,6 +132,10 @@ pub fn write(source: []const u8, target: []u8, state: *State) Error!usize {
         if (source.len <= minGain(source.len) + 1) return writeRaw(source, target);
         return writeRle(source, target);
     }
+    // The full-histogram bail (`huf_compress.c:1384`): no symbol carrying
+    // over a 128th of the literals means the distribution is too flat for a
+    // tree to pay, whatever the streams would have said.
+    if (histogram.largest <= (source.len >> 7) + 4) return writeRaw(source, target);
 
     const table = huff0_compress.buildTable(&histogram, @intCast(source.len)) catch
         return writeRaw(source, target);
@@ -274,7 +322,7 @@ fn covers(table: *const huff0_compress.Table, histogram: *const huff0_compress.H
 fn expectRoundTrip(source: []const u8, expected_type: literals.BlockType) !void {
     var target: [256 * 1024]u8 = undefined;
     var state: State = .{};
-    const written = try write(source, &target, &state);
+    const written = try write(source, &target, &state, false);
     const header = try literals.parseHeader(target[0..written]);
     try testing.expectEqual(expected_type, header.block_type);
     try testing.expectEqual(@as(u20, @intCast(source.len)), header.regenerated_size);
@@ -296,7 +344,7 @@ test "write's ladder picks Raw, RLE, and Compressed at the C's thresholds" {
     // The header is 2 bytes at that size (Regenerated_Size is over 31).
     var short: [63]u8 = undefined;
     for (&short, 0..) |*byte, index| byte.* = @intCast(index % 7);
-    try testing.expectEqual(@as(usize, 65), try write(&short, &target, &state));
+    try testing.expectEqual(@as(usize, 65), try write(&short, &target, &state, false));
     // 64: the floor is passed, and the skewed distribution compresses.
     var literals_64: [64]u8 = undefined;
     for (&literals_64, 0..) |*byte, index| byte.* = if (index % 8 == 0) 7 else 0;
@@ -306,27 +354,92 @@ test "write's ladder picks Raw, RLE, and Compressed at the C's thresholds" {
     try expectRoundTrip(&repeated, .rle);
     // A two-byte input of one symbol: Raw, because the one content byte does
     // not beat minGain (the C's `cLitSize == 1` path).
-    try testing.expectEqual(@as(usize, 3), try write(&.{ 0x41, 0x41 }, &target, &state));
+    try testing.expectEqual(@as(usize, 3), try write(&.{ 0x41, 0x41 }, &target, &state, false));
     // 255 literals: one stream (Size_Format 00); 256: four (01).
     var one_stream: [255]u8 = undefined;
     for (&one_stream, 0..) |*byte, index| byte.* = @intCast(index % 11);
     var four_streams: [256]u8 = undefined;
     for (&four_streams, 0..) |*byte, index| byte.* = @intCast(index % 11);
-    const one = try write(&one_stream, &target, &state);
+    const one = try write(&one_stream, &target, &state, false);
     try testing.expectEqual(@as(u2, 0), (try literals.parseHeader(target[0..one])).size_format);
-    const four = try write(&four_streams, &target, &state);
+    const four = try write(&four_streams, &target, &state, false);
     try testing.expectEqual(@as(u2, 1), (try literals.parseHeader(target[0..four])).size_format);
     // The 4- and 5-byte headers at the 1-KiB and 16-KiB thresholds.
     var kilo: [1024]u8 = undefined;
     for (&kilo, 0..) |*byte, index| byte.* = @intCast(index % 13);
-    const kilo_len = try write(&kilo, &target, &state);
+    const kilo_len = try write(&kilo, &target, &state, false);
     const kilo_header = try literals.parseHeader(target[0..kilo_len]);
     try testing.expectEqual(@as(usize, 4), kilo_header.header_len);
     var sixteen: [16384]u8 = undefined;
     for (&sixteen, 0..) |*byte, index| byte.* = @intCast(index % 17);
-    const sixteen_len = try write(&sixteen, &target, &state);
+    const sixteen_len = try write(&sixteen, &target, &state, false);
     const wide_header = try literals.parseHeader(target[0..sixteen_len]);
     try testing.expectEqual(@as(usize, 5), wide_header.header_len);
+}
+
+test "the suspect sample check bails before the full histogram" {
+    // `huf_compress.c:1366-1380` — a suspect block of at least 40 KiB of
+    // literals is judged by two 4-KiB samples: both ends flat (the samples'
+    // largest counts summing to at most 68) means Raw without the full
+    // histogram, even when the middle would have Huffman-coded — the C's
+    // sacrifice, reproduced exactly.
+    var source: [49152]u8 = undefined;
+    // Both samples flat: 256 symbols at 16 occurrences each per sample,
+    // largest_total 32. The middle is one repeated byte, so the full ladder
+    // would keep a Compressed section.
+    for (&source, 0..) |*byte, index| byte.* = if (index < 4096 or index >= source.len - 4096)
+        @truncate(index % 256)
+    else
+        0x41;
+    var target: [256 * 1024]u8 = undefined;
+    var state: State = .{};
+    const raw_len = try write(&source, &target, &state, true);
+    try testing.expectEqual(
+        literals.BlockType.raw,
+        (try literals.parseHeader(target[0..raw_len])).block_type,
+    );
+    // Without the flag the same bytes take the full ladder and compress.
+    state = .{};
+    const compressed_len = try write(&source, &target, &state, false);
+    try testing.expectEqual(
+        literals.BlockType.compressed,
+        (try literals.parseHeader(target[0..compressed_len])).block_type,
+    );
+    // A suspect block whose samples are NOT flat pays the full ladder: half
+    // one byte at both ends, largest_total far over 68.
+    for (&source, 0..) |*byte, index| byte.* = if (index % 2 == 0) 0x41 else @truncate(index % 7);
+    state = .{};
+    const skewed_len = try write(&source, &target, &state, true);
+    try testing.expectEqual(
+        literals.BlockType.compressed,
+        (try literals.parseHeader(target[0..skewed_len])).block_type,
+    );
+}
+
+test "the flat-histogram bail keeps a treeless distribution Raw" {
+    // `huf_compress.c:1384` — after the full histogram, no symbol carrying
+    // over a 128th of the literals (plus 4) means Raw, whatever the streams
+    // would have saved. 2048 literals over 128 symbols at 16 each: largest
+    // 16 <= (2048 >> 7) + 4 = 20, though the 7-bit codes would have beaten
+    // the minGain margin.
+    var source: [2048]u8 = undefined;
+    for (&source, 0..) |*byte, index| byte.* = @truncate(index % 128);
+    var target: [256 * 1024]u8 = undefined;
+    var state: State = .{};
+    const written = try write(&source, &target, &state, false);
+    try testing.expectEqual(
+        literals.BlockType.raw,
+        (try literals.parseHeader(target[0..written])).block_type,
+    );
+    // One symbol past the bound: five more occurrences of byte 0 make its
+    // count 21, over the bail's 20, and the tree is attempted.
+    for (source[1..6]) |*byte| byte.* = 0;
+    state = .{};
+    const past = try write(&source, &target, &state, false);
+    try testing.expectEqual(
+        literals.BlockType.compressed,
+        (try literals.parseHeader(target[0..past])).block_type,
+    );
 }
 
 test "every ladder rung decodes back through the landed decoder" {
@@ -349,7 +462,7 @@ test "every ladder rung decodes back through the landed decoder" {
         }
         var target: [256 * 1024]u8 = undefined;
         var state: State = .{};
-        const written = try write(source[0..length], &target, &state);
+        const written = try write(source[0..length], &target, &state, false);
         var decoded: [256 * 1024]u8 = undefined;
         var decode_state: literals.State = .{};
         const section = try literals.decode(target[0..written], &decoded, &decode_state);
@@ -426,12 +539,12 @@ test "Treeless reuses the previous block's tree" {
     const second: []const u8 = first[0..2048];
     var target: [64 * 1024]u8 = undefined;
     var state: State = .{};
-    const first_len = try write(&first, &target, &state);
+    const first_len = try write(&first, &target, &state, false);
     const first_header = try literals.parseHeader(target[0..first_len]);
     try testing.expectEqual(literals.BlockType.compressed, first_header.block_type);
     const first_table = state.table.?;
     var second_target: [64 * 1024]u8 = undefined;
-    const second_len = try write(second, &second_target, &state);
+    const second_len = try write(second, &second_target, &state, false);
     try testing.expectEqual(
         literals.BlockType.treeless,
         (try literals.parseHeader(second_target[0..second_len])).block_type,
@@ -447,7 +560,7 @@ test "Treeless reuses the previous block's tree" {
     // A Raw section leaves the tree in place: the third block still reuses
     // it.
     var third_target: [64]u8 = undefined;
-    const raw_len = try write(&.{ 1, 2, 3, 4, 5 }, &third_target, &state);
+    const raw_len = try write(&.{ 1, 2, 3, 4, 5 }, &third_target, &state, false);
     const raw_header = try literals.parseHeader(third_target[0..raw_len]);
     try testing.expectEqual(literals.BlockType.raw, raw_header.block_type);
     try testing.expectEqual(first_table.symbol_count, state.table.?.symbol_count);
@@ -466,7 +579,7 @@ test "a tree listing over 128 weights takes the FSE series, never Raw" {
     }
     var target: [4096]u8 = undefined;
     var state: State = .{};
-    const written = try write(&source, &target, &state);
+    const written = try write(&source, &target, &state, false);
     const header = try literals.parseHeader(target[0..written]);
     try testing.expectEqual(literals.BlockType.compressed, header.block_type);
     // The tree description's first byte is the series length (< 128) in the
@@ -499,7 +612,7 @@ test "a Raw-sized target never fails the Huffman attempt" {
         }
         var state: State = .{};
         const raw_len = rawHeaderLength(length) + length;
-        const written = try write(source[0..length], target[0..raw_len], &state);
+        const written = try write(source[0..length], target[0..raw_len], &state, false);
         try testing.expect(written <= raw_len);
     }
 }

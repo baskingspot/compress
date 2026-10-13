@@ -246,10 +246,19 @@ fn writeEntropy(
     block_size: usize,
     target: []u8,
 ) ?usize {
+    // `SUSPECT_UNCOMPRESSIBLE_LITERAL_RATIO` (`zstd_compress.c:2886,2924`):
+    // a block with no sequences, or at least 20 literals per sequence, is
+    // suspect — the literals writer's two-sample fast path then decides
+    // before the full histogram's price is paid. This is what keeps an
+    // incompressible block's entropy attempt at two 4-KiB sample histograms
+    // instead of the full ladder.
+    const suspect_uncompressible = store.sequence_count == 0 or
+        store.literals_len / store.sequence_count >= 20;
     const literals_len = literals_compress.write(
         store.literals[0..store.literals_len],
         target,
         &state.literals,
+        suspect_uncompressible,
     ) catch return null;
     const sequences_len = sequences_compress.write(
         target[literals_len..],

@@ -294,20 +294,38 @@ const Stats = struct {
     /// The largest count: the C's `HIST_count` return.
     most_frequent: u32 = 0,
 
-    fn count(stats: *Stats, alphabet: Alphabet, source: []const Sequence) void {
-        for (source) |sequence| {
-            const codes = codesOf(sequence);
-            const code = switch (alphabet) {
-                .literals_lengths => codes.literals_lengths,
-                .offsets => codes.offsets,
-                .match_lengths => codes.match_lengths,
-            };
-            stats.counts[code] += 1;
-            if (code > stats.max_code) stats.max_code = code;
-            if (stats.counts[code] > stats.most_frequent) stats.most_frequent = stats.counts[code];
+    fn add(stats: *Stats, code: u8) void {
+        stats.counts[code] += 1;
+    }
+
+    /// The C's trailing scans (`hist.c:55-61`): the largest code and the
+    /// largest count come from one pass over the counted codes afterwards,
+    /// not from a tracked maximum per sequence.
+    fn finish(stats: *Stats) void {
+        for (stats.counts, 0..) |count_of, code| {
+            if (count_of != 0) {
+                stats.max_code = @intCast(code);
+                if (count_of > stats.most_frequent) stats.most_frequent = count_of;
+            }
         }
     }
 };
+
+/// The three alphabets' histograms in one pass over the sequences: the C
+/// stores each sequence's three codes in the store at emit time
+/// (`ZSTD_storeSeq`, `zstd_compress.c:2700-2717`); this port computes them
+/// once here rather than once per consumer.
+fn countStats(source: []const Sequence) [alphabet_count]Stats {
+    var stats: [alphabet_count]Stats = @splat(.{});
+    for (source) |sequence| {
+        const codes = codesOf(sequence);
+        stats[@intFromEnum(Alphabet.literals_lengths)].add(codes.literals_lengths);
+        stats[@intFromEnum(Alphabet.offsets)].add(codes.offsets);
+        stats[@intFromEnum(Alphabet.match_lengths)].add(codes.match_lengths);
+    }
+    for (&stats) |*stats_one| stats_one.finish();
+    return stats;
+}
 
 /// Write a sequences section (`§3.1.1.3.2`) for `sequences`, updating `state`
 /// with the tables this block resolved. Returns the section's length.
@@ -323,8 +341,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
         return 1;
     }
     var cursor = try writeSequenceCount(target, source.len);
-    var stats: [alphabet_count]Stats = @splat(.{});
-    for (description_order) |alphabet| stats[@intFromEnum(alphabet)].count(alphabet, source);
+    const stats = countStats(source);
     var modes: [alphabet_count]sequences.Mode = undefined;
     for (description_order) |alphabet| {
         const index = @intFromEnum(alphabet);
@@ -349,7 +366,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
             &stats[index],
             @intCast(source.len),
             state,
-            codeOf(alphabet, source[source.len - 1]),
+            codeOf(alphabet, codesOf(source[source.len - 1])),
         );
         resolved[index] = state.tables[index].?;
     }
@@ -509,23 +526,31 @@ fn writeBitstream(
     source: []const Sequence,
     resolved: *const [alphabet_count]Resolved,
 ) Error!usize {
-    var writer = bits.BackwardWriter.init(target);
+    // The register-resident accumulator, for the same reason the Huffman
+    // streams use it: six fields per sequence through a memory-resident
+    // writer would pay a store-load round trip per field.
+    var accumulator: bits.BackwardAccumulator = .init;
+    var written: usize = 0;
     var states: [alphabet_count]u16 = undefined;
     const last = source.len - 1;
-    for (description_order) |alphabet| {
-        const index = @intFromEnum(alphabet);
+    {
         // An RLE alphabet's cell reads zero bits and never moves: it carries
         // no state at all.
-        const table = machineOf(resolved[index], alphabet) orelse continue;
-        states[index] = table.initState(codeOf(alphabet, source[last]));
+        const last_codes = codesOf(source[last]);
+        for (description_order) |alphabet| {
+            const index = @intFromEnum(alphabet);
+            const table = machineOf(resolved[index], alphabet) orelse continue;
+            states[index] = table.initState(codeOf(alphabet, last_codes));
+        }
+        try writeExtras(&accumulator, target, &written, source[last], last_codes);
     }
-    try writeExtras(&writer, source[last]);
     var index = last;
     while (index > 0) {
         index -= 1;
         // "FSE_encodeSymbol(&stateOffsetBits, ofCode)" and the two that
         // follow: the transition bits, in the reverse of the decoder's
         // update order.
+        const codes = codesOf(source[index]);
         const transition_order = [alphabet_count]Alphabet{
             .offsets,
             .match_lengths,
@@ -533,68 +558,67 @@ fn writeBitstream(
         };
         inline for (transition_order) |alphabet| {
             const state_index = @intFromEnum(alphabet);
-            const code = codeOf(alphabet, source[index]);
+            const code = codeOf(alphabet, codes);
             switch (resolved[state_index]) {
                 .rle => |symbol| assert(code == symbol),
                 else => |rest| {
                     const table = machineOf(rest, alphabet).?;
-                    states[state_index] = try encodeSymbol(
-                        &writer,
-                        table,
-                        states[state_index],
-                        code,
+                    const transition = table.step(states[state_index], code);
+                    try accumulator.add(
+                        target,
+                        &written,
+                        transition.bits,
+                        transition.bit_count,
                     );
+                    states[state_index] = transition.state;
                 },
             }
         }
-        try writeExtras(&writer, source[index]);
+        try writeExtras(&accumulator, target, &written, source[index], codes);
     }
     // `FSE_flushCState` in the C's order: ML, OF, LL.
     for (flush_order) |alphabet| {
         const flush_index = @intFromEnum(alphabet);
         if (machineOf(resolved[flush_index], alphabet)) |table| {
-            try writer.writeBits(states[flush_index], table.norm.accuracy_log);
+            try accumulator.add(target, &written, states[flush_index], table.norm.accuracy_log);
         }
     }
-    try writer.close();
-    return writer.bytesWritten();
-}
-
-/// One `FSE_encodeSymbol`: the transition's bits, and the state the decoder
-/// holds before it.
-fn encodeSymbol(
-    writer: *bits.BackwardWriter,
-    table: *const fse_compress.Table,
-    state: u16,
-    symbol: u8,
-) error{BufferTooSmall}!u16 {
-    const transition = table.step(state, symbol);
-    try writer.writeBits(transition.bits, transition.bit_count);
-    return transition.state;
+    return accumulator.close(target, &written);
 }
 
 /// The sequence's raw extra bits (`§3.1.1.3.2.1.1`): each value's low
 /// Number_of_Bits bits, in LL, ML, OF order — the reverse of the decoder's
-/// read order, which takes offset first.
-fn writeExtras(writer: *bits.BackwardWriter, sequence: Sequence) error{BufferTooSmall}!void {
-    const codes = codesOf(sequence);
-    try writer.writeBits(
+/// read order, which takes offset first. `codes` are the caller's: one
+/// `codesOf` per sequence serves the transitions and the extras both.
+fn writeExtras(
+    accumulator: *bits.BackwardAccumulator,
+    target: []u8,
+    written: *usize,
+    sequence: Sequence,
+    codes: Codes,
+) error{BufferTooSmall}!void {
+    try accumulator.add(
+        target,
+        written,
         sequence.literals_length,
         sequences.literals_length_codes[codes.literals_lengths].extra_bits,
     );
-    try writer.writeBits(
+    try accumulator.add(
+        target,
+        written,
         sequence.match_length - min_match_length,
         sequences.match_length_codes[codes.match_lengths].extra_bits,
     );
-    try writer.writeBits(
+    try accumulator.add(
+        target,
+        written,
         sequence.offset_value,
         codes.offsets,
     );
 }
 
-/// The code an alphabet's symbol takes for this sequence.
-fn codeOf(alphabet: Alphabet, sequence: Sequence) u8 {
-    const codes = codesOf(sequence);
+/// The code an alphabet's symbol takes, from the sequence's codes.
+fn codeOf(alphabet: Alphabet, codes: Codes) u8 {
     return switch (alphabet) {
         .literals_lengths => codes.literals_lengths,
         .offsets => codes.offsets,
