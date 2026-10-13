@@ -139,7 +139,10 @@ pub fn writeBlock(
     assert(block_start + block_size <= source.len);
     assert(block_size <= max_block_size);
     assert(scratch.literals.len >= block_size);
-    assert(scratch.sequences.len >= max_sequences);
+    // Every sequence carries a match of at least `min_match_length` bytes,
+    // so `block_size / min_match_length + 1` entries cover the block; the
+    // one-shot's `max_sequences` is that bound at `max_block_size`.
+    assert(scratch.sequences.len >= block_size / match_compress.min_match_length + 1);
     if (target.len < block.block_header_len) return error.BufferTooSmall;
     const written = try if (block_size < min_compressible_size)
         writeRaw(state, target, source[block_start..][0..block_size], last_block)
@@ -282,8 +285,9 @@ fn writeRle(
 }
 
 /// `§3.1.1.2` — the 3-byte Block_Header: Last_Block in bit 0, Block_Type in
-/// bits 1-2, Block_Size in bits 3-23, little-endian.
-fn writeBlockHeader(
+/// bits 1-2, Block_Size in bits 3-23, little-endian. `target` must be
+/// exactly `block.block_header_len` bytes.
+pub fn writeBlockHeader(
     target: []u8,
     last_block: bool,
     block_type: block.BlockType,

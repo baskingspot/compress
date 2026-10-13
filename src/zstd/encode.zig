@@ -49,11 +49,12 @@ pub const Error = error{
     Unimplemented,
 };
 
-/// The one-shot's per-block scratch, on the stack: the literals buffer, the
-/// sequence list, and the match finder's position table. Sized by the block
-/// layer's worst cases, so no allocation is needed (see the README's stack
-/// figure).
-const Scratch = struct {
+/// The one-shot's heavy per-block arrays: the literals buffer, the sequence
+/// list, and the match finder's position table. Sized by the block layer's
+/// worst cases, so no allocation is needed. `compress` puts one on the stack
+/// (see the README's stack figure); `compressBuffered` takes a pointer to
+/// one the caller owns, which keeps that stack out of the caller's thread.
+pub const Buffer = struct {
     literals: [block_compress.max_block_size]u8 = undefined,
     sequences: [block_compress.max_sequences]sequences_compress.Sequence = undefined,
     hash_table: [block_compress.hash_table_max]u32 = undefined,
@@ -82,15 +83,33 @@ pub fn maxCompressedLength(source_len: usize) usize {
 /// `error.BufferTooSmall` before writing past `target`. `target`'s contents
 /// are unspecified after a failure. Nothing is allocated.
 pub fn compress(source: []const u8, target: []u8, options: Options) Error!usize {
+    // The convenience form: the heavy per-block arrays ride this frame, so
+    // give encoding threads 1 MiB or more of stack (the README's figure).
+    // `compressBuffered` is the same encoder over a caller-owned `Buffer`.
+    var buffer: Buffer = .{};
+    return compressBuffered(source, target, &buffer, options);
+}
+
+/// `compress` over a caller-owned `Buffer` instead of the stack: the
+/// literals buffer, the sequence list, and the match finder's table live in
+/// `buffer` (768 KiB), so this form needs only the entropy writers' KiB-scale
+/// scratch of thread stack (about 40 KiB, the README's figures). The frame is
+/// the same, byte for byte; `buffer`'s contents are unspecified after the
+/// call.
+pub fn compressBuffered(
+    source: []const u8,
+    target: []u8,
+    buffer: *Buffer,
+    options: Options,
+) Error!usize {
     if (options.level != .fast) return error.Unimplemented;
     const params: match_compress.Params = .forSource(source.len);
     var cursor = try writeFrameHeader(source.len, params, target);
     var state: block_compress.State = .{};
-    var scratch: Scratch = .{};
     // The finder's table holds frame offsets and starts zeroed; only the
     // ladder's chosen width is touched, as the C zeroes its allocated table
     // width at reset.
-    const hash_table = scratch.hash_table[0 .. @as(usize, 1) << @intCast(params.hash_log)];
+    const hash_table = buffer.hash_table[0 .. @as(usize, 1) << @intCast(params.hash_log)];
     fastmem.set(u32, hash_table, 0);
     if (source.len == 0) {
         // `§3.1.1.2` — "Each frame must have at least 1 block": the empty
@@ -100,8 +119,8 @@ pub fn compress(source: []const u8, target: []u8, options: Options) Error!usize 
         cursor += block.block_header_len;
     } else {
         var blocks: block_compress.Scratch = .{
-            .literals = &scratch.literals,
-            .sequences = &scratch.sequences,
+            .literals = &buffer.literals,
+            .sequences = &buffer.sequences,
         };
         const block_size = block_compress.blockSize(params);
         assert(block_size <= block_compress.max_block_size);
@@ -155,7 +174,7 @@ fn writeFrameHeader(source_len: usize, params: match_compress.Params, target: []
     if (!single_segment) {
         // The C writes `(windowLog - 10) << 3`: the exponent in the high
         // five bits, mantissa 0 (`zstd_compress.c:4705,4722`).
-        target[cursor] = @as(u8, params.window_log - 10) << 3;
+        target[cursor] = frame.window.descriptor(params.window_log);
         cursor += 1;
     }
     switch (fcs_code) {
@@ -200,71 +219,6 @@ const frame_header_len_max = frame.magic_len + 1 + 1 + 8;
 // the CLI v1.5.7 verdicts on the recorded fixtures are in `golden.zig`.
 // ---------------------------------------------------------------------------
 
-/// One corpus shape, restated from `bench/zig/corpus.zig` so the codec tests
-/// pin the same bytes the bench corpus generates (`just corpus`).
-const Shape = enum { text, html, rle, random, mixed, skewlit, words, zeros };
-
-fn fillShape(shape: Shape, buf: []u8) void {
-    switch (shape) {
-        .text => fill(buf, "the quick brown fox jumps over the lazy dog. "),
-        .html => fill(buf, "<div class=\"row\"><span>hello</span><span>flate</span></div>"),
-        .rle, .zeros => fastmem.set(u8, buf, if (shape == .rle) 0x41 else 0),
-        .random => {
-            var rng: DefaultPrng = .init(0xC0FFEE);
-            for (buf) |*byte| byte.* = rng.random().int(u8);
-        },
-        .mixed => {
-            var rng: DefaultPrng = .init(0x5A4BEEF);
-            for (buf, 0..) |*byte, index| {
-                byte.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(index)));
-            }
-        },
-        .skewlit => {
-            var rng: DefaultPrng = .init(0x5CEBE1);
-            for (buf) |*byte| {
-                const x: u16 = rng.random().int(u8);
-                byte.* = @truncate(x * x >> 10);
-            }
-        },
-        .words => {
-            var rng: DefaultPrng = .init(0xD1C710);
-            var index: usize = 0;
-            while (index < buf.len) {
-                const word = dictionary[rng.random().uintLessThan(usize, dictionary.len)];
-                const length = @min(word.len, buf.len - index);
-                fastmem.copy(u8, buf[index..][0..length], word[0..length]);
-                index += length;
-                if (index < buf.len) {
-                    buf[index] = ' ';
-                    index += 1;
-                }
-            }
-        },
-    }
-}
-
-fn fill(buf: []u8, phrase: []const u8) void {
-    var index: usize = 0;
-    while (index < buf.len) {
-        const length = @min(phrase.len, buf.len - index);
-        fastmem.copy(u8, buf[index..][0..length], phrase[0..length]);
-        index += length;
-    }
-}
-
-/// The `words` shape's vocabulary, the same 64 words `bench/zig/corpus.zig`
-/// pins.
-const dictionary = [_][]const u8{
-    "the",  "of",    "and",  "a",     "to",    "in",    "is",   "you",
-    "that", "it",    "he",   "was",   "for",   "on",    "are",  "as",
-    "with", "his",   "they", "at",    "be",    "this",  "have", "from",
-    "or",   "one",   "had",  "by",    "word",  "but",   "not",  "what",
-    "all",  "were",  "we",   "when",  "your",  "can",   "said", "there",
-    "use",  "an",    "each", "which", "she",   "do",    "how",  "their",
-    "if",   "will",  "up",   "other", "about", "out",   "many", "then",
-    "them", "these", "so",   "some",  "her",   "would", "make", "like",
-};
-
 /// Compress `source` into a fresh bound-sized target and decode it back
 /// through the landed one-shot, with the sentinel overrun check. Returns the
 /// frame's length.
@@ -294,16 +248,16 @@ test "compress round-trips through the landed decoder" {
         255,    256,    1024,   4096,   16384,  32768,  65536,  131071,
         131072, 131073, 200000, 262144, 300000, 524288, 524289, 600 * 1024,
     };
-    for ([_]Shape{ .text, .rle, .random, .skewlit }) |shape| {
+    for ([_]golden.Shape{ .text, .rle, .random, .skewlit }) |shape| {
         for (sizes) |size| {
-            fillShape(shape, source[0..size]);
+            golden.fillShape(shape, source[0..size]);
             _ = try expectRoundTrip(source[0..size]);
         }
     }
     // The remaining shapes at the ladder's class boundaries.
-    for ([_]Shape{ .html, .mixed, .words, .zeros }) |shape| {
+    for ([_]golden.Shape{ .html, .mixed, .words, .zeros }) |shape| {
         for ([_]usize{ 100, 4096, 65536, 131072, 300000 }) |size| {
-            fillShape(shape, source[0..size]);
+            golden.fillShape(shape, source[0..size]);
             _ = try expectRoundTrip(source[0..size]);
         }
     }
@@ -315,7 +269,7 @@ test "the frame header declares the exact size and the ladder's window" {
     // smallest form, single-segment exactly when the source fits the
     // window, and the C's window ladder `min(19, nextPow2(size))` floor 10.
     var source: [600 * 1024]u8 = undefined;
-    fillShape(.text, &source);
+    golden.fillShape(.text, &source);
     const target = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(target);
     const cases = [_]struct { size: usize, descriptor: u8, window_log: u6 }{
@@ -393,7 +347,7 @@ test "maxCompressedLength bounds every emission" {
     try testing.expectEqual(@as(usize, 21), maxCompressedLength(0));
     try testing.expectEqual(@as(usize, 22), maxCompressedLength(1));
     var source: [300 * 1024]u8 = undefined;
-    fillShape(.random, &source);
+    golden.fillShape(.random, &source);
     const bound = maxCompressedLength(source.len);
     const frame_buffer = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(frame_buffer);
@@ -416,7 +370,7 @@ test "the level seat is reserved, never aliased" {
 
 test "compress is deterministic" {
     var source: [64 * 1024]u8 = undefined;
-    fillShape(.mixed, &source);
+    golden.fillShape(.mixed, &source);
     const first = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(first);
     const second = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
@@ -436,7 +390,7 @@ test "our level-1 frame is the CLI's own bytes" {
     var source: [600 * 1024]u8 = undefined;
     const cases = [_]struct {
         name: []const u8,
-        shape: Shape,
+        shape: golden.Shape,
         size: usize,
         expected: []const u8,
     }{
@@ -504,7 +458,7 @@ test "our level-1 frame is the CLI's own bytes" {
     };
     for (cases) |case| {
         const input = source[0..case.size];
-        fillShape(case.shape, input);
+        golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
         const written = try compress(input, target, .{});
@@ -529,14 +483,14 @@ test "the emission ladder picks the CLI's block forms" {
     var source: [64 * 1024]u8 = undefined;
     // The rle shape: one RLE block (the first block is never RLE, but the
     // whole 32-KiB block compresses to 4 bytes, so it is Compressed first).
-    fillShape(.rle, source[0..32768]);
+    golden.fillShape(.rle, source[0..32768]);
     const rle_frame = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(rle_frame);
     const rle_len = try compress(source[0..32768], rle_frame, .{});
     const rle_header = try block.parseHeader(rle_frame[headerLenFor(rle_frame, rle_len)..]);
     try testing.expectEqual(block.BlockType.compressed, rle_header.block_type);
     // The random shape: one Raw block at exactly the block size.
-    fillShape(.random, source[0..32768]);
+    golden.fillShape(.random, source[0..32768]);
     const random_frame = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(random_frame);
     const random_len = try compress(source[0..32768], random_frame, .{});
@@ -547,7 +501,7 @@ test "the emission ladder picks the CLI's block forms" {
     try testing.expect(random_header.last_block);
     // The 600 KB text frame: windowed, eight blocks, the last one last.
     var big: [600 * 1024]u8 = undefined;
-    fillShape(.text, &big);
+    golden.fillShape(.text, &big);
     const big_frame = try testing.allocator.alloc(u8, maxCompressedLength(big.len));
     defer testing.allocator.free(big_frame);
     const big_len = try compress(&big, big_frame, .{});

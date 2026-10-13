@@ -1,8 +1,8 @@
 # Agent notes: zstd
 
-A Zstandard codec (RFC 8878): a decoder (landed) and a fast encoder, landed
-through the one-shot — `encode.zig`, `block_compress.zig`, and
-`match_compress.zig`; the streaming `Writer.zig` is the next slice. `README.md`
+A Zstandard codec (RFC 8878): a decoder and a fast encoder, both complete —
+one-shot (`encode.zig`), streaming (`Writer.zig`), over the block layer
+(`block_compress.zig`) and the match finder (`match_compress.zig`). `README.md`
 is the user overview; this file keeps the decisions, errata, and oracle notes
 behind it. There is no external-oracle lane yet (`oracle.zig`,
 `scripts/zstd_oracle.py`, `just zstd-oracle`); the encoder's oracle plan is
@@ -22,11 +22,16 @@ writer will instantiate `internal.writer.VTable`.
 
 ## Design decisions
 
-- **The surface is `{encode, decode, Writer, Reader}`.** The decoder's `decode`
-  exposes the layer modules because the one-shot and the reader are built from
-  them and the tests pin the same functions; the encoder keeps its block layer
-  internal (a zstd block is not self-contained) and exposes `Level`, `Options`,
-  `maxCompressedLength`, and `compress`. The encoder's contracts are "The
+- **The surface is `{encode, decode, Writer, Reader}`, complete.** The
+  decoder's `decode` exposes the layer modules because the one-shot and the
+  reader are built from them and the tests pin the same functions; the encoder
+  keeps its block layer internal (a zstd block is not self-contained) and
+  exposes `Level`, `Options`, `maxCompressedLength`, `compress`, and
+  `compressBuffered` with `encode.Buffer`. `compressBuffered` is the addition
+  the stack budget forced (below): the sketch's API block named only
+  `compress`, and the name follows the reader's `streamFrame`/`streamFrameAlloc`
+  shape — a caller-owned buffer instead of the default allocation. Both encode
+  functions are byte-for-byte the same frame; only the stack differs. The encoder's contracts are "The
   encoder" below.
 - **The window is the caller's and comptime-sized (OQ1).** A frame declares its
   own window, 1 KB to 3.75 TB (§3.1.1.1.2); flate's is a fixed 32 KB.
@@ -262,43 +267,79 @@ five blocks). The CLI's verdicts on all eleven: `zstd -d -c` byte-exact,
   streaming form declares no FCS (it cannot know the length when the header
   goes out) and `1 << window_log`, never 2^64-1 (T14: our own decoder reads the
   sentinel as a declaration and would reject our output).
-- **The streaming Writer (EQ7).** The Reader's mirror: one caller-owned
-  `Buffer(window_log)` holding the retained history (`1 << window_log`), the
-  block staging (`min(128 KiB, 1 << window_log)`), and the hash table
-  (`4 << min(15, window_log + 1)` bytes) — all comptime from `window_log`, the
-  exact-pointer `init`. The frame header is lazy: `emitBlock` writes it if it is
-  not yet written, so it goes out with the first drain/flush/rebase or with
-  `finish`; a zero-length emission (a flush with nothing buffered) writes the
-  header and no block. `flush` emits the buffered data as one complete block —
+- **The streaming Writer (EQ7, landed).** The Reader's mirror: one
+  caller-owned `Buffer(window_log)` holding the retained history
+  (`1 << window_log`), the accumulating block (`min(128 KiB, 1 << window_log)`),
+  the block's literals and its compressed output, the finder's table
+  (`4 << min(14, window_log + 1)` bytes), and the sequence list
+  (`12 * (block / 3 + 1)` bytes) — all comptime from `window_log`, the
+  exact-pointer `init`. Two deviations from the sketch's byte figures, both
+  deliberate: the table is `min(14, ...)` entries, not `min(15, ...)`, because
+  the writer is always the *streaming* class (14 is level 1's `hashLog` for an
+  unknown size, and the sketch's 15 was the one-shot ladder's cap), and the
+  Buffer also carries the literals, the emission target, and the sequence list
+  so the writer's own frame stays KiB-scale (the sketch listed only the first
+  three; the stack measurement below is why). The finder's parameters are the
+  C's streaming class, `ZSTD_getCParams(1, ZSTD_CONTENTSIZE_UNKNOWN, 0)`:
+  windowLog = the caller's, hashLog 14 (clamped to `window_log + 1`), minMatch
+  7 — which is what makes the CLI's `zstd -1`-over-a-pipe frames byte-identical
+  (the `encode_stream_*` fixtures). The finder's table entries are
+  window-relative, so a window slide rebases them (`correctTable`, the C's
+  `ZSTD_window_correctOffsets` shape) — a slide costs one pass over the table
+  per `min(128 KiB, window)` emitted. The flush contract, the lazy header, and
+  the trailer are as sketched: the frame header is lazy — `emitBlock` writes it
+  if it is not yet written, so it goes out with the first drain/flush/rebase or
+  with `finish`, and a zero-length emission (a flush with nothing buffered)
+  writes the header and no block. `flush` emits the buffered data as one complete block —
   a zstd block boundary is a decode boundary, so a decoder reading the output
   so far decodes every byte written — and only `finish` writes Last_Block and
   the trailer (the poisoned-finish machinery, `src/internal/AGENTS.md`). The
   checksum hashes each input chunk as it is consumed at the one funnel (the C's
   per-chunk `XXH64_update`, `zstd_compress.c:4608`). `window_log` is 10 to 31
   (u32 positions); the recommended ladder caps at 19, inside the decoder's
-  default 8 MiB.
+  default 8 MiB. The empty writer's frame is the FCS-unknown header, one raw
+  zero-size last block, and the checksum (13 bytes) — the CLI's *empty* stdin
+  frame is the one-shot's single-segment 13 bytes instead, because the CLI
+  knows the length at the frame's end (TE12).
 - **The one-shot (EQ8), landed as `encode.zig`.** `encode.compress(source,
   target, options)`: the source IS the history, so no window buffer and no
   allocation. `maxCompressedLength(n) = n + 3 * (n / 131072 + 1) + 18` (a
   14-byte header cap, 3 bytes per block, the 4-byte checksum), always inside
-  `ZSTD_COMPRESSBOUND` (`zstd.h:249`). The block layer stays internal: no zstd
+  `ZSTD_COMPRESSBOUND` (`zstd.h:249`). `compress` is the convenience form:
+  the heavy per-block arrays (the literals, the sequence list, the finder's
+  table) are a stack local, which is the 830-KiB figure the README cites.
+  `compressBuffered` is the same encoder over `encode.Buffer` (768 KiB,
+  caller-owned), so its thread stack is about 40 KiB; the pair exists because
+  the stack local violated the house's KiB-scale rule and survived only the
+  8-MiB default `ulimit -s`. The block layer stays internal: no zstd
   block function is self-contained (cross-block entropy and repeat-offset
   state), unlike snappy's and flate's. `Level = enum { fast, ratio }`: `.fast`
   is the level-1 class, `.ratio` is reserved and returns
   `error.Unimplemented` (the flate pattern, never a silent alias); the numeric
   CLI ladder gets no seats — each of levels 2-22 is a distinct output class
-  this package cannot produce. The barrel exposes `{encode, decode, Reader}`
-  today; `Writer` is the next slice's name (the README's API block is the
-  target surface). `Writer.streamAll` and `Writer.streamAllAlloc` mirror the
+  this package cannot produce. The barrel is complete: `{encode, decode,
+  Writer, Reader}`. `Writer.streamAll` and `Writer.streamAllAlloc` mirror the
   Reader's pumps (the caller-buffered pair first, then the default-window
-  allocation); there is no stack-buffered default pump.
+  allocation); there is no stack-buffered default pump — `Writer.Buffer(19)`
+  is 1.4 MiB, so a stack-buffered default is out (the `ulimit -s 8192` lesson).
 - **The scratch.** Per-block scratch (literals up to 128 KiB, the sequence
   store, the entropy workspace) is comptime stack in the emission path; the
   caller's `Buffer` holds the window, the staging, and the table (EQ7). The
   one-shot's measured need on aarch64 Linux is about 830 KiB of thread stack
-  (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of literals, 384
-  KiB of sequence list — `max_block_size / 4 + 1` twelve-byte sequences — plus
-  the writers' workspaces); the README carries the figure.
+  (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of literals, 512
+  KiB of sequence list — `max_block_size / 3 + 1` twelve-byte sequences, the
+  `min_match_length` bound — plus the writers' workspaces); the README carries
+  the figure. The bisect, re-run on aarch64 macOS (ReleaseFast, 600 KiB and
+  1.5 MiB text inputs, a thread spawned at a given `stack_size`): `compress`
+  805 KiB (809 KiB Debug), `compressBuffered` 37 KiB (41 KiB Debug),
+  `Writer.streamAll` 37 KiB (57 KiB Debug), against a 3-KiB floor for an empty
+  thread — so the two buffered forms are the KiB-scale paths, and the figure is
+  flat in the input size. `Writer.Buffer(19)` is 1507336 bytes (1.44 MiB):
+  512 KiB history, 128 KiB block, 128 KiB literals, 128 KiB + 3 output, 64 KiB
+  table, 512 KiB sequences, one byte of padding. On macOS a thread stack below
+  ~772 KiB crashes even with an empty thread body when the caller's frame is
+  large (the bisect needs each path in its own `noinline` frame, and the
+  ReleaseFast floor only resolves needs above ~772 KiB).
 - **The emission survey (verified).** The pinned CLI's `-1` output over the
   corpus and the survey inputs: Raw literals on match-rich data; Predefined
   sequences for small nbSeq; FSE at the 9/8/9 caps for large nbSeq; RLE blocks
@@ -423,6 +464,37 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
   CLI's while the frame decodes identically and usually at the same size. This
   is the four-case residue of the 232-case byte-identity sweep (all `words`
   inputs under 8 KiB).
+- **TE12 — the empty streaming frame.** `Writer` declares no
+  Frame_Content_Size in any frame, so `finish` on an empty writer writes the
+  6-byte streaming header, a raw zero-size last block, and the checksum: 13
+  bytes (`28 b5 2f fd 04 48 01 00 00 99 e9 d8 51` at the default window_log).
+  The CLI's empty *pipe* frame is the other 13 bytes — the single-segment form
+  the one-shot writes (`24 00` for the descriptor and FCS) — because its length
+  is known by the time it ends the frame. Every non-empty pipe input uses the
+  FCS-unknown header, which our `Writer` reproduces byte for byte (the
+  `encode_stream_*` fixtures); only the empty case departs.
+- **TE13 — the sequences bitstream on prose input.** `zstd -1 -c README.md`
+  (v1.5.7) and our one-shot both decode to README.md and their 7-byte headers
+  are identical (`28 b5 2f fd 64 71 0c`); the frames differ at byte 7 (ours
+  `0x85`, the CLI's `0x8d`: the first block header's size bits, 1712 vs 1713
+  compressed bytes) and in 490 bytes of that block. It is not the FCS form,
+  and not TE11's Huffman tie: the whole literals section (484 bytes — the
+  3-byte header, the tree description, and both Huffman streams) is
+  byte-identical, as are the sequence count (73), the modes byte (`0xcc`), and
+  the first ~700 bytes of the sequences bitstream. The difference is inside the
+  bitstream, so the two encoders encode the same match spans (identical
+  literals and counts) with different repcode accounting. The prefix sweep
+  localizes it: our one-shot's frame equals the CLI's for every README prefix
+  up to 832 bytes and first differs at 896 (both frames 460 bytes; the first
+  differing byte is 362, the bitstream's third byte; 55 bytes differ; all three
+  tables are Predefined, so there are no descriptions to blame). The corpus
+  sweep is unaffected: 116 of 117 shape/size cases are byte-identical, and the
+  residue is `words-65536` (same length, different bytes). Open: which finder
+  decision differs — the rep pre-check's position, the offset-2 chain, or a
+  rule the port reads differently from the C — and whether it is a port bug or
+  a documented C behavior. A byte-identity investigation, not a correctness
+  one: every frame here decodes byte-exactly through the CLI, libzstd, and our
+  decoder, and passes `zstd -t`.
 
 ## Testing
 
@@ -444,17 +516,24 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
   (same bytes or the same named error, `WindowTooLarge` excepted), and the
   reader-machinery target asks past a frame's tail so the trailer step runs
   through `rebase`.
-- **The encoder.** Landed: the round-trip gates (writer → reader identity over
-  the corpus shapes and the fixture classes, sentinel-checked), the CLI's own
-  level-1 bytes pinned for eleven inputs (`golden.zig`'s `encode_*` group,
-  each rebuilt from the corpus shape definitions and compared whole-frame), the
-  block-form checks (Raw at exactly Block_Size, RLE after the first block, the
-  windowed five-block frame), the header forms, the empty frame's 13 bytes,
-  determinism, and the `maxCompressedLength` bound. The T1 `01 0D` pair is
-  the literals layer's byte-exact golden (`literals_compress`). Still the fuzz
-  lane's: our encode → our decode identity, our encode → CLI decode
-  byte-exact, and the compliance property (no `Reader.Error` name except
-  `BufferTooSmall` reachable on our own output).
+- **The encoder.** Landed: the round-trip gates (encoder → reader identity over
+  the corpus shapes and the fixture classes, sentinel-checked, one-shot and
+  streaming), the CLI's own level-1 bytes pinned for eleven inputs
+  (`golden.zig`'s `encode_*` group, each rebuilt from the corpus shape
+  definitions and compared whole-frame), the CLI's own *streaming* bytes pinned
+  for five inputs (`encode_stream_*`, the same shapes through a pipe, which
+  `Writer` reproduces byte for byte), the block-form checks (Raw at exactly
+  Block_Size, RLE after the first block, the windowed five-block frame), the
+  header forms (the one-shot's exact FCS in its smallest form; the Writer's
+  FCS-unknown two-field header), the empty frame's 13 bytes in both forms, the
+  Writer's lazy header and zero-data flush, the flush-boundary walk, the
+  sliding window's cross-block matches, the one-shot/Writer block-byte
+  agreement, determinism under chunked writes, the poisoned lifecycle, and the
+  `maxCompressedLength` bound. The T1 `01 0D` pair is the literals layer's
+  byte-exact golden (`literals_compress`). Still the fuzz lane's: our encode →
+  our decode identity, our encode → CLI decode byte-exact, and the compliance
+  property (no `Reader.Error` name except `BufferTooSmall` reachable on our own
+  output).
 
 ## Oracles
 
@@ -499,9 +578,11 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
 - The streaming direction is not a bench row: a streaming row in the bench binary
   shifts the one-shot rows through code layout (flate tried one and reverted it).
   Time it through the example pump, `just example zstd decode <file>`.
-- Thread stack: the one-shot and the reader both need about 161 KiB in ReleaseFast
-  and 206 KiB in Debug; the 128 KiB literals scratch is the floor. To re-measure,
-  decode in a `std.Thread.spawn(.{ .stack_size = N })` thread and bisect on the
+- Thread stack: the reader needs about 161 KiB in ReleaseFast
+  and 206 KiB in Debug; the 128 KiB literals scratch is the floor. The encoder's
+  figures (the one-shot's 805-830 KiB, the buffered forms' ~40 KiB) are in "The
+  scratch" above. To re-measure,
+  run the path in a `std.Thread.spawn(.{ .stack_size = N })` thread and bisect on the
   segfault (aarch64 Linux, glibc; the window buffer is static, so only the
   decoder's frames count). Re-measure after changes to the compressed-block path
   and keep the README's figures in step.

@@ -28,7 +28,7 @@ fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
 }
 ```
 
-Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 768 KiB and
+Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 1.4 MiB and
 `Reader.Buffer(1 MiB)` 1.25 MiB: keep them in static or heap storage.
 
 ```zig
@@ -58,6 +58,9 @@ const zstd = @import("zcompress").zstd; // four names: `encode`, `decode`, `Writ
 // One-shot encode: one frame, header through checksum.
 zstd.encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize
+zstd.encode.compressBuffered(source: []const u8, target: []u8, buffer: *Buffer,
+    options: Options) error{ BufferTooSmall, Unimplemented }!usize
+zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + hash table 128 KiB; 768 KiB
 zstd.encode.maxCompressedLength(input_len: usize) usize // header + 3/block + input_len + 4
 zstd.encode.Options = struct { level: Level = .fast }
 zstd.encode.Level = enum { fast, ratio } // fast: level-1 class (the default); ratio: reserved
@@ -80,10 +83,12 @@ zstd.decode.DecompressError = error{
 
 // Streaming encode. One `Writer` writes one frame; `finish` is required.
 zstd.Writer.Buffer(comptime window_log: usize) type
-    // history (1 << window_log) + staging min(128 KiB, 1 << window_log)
-    // + hash table 4 << min(15, window_log + 1) bytes; window_log must be 10 to 31
+    // history (1 << window_log) + block min(128 KiB, 1 << window_log)
+    // + literals (the block) + the block's output (the block + 3)
+    // + hash table 4 << min(14, window_log + 1) bytes
+    // + sequences 12 * (block / 3 + 1); window_log must be 10 to 31
 zstd.Writer.default_window_log: usize // 19: a 512 KiB window, the largest level 1 declares
-zstd.Writer.DefaultBuffer // Buffer(default_window_log): 768 KiB
+zstd.Writer.DefaultBuffer // Buffer(default_window_log): 1.44 MiB
 zstd.Writer.init(comptime window_log: usize, output: *Io.Writer, buffer: *Buffer(window_log),
     options: encode.Options) Writer // write through `&w.writer`, then call `finish`
 zstd.Writer.finish(w: *Writer) Io.Writer.Error!void // writes the last block and the checksum
@@ -134,11 +139,13 @@ state — so `encode` exposes only the names above.
   when the data compresses; if it is too small, `compress` returns
   `error.BufferTooSmall` and `target`'s contents are unspecified.
 - **Encode output.** Deterministic: the same input and options produce the same
-  bytes. The header declares the exact Frame_Content_Size (§3.1.1.1.4) in the
+  bytes. `compress` declares the exact Frame_Content_Size (§3.1.1.1.4) in the
   smallest form, the XXH64 checksum is always written, and no dictionary is
   ever named. The window is the smallest power of two covering the input, from
   1 KiB to 512 KiB; when the input fits it the frame is single-segment, and
-  above 512 KiB it declares a 512 KiB window.
+  above 512 KiB it declares a 512 KiB window. A `Writer` cannot know the
+  length when its header goes out, so its frames declare no Frame_Content_Size
+  and always carry a `window_log`-sized Window_Descriptor.
 - **Emission.** The ladder follows `zstd -1`: a block that does not shrink by
   `(size >> 6) + 2` bytes is stored raw; a block of one repeated byte becomes an
   RLE block, except the frame's first block, which is never RLE (a zstd ≤ 1.4.3
@@ -149,18 +156,28 @@ state — so `encode` exposes only the names above.
   Huffman tree's equal-count symbols keep natural order here, where the C's
   sort is unstable, so a tree description's bytes can differ from the CLI's
   while decoding identically.
-- **Encode streaming.** Nothing reaches `output` until the block buffer fills,
-  you call `w.writer.flush()`, or `finish`; the first output is the frame
-  header. A `flush` emits the buffered data as one complete block, so a decoder
-  reading the output so far decodes every byte written; only `finish` writes
-  the last block and the checksum trailer. `finish` is required and final:
-  after it, or after a failed write, the writer returns `error.WriteFailed`. A
-  `Writer` never declares Frame_Content_Size, so its frames are always windowed.
+- **Encode streaming.** Nothing reaches `output` until the block region fills,
+  you call `w.writer.flush()`, or `finish`; the frame header goes out with the
+  first of those, and a `flush` with nothing buffered emits the header alone.
+  A `flush` emits the buffered data as one complete block, so a decoder reading
+  the output so far decodes every byte written; only `finish` writes the last
+  block and the checksum trailer. `finish` is required and final: after it, or
+  after a failed write, the writer returns `error.WriteFailed`. An empty
+  writer's `finish` is still a frame: the header, one raw zero-size last block,
+  and the checksum — 13 bytes. Blocks are `min(128 KiB, 1 << window_log)` bytes
+  and the splits follow the block region, never the caller's write sizes; a
+  `writableSliceGreedy` write onto a full region emits the block, never drops
+  it. The frames match the zstd CLI's own `zstd -1` output over a pipe byte for
+  byte, and the finder's parameters are that CLI class: windowLog 19, hashLog
+  14, and 7-byte hashing at the default `window_log`.
 - **Buffers.** You own every buffer, and neither direction keeps anything
   between calls. `decompress` writes only into `target`, leaves the bytes past
   the returned length untouched, and returns `error.BufferTooSmall` before any
   write that would pass the end; a declared Frame_Content_Size is checked
-  against the output, never used to size anything.
+  against the output, never used to size anything. `encode.compressBuffered`
+  and `Writer` put the encoder's heavy per-block arrays in the `Buffer` you
+  provide (`encode.Buffer`, 768 KiB; `Writer.Buffer(window_log)`, 1.4 MiB at
+  the default) instead of on the stack.
 - **Windows.** The decoder's one-shot needs no window: a match can only reach
   back into output already in `target`. A `Reader` keeps its history in the
   `Buffer` you give it: `window_len` bytes of history, one 128 KiB block of
@@ -192,13 +209,16 @@ state — so `encode` exposes only the names above.
   160 KiB of thread stack in release builds and 210 KiB in Debug, so give
   decoding threads 256 KiB or more. `encode.compress` needs about 830 KiB
   (Debug and release alike): the match finder's table (128 KiB), the literals
-  buffer (128 KiB), and the sequence list (384 KiB) are stack scratch, the
+  buffer (128 KiB), and the sequence list (512 KiB) are stack scratch, the
   price of a one-shot with no allocator — give encoding threads 1 MiB or more.
-  A `Writer` keeps its window, staging, and table in the `Buffer` you provide
-  (768 KiB at the default `window_log`).
-- **Allocation.** None while encoding or decoding. `streamFrameAlloc`,
-  `streamAllAlloc`, and `Writer.streamAllAlloc` allocate one `DefaultBuffer`
-  from your allocator for the call and free it before returning; a failed
+  `encode.compressBuffered` and `Writer.streamAll` are the same encoders over a
+  caller-owned `Buffer`, and need about 40 KiB of thread stack (measured by the
+  same bisect: 37 KiB release, 41-57 KiB Debug, flat from 600 KiB to 1.5 MiB of
+  input).
+- **Allocation.** None while encoding or decoding. `Reader.streamFrameAlloc`
+  and `Reader.streamAllAlloc` allocate one `Reader.DefaultBuffer` (8 MiB + 256
+  KiB), and `Writer.streamAllAlloc` one `Writer.DefaultBuffer` (1.44 MiB), from
+  your allocator for the call, and free it before returning; a failed
   allocation is `error.OutOfMemory`.
 - **Reader input.** `input` needs a buffer of at least 4 bytes; `Io.Reader.fixed`
   always qualifies. A contiguous `peek` or `take` of up to 128 KiB is served; a
@@ -221,8 +241,10 @@ state — so `encode` exposes only the names above.
 ## Testing and benchmarks
 
 `just test` runs the unit tests: frames built by hand or produced by `zstd`
-1.5.7 and checked against it, tables from the RFC, encode and decode round
-trips, and a check on every decode that no byte past the output was written.
+1.5.7 and checked against it — including the encoder's own output, which
+reproduces the CLI's `zstd -1` bytes on the recorded fixtures — tables from the
+RFC, encode and decode round trips, and a check on every decode that no byte
+past the output was written.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and `just check-32`
 runs a large-frame probe on wasm32-wasi under wasmtime. `just corpus` generates
 the hash-checked benchmark corpus, and `just bench` runs the local benchmarks;

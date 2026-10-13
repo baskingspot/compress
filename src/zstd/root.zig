@@ -1,8 +1,9 @@
 //! zstd (RFC 8878): a fast encoder and a complete decoder in pure Zig.
 //! `zstd.encode` and `zstd.decode` are the one-shots; `zstd.Reader` is a
-//! decompressing `std.Io.Reader` over one frame (the streaming `Writer` is
-//! still to land). No encode or decode path allocates, and the only imports
-//! are `std` and `fastmem`. This is the `zcompress.zstd` namespace.
+//! decompressing `std.Io.Reader` and `zstd.Writer` a compressing
+//! `std.Io.Writer`, each over one frame. No encode or decode path allocates,
+//! and the only imports are `std` and `fastmem`. This is the
+//! `zcompress.zstd` namespace.
 //!
 //! The source files, from the bottom up:
 //!
@@ -16,8 +17,8 @@
 //!   decode, and the encoder's block emission ladder.
 //! - `frame.zig` and `xxh64.zig`: the frame header, the block chain, skippable
 //!   frames, and the checksum.
-//! - `encode.zig`, `decode.zig`, and `Reader.zig`: the one-shots and the
-//!   streaming decoder.
+//! - `encode.zig`, `decode.zig`, `Reader.zig`, and `Writer.zig`: the
+//!   one-shots and the streaming decoder and encoder.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
 
@@ -53,6 +54,11 @@ pub const decode = @import("decode.zig");
 /// `streamFrame` and `streamAll` pumps.
 pub const Reader = @import("Reader.zig");
 
+/// The streaming encoder: an `Io.Writer` that compresses into one Zstandard
+/// frame, the caller-owned `Writer.Buffer`, and the `streamAll` and
+/// `streamAllAlloc` pumps.
+pub const Writer = @import("Writer.zig");
+
 test {
     _ = bits;
     _ = block;
@@ -72,6 +78,7 @@ test {
     _ = encode;
     _ = decode;
     _ = Reader;
+    _ = Writer;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
     std.testing.refAllDecls(@This());

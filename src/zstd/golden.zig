@@ -3,8 +3,9 @@
 //! and sequences sections from real frames, and whole frames, good and
 //! corrupt, for the block, frame, and streaming layers. Provenance is noted
 //! beside each group. Helpers: `hex` (comptime hex literals), `buildFrame`
-//! (assembles a frame from block contents), and `expectDecoded` (the shared
-//! decode check). "The CLI" in the comments below is the zstd CLI v1.5.7,
+//! (assembles a frame from block contents), `expectDecoded` (the shared
+//! decode check), and the corpus `Shape`/`fillShape` the encoder tests
+//! rebuild their inputs from. "The CLI" in the comments below is the zstd CLI v1.5.7,
 //! the reference decoder the fixtures were generated and checked with.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
@@ -12,6 +13,9 @@
 const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
+const DefaultPrng = std.Random.DefaultPrng;
+
+const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 
@@ -575,6 +579,75 @@ pub fn buildFrame(
     return out;
 }
 
+/// The benchmark corpus shapes, restated from `bench/zig/corpus.zig` so the
+/// codec tests pin the same bytes the bench corpus generates (`just
+/// corpus`); `zeros` is the tests' addition (the RLE shape at byte 0). One
+/// definition, shared by every encoder layer's tests.
+pub const Shape = enum { text, html, rle, random, mixed, skewlit, words, zeros };
+
+/// Fill `buf` with one corpus shape.
+pub fn fillShape(shape: Shape, buf: []u8) void {
+    switch (shape) {
+        .text => fill(buf, "the quick brown fox jumps over the lazy dog. "),
+        .html => fill(buf, "<div class=\"row\"><span>hello</span><span>flate</span></div>"),
+        .rle, .zeros => fastmem.set(u8, buf, if (shape == .rle) 0x41 else 0),
+        .random => {
+            var rng: DefaultPrng = .init(0xC0FFEE);
+            for (buf) |*byte| byte.* = rng.random().int(u8);
+        },
+        .mixed => {
+            var rng: DefaultPrng = .init(0x5A4BEEF);
+            for (buf, 0..) |*byte, index| {
+                byte.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(index)));
+            }
+        },
+        .skewlit => {
+            var rng: DefaultPrng = .init(0x5CEBE1);
+            for (buf) |*byte| {
+                const x: u16 = rng.random().int(u8);
+                byte.* = @truncate(x * x >> 10);
+            }
+        },
+        .words => {
+            var rng: DefaultPrng = .init(0xD1C710);
+            var index: usize = 0;
+            while (index < buf.len) {
+                const word = dictionary[rng.random().uintLessThan(usize, dictionary.len)];
+                const length = @min(word.len, buf.len - index);
+                fastmem.copy(u8, buf[index..][0..length], word[0..length]);
+                index += length;
+                if (index < buf.len) {
+                    buf[index] = ' ';
+                    index += 1;
+                }
+            }
+        },
+    }
+}
+
+/// Repeat `phrase` over `buf`.
+fn fill(buf: []u8, phrase: []const u8) void {
+    var index: usize = 0;
+    while (index < buf.len) {
+        const length = @min(phrase.len, buf.len - index);
+        fastmem.copy(u8, buf[index..][0..length], phrase[0..length]);
+        index += length;
+    }
+}
+
+/// The `words` shape's vocabulary, the same 64 words `bench/zig/corpus.zig`
+/// pins.
+const dictionary = [_][]const u8{
+    "the",  "of",    "and",  "a",     "to",    "in",    "is",   "you",
+    "that", "it",    "he",   "was",   "for",   "on",    "are",  "as",
+    "with", "his",   "they", "at",    "be",    "this",  "have", "from",
+    "or",   "one",   "had",  "by",    "word",  "but",   "not",  "what",
+    "all",  "were",  "we",   "when",  "your",  "can",   "said", "there",
+    "use",  "an",    "each", "which", "she",   "do",    "how",  "their",
+    "if",   "will",  "up",   "other", "about", "out",   "many", "then",
+    "them", "these", "so",   "some",  "her",   "would", "make", "like",
+};
+
 /// A single Raw block of 8 bytes (`§3.1.1.2.2`); the CLI decodes it to those bytes.
 pub const frame_raw = hex("28b52ffd00484100007a73746420726177");
 
@@ -1101,7 +1174,9 @@ pub const skippable_huge = hex("512a4d18ffffffff616263");
 // The CLI's verdicts: `zstd -t` clean and `zstd -d -c` byte-exact on all
 // eleven (v1.5.7), the same checks the frame fixtures above record. The inputs are the
 // `bench/zig/corpus.zig` shapes (the text/html/rle 32 KiB and 64 KiB blobs
-// are `bench/corpus-gen`'s, whose SHA256SUMS anchor they share).
+// are `bench/corpus-gen`'s, whose SHA256SUMS anchor they share). The
+// `encode_stream_*` group below is the same CLI over the same shapes read
+// from a pipe, where the frame's size is unknown.
 
 /// The CLI's `zstd -1` frame for the 100-byte input: 67 bytes.
 pub const encode_text_100 = hex("28b52ffd2464b50100c40274686520717569636b2062726f776e2066" ++
@@ -1303,6 +1378,95 @@ pub const encode_skewlit_4096 = hex("28b52ffd64000f455b000a008d2d121080ad0efcdda
     "59f86fbbfdeab247ab3cec9dcd2f248288ce3063a46d02da94f21f19" ++
     "19157efbd849f64600d8cf5816ce26c702004002873f");
 
+// The `encode_stream_*` fixtures are the CLI's own `zstd -1` frames for the
+// same shapes read from a **pipe** (`cat SHAPE | zstd -1`), where the size is
+// unknown: the streaming class (`ZSTD_getCParams(1, ZSTD_CONTENTSIZE_UNKNOWN,
+// 0)`: windowLog 19, hashLog 14, minMatch 7) and the FCS-unknown six-byte
+// header. `Writer` at `default_window_log` reproduces each one byte for byte
+// (its test requires it), and each decodes through our decoder and the CLI to
+// the shape. The CLI's verdicts: `zstd -t` clean and `zstd -d -c` byte-exact
+// on all five (v1.5.7). The empty input is the one case the CLI writes
+// differently: it knows the length at the frame's end, so its empty frame is
+// the single-segment 13 bytes the one-shot writes, while the `Writer` keeps
+// the FCS-unknown form for every frame.
+
+/// The CLI's `zstd -1` frame for the 1024-byte text shape read from a pipe: 67 bytes.
+pub const encode_stream_text_1024 =
+    hex("28b52ffd0448b50100d40274686520717569636b2062726f776e20666f78206a" ++
+        "756d7073206f76657220746865206c617a7920646f672e200100850e2b55063b" ++
+        "f59c43");
+
+/// The CLI's `zstd -1` frame for the 32-KiB html shape read from a pipe: 71 bytes.
+pub const encode_stream_html_32768 =
+    hex("28b52ffd0448d50100c4023c64697620636c6173733d22726f77223e3c737061" ++
+        "6e3e68656c6c6f3c2f7370616e666c6174652f6469763e0300c2bf575b83a755" ++
+        "ee7c0207cc1117");
+
+/// The CLI's `zstd -1` frame for the 64-KiB rle shape read from a pipe: 23 bytes.
+pub const encode_stream_rle_65536 =
+    hex("28b52ffd04485500001041410100fb7f1d6001cf99e954");
+
+/// The CLI's `zstd -1` frame for the 131073-byte text shape (two blocks): 72 bytes.
+pub const encode_stream_text_131073 =
+    hex("28b52ffd0448bc0100d40274686520717569636b2062726f776e20666f78206a" ++
+        "756d7073206f76657220746865206c617a7920646f672e20010085fe87b92a03" ++
+        "090000683300dc84");
+
+/// The CLI's `zstd -1` frame for the 4-KiB words shape read from a pipe: 1666 bytes.
+pub const encode_stream_words_4096 =
+    hex("28b52ffd0448ad33000a7cf00f16a0256931803c6d045eee665e5693a4adaaaa" ++
+        "d1ffac01f200fa00f9007911a9679b2c1e6417e600e635c17b9b2c2e659b97e9" ++
+        "a92fd996b28bb21df3b297ecac4464192e82873bf5411372e73ab90fb273ac74" ++
+        "a90289b8945d65ef325de94dbc28db37f152362174c937b1402212af7359b273" ++
+        "69d93e903e6984d04b63d9397742e8321d4958cff61c0f62f2ac67445cec8d24" ++
+        "3c88c98377055770c961a40b732c3b233dc8ae426fe2c33de44baf09cef138d2" ++
+        "9156bae4302177c6bbec41f69abc6c87bb4a9dd704afc92bdb2b70e451f25c72" ++
+        "b80244bc74050f3951b653a18b2080ec2a653b96edb6772e3597ed7a36214494" ++
+        "ed7b2bbd26031ae92278ef5273c96113a81e25cf657a115c01642b9de7d4d704" ++
+        "57a9b3d2b90a9d63b847c9f3401aef25db976ca7d704039807d26598d384d048" ++
+        "c2a58c483df7821c239d8bc9e20a1cb9ec0a10f1c0d44fda44d95ef2bd95ce65" ++
+        "7a31595cf292b4d2036993c5b6a7547218c05c049b401520e252b39e6de0c844" ++
+        "9621a0253b0fb70967a7945dca2e82cb7613a8ae60db3b55861c735c94edb9af" ++
+        "c9804eda84d0b677c67b4d3ec84ad97429db4d7c943c44ea48e5ca00cc657b51" ++
+        "b6975db64496612ff9908f237d4d5e6a1e6eefb2abd04ae752f306d719cbce85" ++
+        "f9704496a108aec0910b2482485de9ac7762d906909de34176d226b20c63d9be" ++
+        "2698c8325c989b7076ae52e7d42a75aa0c3792f0904357b645a45e72f8a4d9b8" ++
+        "4c5fb2332177e84c1c93976d7b67a597ec9c4257e0087dd290844d38bb18c4e4" ++
+        "a9527a57b64bb613429b2c889042cf2e357a76058e6ce228792e8253f592c303" ++
+        "4bae77d2d6e02a658410d95eb28295c61cc0ac74ce7d104394ed00e61cebd9de" ++
+        "2939a42a992cde3bf50a1c3179ee655740a4da989b2c26caf60a20bb40222684" ++
+        "c876a54d8e26504d088df79a60c94e29bb02bcb16c3f79830c97f026841e48c3" ++
+        "655740435ef2527661aeb7c9e22a65bb26c791ae1738f2de480f77c9d704dbde" ++
+        "b94022ce31bdf426bef740ba983e8ef41c2f6d7bb7ed019847c9a3e64177058e" ++
+        "14c15e852ed32bb888cc52677ab82b19d0269c9dd7e48d6567001340f6901359" ++
+        "869b28dbdb84b353d8def9a49d632c5b135ca683983c89e73e9046d1b34dfca4" ++
+        "8d245c1a9c2350bad46471052bed6b522f652b9d7b058e0cb23ac3e527cdf632" ++
+        "13cef0863c97ce5de78194789d735cacf749dbf6f426caf63225614d0664271f" ++
+        "48f69ab4ad00119817e627ed32dd04aacb9ad40bf3544c0033dc00665b007311" ++
+        "a90154cadec4f5acce4b0f62f26cea269c9db245baa49e5dc16b820bf35256f2" ++
+        "a4dd03e90a2e572011268b4fda00e63a572983ec7244f649bbb46c83b16c2f35" ++
+        "97b291844b9eba57b94a9d9184cbae2a268b2325db877b13af52b67a0f7711a9" ++
+        "261f486b993ee4b601810ba8b198634e1943323322329224e921040882301048" ++
+        "62f50111200408214c7a2853019fef345df012378f5e692455da0c2d0391ae67" ++
+        "2046a8937a60da599158201d4f4eca9975d5fa2de81abba5ab3e8e49028a1600" ++
+        "03ae930d21dcd6fbcfbe322d5f491a870258078a6bee28912fc0c8aba1393e49" ++
+        "184cf8956adb196c0b83207c8364336b8e2b8cc5f5469e49636cd4ec20de2780" ++
+        "006277943230fe01dd0ec14c0a217c65759fe70256f8141353dbd32a37a125b8" ++
+        "e41a55de6d0ade75642c1ef00b3be6df6825774787e5d785b39b2d704d41f746" ++
+        "a96bdf4daa23548f1ce3e4b4c902153a04e61f92e941d7aebb2866d2c60538b7" ++
+        "fe927aef42355f3688f1b3f7297792a1ab6dcb0cc57e83d7bd7df1e3829710fb" ++
+        "8864cce0241e429601dc49e21d2261f0f12e8a51d3e9dd36e9a5a45310fb01a6" ++
+        "31503f98666c387549fbbae24fa4d85aedea4b63bb09046d8a889b451382e27c" ++
+        "8f34d44fd4f9b2e015a1cf3cc0e981a7802c67e720e7983621b658f130c0018d" ++
+        "d8c0ae717e538e0c30ee8c484355da228b9a9746f527fe6c0239a7cc57de0bca" ++
+        "b359c39dd7e528abe87dfe0682a14119a1cd261dddf404f69a4ba17950a913f5" ++
+        "95c576356de78cd47c6f656f54f07027b7102d114ff08917fb9c173c3d8082e3" ++
+        "a5eb39a11406ab47e15fe2ddabcb7a393c2b6d2d15180aea2c14eac40da69879" ++
+        "958709195d02314c646fc640cc35d973b9e3f2263829f64f1f1f2b1c06e72e51" ++
+        "dcc8968aafdcba534daaa3170b906ce8d1da82f61c50b0f920003e23e9140077" ++
+        "7e04fe0545432790eab91e944c02f2265c8ec1384ff5a61a0308a78a15f2726d" ++
+        "4074f99a7811fb11a7de04d4d15b892dfe13c9c604701814fdc04fccac6a018b" ++
+        "56c5");
 /// The CLI's `zstd -1` frame for the 600000-byte input: 120 bytes.
 pub const encode_text_600000 = hex("28b52ffd8448c0270900bc0100d40274686520717569636b2062726f" ++
     "776e20666f78206a756d7073206f76657220746865206c617a792064" ++

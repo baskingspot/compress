@@ -116,10 +116,22 @@ pub const window = struct {
 
     /// `Window_Size = windowBase + windowAdd`, from the Window_Descriptor
     /// byte (`§3.1.1.1.2`, Table 6: bits 7-3 Exponent, bits 2-0 Mantissa).
-    pub fn size(descriptor: u8) u64 {
-        const exponent: u5 = @truncate(descriptor >> 3);
-        const mantissa: u3 = @truncate(descriptor);
+    pub fn size(byte: u8) u64 {
+        const exponent: u5 = @truncate(byte >> 3);
+        const mantissa: u3 = @truncate(byte);
         return windowBase(exponent) + windowAdd(exponent, mantissa);
+    }
+
+    /// The Window_Descriptor byte declaring a window of exactly
+    /// `1 << window_log` bytes (`§3.1.1.1.2`): the exponent in bits 7-3,
+    /// mantissa 0 in bits 2-0. `size` of the result is that window, which
+    /// the comptime check below pins for every encodable `window_log`.
+    /// The format's Window_Log is 10 to 41; an encoder that declares
+    /// `1 << window_log` with a nonzero mantissa would declare more than it
+    /// retains, so the mantissa stays 0.
+    pub fn descriptor(window_log: u6) u8 {
+        assert(window_log >= 10);
+        return @as(u8, window_log - 10) << 3;
     }
 
     /// `§3.1.1.1.2` — "The minimum Window_Size is 1 KB."
@@ -136,6 +148,11 @@ comptime {
     assert(window.size(0xff) == window.max_size);
     assert(window.windowLog(0) == 10);
     assert(window.windowLog(31) == 41);
+    // `descriptor` is `size`'s inverse for a mantissa of 0: the byte an
+    // encoder writes for `1 << window_log` parses back to that window.
+    for (10..32) |window_log| {
+        assert(window.size(window.descriptor(window_log)) == @as(u64, 1) << window_log);
+    }
 }
 
 /// The Frame_Header_Descriptor's fields (`§3.1.1.1.1`, Table 3).
