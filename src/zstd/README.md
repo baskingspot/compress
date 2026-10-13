@@ -178,8 +178,11 @@ state — so `encode` exposes only the names above.
   and the splits follow the block region, never the caller's write sizes; a
   `writableSliceGreedy` write onto a full region emits the block, never drops
   it. The frames match the zstd CLI's own `zstd -1` output over a pipe byte for
-  byte, and the finder's parameters are that CLI class: windowLog 19, hashLog
-  14, and 7-byte hashing at the default `window_log`.
+  byte up to about 2 MiB, and the finder's parameters are that CLI class:
+  windowLog 19, hashLog 14, and 7-byte hashing at the default `window_log`.
+  Above 2 MiB the CLI's own pipe output splits its streaming jobs (its
+  multi-threaded workers cut different blocks), so the pipe comparison stops
+  there; the frames remain valid and every strict decoder accepts them.
 - **Buffers.** You own every buffer, and neither direction keeps anything
   between calls. `decompress` writes only into `target`, leaves the bytes past
   the returned length untouched, and returns `error.BufferTooSmall` before any
