@@ -6,7 +6,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from ec2bench.box import Box
+from ec2bench.box import Box, RemoteError
 from ec2bench.config import Config
 from ec2bench.facts import collect
 from ec2bench.isolation import isolate, run_isolated, stop_isolated
@@ -121,7 +121,7 @@ def execute(
         # their hashes (the provenance).
         try:
             box.run(f"test -d {shlex.quote(remote + '/raw')}")
-        except Box.RemoteError:
+        except RemoteError:
             # A failure before the raw tree exists has nothing to fetch —
             # its own error stands as the run's.
             pass

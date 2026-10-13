@@ -2,8 +2,9 @@
 // schema-v1 JSONL as the zcompress driver: one process is one round of this
 // arm. Rows: flate/gzip/zlib at level 1 (the fast class, matching the
 // zcompress .fast rows) and snappy raw blocks, both directions, plus zstd
-// DecodeAll, decode only because zcompress has no zstd encoder. DecodeAll is
-// the single-buffer shape that the zc one-shot decode is measured against.
+// EncodeAll/DecodeAll on shared contexts. EncodeAll at SpeedFastest is the
+// level-1 class the zc one-shot (level .fast) targets; DecodeAll is the
+// single-buffer shape that the zc one-shot decode is measured against.
 //
 // One-shot shape: writers and readers are constructed per iteration, the Go
 // equivalent of the zcompress one-shots' per-call table setup. Decompression
@@ -38,12 +39,8 @@ var sizes = []int{32 * 1024, 64 * 1024}
 var codecs = []string{"flate", "gzip", "zlib", "snappy", "zstd"}
 var directions = []string{"compress", "decompress"}
 
-// directionsFor: zstd is decode only (zcompress has no zstd encoder, so there
-// is no compress row to compare against).
+// directionsFor: every codec runs both directions.
 func directionsFor(codec string) []string {
-	if codec == "zstd" {
-		return []string{"decompress"}
-	}
 	return directions
 }
 
@@ -114,12 +111,36 @@ func zstdDecoder() (*zstd.Decoder, error) {
 	return zstdDec, nil
 }
 
-// compressOne compresses raw with the codec's level-1 writer and returns the
-// produced length.
+// The zstd encoder, built once: EncodeAll on a shared *Encoder at
+// SpeedFastest (klauspost's fastest class, the peer of the CLI's level 1
+// that the corpus's .zst blobs and the zc one-shot's .fast level measure),
+// concurrency 1 as on the decode side.
+var zstdEnc *zstd.Encoder
+
+func zstdEncoder() (*zstd.Encoder, error) {
+	if zstdEnc == nil {
+		enc, err := zstd.NewWriter(
+			nil,
+			zstd.WithEncoderLevel(zstd.SpeedFastest),
+			zstd.WithEncoderConcurrency(1),
+		)
+		if err != nil {
+			return nil, err
+		}
+		zstdEnc = enc
+	}
+	return zstdEnc, nil
+}
+
+// compressOne compresses raw with the codec's level-1 writer (the zstd
+// encoder's EncodeAll) and returns the produced length.
 func compressOne(codec string, raw, target []byte) (int, error) {
 	if codec == "zstd" {
-		// directionsFor gates every caller; reaching here is a bug.
-		return 0, fmt.Errorf("zstd is decode-only")
+		enc, err := zstdEncoder()
+		if err != nil {
+			return 0, err
+		}
+		return len(enc.EncodeAll(raw, target[:0])), nil
 	}
 	buf := bytes.NewBuffer(target[:0])
 	switch codec {

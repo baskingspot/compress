@@ -23,12 +23,12 @@ last physical core of the box, isolated through systemd
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks) plus zstd decode, and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1` and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
-| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `DecodeAll` | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `EncodeAll` at SpeedFastest and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
 | `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
 | `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
 | `googlesnappy` | bench/drivers/google-snappy/bench_snappy.cc | google/snappy 1.3.1 raw blocks (`snappy::RawCompress`, `RawUncompress`), both directions | cmake (static `snappy`) with zig-cc and zig-c++ wrappers, per target and CPU |
-| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_decompressDCtx`, decode only | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
+| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_compressCCtx` at level 1 and `ZSTD_decompressDCtx`, both directions | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
 | `aa` | the `zc` binary again | the A/A noise floor | none |
 
 The sources of the four native arms are pinned by release-tarball URL and hash
@@ -38,9 +38,10 @@ delegates to `bench/build.zig`) materializes them under
 `bench/zig-out/bench-src/<name>/`, hash-verified by zig's own fetcher. The
 harness runs that step itself and never downloads or unpacks a tarball.
 
-zcompress has no zstd encoder, so zstd rows are decode only
-(`zstd/decompress/...`) on the arms that carry the codec: zc (with the in-binary
-std.compress.zstd rows), klauspost, and zstd-c.
+zstd rows run both directions on the arms that carry the codec: zc (the
+level-`.fast` one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
+the level-1 class. The in-binary std.compress.zstd rows stay decode only: the
+std library ships no zstd compressor.
 
 ## Corpus
 

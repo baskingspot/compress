@@ -105,8 +105,13 @@ class Measurement:
 
 
 def applicable(meta: Meta, sample: Sample) -> list[str]:
-    """The implementations that must report this case: the std rows have no snappy."""
-    return [impl for impl in meta.impls if not (impl == "std" and sample.codec == "snappy")]
+    """The implementations that must report this case: the std rows skip snappy
+    (std ships no snappy) and zstd compression (std.compress.zstd ships no
+    encoder)."""
+    std_skips = sample.codec == "snappy" or (
+        sample.codec == "zstd" and sample.direction == "compress"
+    )
+    return [impl for impl in meta.impls if not (impl == "std" and std_skips)]
 
 
 def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

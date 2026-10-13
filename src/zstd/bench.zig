@@ -1,11 +1,12 @@
-//! zstd decoder benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! zstd codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
 //!
-//! Decode only: the encoder is not implemented yet. Each row decodes a
-//! reference frame written by the zstd CLI v1.5.7 over the shared corpus
-//! shapes (level 1, except the entropy shapes in `Shape`). `just corpus`
-//! generates the frames into `bench/corpus-gen/`, and the harness in `bench/`
-//! decodes the same files, so a local row and a harness row measure the same
-//! input. Throughput is MB/s over the *decompressed* size.
+//! The decode rows decode a reference frame written by the zstd CLI v1.5.7
+//! over the shared corpus shapes (level 1, except the entropy shapes in
+//! `Shape`); the compress rows are the mirror: the one-shot encoder (the
+//! CLI's level-1 class) over the raw shapes. `just corpus` generates the
+//! corpus into `bench/corpus-gen/`, and the harness in `bench/` runs the
+//! same files, so a local row and a harness row measure the same input.
+//! Throughput is MB/s over the *decompressed* size.
 //!
 //! Output is benchstat-friendly:
 //! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
@@ -60,6 +61,46 @@ fn readCorpus(allocator: Allocator, io: Io, name: []const u8) ![]u8 {
     var dir = try Io.Dir.cwd().openDir(io, corpus_dir, .{});
     defer dir.close(io);
     return dir.readFileAlloc(io, name, allocator, .unlimited);
+}
+
+/// Compress benchmarks: one sub-benchmark per corpus case. The raw shape is
+/// loaded once and the one-shot output is verified once (the frame must
+/// decode back to the raw shape, as in the `bench/` harness's warmup), then
+/// the raw shape is compressed repeatedly. Reports MB/s over the
+/// uncompressed input.
+pub fn benchmarkZstdCompress(b: *bench.B) !void {
+    inline for (.{ Size.half, Size.full }) |size| {
+        inline for (std.enums.values(Shape)) |shape| {
+            _ = try b.run(caseName(size, shape), struct {
+                fn run(bb: *bench.B) !void {
+                    var threaded: Io.Threaded = .init_single_threaded;
+                    const io = threaded.io();
+                    const base = @tagName(shape) ++ switch (size) {
+                        .half => "-32768",
+                        .full => "-65536",
+                    };
+                    const raw = try readCorpus(bb.allocator, io, base);
+                    defer bb.allocator.free(raw);
+                    const bound = zstd.encode.maxCompressedLength(raw.len);
+                    const comp = try bb.allocator.alloc(u8, bound);
+                    defer bb.allocator.free(comp);
+                    const back = try bb.allocator.alloc(u8, raw.len);
+                    defer bb.allocator.free(back);
+                    // The one-shot's frame must round trip to the raw shape.
+                    const clen = try zstd.encode.compress(raw, comp, .{});
+                    const verified = try zstd.decode.decompress(comp[0..clen], back);
+                    if (verified != raw.len or !std.mem.eql(u8, back, raw))
+                        return error.CorpusMismatch;
+
+                    while (try bb.loop()) {
+                        const n = try zstd.encode.compress(raw, comp, .{});
+                        bb.keepAlive(n);
+                    }
+                    bb.setBytes(@intCast(raw.len));
+                }
+            }.run);
+        }
+    }
 }
 
 /// Decompress benchmarks: one sub-benchmark per corpus case. The frame is

@@ -24,9 +24,9 @@
 
 /* The driver's codec set and the compiler line in the meta record. The
  * flate-family default covers the C arms; the google/snappy driver
- * overrides both before including this header. A decode-only driver (the
- * zstd-c arm) overrides CBENCH_DIRECTIONS; its impl_compress is then never
- * called. */
+ * overrides both before including this header. A driver that carries one
+ * direction overrides CBENCH_DIRECTIONS (and CBENCH_DIRECTION_COUNT); its
+ * unused impl_* is then never called. */
 #ifndef CBENCH_CODECS
 #define CBENCH_CODECS {"flate", "gzip", "zlib"}
 #define CBENCH_CODEC_COUNT 3

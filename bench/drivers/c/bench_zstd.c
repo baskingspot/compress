@@ -1,9 +1,8 @@
 /* The zstd-c arm (bench/README.md): the pinned facebook/zstd v1.5.7, the
- * native reference, using whole-buffer ZSTD_decompressDCtx on a reused
- * context. This is the simple one-shot API and matches the zc arm's
- * `zstd/decompress/...` rows (bench/zig/bench_zcompress.zig). Decode only:
- * zcompress has no zstd encoder, so there is no compress row to compare
- * against.
+ * native reference, using whole-buffer ZSTD_compressCCtx at level 1 (the
+ * fast class every arm's rows measure) and ZSTD_decompressDCtx on reused
+ * contexts. This is the simple one-shot API and matches the zc arm's
+ * `zstd/...` rows (bench/zig/bench_zcompress.zig).
  *
  * Window limit: ZSTD_d_windowLogMax is pinned to ZSTD_WINDOWLOG_LIMIT_DEFAULT
  * (27, the reference default). This is the driver's own setting, recorded so
@@ -24,17 +23,19 @@
 #define TOOL "zstd"
 #define CBENCH_CODECS {"zstd"}
 #define CBENCH_CODEC_COUNT 1
-#define CBENCH_DIRECTIONS {"decompress"}
-#define CBENCH_DIRECTION_COUNT 1
+#define CBENCH_DIRECTIONS {"compress", "decompress"}
+#define CBENCH_DIRECTION_COUNT 2
 
 /* Owned by impl_setup/impl_teardown; the documented reuse pattern, so the
- * timed loop is the decode alone. */
+ * timed loop is the compress/decode alone. */
+static ZSTD_CCtx *cctx;
 static ZSTD_DCtx *dctx;
 
 static void impl_setup(void)
 {
+    cctx = ZSTD_createCCtx();
     dctx = ZSTD_createDCtx();
-    if (!dctx) exit(1);
+    if (!cctx || !dctx) exit(1);
     /* 27 = ZSTD_WINDOWLOG_LIMIT_DEFAULT (zstd_internal.h — the public
      * zstd.h hides it behind the static-linking-only section). */
     if (ZSTD_isError(ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 27)))
@@ -43,21 +44,22 @@ static void impl_setup(void)
 
 static void impl_teardown(void)
 {
+    ZSTD_freeCCtx(cctx);
     ZSTD_freeDCtx(dctx);
+    cctx = NULL;
     dctx = NULL;
 }
 
 static size_t impl_compress(const char *codec, const unsigned char *in, size_t in_len,
                             unsigned char *out, size_t out_cap)
 {
-    /* Decode-only arm (CBENCH_DIRECTIONS): cbench.h never calls this.
-     * (Return 0 = the harness's failure sentinel.) */
-    (void)codec;
-    (void)in;
-    (void)in_len;
-    (void)out;
-    (void)out_cap;
-    return 0;
+    (void)codec; /* one codec: the zstd frame */
+    /* Level 1: the fast class the zc one-shot (level .fast) targets. The
+     * default parameters carry the content-size flag and no checksum; the
+     * zc frame adds XXH64, which its size rows report. */
+    size_t n = ZSTD_compressCCtx(cctx, out, out_cap, in, in_len, 1);
+    if (ZSTD_isError(n)) return 0;
+    return n;
 }
 
 static size_t impl_decompress(const char *codec, const unsigned char *in, size_t in_len,
