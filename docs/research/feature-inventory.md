@@ -100,6 +100,15 @@ sizing question.
 7. The `s2` extensions (the snappy-compatible better-compression format):
    explicitly post-M6, only if wanted (the plan's decision).
 
+## Demo candidates (not gaps)
+
+- **wasm32-freestanding build of the codecs**: pure functions over caller
+  buffers, no OS or allocator in the codec paths, 32-bit safety already
+  proven by the standing gate — the browser target is an export wrapper
+  plus JS glue (~a day, mostly glue). The Buffer-based APIs are the
+  natural wasm surface (JS owns the ArrayBuffers); a `simd128` per-model
+  arm is a later perf question. Low priority, after the real milestones.
+
 ## What is deliberately NOT a gap
 
 - Zero allocation on hot paths (the codecs allocate nothing; the
