@@ -271,10 +271,14 @@ decrement, the one-shot's window rebase over 4 GiB, the hash-log clamp order
 for sources under 1 KiB, the scan's exit at a block's end, and the
 literals floor's dictionary gate. The encoder's fuzz targets land with it.
 
-M6 — brotli, decoder first (RFC 7932 —
-vendor it at M6; the google/brotli C reference is the oracle lane and the
-strongest-native competitor; the static dictionary is a sizing decision the
-M6 research owns).
+M6 — brotli, decoder first. The one-shot (`decode.decompress`) and the
+streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` (default
+22) and the format's built-in static dictionary shipped unconditionally. The
+research is `docs/research/brotli-notes.md` (the `BR` matrix, the `T`
+divergence rows, the `OQ` register; the RFC vendored at
+`docs/research/specs/rfc7932-brotli.txt`), the google/brotli C reference is
+the oracle lane and the strongest-native competitor, and the API sketch is
+`src/brotli/README.md`.
 
 ## Decisions made
 
