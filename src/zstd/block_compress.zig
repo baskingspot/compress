@@ -180,12 +180,17 @@ fn writeCompressible(
         .literals = scratch.literals,
         .sequences = scratch.sequences,
     };
-    match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, &store);
-    // The entropy attempt mutates the cross-block state; a block that is not
-    // kept reverts it below.
+    // The find and the entropy attempt both mutate the cross-block state; a
+    // block that is not kept reverts it below. The reps must be captured
+    // BEFORE the find: `find` updates them in place as it emits matches,
+    // and RFC 8878 §3.1.1.5 skips non-Compressed blocks for offset history
+    // — a Raw/RLE revert that restores the post-find values is a no-op and
+    // leaves the history advanced (the C restores `dRepOriginal`, captured
+    // before its find: zstd_compress.c:4155-4160).
     const literals_before = state.literals;
     const sequences_before = state.sequences;
     const rep_before = state.rep;
+    match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, &store);
     const compressed_size = writeEntropy(
         state,
         &store,
@@ -389,6 +394,70 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
     try testing.expectEqual(block_size, section.bytes_written);
     try testing.expectEqualSlices(u8, source[0..block_size], decoded[0..section.bytes_written]);
     try internal.sentinel.expect(&decoded, section.bytes_written);
+}
+
+test "the reps do not advance across a raw or rle block" {
+    // RFC 8878 §3.1.1.5 — blocks that are not Compressed_Blocks are
+    // skipped; they do not contribute to offset history. The find mutates
+    // the reps in place as it emits matches, so a Raw or RLE revert must
+    // restore the values captured BEFORE the find (the C's dRepOriginal,
+    // zstd_compress.c:4155-4160); a capture after the find restores the
+    // advanced values and the revert is a no-op. Found by the encode-side
+    // fuzz wave: the next block's repcodes decoded to the wrong distances.
+    var rig: Rig = .{ .params = .{ .window_log = 10, .hash_log = 11, .mls = 6 } };
+    var scratch = rig.scratch();
+    var target: [max_block_size + 64]u8 = undefined;
+
+    // Block one, compressible: the find advances the reps past their
+    // start values.
+    const phrase = "advance the reps, then bail to raw. ";
+    var block_one: [128]u8 = undefined;
+    for (&block_one, 0..) |*byte, index| byte.* = phrase[index % phrase.len];
+    _ = try writeBlock(
+        &rig.state,
+        &scratch,
+        rig.params,
+        rig.table(),
+        &block_one,
+        0,
+        block_one.len,
+        &target,
+        false,
+    );
+    const reps_after_block_one = rig.state.rep;
+
+    // Block two: noise with one planted 6-byte match. The match makes the
+    // find emit (and advance the reps), but one match in 256 bytes of noise
+    // saves under the minGain margin (256>>6 + 2 = 6), so the entropy
+    // attempt bails to Raw.
+    var noise: [256]u8 = undefined;
+    var rng: std.Random.DefaultPrng = .init(0xBADC0DE);
+    rng.random().bytes(&noise);
+    fastmem.copy(u8, noise[10..16], "abcdef");
+    fastmem.copy(u8, noise[110..116], "abcdef");
+    var second: [max_block_size + 64]u8 = undefined;
+    internal.sentinel.fill(&second);
+    var scratch_two = rig.scratch();
+    const written = try writeBlock(
+        &rig.state,
+        &scratch_two,
+        rig.params,
+        rig.table(),
+        &noise,
+        0,
+        noise.len,
+        &second,
+        true,
+    );
+    // A Raw block: the header's type bits are 0 (last_block alone), and
+    // the bytes are the source verbatim.
+    try testing.expectEqual(@as(u8, 1), second[0] & 0b111);
+    try testing.expectEqual(noise.len, written - block.block_header_len);
+
+    // The revert: the reps are block one's exit values, not advanced by
+    // the match the abandoned attempt emitted. With the capture after the
+    // find, the planted match leaves its offset in the history here.
+    try testing.expectEqual(reps_after_block_one, rig.state.rep);
 }
 
 test "the ladder stores tiny and incompressible blocks raw" {
