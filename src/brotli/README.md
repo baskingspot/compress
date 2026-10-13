@@ -35,7 +35,7 @@ fn decode(gpa: std.mem.Allocator, stream: []const u8, out: *std.Io.Writer) !void
 ```
 
 Streaming, through the `std.Io` interfaces. `Reader.Buffer(22)` is about
-4.6 MiB: keep it in static or heap storage.
+4.7 MiB: keep it in static or heap storage.
 
 ```zig
 fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
@@ -115,7 +115,7 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
   keeps the sliding window and the meta-block trees in the `Buffer` you give
   it: a `(1 << window_wbits)`-byte history ring — the window bound is
   `(1 << window_wbits) - 16` (§9.1) — plus the tree region. `Buffer(22)` is
-  about 4.6 MiB.
+  about 4.7 MiB.
 - **The window.** The stream header's only field is WBITS (§9.1), a 1..7-bit
   code over 10..24 (16 is the single bit `0`); the window is
   `(1 << WBITS) - 16` bytes, 1,008 bytes to 16,777,200 (§9.1, §2).
@@ -161,13 +161,16 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
   no stream began. The empty *stream* is the single byte `06` and decodes to
   zero bytes. `streamAll` treats a zero-byte input as the walk's clean end
   (zero streams), like the other codecs here.
-- **Stack.** The per-meta-block scratch is comptime and KiB-scale: the header
-  arena (the context maps, symbol lists, and code lengths), the distance-code
+- **Stack.** The per-meta-block scratch is comptime and KiB-scale: the
+  symbol lists and code lengths of a tree description, the distance-code
   tables derived from NPOSTFIX and NDIRECT, and the 38-byte transformed-word
-  buffer. `decompress` also carries the meta-block tree region as a stack
-  local — about 650 KiB with the reference's two-level table shape — so give
-  decoding threads 1 MiB or more. A `Reader` keeps that region in its `Buffer`
-  instead, and its own stack stays KiB-scale.
+  buffer. `decompress` also carries the meta-block header arena as a stack
+  local — about 691 KiB, nearly all of it the tree region: a two-level table
+  per tree, 64 trees per category at the cap, sized by the reference's proven
+  ceiling (about 2.5 KiB per literal tree, 4.3 KiB per command tree, 3.7 KiB
+  per distance tree) — so give decoding threads 1 MiB or more. A `Reader`
+  keeps that region in its `Buffer` instead, and its own stack stays
+  KiB-scale.
 - **Reader input.** `input` needs a buffer of at least 1 byte; `Io.Reader.fixed`
   always qualifies. A contiguous `peek` or `take` is served up to the history
   ring's room at the read position; a larger one fails with `StreamTooLong`.

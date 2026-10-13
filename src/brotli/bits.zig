@@ -39,6 +39,10 @@ pub const max_read_bits: u6 = 32;
 /// the input cannot satisfy, so no decoded value is ever assembled from
 /// past-the-end padding.
 pub const BitReader = struct {
+    /// The bit source's error set, under the name the generic decode
+    /// helpers expect (`Bits.ErrorSet`).
+    pub const ErrorSet = Error;
+
     source: []const u8,
     /// Next source byte not yet loaded into `bits`.
     next_byte: usize,
@@ -66,16 +70,35 @@ pub const BitReader = struct {
     }
 
     /// The next `n` bits as an unsigned integer, least significant bit first
+    /// (`§1.5.1`), without consuming them. Bits past the end of the input
+    /// read as zero: `take` is the gate that turns a starved read into
+    /// `error.Truncated`, so a value assembled from padding is never trusted.
+    /// The prefix-code layer's peek table (`huffman.zig`) reads codes this
+    /// way — a code may end before the stream's last byte, whose fill bits
+    /// are still zeros on the wire.
+    pub fn peek(self: *BitReader, n: u6) Error!u32 {
+        assert(n <= max_read_bits);
+        self.refill();
+        return @intCast(self.bits & ((@as(u64, 1) << n) - 1));
+    }
+
+    /// The next `n` bits as an unsigned integer, least significant bit first
     /// (`§1.5.1`). `error.Truncated` when the input holds fewer than `n`.
     pub fn take(self: *BitReader, n: u6) Error!u32 {
         assert(n <= max_read_bits);
         if (self.availableBits() < n) return error.Truncated;
-        self.refill();
-        const value: u32 = @intCast(self.bits & ((@as(u64, 1) << n) - 1));
+        const value = try self.peek(n);
+        self.drop(n);
+        return value;
+    }
+
+    /// Consume `n` bits `peek` has already loaded.
+    fn drop(self: *BitReader, n: u6) void {
+        assert(n <= max_read_bits);
+        assert(self.bit_count >= n);
         self.bits >>= n;
         self.bit_count -= n;
         self.bit_pos += n;
-        return value;
     }
 
     /// Skip to the next byte boundary. The skipped bits are a fill field the

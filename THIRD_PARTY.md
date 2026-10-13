@@ -51,6 +51,14 @@ and dependency with a license that is not ours.
   zlib's framing), and the C-reference emissions verified through python3's
   `zlib` in `docs/research/containers-notes.md §5.5`. Attribution: Copyright
   the Go Authors, https://github.com/golang/go; Zig std contributors.
+- `src/brotli/huffman.zig`: the two-level decode table's proven size ceiling
+  (`max_table_size_by_block`) and the code-length prefix tables
+  (`cl_prefix_length`/`cl_prefix_value`) are transcribed from google/brotli
+  v1.2.0 (MIT) `c/dec/huffman.c` (`kMaxHuffmanTableSize`,
+  `kCodeLengthPrefixLength`/`Value`). The tables themselves are built by this
+  package's own two-pass construction, verified against that ceiling.
+  Attribution: Copyright the Brotli Authors,
+  https://github.com/google/brotli.
 - `src/flate/decode.zig` lineage: the two-level Huffman decode table (a
   9-bit primary table plus a chained chase for longer codes) follows the
   algorithm in zlib's `doc/algorithm.txt` (zlib license, studied), as used by

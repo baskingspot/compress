@@ -88,16 +88,31 @@ marked **[sketch call]** and collected at the end.
   meta-block; this package's posture is zero allocation), and an
   allocator-taking `Reader.init` for the tree region alone would make every
   streaming caller allocate for a worst case no measured stream approaches
-  (every stream the sweep produced uses single digits). The region's exact
-  byte figure follows the implementation's table shape; the sketch's budget is
-  the reference's two-level table — 2,528 B per literal tree, 4,320 per IaC
-  tree, 3,584 per distance tree (`alphabet_size_limit + 376` entries × 4 B,
-  `state.c:170-171`), so 64 × (2,528 + 4,320 + 3,584) ≈ 650 KiB.
-  **[sketch call]** the one-shot carries the same region as a comptime stack
-  local (about 650 KiB at the cap), because `decompress(source, target)` has no
-  buffer parameter; the README's Stack bullet states the figure. If it bites, a
-  `decompressBuffered` addition follows the zstd `compressBuffered` precedent
-  without reshaping the two names.
+  (every stream the sweep produced uses single digits). **The landed shape
+  (slice 2):** `huffman.Tree` is a two-level table — a 256-entry root table
+  indexed by the next eight wire bits, then one subtable per root prefix whose
+  codes run long, sized by the longest code in that prefix's group; the
+  consumption is a peek-table (`bits.BitReader.peek` plus a strict `take` — the
+  flate reader's rule: the peek may read padding, the take is the gate, so a
+  starved decode is `Truncated`, never a symbol out of padding). Each tree's
+  table is bounded by the reference's *proven* ceiling (`kMaxHuffmanTableSize`,
+  13.4% over the alphabet size; THIRD_PARTY.md), so the region is a comptime
+  array, never an allocation: 2,528 B per literal tree, 4,328 per command
+  tree, 3,688 per distance tree, 2,656/1,616/1,880 for the
+  block-type/block-count/context-map trees — `huffman.Trees` is **689,512 B**,
+  and `frame.Header` (the trees plus the 17,664-byte context arena — the
+  modes and the two maps) is **707,204 B**, the README's "about 691 KiB". The
+  cap applies to the three *tree* categories (NTREESL, NBLTYPESI, NTREESD);
+  NBLTYPESL/NBLTYPESD are not capped — they size the modes array and the maps,
+  and the format's own 256-value ceiling fits (the literal map is 64 × 256 =
+  16 KiB). The build checks the computed table size against the ceiling and
+  returns `BadHuffmanCode` if it ever exceeds it: no conformant code-length set
+  can (F2), and the check is what makes the region a hard bound rather than a
+  hope. **[sketch call]** the one-shot carries the same region as a comptime
+  stack local (about 691 KiB at the cap), because `decompress(source, target)`
+  has no buffer parameter; the README's Stack bullet states the figure. If it
+  bites, a `decompressBuffered` addition follows the zstd `compressBuffered`
+  precedent without reshaping the two names.
 - **Extensions are out of scope (OQ7, T3).** The large-window extension: the
   RFC's invalid 0010001 pattern is refused with `BadWindowBits`, and the CLI's
   forced leniency (`BROTLI_DECODER_PARAM_LARGE_WINDOW` set unconditionally,
@@ -107,6 +122,30 @@ marked **[sketch call]** and collected at the end.
   RFC 7932 stream, and its distances fall past the dictionary space and fail
   naturally (`BadDictionary`/`BadDistance`), so no dedicated refusal surface is
   needed.
+
+- **The prefix-code layer owns both forms and both Kraft rules (§3.4, §3.5).**
+  `huffman.zig` reads the simple form (NSYM 1..4, ALPHABET_BITS as the width
+  rule of T7, the tree-select bit, the sorted-symbol-order assignment) and the
+  complex form (HSKIP, the code-length code over the fixed 18-symbol order,
+  the 16/17 repeat machine with the reference's exact modifier arithmetic, and
+  the main code's length sequence), then builds the §3.2 canonical table. The
+  two Kraft equalities are `space == 0` accumulators — 32 for the code-length
+  code, with the one-non-zero-length zero-length-code exception; 32768 for the
+  main code — and each rejection site keeps one name (OQ5):
+  `BadCodeLengthCode` for the code-length code, `BadHuffmanCode` for the length
+  sequence and the table bound. A tree's declared alphabet is a runtime
+  parameter (block types are NBLTYPES + 2, context maps NTREES + RLEMAX,
+  distances 16 + NDIRECT + (48 << NPOSTFIX)), so the tree type's comptime
+  parameter is the *storage* bound, not the alphabet.
+- **The context layer owns the wire of §7.1 and §7.3.** `context.zig` reads
+  the modes (two bits per literal block type) and the two maps: RLEMAX's 1..5
+  bit code, the map's own prefix code, the zero-run coding, and the IMTF bit.
+  The context ID computation — the three Luts, the literal formulas, and §7.2's
+  copy-length bands — is the command layer's. The map values are in
+  [0, NTREES-1] by the alphabet size and by the MTF's own property, so nothing
+  downstream re-checks an index; §7.3's "NTREES must equal the number of
+  different values" is an encoder obligation the references do not check, and
+  neither do we.
 
 ## The requirement matrix, mapped to the layers
 
@@ -127,12 +166,61 @@ Every BR row lands somewhere; the row text is in `brotli-notes.md` §2.
 | dictionary and transforms | BR38, BR39 | the ported data, the 21 elementary transforms, the 121 compositions |
 | the window | BR41 | the history ring, the `-16` bound |
 
-The likely file split (the implementation lane's to settle): `decode.zig` (the
-one-shot and the shared decode state), `frame.zig` (the stream header and the
-meta-block ladder), `huffman.zig` (both tree forms and the table builder),
-`context.zig` (the Luts and the context maps), `distance.zig` (the ring and the
+The file split as landed: `bits.zig` (the LSB-first reader), `frame.zig` (the
+stream header, the meta-block ladder, and the compressed header's completion),
+`huffman.zig` (both tree forms, the table builder, and the OQ8 region),
+`context.zig` (the modes and the maps), `golden.zig` (the CLI-verified wire
+vectors and the test-side bit writer). Still to land: `decode.zig` (the
+one-shot and the shared decode state), `distance.zig` (the ring and the
 reconstruction), `dictionary.zig` (the generated data and the transforms),
-`Reader.zig`, `golden.zig`.
+`Reader.zig`.
+
+## Register findings
+
+Rows discovered while landing a layer; each is a fact the next slice carries,
+not a decision.
+
+- **F1 — the CLI's default window is not 22 for small inputs.** `printf 'A' |
+  brotli -c` emits `0f` (WBITS 24) and a one-byte file emits `21` (WBITS 10);
+  the auto-lgwin sweep's "10 for tiny inputs, 17-19 through 400 KB" is the
+  same behavior. The README's "the default is 22 — the reference encoder's
+  default ... which decodes the CLI family unconfigured (measured)" is a
+  *library* default, not a CLI fact, and it needs the re-measure before the
+  Reader's OQ4 default is pinned: a `Buffer(22)` would refuse a typical CLI
+  stream as `WindowTooLarge`. The Reader slice re-runs the CLI lane (the 45
+  corpus vectors plus the auto-lgwin sweep), records the WBITS histogram here,
+  and moves the exported default (or states the instantiation the caller
+  needs) with it.
+- **F2 — the tree table's ceiling is the reference's, and the build guards
+  it.** `kMaxHuffmanTableSize` is a *proven* ceiling (google/brotli v1.2.0
+  `c/dec/huffman.c`, "13.4% maximum overhead"; THIRD_PARTY.md). This package's
+  two-pass construction was verified against it before landing: 30k random
+  conformant code-length sets, plus a hill-climbed maximum (1,078 entries for
+  a 704-symbol alphabet against the ceiling's 1,080), produce the same table
+  size as the reference's incremental builder and never exceed the ceiling.
+  The build still checks, because a region that trusts a table is one
+  transcription error from a buffer overrun.
+- **F3 — §3.5's single-non-zero-length code-length code consumes no bits.**
+  "That symbol results in no bits being emitted ... and no bits consumed": the
+  code-length *symbols* are free, but a 16/17 code's extra bits are still read,
+  and the main code the sequence describes is a normal tree. Pinned by the
+  CLI-verified `complex_single_stream` and its unit test.
+- **F4 — `BadBlockLength` is the command layer's, not the header's.** §6's
+  block counts "need not count down to exactly zero at the end of the
+  meta-block", so a first count larger than MLEN is legal; the C's
+  `FORMAT_BLOCK_LENGTH_1` is raised where the *output* overruns MLEN
+  (`decode.c`'s `WriteRingBuffer`, `meta_block_remaining_len < 0`). The §3
+  table's "BR12, BR31 (the block-count decode)" attribution is loose: the
+  count decode itself cannot fail beyond `Truncated`, and the overrun check
+  lands with BR29 in the command layer.
+- **F5 — the header's field order is one wire sequence, trees interleaved.**
+  §9.2 reads NBLTYPESL/I/D, each with its own block-type tree, block-count
+  tree, and first count; then NPOSTFIX/NDIRECT, the modes, NTREESL + the
+  literal map, NTREESD + the distance map; and only then the three tree groups
+  (literals, insert-and-copy, distances). The references confirm it
+  (`decode.c`: `BROTLI_STATE_HUFFMAN_CODE_*` → `METABLOCK_HEADER_2` →
+  `CONTEXT_MODES` → `CONTEXT_MAP_1/2` → `TREE_GROUP`), and the interleaving is
+  what makes "each count read needs its tree" true.
 
 ## Errata register
 
@@ -248,6 +336,18 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   the unordered-symbol and ALPHABET_BITS pairs pin §3.4's construction and
   width rules; the rejection set pins the named errors; the trivial-compressor
   streams pin §11.1's bound exactly (100,008 bytes for a 100,000-byte input).
+  **Landed so far** (all built by a §1.5.1 bit writer and verified with the
+  pinned CLI before landing; the vectors are in `golden.zig`): `hand_stream`
+  (the notes' `hand.br`, three NSYM = 1 codes); `unordered_symbol_stream`;
+  `wide_symbol_stream` + `floor_log_stream` (T7's pair);
+  `high_literal_stream` (T7's unreachability half);
+  `duplicate_symbol_streams` + `out_of_alphabet_streams` (§3.4's rejections,
+  the CLI's `FORMAT_SIMPLE_HUFFMAN_SAME`/`_ALPHABET`); `complex_tree_stream`,
+  `complex_single_stream`, `repeat16_stream` (§3.5's complex form, the 17 and
+  16 repeats, and the single-symbol code-length code);
+  `context_map_stream` (§7.3's RLEMAX, zero runs, and IMTF — the map selects
+  between two literal trees, so a decoder that ignored the IMTF bit emits
+  different bytes).
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
@@ -257,7 +357,13 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   register: T1's first-switch symbol 0, T5's last-metadata corner, T7's
   simple-code widths, T6's error-or-difference rule, the walk's boundary (an
   over-end peek reaches the stream end through `rebase` — the pattern book's
-  entry, `src/internal/AGENTS.md`), and the `TooManyTrees` cap.
+  entry, `src/internal/AGENTS.md`), the `TooManyTrees` cap, and slice 2's
+  surfaces: both tree forms' rejection sites (the two Kraft equalities, the
+  repeat overruns, the §3.4 symbol rules), the code-length-code's HSKIP ladder
+  and the 16/17 modifier arithmetic, the single-symbol code-length code, the
+  table-bound guard, the context map's RLE overrun and IMTF, and the
+  code-length peek that reads padding at the stream's last byte (a decode that
+  must be `Truncated`, never a symbol).
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
   and `just check-baseline` the portable targets.
 
