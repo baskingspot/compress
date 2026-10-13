@@ -498,6 +498,53 @@ test "our level-1 frame is the CLI's own bytes" {
     }
 }
 
+test "the witness inputs reproduce the CLI's frames, guarding three fixes' reverts" {
+    // RFC 8878 §3.1 — the M5 verification witnesses: real inputs whose
+    // emitted frames the reviewer verified byte-identical to the CLI's.
+    // The clamp-order pair guards the hash-clamp order in `forSource`
+    // (zstd_compress.c:1552-1569: clamp the hash to the shrunk window
+    // before flooring the window); the tree-tie pair guards the
+    // integer-division tie rule in `writeTree` (`huf_compress.c`:
+    // `hSize < maxSymbolValue/2` with integer division, not the float
+    // shape). With either fix reverted, the frame differs from the
+    // CLI's recorded bytes.
+    const cases = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        expected: []const u8,
+    }{
+        .{
+            .name = "clamp-order-85B",
+            .source = &golden.clamp_order_85b_source,
+            .expected = &golden.clamp_order_85b_frame,
+        },
+        .{
+            .name = "clamp-order-94B",
+            .source = &golden.clamp_order_94b_source,
+            .expected = &golden.clamp_order_94b_frame,
+        },
+        .{
+            .name = "tree-tie-584B",
+            .source = &golden.tree_tie_584b_source,
+            .expected = &golden.tree_tie_584b_frame,
+        },
+        .{
+            .name = "tree-tie-890B",
+            .source = &golden.tree_tie_890b_source,
+            .expected = &golden.tree_tie_890b_frame,
+        },
+    };
+    var target: [700 * 1024]u8 = undefined;
+    for (cases) |case| {
+        const written = try compress(case.source, &target, .{});
+        try testing.expectEqualSlices(u8, case.expected, target[0..written]);
+        // and the frame decodes back through our decoder.
+        var plain: [700 * 1024]u8 = undefined;
+        const n = try decode.decompress(case.expected, &plain);
+        try testing.expectEqual(case.source.len, n);
+    }
+}
+
 test "the emission ladder picks the CLI's block forms" {
     // RFC 8878 §3.1.1.2 — the corpus shapes' block forms: incompressible
     // noise is stored Raw at exactly Block_Size; a one-byte run is a single
