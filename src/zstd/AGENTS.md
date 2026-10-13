@@ -1,8 +1,9 @@
 # Agent notes: zstd
 
-A Zstandard codec (RFC 8878): a decoder (landed) and a fast encoder (the design
-in "The encoder"; `encode.zig` and `Writer.zig` do not exist yet). `README.md` is
-the user overview; this file keeps the decisions, errata, and oracle notes
+A Zstandard codec (RFC 8878): a decoder (landed) and a fast encoder, landed
+through the one-shot — `encode.zig`, `block_compress.zig`, and
+`match_compress.zig`; the streaming `Writer.zig` is the next slice. `README.md`
+is the user overview; this file keeps the decisions, errata, and oracle notes
 behind it. There is no external-oracle lane yet (`oracle.zig`,
 `scripts/zstd_oracle.py`, `just zstd-oracle`); the encoder's oracle plan is
 below.
@@ -114,6 +115,19 @@ is "no error name except `BufferTooSmall` is reachable on our own output"), its
 the C v1.5.7's unless a `TE` row says otherwise; the notes' §0 records the C
 checkout and the survey tooling.
 
+**The one-shot is landed and byte-identical to the CLI's level 1.**
+`encode.compress` over the corpus shapes (32 KiB, 64 KiB, and the seven 1-MiB
+survey shapes) reproduces `zstd -1 -q -k -f`'s whole frame, byte for byte, and
+a 232-case sweep (every corpus shape at 32 sizes plus PRNG bytes) is 228
+byte-identical, the four exceptions being the Huffman tree's tie order alone
+(`huff0_compress`'s stable sort against the C's quicksort; same frame size,
+verified in the sweep below). The tests pin the CLI's own bytes for eleven
+inputs (`golden.zig`'s `encode_*` group): the text/html/rle corpus shapes at
+both sizes, the `words`/`skewlit` shapes' first 4 KiB (the entropy paths),
+the tiny class's 100- and 1024-byte text, and a 600 KB text frame (windowed,
+five blocks). The CLI's verdicts on all eleven: `zstd -d -c` byte-exact,
+`zstd -t` clean, CPython 3.14 `compression.zstd` byte-exact.
+
 - **The entropy writers (landed).** `fse_compress.zig`, `huff0_compress.zig`,
   `sequences_compress.zig`, `literals_compress.zig`, and the writer inverses in
   `bits.zig` (`ForwardWriter`, `BackwardWriter`). Each layer round-trips
@@ -144,13 +158,19 @@ checkout and the survey tooling.
   decoder's four resolutions) and the dispatch keeps the C's precondition,
   with `State.repeat_valid` the seat a dictionary would set. Do not "fix" the
   branch to fire: that would leave the CLI's byte class.
-- **The match finder (EQ1, EQ2).** Greedy, the C's `ZSTD_fast` shape: a
-  single-slot position-only `u32` table, last writer wins
-  (`zstd_fast.c:271-272`); `hashLog = min(15, windowLog + 1)`
-  (`zstd_compress.c:1564`); `mls` 6 (the ≤ 128-KiB class's hash width,
-  `hash6`'s prime multiply, `zstd_compress_internal.h:930-948`); candidates are
-  verified with a 4-byte compare (`ZSTD_match4Found_cmov`, `zstd_fast.c:103-125`),
-  so emitted matches are at least 4 bytes. The repcode pre-check at +2
+- **The match finder (EQ1, EQ2), landed as `match_compress.zig`.** Greedy, the
+  C's `ZSTD_fast` shape: a single-slot position-only `u32` table, last writer
+  wins (`zstd_fast.c:271-272`); `hashLog = min(class hashLog, windowLog + 1)`
+  (`zstd_compress.c:1564`, the class row's own hashLog — `min(15, windowLog +
+  1)` is only the ≤ 16-KB class's shape, not the rule); `mls` 5/6/7 by the size
+  class (`clevels.h`'s `L`: 5 under 16 KB, 6 up to 256 KB, 7 above — see TE7);
+  candidates are verified with a 4-byte compare (`ZSTD_match4Found_cmov`,
+  `zstd_fast.c:103-125`), so emitted matches are at least 4 bytes. A zeroed
+  table slot is "no candidate": the C's window indices start above zero
+  (`ZSTD_WINDOW_START_INDEX`, `zstd_compress_internal.h:1334-1340`), while
+  this port's frame offsets start at zero, so the candidate floor is
+  `max(prefixStart, 1)` — without it the frame's first bytes become a
+  candidate the CLI never has, and the whole output class shifts. The repcode pre-check at +2
   (`:267-290`) lets a rep match beat the table candidate two bytes ahead; its
   backward extension stops one short of `nextEmit` (`:278-279`), so the hot
   path never emits a zero-literals repcode and never meets §3.1.1.5's ll0
@@ -163,19 +183,23 @@ checkout and the survey tooling.
   matching (the C's lazy starts at level 5-6); the rep pre-check and the
   offset-2 chain are the only lookahead. The extension reuses the flate port's
   word-XOR machinery.
-- **The block layer (EQ3).** Blocks of `min(128 KiB, 1 << windowLog)`
-  (`zstd_compress.c:1816`; TE2). The C's fallback ladder: inputs under 7 bytes
-  are stored raw (`:3273`); a compressed block is kept only if
-  `cSize < blockSize - minGain`, `minGain = (blockSize >> 6) + 2` at fast levels
-  (`zstd_compress_internal.h:677-683`, applied `zstd_compress.c:3033`), else
-  the block is raw; a whole-block one-byte repeat becomes an RLE block
-  (`ZSTD_isRLE`, `:3572-3589`) except as the frame's first block
-  (`rleMaxLength = 25`, the zstd ≤ 1.4.3 CLI compatibility rule, `:4424-4433` —
-  TE3); an all-literals block gets a `nbSeq == 0` sequences section. The
-  minGain margin is also ZE9's safety: a compressed block's `cSize + 3` stays
-  under a single-segment frame's FCS-sized Block_Maximum_Size. The empty input
-  is one raw 0-size Last_Block plus the trailer (13 bytes, the CLI's empty
-  frame).
+- **The block layer (EQ3), landed as `block_compress.zig`.** Blocks of
+  `min(128 KiB, 1 << windowLog)` (`zstd_compress.c:1816`; TE2). The C's
+  fallback ladder: inputs under 7 bytes are stored raw (`:3273`); a compressed
+  block is kept only if `cSize < blockSize - minGain`, `minGain = (blockSize
+  >> 6) + 2` at fast levels (`zstd_compress_internal.h:677-683`, applied
+  `zstd_compress.c:3033`), else the block is raw; a whole-block one-byte
+  repeat becomes an RLE block (`ZSTD_isRLE`, `:3572-3589`) except as the
+  frame's first block (`rleMaxLength = 25`, the zstd ≤ 1.4.3 CLI
+  compatibility rule, `:4424-4433` — TE3); an all-literals block gets a
+  `nbSeq == 0` sequences section. Raw and RLE blocks revert the frame's
+  cross-block state (the entropy tables and the repeat offsets) to what the
+  previous block left, and the checksum folds through the decoder's funnel:
+  a Raw block's fold rides its copy chunk by chunk, Compressed and RLE blocks
+  fold through `State.recordBlock`. The minGain margin is also ZE9's safety: a
+  compressed block's `cSize + 3` stays under a single-segment frame's
+  FCS-sized Block_Maximum_Size. The empty input is one raw 0-size Last_Block
+  plus the trailer (13 bytes, the CLI's empty frame).
 - **The literals ladder (EQ4).** Raw below 64 literals (fast strategies; 6 with
   a reusable tree — `zstd_compress_literals.c:114-127`) or when Huffman misses
   minGain (`:187-191`); RLE for one-byte literals (`:81-107,192-201`);
@@ -253,24 +277,28 @@ checkout and the survey tooling.
   per-chunk `XXH64_update`, `zstd_compress.c:4608`). `window_log` is 10 to 31
   (u32 positions); the recommended ladder caps at 19, inside the decoder's
   default 8 MiB.
-- **The one-shot (EQ8).** `encode.compress(source, target, options)`: the
-  source IS the history, so no window buffer and no allocation.
-  `maxCompressedLength(n) = n + 3 * (n / 131072 + 1) + 18` (a 14-byte header
-  cap, 3 bytes per block, the 4-byte checksum), always inside
+- **The one-shot (EQ8), landed as `encode.zig`.** `encode.compress(source,
+  target, options)`: the source IS the history, so no window buffer and no
+  allocation. `maxCompressedLength(n) = n + 3 * (n / 131072 + 1) + 18` (a
+  14-byte header cap, 3 bytes per block, the 4-byte checksum), always inside
   `ZSTD_COMPRESSBOUND` (`zstd.h:249`). The block layer stays internal: no zstd
   block function is self-contained (cross-block entropy and repeat-offset
   state), unlike snappy's and flate's. `Level = enum { fast, ratio }`: `.fast`
   is the level-1 class, `.ratio` is reserved and returns
   `error.Unimplemented` (the flate pattern, never a silent alias); the numeric
   CLI ladder gets no seats — each of levels 2-22 is a distinct output class
-  this package cannot produce. `Writer.streamAll` and `Writer.streamAllAlloc`
-  mirror the Reader's pumps (the caller-buffered pair first, then the
-  default-window allocation); there is no stack-buffered default pump.
+  this package cannot produce. The barrel exposes `{encode, decode, Reader}`
+  today; `Writer` is the next slice's name (the README's API block is the
+  target surface). `Writer.streamAll` and `Writer.streamAllAlloc` mirror the
+  Reader's pumps (the caller-buffered pair first, then the default-window
+  allocation); there is no stack-buffered default pump.
 - **The scratch.** Per-block scratch (literals up to 128 KiB, the sequence
   store, the entropy workspace) is comptime stack in the emission path; the
   caller's `Buffer` holds the window, the staging, and the table (EQ7). The
-  stack budget is measured with the implementation and lands in the README
-  beside the decoder's figures.
+  one-shot's measured need on aarch64 Linux is about 830 KiB of thread stack
+  (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of literals, 384
+  KiB of sequence list — `max_block_size / 4 + 1` twelve-byte sequences — plus
+  the writers' workspaces); the README carries the figure.
 - **The emission survey (verified).** The pinned CLI's `-1` output over the
   corpus and the survey inputs: Raw literals on match-rich data; Predefined
   sequences for small nbSeq; FSE at the 9/8/9 caps for large nbSeq; RLE blocks
@@ -363,6 +391,38 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
 - **TE6 — the `nbSeq == 0` form.** The 1-byte section (byte0 == 0), as both
   references write it; our decoder also accepts the 2-byte decoded-zero form
   (T5), which our encoder never emits.
+- **TE7 — the `mls` ladder.** The C's 5/6/7 by size class (`clevels.h`'s `L`),
+  as landed. The prompt for the encoder's block layer named "mls 6 with the
+  6/7 length ladder"; the measurements say the ≤ 16-KB class's 5 is what
+  keeps the CLI's byte class on small inputs — with it the 232-case sweep is
+  228 byte-identical, without it 195 (every input under 16 KiB diverges).
+- **TE8 — no pre-block splitter.** The C v1.5.7's `ZSTD_optimalBlockSize`
+  (`zstd_compress.c:4550-4583`) runs `ZSTD_splitBlock` on full 128-KB blocks
+  once a frame has saved 3 bytes, which at level 1 can cut a block to 32/64/96
+  KiB (`zstd_preSplit.c:198-226`). The port splits at exactly `min(128 KiB, 1
+  << windowLog)`, the C's pre-1.5.7 shape and the survey's 1-MiB observation
+  (8 blocks of 128 KiB); a frame may therefore carry fewer, larger blocks
+  than the CLI's on split-triggering data.
+- **TE9 — the literals heuristics are the landed writer's.** `literals_compress`
+  carries the C's ladder (the 64/6-literal floor, minGain, RLE, the 1/4-stream
+  split) but not `HUF_compress_internal`'s two early bails — the
+  `largest <= (srcSize >> 7) + 4` histogram check and the
+  `suspectUncompressible` first/last-4096 sample (`huf_compress.c:1251-1252,
+  1366-1379`). Both can only turn a marginal Huffman win into Raw literals, and
+  the minGain margin catches the rest; the byte-identity sweep says the corpus
+  shapes never reach them.
+- **TE10 — the old-decoder workaround is not emitted.** The C returns 0 (a Raw
+  block) when the last FSE description is 2 bytes and the sequences bitstream
+  is 1 byte, to dodge a zstd ≤ 1.3.4 decoder bug (`zstd_compress.c:2985-2996`).
+  Our decoder and the CLI v1.5.7 read that shape fine, so the port emits the
+  Compressed block; a frame that would have hit it is a few bytes shorter than
+  the CLI's.
+- **TE11 — the Huffman tree's tie order.** `huff0_compress.buildTable` sorts
+  equal counts in natural symbol order, where the C's per-rank quicksort is
+  unstable (`huf_compress.c:610-632`); a tree description can differ from the
+  CLI's while the frame decodes identically and usually at the same size. This
+  is the four-case residue of the 232-case byte-identity sweep (all `words`
+  inputs under 8 KiB).
 
 ## Testing
 
@@ -384,19 +444,17 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
   (same bytes or the same named error, `WindowTooLarge` excepted), and the
   reader-machinery target asks past a frame's tail so the trailer step runs
   through `rebase`.
-- **The encoder (the M5 plan).** Round-trip gates first: our writer's norm
-  through our reader's `readDescription` (the FSE round-trip gate, in-process),
-  writer → reader identity over the corpus, the CLI decoding our frames
-  byte-exact (`zstd -d -c` plus `cmp`, `zstd -t` for the trailer), our reader
-  decoding the CLI's level-1 frames, and the compliance property: no
-  `Reader.Error` name except `BufferTooSmall` is reachable on our own output,
-  one-shot and reader alike. The fixture plan: our level-1 output over the
-  corpus shapes recorded in `golden.zig` with the CLI's and our decoder's
-  verdicts in the provenance comment (the M4 fixture rule), plus the T1
-  `01 0D` pair as the Huffman path's day-one byte-exact golden (encode the
-  four literals, compare the whole 19-byte frame). Fuzz targets (the fuzz
-  lane's): our encode → our decode identity, our encode → CLI decode
-  byte-exact, and the compliance property.
+- **The encoder.** Landed: the round-trip gates (writer → reader identity over
+  the corpus shapes and the fixture classes, sentinel-checked), the CLI's own
+  level-1 bytes pinned for eleven inputs (`golden.zig`'s `encode_*` group,
+  each rebuilt from the corpus shape definitions and compared whole-frame), the
+  block-form checks (Raw at exactly Block_Size, RLE after the first block, the
+  windowed five-block frame), the header forms, the empty frame's 13 bytes,
+  determinism, and the `maxCompressedLength` bound. The T1 `01 0D` pair is
+  the literals layer's byte-exact golden (`literals_compress`). Still the fuzz
+  lane's: our encode → our decode identity, our encode → CLI decode
+  byte-exact, and the compliance property (no `Reader.Error` name except
+  `BufferTooSmall` reachable on our own output).
 
 ## Oracles
 
@@ -416,7 +474,12 @@ the C's wins, so the survey's class and the corpus fixtures stay in one family.
   -k -f SRC -o OUT` is the class reference, and our output passes `zstd -d -q
   -c` plus `cmp`, `zstd -t`, our own example decode, and CPython 3.14's
   `compression.zstd` one-shot (libzstd v1.5.7; the module-level function per
-  frame — a `ZstdDecompressor` object is stateful and single-frame).
+  frame — a `ZstdDecompressor` object is stateful and single-frame). The
+  landed evidence: all fourteen 32-KiB/64-KiB corpus blobs and the seven 1-MiB
+  survey shapes are byte-identical to the CLI's level 1, and a 232-case sweep
+  (corpus shapes at 32 sizes, PRNG bytes, the accuracy-ladder truncations)
+  passes `zstd -d` byte-exact and `zstd -t` clean on every case, 228 of them
+  byte-identical (TE7 and TE11 account for the rest).
   klauspost's encoder is a read-and-run reference, not a gate: its level-1
   class deliberately differs (TE1-TE5). `zstd.compress(src, level=1)` is
   byte-identical to `zstd -1 --no-check` (verified), so the bench harness's

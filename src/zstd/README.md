@@ -144,7 +144,11 @@ state — so `encode` exposes only the names above.
   RLE block, except the frame's first block, which is never RLE (a zstd ≤ 1.4.3
   CLI convention); literals and sequences pick their entropy modes by the
   level-1 heuristics. Every frame is valid zstd that the CLI, libzstd, and this
-  package's decoder accept.
+  package's decoder accept, and the whole frame reproduces the pinned CLI
+  v1.5.7's `zstd -1` bytes on the corpus shapes. One deliberate difference: a
+  Huffman tree's equal-count symbols keep natural order here, where the C's
+  sort is unstable, so a tree description's bytes can differ from the CLI's
+  while decoding identically.
 - **Encode streaming.** Nothing reaches `output` until the block buffer fills,
   you call `w.writer.flush()`, or `finish`; the first output is the frame
   header. A `flush` emits the buffered data as one complete block, so a decoder
@@ -186,9 +190,12 @@ state — so `encode` exposes only the names above.
 - **Stack.** A compressed block decodes its literals into a 128 KiB buffer on
   the stack. Measured on aarch64 Linux, `decompress` and `Reader` need about
   160 KiB of thread stack in release builds and 210 KiB in Debug, so give
-  decoding threads 256 KiB or more. The encoder keeps its match-finder table
-  and per-block scratch on the stack; a `Writer` keeps its window, staging, and
-  table in the `Buffer` you provide (768 KiB at the default `window_log`).
+  decoding threads 256 KiB or more. `encode.compress` needs about 830 KiB
+  (Debug and release alike): the match finder's table (128 KiB), the literals
+  buffer (128 KiB), and the sequence list (384 KiB) are stack scratch, the
+  price of a one-shot with no allocator — give encoding threads 1 MiB or more.
+  A `Writer` keeps its window, staging, and table in the `Buffer` you provide
+  (768 KiB at the default `window_log`).
 - **Allocation.** None while encoding or decoding. `streamFrameAlloc`,
   `streamAllAlloc`, and `Writer.streamAllAlloc` allocate one `DefaultBuffer`
   from your allocator for the call and free it before returning; a failed
