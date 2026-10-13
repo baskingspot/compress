@@ -270,6 +270,15 @@ form for literals carrying bytes above 0x80, the FSE last-symbol count
 decrement, the one-shot's window rebase over 4 GiB, the hash-log clamp order
 for sources under 1 KiB, the scan's exit at a block's end, and the
 literals floor's dictionary gate. The encoder's fuzz targets land with it.
+The perf pass (the ranked levers, `6ade796`) is adjudicated by
+`docs/results/m5-perf-pass-fleet-20261013.md` (run id
+`20261013T192145Z-m5-perf-pass`, measured against the `m5-encode2` baseline):
+the incompressible 64-KiB rows 6.5-8.8x -> 1.4-1.9x (the block-level
+early-exit), mixed/random-32K 2.4-3.6x -> 1.15-1.38x (the 4-lane histogram),
+skewlit 3.1-5.9x -> 1.5-2.5x, words ~10-15% (countStats + the spill fix); the
+literal-heavy shapes regressed a real 1-3% on every target (TE9's per-block
+sample scan the leading candidate — the next pass's ranked lever). Size
+parity held: every row `zstd -1` + the 4-byte trailer.
 
 M6 — brotli, decoder first. The one-shot (`decode.decompress`) and the
 streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` (default
