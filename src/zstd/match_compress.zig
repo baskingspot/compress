@@ -35,6 +35,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
+const builtin = @import("builtin");
 
 const fastmem = @import("fastmem");
 
@@ -519,13 +520,41 @@ inline fn read32(source: []const u8, position: usize) u32 {
     return readInt(u32, source[position..][0..4]);
 }
 
+/// The forward-extension vector width: the CPU's byte-vector suggestion, so
+/// a stripe compare is one instruction on NEON (16) and AVX-512 (64).
+const count_vec_len = std.simd.suggestVectorLengthForCpu(u8, builtin.cpu) orelse 8;
+const CountVec = @Vector(count_vec_len, u8);
+
 /// `ZSTD_count` (`zstd_compress_internal.h:854-875`): the common bytes
-/// between `current` and `match` up to `iend`, eight at a time with the
-/// word-XOR machinery the flate finder uses, then the 4/2/1-byte tail.
-/// `match < current` and both reads stay inside `iend`.
+/// between `current` and `match` up to `iend`, a stripe at a time — the
+/// word-XOR machinery the flate finder uses, widened to a vector compare —
+/// then the 8/4/2/1-byte tail. `match < current` and both reads stay inside
+/// `iend`. Long matches dominate the compressible shapes (a 32 KiB html
+/// block is one extension), so the stripe width is what matters; the first
+/// difference is the lowest set mask bit (lane i is bit i, bytes in order).
 fn count(source: []const u8, current_start: usize, match_start: usize, iend: usize) usize {
     var current = current_start;
     var match = match_start;
+    // The first word peels off the common short extension (most matches end
+    // within their first eight unchecked bytes): a stripe compare's mask
+    // chain costs more than the one word-XOR that resolves them, and the
+    // vector loop pays for itself only past it (measured on the words
+    // shape's short matches).
+    if (current + 8 <= iend) {
+        const difference = readInt(u64, source[current..][0..8]) ^
+            readInt(u64, source[match..][0..8]);
+        if (difference != 0) return @ctz(difference) >> 3;
+        current += 8;
+        match += 8;
+    }
+    while (current + count_vec_len <= iend) {
+        const a: CountVec = source[current..][0..count_vec_len].*;
+        const b: CountVec = source[match..][0..count_vec_len].*;
+        const mask: @Int(.unsigned, count_vec_len) = @bitCast(a != b);
+        if (mask != 0) return current - current_start + @ctz(mask);
+        current += count_vec_len;
+        match += count_vec_len;
+    }
     while (current + 8 <= iend) {
         const difference = readInt(u64, source[current..][0..8]) ^
             readInt(u64, source[match..][0..8]);
