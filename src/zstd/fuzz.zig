@@ -1,27 +1,39 @@
-//! Fuzz targets for the zstd decoder (RFC 8878): the one-shot
-//! `decode.decompress` and the streaming `Reader`.
+//! Fuzz targets for zstd (RFC 8878): the decoder's one-shot
+//! `decode.decompress` and streaming `Reader`, and the encoder's one-shot
+//! `encode.compress` and streaming `Writer`.
 //!
-//! There is no zstd encoder, so nothing here round-trips. Every target starts
-//! from the golden fixtures (`golden.zig`), whose expected output and verdict
-//! were checked against the C `zstd` CLI. A checksummed fixture's trailer is
-//! the C library's XXH64 value, cross-checked against std's `XxHash64`.
+//! Decode targets start from the golden fixtures (`golden.zig`), whose
+//! expected output and verdict were checked against the C `zstd` CLI. A
+//! checksummed fixture's trailer is the C library's XXH64 value,
+//! cross-checked against std's `XxHash64`. The decode targets:
+//! `fuzzGoldenCorpus` (the good fixtures), `fuzzCorruption` (bad frames and
+//! mutations of good ones), `fuzzReaderMachinery` (random `Io.Reader` calls),
+//! `fuzzChecksumAccounting` (the XXH64 trailer), and `fuzzAmplification`
+//! (declared-size bombs).
 //!
-//! Targets: `fuzzGoldenCorpus` (the good fixtures), `fuzzCorruption` (bad
-//! frames and mutations of good ones), `fuzzReaderMachinery` (random
-//! `Io.Reader` calls), `fuzzChecksumAccounting` (the XXH64 trailer), and
-//! `fuzzAmplification` (declared-size bombs). Each has a doc comment with the
-//! properties it checks.
+//! Encode targets attack our own encoder's output. There is no in-process
+//! reference oracle — the CLI is not callable from a fuzz target — so the
+//! byte class is pinned by the CLI-verified `encode_*` fixtures (`golden.zig`)
+//! and the targets pin the invariants instead: `fuzzEncodeRoundTrip` (the
+//! one-shot and the Writer, decoded back with the sentinel rule),
+//! `fuzzEncodeByteClass` (determinism, the header forms and the window
+//! ladder, the block-chain structure), `fuzzEncodeCorruption` (the decode
+//! mutation taxonomy over real encoder output), `fuzzWriterMachinery` (random
+//! `Io.Writer` calls and the poison lifecycle), and `fuzzEncodeAmplification`
+//! (the `maxCompressedLength` bound and the `BufferTooSmall` boundary). Each
+//! has a doc comment with the properties it checks.
 //!
 //! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run hits
 //! ziglang/zig#30655). Every target caps its per-iteration input and work
-//! (`source_max`, `out_max`) so a budget run finishes. Nothing here allocates:
-//! every buffer is a stack local.
+//! (`source_max`, `encode_max`, `out_max`) so a budget run finishes. Nothing
+//! here allocates: every buffer is a stack local.
 //!
 //! Spec: docs/research/specs/rfc8878-zstd.txt (§3.1 frames, §3.1.1 the frame
 //! and its checksum, §3.1.1.1 the header, §3.1.1.2 the block chain, §3.1.1.3
 //! and §3.1.1.4 the entropy layers and execution, §3.1.2 skippable frames,
 //! §4.1 and §4.2 the FSE and Huffman tables). Where this decoder differs from
-//! the C reference, docs/research/zstd-notes.md §4 records the decision.
+//! the C reference, docs/research/zstd-notes.md §4 records the decision; where
+//! the encoder does, docs/research/zstd-encoder-notes.md §5 does.
 
 const std = @import("std");
 const Io = std.Io;
@@ -30,6 +42,7 @@ const testing = std.testing;
 const Smith = testing.Smith;
 const math = std.math;
 const mem = std.mem;
+const DefaultPrng = std.Random.DefaultPrng;
 const XxHash64 = std.hash.XxHash64;
 
 const fastmem = @import("fastmem");
@@ -38,11 +51,15 @@ const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const readInt = @import("common.zig").readInt;
 const block = @import("block.zig");
+const block_compress = @import("block_compress.zig");
 const decode = @import("decode.zig");
+const encode = @import("encode.zig");
 const fse = @import("fse.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
+const match_compress = @import("match_compress.zig");
 const Reader = @import("Reader.zig");
+const Writer = @import("Writer.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -1599,7 +1616,14 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
 
     var mut_buf: [mutation_max]u8 = undefined;
     const meta = mutate(smith, &mut_buf, row);
-    const mutated = mut_buf[0..meta.len];
+    try checkMutation(smith, mut_buf[0..meta.len], expected, meta);
+}
+
+/// The capped and uncapped checks every mutation gets: the class pin at a cap
+/// the class can land on, the cap invariant, the determinism pin, and the
+/// one-shot/reader agreement. Shared by the decode-side and encode-side
+/// corruption targets.
+fn checkMutation(smith: *Smith, mutated: []const u8, expected: []const u8, meta: Mutated) !void {
     const info = analyze(mutated);
 
     // The cap: the expected length for the pinned classes (so `exact_source`
@@ -2453,6 +2477,1357 @@ test "zstd fuzz: amplification caps" {
 }
 
 // ---------------------------------------------------------------------------
+// The encode side: the one-shot, the streaming Writer, and their invariants
+// ---------------------------------------------------------------------------
+
+/// The encode targets' largest Smith-built source: 256 KiB + 1, one byte past
+/// the one-shot ladder's 256-KiB window class, so a frame carries up to three
+/// 128-KiB blocks (`block_compress.blockSize` is `min(128 KiB, 1 <<
+/// window_log)`) and the later blocks can reuse the earlier ones' entropy
+/// tables (Treeless_Literals_Block, Repeat_Mode).
+const encode_max: usize = 256 * 1024 + 1;
+
+/// `encode.maxCompressedLength` at `encode_max`: the largest frame an encode
+/// target's one-shot writes.
+const encode_bound: usize = encode.maxCompressedLength(encode_max);
+
+/// The decode buffer an encode target's frame is checked in: the source cap
+/// plus the sentinel guard.
+const encode_out_max: usize = encode_max + guard_len;
+
+/// The corruption target's source cap: over 128 KiB, so a frame carries two
+/// blocks (the second reusing the first's entropy tables) while the mutation
+/// buffer stays stack-sized. A doubled frame covers `duplicate_frame`.
+const corrupt_encode_max: usize = 150_000;
+const corrupt_frame_max: usize = encode.maxCompressedLength(corrupt_encode_max);
+const encode_mutation_max: usize = 2 * corrupt_frame_max + 64;
+
+/// The Writer-machinery target's write budget and op budget: one default
+/// block region's worth, so blocks emit and the window slides mid-stream.
+const machinery_max: usize = 192 * 1024;
+const machinery_ops_max: usize = 32;
+
+/// The Writer's mid-stream flush budget: every flush ends the current block,
+/// and every extra block costs its 3-byte Block_Header beyond the
+/// `maxCompressedLength` bound (which budgets only the block region's own
+/// split), so the Writer's sinks carry headroom for `flush_budget` extra
+/// blocks plus the empty last block.
+const flush_budget: usize = 16;
+
+/// The round-trip Writer's sink: the one-shot bound plus the flush headroom.
+const writer_out_max: usize = encode_bound + 3 * (flush_budget + 4) + 8;
+
+/// The machinery target's sink: the worst case over the window ladder — one
+/// 3-byte header per 1-KiB block region (the smallest window), one per
+/// mid-stream flush, and the final empty block.
+const machinery_out_max: usize = 10 +
+    3 * (machinery_max / 1024 + machinery_ops_max + 2) +
+    machinery_max;
+
+/// The byte-class target's largest source: 530000 crosses the one-shot's
+/// single-segment boundary (512 KiB), where the header gains a
+/// Window_Descriptor and the 8-byte Frame_Content_Size form.
+const class_max: usize = 530_000;
+const class_bound: usize = encode.maxCompressedLength(class_max);
+
+/// The sizes the encode targets draw from: the one-shot ladder's window
+/// boundaries (`match_compress.Params.forSource`: `nextPow2`, floor 1 KiB),
+/// the Frame_Content_Size form boundaries (256, 65536 + 256), and the 128-KiB
+/// block boundary — each with its one-byte neighbours.
+const encode_sizes = [_]usize{
+    0,      1,      2,     3,     6,     7,      8,      15,     16,
+    17,     31,     32,    33,    63,    64,     65,     100,    127,
+    128,    129,    255,   256,   257,   511,    512,    513,    1023,
+    1024,   1025,   2047,  2048,  2049,  4095,   4096,   4097,   8191,
+    8192,   8193,   16383, 16384, 16385, 32767,  32768,  32769,  65535,
+    65536,  65537,  65791, 65792, 65793, 131071, 131072, 131073, 262143,
+    262144, 262145,
+};
+
+/// The corruption target's sizes: the header-mutation classes on small
+/// frames, and over 128 KiB for the entropy classes' two-block frames.
+const corrupt_sizes = [_]usize{
+    0, 1, 7, 8, 100, 255, 256, 1024, 4096, 16384, 65536, 131071, 131072, 131073, 150_000,
+};
+
+/// The byte-class target's sizes, up to the one-shot's single-segment
+/// boundary: 524288 is the largest single-segment frame, 524289 the first
+/// windowed one.
+const class_sizes = [_]usize{
+    0,     1,      100,    255,    256,    257,    1024,   65791,  65792,
+    65793, 131072, 131073, 262144, 262145, 524288, 524289, 530000,
+};
+
+/// The sizes the `maxCompressedLength` tightness check covers: the ladder's
+/// boundary classes and the format's form boundaries, to 1 GiB (above 512 KiB
+/// the window class repeats, so the classes repeat with it).
+const bound_sizes = [_]usize{
+    0,      1,      255,    256,    257,    1023,    1024,    1025,    65535,
+    65536,  65537,  65791,  65792,  65793,  131071,  131072,  131073,  262143,
+    262144, 262145, 524287, 524288, 524289, 1 << 20, 1 << 24, 1 << 30,
+};
+
+/// The encode targets' source model: the corpus shapes plus the patterns that
+/// drive the match finder and the entropy writers.
+const EncodeInput = enum(u8) {
+    /// A `golden.Shape`: the corpus shapes the golden fixtures share.
+    corpus,
+    /// PRNG bytes from one Smith-chosen seed: incompressible, the Raw
+    /// fallback.
+    uniform,
+    /// A repeated random phrase of 1-64 bytes: long matches at one distance —
+    /// the repcode and offset-2 chains, across block boundaries.
+    period,
+    /// PRNG bytes masked to a 2-16 symbol alphabet: Huffman-heavy literals.
+    alphabet,
+    /// PRNG bytes turned into short runs: RLE-adjacent blocks.
+    runs,
+};
+
+/// The `corpus` kind's shapes, in `golden.Shape` order.
+const encode_shapes = [_]golden.Shape{
+    .text, .html, .rle, .random, .mixed, .skewlit, .words, .zeros,
+};
+
+/// Fill `buf` with one Smith-chosen input. `content` seeds the model (a
+/// `DefaultPrng` seed, or the shape index for `corpus`), so a target's Smith
+/// consumption does not depend on the kind.
+fn fillEncodeInput(kind: EncodeInput, content: u64, buf: []u8) void {
+    switch (kind) {
+        .corpus => golden.fillShape(encode_shapes[@intCast(content % encode_shapes.len)], buf),
+        .uniform => {
+            var rng: DefaultPrng = .init(content);
+            const rand = rng.random();
+            rand.bytes(buf);
+        },
+        .period => {
+            const period: usize = 1 + @as(usize, @intCast(content & 63));
+            var phrase: [64]u8 = undefined;
+            var rng: DefaultPrng = .init(content);
+            const rand = rng.random();
+            rand.bytes(phrase[0..period]);
+            var at: usize = 0;
+            while (at < buf.len) : (at += period) {
+                const n = @min(period, buf.len - at);
+                fastmem.copy(u8, buf[at..][0..n], phrase[0..n]);
+            }
+        },
+        .alphabet => {
+            const bits: u3 = @intCast(1 + content % 4);
+            const mask: u8 = (@as(u8, 1) << bits) - 1;
+            var rng: DefaultPrng = .init(content);
+            const rand = rng.random();
+            rand.bytes(buf);
+            for (buf) |*byte| byte.* &= mask;
+        },
+        .runs => {
+            var rng: DefaultPrng = .init(content);
+            const rand = rng.random();
+            var at: usize = 0;
+            while (at < buf.len) {
+                const byte = rand.int(u8);
+                const run = 1 + rand.uintAtMost(usize, 15);
+                const n = @min(run, buf.len - at);
+                fastmem.set(u8, buf[at..][0..n], byte);
+                at += n;
+            }
+        },
+    }
+}
+
+/// The ladder index of `size`, at comptime: a seed that names a size the
+/// ladder does not carry fails the build, not the run.
+fn sizeIndex(comptime ladder: []const usize, comptime size: usize) usize {
+    comptime {
+        for (ladder, 0..) |entry, index| {
+            if (entry == size) return index;
+        }
+        @compileError("no ladder entry for the seed's size");
+    }
+}
+
+/// The `content` word that selects `shape` for the `corpus` kind.
+fn shapeContent(comptime shape: golden.Shape) u64 {
+    comptime {
+        for (encode_shapes, 0..) |entry, index| {
+            if (entry == shape) return index;
+        }
+        @compileError("shape not in encode_shapes");
+    }
+}
+
+/// An encode-target seed: the kind, the size (by ladder index), the content
+/// seed, and the target's mode word — the values the target consumes, in
+/// order, before it fills the source.
+fn encodeSeed(
+    comptime ladder: []const usize,
+    comptime kind: EncodeInput,
+    comptime size: usize,
+    comptime content: u64,
+    comptime mode: u64,
+) [32]u8 {
+    var seed: [32]u8 = undefined;
+    mem.writeInt(u64, seed[0..8], @intFromEnum(kind), .little);
+    mem.writeInt(u64, seed[8..16], sizeIndex(ladder, size), .little);
+    mem.writeInt(u64, seed[16..24], content, .little);
+    mem.writeInt(u64, seed[24..32], mode, .little);
+    return seed;
+}
+
+/// A Smith-chosen size from `ladder`, jittered by up to four bytes so the
+/// boundaries' shoulders are hit too.
+fn ladderSize(smith: *Smith, comptime ladder: []const usize, comptime max: usize) usize {
+    const base = ladder[smith.index(ladder.len)];
+    return @min(base + rangeAtMost(smith, 0, 4), max);
+}
+
+// ---------------------------------------------------------------------------
+// Target 6: the encode round trip
+// ---------------------------------------------------------------------------
+
+/// The encode round-trip: the one-shot and the streaming `Writer` over
+/// Smith-driven inputs, decoded back through the landed one-shot decoder with
+/// the sentinel rule.
+///
+/// The one-shot path checks the `maxCompressedLength` bound, the trailer
+/// against std's XXH64, identity at the exact cap and with slack, and a
+/// Smith-chosen smaller cap: either a shorter frame that still decodes to the
+/// source, or `BufferTooSmall` with the cap held. The Writer path drives the
+/// manual `init`/write/`flush`/`finish` sequence — Smith-chosen write chunks
+/// (single bytes included), mid-stream flushes, and the zero-data flush —
+/// then checks the bound, the trailer, and identity. The empty writer's frame
+/// is checked on every iteration.
+fn fuzzEncodeRoundTrip(_: void, smith: *Smith) anyerror!void {
+    const kind = smith.value(EncodeInput);
+    var size = ladderSize(smith, &encode_sizes, encode_max);
+    const content = smith.value(u64);
+    const mode = rangeAtMost(smith, 0, 3);
+    // Single-byte writes only where the loop stays cheap.
+    if (mode == 2) size = @min(size, 4096);
+
+    var source: [encode_max]u8 = undefined;
+    fillEncodeInput(kind, content, source[0..size]);
+
+    try expectOneShotEncodeRoundTrip(smith, source[0..size]);
+    try expectWriterEncodeRoundTrip(smith, source[0..size], mode);
+}
+
+/// The one-shot's frame for `source`: the bound, the trailer, identity at the
+/// exact cap and with slack, and a Smith-chosen smaller cap.
+fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
+    var compressed: [encode_bound]u8 = undefined;
+    const bound = encode.maxCompressedLength(source.len);
+    const written = try encode.compress(source, compressed[0..bound], .{});
+    try testing.expect(written <= bound);
+    try expectTrailerConsistent(compressed[0..written], written, source, true);
+
+    var plain: [encode_out_max]u8 = undefined;
+    sentinel.fill(&plain);
+    const n = try decode.decompress(compressed[0..written], plain[0..source.len]);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, plain[0..n]);
+    try sentinel.expect(&plain, n);
+    sentinel.fill(&plain);
+    const m = try decode.decompress(compressed[0..written], &plain);
+    try testing.expectEqual(n, m);
+    try testing.expectEqualSlices(u8, source, plain[0..m]);
+    try sentinel.expect(&plain, m);
+
+    // A Smith-chosen smaller cap: a shorter frame (the ladder may fall back
+    // per block) that still decodes to the source, or `BufferTooSmall` with
+    // the cap held.
+    const cap = rangeAtMost(smith, 0, written);
+    sentinel.fill(&compressed);
+    if (encode.compress(source, compressed[0..cap], .{})) |short| {
+        // A successful emission writes its frame into the target's front; a
+        // block whose entropy attempt fails partway can leave bytes past the
+        // returned length inside the target (the C's encoder does the same),
+        // so the checked property is the cap: nothing past the slice.
+        try testing.expect(short <= cap);
+        try sentinel.expect(&compressed, cap);
+        sentinel.fill(&plain);
+        const d = try decode.decompress(compressed[0..short], plain[0..source.len]);
+        try testing.expectEqual(source.len, d);
+        try testing.expectEqualSlices(u8, source, plain[0..d]);
+        try sentinel.expect(&plain, d);
+    } else |err| {
+        try testing.expectEqual(error.BufferTooSmall, err);
+        try sentinel.expect(&compressed, cap);
+    }
+}
+
+/// The Writer's frame for `source`, in `mode`'s write pattern: the empty
+/// writer's 13-byte frame, the bound, the trailer, and identity.
+fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !void {
+    var out: [writer_out_max]u8 = undefined;
+    var fw: Io.Writer = .fixed(&out);
+    var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
+
+    // The empty writer: the header, one raw zero-size Last_Block, and the
+    // checksum — 13 bytes that decode to nothing.
+    {
+        var empty: [32]u8 = undefined;
+        var efw: Io.Writer = .fixed(&empty);
+        var ew: Writer = .init(Writer.default_window_log, &efw, &buffer, .{});
+        try ew.finish();
+        try expectTrailerConsistent(empty[0..efw.end], efw.end, "", true);
+        var nothing: [guard_len]u8 = undefined;
+        sentinel.fill(&nothing);
+        const zero = try decode.decompress(empty[0..efw.end], &nothing);
+        try testing.expectEqual(@as(usize, 0), zero);
+        try sentinel.expect(&nothing, 0);
+    }
+
+    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{});
+    var pos: usize = 0;
+    var flushes: usize = 0;
+    switch (mode) {
+        0 => {
+            try w.writer.writeAll(source);
+            pos = source.len;
+        },
+        1, 3 => {
+            // Mode 3's zero-data flush: the header alone reaches the sink
+            // before the first byte.
+            if (mode == 3) try w.writer.flush();
+            while (pos < source.len) {
+                const n = @min(source.len - pos, rangeAtMost(smith, 1, 4096));
+                try w.writer.writeAll(source[pos..][0..n]);
+                pos += n;
+                if (flushes < flush_budget and smith.boolWeighted(1, 3)) {
+                    try w.writer.flush();
+                    flushes += 1;
+                }
+            }
+        },
+        else => {
+            while (pos < source.len) {
+                try w.writer.writeAll(source[pos..][0..1]);
+                pos += 1;
+            }
+        },
+    }
+    try w.finish();
+    const written = fw.end;
+    // The unflushed stream stays inside the one-shot's bound; a mid-stream
+    // flush ends a block early, and each extra block costs its 3-byte header
+    // beyond the bound's own split.
+    try testing.expect(written <= writer_out_max);
+    if (mode == 0 or mode == 2) {
+        try testing.expect(written <= encode.maxCompressedLength(source.len));
+    }
+    try expectTrailerConsistent(out[0..written], written, source, true);
+
+    var plain: [encode_out_max]u8 = undefined;
+    sentinel.fill(&plain);
+    const n = try decode.decompress(out[0..written], plain[0..source.len]);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, plain[0..n]);
+    try sentinel.expect(&plain, n);
+}
+
+/// Seeds for `fuzzEncodeRoundTrip`: the corpus shapes across the ladder's
+/// classes, the pattern kinds that drive the finder, and every writer mode.
+const encode_roundtrip_corpus: []const []const u8 = &.{
+    &encodeSeed(&encode_sizes, .corpus, 0, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .corpus, 100, shapeContent(.words), 0),
+    &encodeSeed(&encode_sizes, .corpus, 257, shapeContent(.html), 1),
+    &encodeSeed(&encode_sizes, .corpus, 1024, shapeContent(.mixed), 3),
+    &encodeSeed(&encode_sizes, .corpus, 4096, shapeContent(.skewlit), 0),
+    &encodeSeed(&encode_sizes, .corpus, 16384, shapeContent(.rle), 1),
+    &encodeSeed(&encode_sizes, .corpus, 65536, shapeContent(.zeros), 2),
+    &encodeSeed(&encode_sizes, .corpus, 131073, shapeContent(.text), 1),
+    &encodeSeed(&encode_sizes, .corpus, 262145, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .uniform, 262145, 0x9E3779B97F4A7C15, 1),
+    &encodeSeed(&encode_sizes, .period, 262145, 17, 0),
+    &encodeSeed(&encode_sizes, .alphabet, 8192, 3, 1),
+    &encodeSeed(&encode_sizes, .runs, 4096, 0xC0FFEE, 2),
+    &encodeSeed(&encode_sizes, .uniform, 131072, 1, 0),
+};
+
+test "zstd fuzz: encode round trip" {
+    try testing.fuzz({}, fuzzEncodeRoundTrip, .{ .corpus = encode_roundtrip_corpus });
+}
+
+// ---------------------------------------------------------------------------
+// Target 7: the encode byte class
+// ---------------------------------------------------------------------------
+
+/// The encode byte-class invariants: the properties the pinned CLI v1.5.7
+/// fixtures stand in for (there is no in-process reference oracle).
+///
+/// The one-shot's emission is deterministic (two runs, byte for byte), its
+/// header declares the exact Frame_Content_Size in its smallest form, its
+/// single-segment bit and window follow the ladder (single-segment exactly
+/// when the source fits the window; the window is the FCS itself then, the
+/// 512-KiB class otherwise), its descriptor sets the checksum and nothing
+/// else, its block chain's headers are structurally legal (no reserved type,
+/// Block_Size inside Block_Maximum_Size, the first block never RLE, Last_Block
+/// exactly on the last block, the chain ending at the trailer), and the frame
+/// decodes through the one-shot to the source with the trailer verified. The
+/// `Writer` on the same source declares the FCS-unknown header form, and
+/// where the two encoders' parameters coincide (over 256 KiB) their block
+/// bodies are byte-identical.
+fn fuzzEncodeByteClass(_: void, smith: *Smith) anyerror!void {
+    const kind = smith.value(EncodeInput);
+    const size = ladderSize(smith, &class_sizes, class_max);
+    const content = smith.value(u64);
+
+    var source: [class_max]u8 = undefined;
+    fillEncodeInput(kind, content, source[0..size]);
+
+    var one_shot: [class_bound]u8 = undefined;
+    var streamed: [class_bound]u8 = undefined;
+    const one_shot_len = try oneShotByteClass(source[0..size], &one_shot);
+    const streamed_len = try writerByteClass(source[0..size], &streamed);
+    if (size > 256 * 1024) {
+        // The finder's parameters coincide (`Params.forSource` picks windowLog
+        // 19, hashLog 14, minMatch 7 over 256 KiB; the Writer's streaming
+        // class is the same), so only the header form differs: the block
+        // bodies and the trailer are the same bytes.
+        const one_shot_header = headerLenFor(one_shot[0..one_shot_len]);
+        const streamed_header = headerLenFor(streamed[0..streamed_len]);
+        try testing.expectEqualSlices(
+            u8,
+            one_shot[one_shot_header .. one_shot_len - frame.checksum_len],
+            streamed[streamed_header .. streamed_len - frame.checksum_len],
+        );
+        try testing.expectEqualSlices(
+            u8,
+            one_shot[one_shot_len - frame.checksum_len .. one_shot_len],
+            streamed[streamed_len - frame.checksum_len .. streamed_len],
+        );
+    }
+}
+
+/// The one-shot's frame for `source` into `out`: determinism, the header
+/// forms, the block-chain structure, identity, and the trailer. Returns the
+/// frame's length.
+fn oneShotByteClass(source: []const u8, out: []u8) !usize {
+    const bound = encode.maxCompressedLength(source.len);
+    const written = try encode.compress(source, out[0..bound], .{});
+    try testing.expect(written <= bound);
+    {
+        var again: [class_bound]u8 = undefined;
+        const m = try encode.compress(source, again[0..bound], .{});
+        try testing.expectEqual(written, m);
+        try testing.expectEqualSlices(u8, out[0..written], again[0..m]);
+    }
+
+    const frame_bytes = out[0..written];
+    try testing.expectEqual(frame.magic, readInt(u32, frame_bytes[0..frame.magic_len]));
+    const header = try frame.parseHeader(frame_bytes[frame.magic_len..]);
+    try testing.expectEqual(@as(?u64, source.len), header.content_size);
+    try testing.expect(header.checksum);
+    const single = header.descriptor & frame.descriptor_single_segment != 0;
+    try testing.expectEqual(source.len <= (@as(usize, 1) << 19), single);
+    // §3.1.1.1.1.1 — the descriptor is the FCS flag, the single-segment bit,
+    // and the checksum flag; nothing else.
+    try testing.expectEqual(
+        (@as(u8, fcsCode(source.len)) << 6) |
+            (@as(u8, @intFromBool(single)) << 5) |
+            frame.descriptor_checksum,
+        header.descriptor,
+    );
+    // §3.1.1.1.1.1 — the smallest FCS form that carries the exact size.
+    try testing.expectEqual(fcsLen(source.len), frame.fcsFieldSize(header.descriptor));
+    // §3.1.1.1.1.2 — single-segment: Window_Size is Frame_Content_Size;
+    // windowed: the level-1 class's 512-KiB window.
+    const window_size: u64 = if (single) source.len else @as(u64, 1) << 19;
+    try testing.expectEqual(window_size, header.window_size);
+    if (!single) {
+        const window_byte = frame_bytes[frame.magic_len + 1];
+        try testing.expectEqual(frame.window.descriptor(19), window_byte);
+        try testing.expectEqual(@as(u64, 1) << 19, frame.window.size(window_byte));
+    }
+
+    // §3.1.1.2 — the block chain: legal headers, Block_Maximum_Size, the
+    // first block never RLE (TE3), Last_Block exactly on the last block, the
+    // chain ending at the trailer.
+    var cursor = frame.magic_len + header.bytes_consumed;
+    var blocks: usize = 0;
+    const block_max = @min(header.window_size, @as(u64, block.max_block_size));
+    while (true) {
+        const bh = try block.parseHeader(frame_bytes[cursor..]);
+        try testing.expect(bh.block_type != .reserved);
+        try testing.expect(@as(u64, bh.block_size) <= block_max);
+        if (blocks == 0) try testing.expect(bh.block_type != .rle);
+        blocks += 1;
+        cursor += block.block_header_len + block.contentLength(bh);
+        try testing.expect(cursor <= written - frame.checksum_len);
+        if (bh.last_block) break;
+    }
+    try testing.expect(blocks >= 1);
+    try testing.expectEqual(written - frame.checksum_len, cursor);
+
+    // The one-shot decodes the frame to the source, markers after it are not
+    // part of it, and the trailer is the XXH64 of the source.
+    var framed: [class_bound + marker_len]u8 = undefined;
+    fastmem.copy(u8, framed[0..written], frame_bytes);
+    fastmem.set(u8, framed[written..][0..marker_len], marker_byte);
+    var plain: [class_max + guard_len]u8 = undefined;
+    sentinel.fill(&plain);
+    const n = try decode.decompress(framed[0 .. written + marker_len], plain[0..source.len]);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, plain[0..n]);
+    try sentinel.expect(&plain, n);
+    try expectTrailerConsistent(frame_bytes, written, source, true);
+    return written;
+}
+
+/// The Writer's frame for `source` into `out`: the FCS-unknown header form,
+/// identity, and the bound. Returns the frame's length.
+fn writerByteClass(source: []const u8, out: []u8) !usize {
+    var fw: Io.Writer = .fixed(out);
+    var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
+    var fixed_in: Io.Reader = .fixed(source);
+    const consumed = try Writer.streamAll(Writer.default_window_log, &fixed_in, &fw, &buffer, .{});
+    try testing.expectEqual(source.len, consumed);
+    const written = fw.end;
+    try testing.expect(written <= encode.maxCompressedLength(source.len));
+
+    // §3.1.1.1.1.1 — the streaming form: no Frame_Content_Size, not
+    // single-segment, the checksum flag alone; the window is declared.
+    const header = try frame.parseHeader(out[frame.magic_len..written]);
+    try testing.expectEqual(frame.descriptor_checksum, header.descriptor);
+    try testing.expectEqual(@as(?u64, null), header.content_size);
+    try testing.expectEqual(@as(u64, 1) << Writer.default_window_log, header.window_size);
+    try testing.expect(header.checksum);
+
+    var plain: [class_max + guard_len]u8 = undefined;
+    sentinel.fill(&plain);
+    const n = try decode.decompress(out[0..written], plain[0..source.len]);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, plain[0..n]);
+    try sentinel.expect(&plain, n);
+    try expectTrailerConsistent(out[0..written], written, source, true);
+    return written;
+}
+
+/// The descriptor's Frame_Content_Size_Flag the one-shot writes for a source
+/// of `source_len` (`§3.1.1.1.1.1`): the smallest form that carries the exact
+/// size.
+fn fcsCode(source_len: usize) u2 {
+    var code: u2 = 0;
+    if (source_len >= 256) code += 1;
+    if (source_len >= 65536 + 256) code += 1;
+    if (source_len >= 0xffff_ffff) code += 1;
+    return code;
+}
+
+/// `§3.1.1.1.1.1`, Table 4 — the FCS_Field_Size of the smallest form that
+/// carries `source_len`.
+fn fcsLen(source_len: usize) usize {
+    return switch (fcsCode(source_len)) {
+        0 => 1,
+        1 => 2,
+        2 => 4,
+        else => 8,
+    };
+}
+
+/// The frame header's length, from the parsed descriptor: the magic, the
+/// descriptor, the optional Window_Descriptor, and the Frame_Content_Size
+/// field (`§3.1.1.1`).
+fn headerLenFor(frame_bytes: []const u8) usize {
+    const header = frame.parseHeader(frame_bytes[frame.magic_len..]) catch unreachable;
+    return frame.magic_len + header.bytes_consumed;
+}
+
+/// Seeds for `fuzzEncodeByteClass`: every header-form class (the FCS forms
+/// 1/2/4, the single-segment boundary, the windowed form) and every block
+/// form the ladder picks.
+const byte_class_corpus: []const []const u8 = &.{
+    &encodeSeed(&class_sizes, .corpus, 0, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 1, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 255, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 256, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 257, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 65791, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 65792, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 65793, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 131072, shapeContent(.rle), 0),
+    &encodeSeed(&class_sizes, .corpus, 262144, shapeContent(.mixed), 0),
+    &encodeSeed(&class_sizes, .corpus, 262145, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 524288, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 524289, shapeContent(.text), 0),
+    &encodeSeed(&class_sizes, .corpus, 530000, shapeContent(.random), 0),
+    &encodeSeed(&class_sizes, .period, 524289, 33, 0),
+    &encodeSeed(&class_sizes, .uniform, 262145, 7, 0),
+};
+
+test "zstd fuzz: encode byte class" {
+    try testing.fuzz({}, fuzzEncodeByteClass, .{ .corpus = byte_class_corpus });
+}
+
+// ---------------------------------------------------------------------------
+// Target 8: the corruption taxonomy over our own frames
+// ---------------------------------------------------------------------------
+
+/// The mutation operators over our own frames. Each keeps `buf[0..len]` in
+/// bounds and stays inside the mutation buffer.
+const EncodeMutation = enum(u8) {
+    /// Cut the frame at a Smith-chosen byte: inside the header or the
+    /// trailer is `Truncated` exactly; inside the body the bits run out first
+    /// (any failure).
+    truncate,
+    /// A flip inside the 4-byte Magic_Number: `BadMagic`.
+    flip_magic,
+    /// Descriptor bit 3 (`§3.1.1.1.1.4`): `ReservedBitSet`.
+    set_reserved_bit,
+    /// A Dictionary_ID_Flag bit (`§3.1.1.1.3`): `DictionaryRequired`.
+    set_dictionary_flag,
+    /// Descriptor bit 4 (`§3.1.1.1.1.3`): ignored, so the frame decodes
+    /// identically.
+    flip_unused_bit,
+    /// A flip in the first compressed block's content: the entropy layers'
+    /// business (`unknown`).
+    entropy_poke,
+    /// A flip inside the checksum trailer (`§3.1.1`): `WrongChecksum`.
+    flip_trailer,
+    /// Block type 3 (`§3.1.1.2.2`): `ReservedBlock`.
+    block_reserved_type,
+    /// Block_Size 2^21 - 1: `BlockOversize` (`§3.1.1.2.4`).
+    block_oversize,
+    /// The Last_Block bit on the first block (`§3.1.1.2.1`): a one-block
+    /// frame is unchanged; a chain that stops early fails the exact
+    /// Frame_Content_Size — or, when the frame declares none (the Writer's),
+    /// the trailer check's business.
+    last_block_first,
+    /// A poked Frame_Content_Size byte (`§3.1.1.1.4`), classified against the
+    /// single-segment window coupling; a frame that declares none gets a body
+    /// flip instead.
+    poke_fcs,
+    /// Markers after the frame: ignored by the one-shot, unconsumed by the
+    /// reader.
+    append_markers,
+    /// A second copy of the frame: not consumed by one reader.
+    duplicate_frame,
+    /// A skippable frame before the frame (`§3.1.2`): consumed and ignored.
+    skippable_prefix,
+};
+
+/// The corruption taxonomy over our own encoder's frames: the decode-side
+/// mutation classes, seeded with real encoder output (real Huffman trees and
+/// FSE tables, real repeat modes, both header forms).
+///
+/// Each iteration builds one frame — the one-shot's FCS-known form from a
+/// Smith source, or the Writer's FCS-unknown form — copies it into the
+/// mutation buffer, applies one mutation, and pins the class the decode-side
+/// taxonomy pins for it. The universal properties are the decode side's: the
+/// cap held (sentinel), the one-shot and the reader agree (same bytes or the
+/// same named error), a clean reader end is trailer-verified at the exact
+/// frame boundary, and a failure is sticky.
+fn fuzzEncodeCorruption(_: void, smith: *Smith) anyerror!void {
+    const kind = smith.value(EncodeInput);
+    const size = ladderSize(smith, &corrupt_sizes, corrupt_encode_max);
+    const content = smith.value(u64);
+    const writer_frame = smith.boolWeighted(1, 3);
+    const mutation = smith.value(EncodeMutation);
+
+    var source: [corrupt_encode_max]u8 = undefined;
+    fillEncodeInput(kind, content, source[0..size]);
+
+    var frame_buf: [corrupt_frame_max]u8 = undefined;
+    const frame_len = if (writer_frame)
+        try streamFrame(source[0..size], &frame_buf)
+    else
+        try encode.compress(source[0..size], &frame_buf, .{});
+
+    var mut_buf: [encode_mutation_max]u8 = undefined;
+    const meta = mutateEncodeFrame(smith, &mut_buf, frame_buf[0..frame_len], mutation);
+    try checkMutation(smith, mut_buf[0..meta.len], source[0..size], meta);
+}
+
+/// The Writer's frame for `source` into `out`, one write and one `finish`
+/// (the chunking is the machinery target's business). Returns its length.
+fn streamFrame(source: []const u8, out: []u8) !usize {
+    var fw: Io.Writer = .fixed(out);
+    var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
+    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{});
+    try w.writer.writeAll(source);
+    try w.finish();
+    return fw.end;
+}
+
+/// Apply one Smith-chosen mutation to `frame_bytes` in `buf` and return the
+/// mutated length, the outcome class it pins, and the frame's end in the
+/// mutated bytes.
+fn mutateEncodeFrame(
+    smith: *Smith,
+    buf: []u8,
+    frame_bytes: []const u8,
+    mutation: EncodeMutation,
+) Mutated {
+    // Our own frames always analyze: a frame that does not is an encoder bug,
+    // not input.
+    const info = analyze(frame_bytes).?;
+    assert(frame_bytes.len <= buf.len);
+    fastmem.copy(u8, buf[0..frame_bytes.len], frame_bytes);
+    var len = frame_bytes.len;
+    var frame_end = info.end;
+    var expected: Expected = .unknown;
+    switch (mutation) {
+        .truncate => {
+            const cut = rangeAtMost(smith, 0, frame_bytes.len - 1);
+            len = cut;
+            if (cut >= frame_end) {
+                expected = .exact_source;
+            } else if (cut < info.first_block_at) {
+                // Inside the Magic_Number or the Frame_Header: the input ends
+                // before any body byte.
+                expected = .fail_truncated;
+            } else if (info.trailer_at) |trailer_at| {
+                // A cut inside the trailer leaves the body intact and is
+                // `Truncated` exactly; earlier the body's bits run out first.
+                expected = if (cut >= trailer_at) .fail_truncated else .fail_any;
+            } else {
+                expected = .fail_any;
+            }
+        },
+        .flip_magic => {
+            buf[rangeAtMost(smith, 0, frame.magic_len - 1)] ^= flipValue(smith);
+            expected = .fail_bad_magic;
+        },
+        .set_reserved_bit => {
+            buf[info.start + frame.magic_len] |= frame.descriptor_reserved;
+            expected = .fail_reserved_bit;
+        },
+        .set_dictionary_flag => {
+            const bit: u8 = @as(u8, 1) << @intCast(rangeAtMost(smith, 0, 1));
+            buf[info.start + frame.magic_len] |= bit;
+            expected = .fail_dictionary;
+        },
+        .flip_unused_bit => {
+            buf[info.start + frame.magic_len] ^= frame.descriptor_unused;
+            expected = .exact_source;
+        },
+        .entropy_poke => {
+            if (info.first_block.block_type == .compressed and info.first_block.block_size > 0) {
+                const at = info.first_content_at +
+                    rangeAtMost(smith, 0, info.first_block.block_size - 1);
+                buf[at] ^= flipValue(smith);
+            } else {
+                buf[rangeAtMost(smith, info.first_block_at, bodyEnd(info))] ^= flipValue(smith);
+            }
+            expected = .unknown;
+        },
+        .flip_trailer => {
+            if (info.trailer_at) |trailer_at| {
+                const at = trailer_at + rangeAtMost(smith, 0, frame.checksum_len - 1);
+                buf[at] ^= flipValue(smith);
+                expected = .fail_wrong_checksum;
+            } else {
+                buf[rangeAtMost(smith, info.first_block_at, bodyEnd(info))] ^= flipValue(smith);
+                expected = .unknown;
+            }
+        },
+        .block_reserved_type => {
+            buf[info.first_block_at] |= 0b0000_0110;
+            expected = .fail_reserved_block;
+        },
+        .block_oversize => {
+            buf[info.first_block_at] |= 0b1111_1000;
+            buf[info.first_block_at + 1] = 0xff;
+            buf[info.first_block_at + 2] = 0xff;
+            expected = .fail_block_oversize;
+        },
+        .last_block_first => {
+            buf[info.first_block_at] |= 1;
+            expected = if (info.header.content_size == null)
+                .unknown
+            else if (info.block_count == 1)
+                .exact_source
+            else
+                .fail_content_size;
+        },
+        .poke_fcs => {
+            const fcs_len = frame.fcsFieldSize(info.header.descriptor);
+            if (fcs_len == 0) {
+                // The Writer declares no Frame_Content_Size: the body flip
+                // stands in.
+                buf[rangeAtMost(smith, info.first_block_at, bodyEnd(info))] ^= flipValue(smith);
+                expected = .unknown;
+            } else {
+                // The FCS is the header's last field, so it ends where the
+                // block chain begins.
+                const fcs_at = info.first_block_at - fcs_len;
+                buf[fcs_at + rangeAtMost(smith, 0, fcs_len - 1)] ^= flipValue(smith);
+                const new_fcs = readFcs(buf[fcs_at..][0..fcs_len]);
+                const block_max: u64 = @min(new_fcs, @as(u64, block.max_block_size));
+                const oversize = info.first_block.block_size > block_max;
+                expected = .fail_content_size;
+                if (info.header.descriptor & frame.descriptor_single_segment != 0) {
+                    if (oversize) {
+                        expected = .fail_block_oversize;
+                    } else if (new_fcs < info.header.window_size) {
+                        // The window shrank: a match may now reach past it
+                        // (`§3.1.1.4`), so the failure's name is the decode's
+                        // business.
+                        expected = .unknown;
+                    }
+                }
+            }
+        },
+        .append_markers => {
+            const extra = rangeAtMost(smith, 1, 64);
+            fastmem.set(u8, buf[len..][0..extra], marker_byte);
+            len += extra;
+            expected = .exact_source;
+        },
+        .duplicate_frame => {
+            if (frame_end <= buf.len - len) {
+                fastmem.copy(u8, buf[len..][0..frame_end], buf[0..frame_end]);
+                len += frame_end;
+            }
+            expected = .exact_source;
+        },
+        .skippable_prefix => {
+            const prefix = [_]u8{ 0x50, 0x2a, 0x4d, 0x18, 4, 0, 0, 0, 'm', 'e', 't', 'a' };
+            fastmem.move(u8, buf[prefix.len..][0..frame_bytes.len], buf[0..frame_bytes.len]);
+            fastmem.copy(u8, buf[0..prefix.len], &prefix);
+            len += prefix.len;
+            frame_end += prefix.len;
+            expected = .exact_source;
+        },
+    }
+    return .{ .len = len, .expected = expected, .frame_end = frame_end };
+}
+
+/// A corruption seed: the kind, the size, the content seed, the frame form
+/// (the one-shot's or the Writer's), the mutation, and the mutation's first
+/// parameter.
+fn corruptionSeed(
+    comptime kind: EncodeInput,
+    comptime size: usize,
+    comptime content: u64,
+    comptime writer: bool,
+    comptime mutation: EncodeMutation,
+    comptime param: u64,
+) [48]u8 {
+    var seed: [48]u8 = undefined;
+    mem.writeInt(u64, seed[0..8], @intFromEnum(kind), .little);
+    mem.writeInt(u64, seed[8..16], sizeIndex(&corrupt_sizes, size), .little);
+    mem.writeInt(u64, seed[16..24], content, .little);
+    mem.writeInt(u64, seed[24..32], @intFromBool(writer), .little);
+    mem.writeInt(u64, seed[32..40], @intFromEnum(mutation), .little);
+    mem.writeInt(u64, seed[40..48], param, .little);
+    return seed;
+}
+
+/// Seeds for `fuzzEncodeCorruption`: one per operator over a source that
+/// exercises it, on both frame forms.
+const encode_corruption_corpus: []const []const u8 = &.{
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .truncate, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .flip_magic, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .set_reserved_bit, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .set_dictionary_flag, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .flip_unused_bit, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .entropy_poke, 0),
+    &corruptionSeed(.corpus, 1024, shapeContent(.mixed), false, .flip_trailer, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .block_reserved_type, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .block_oversize, 0),
+    &corruptionSeed(.corpus, 131073, shapeContent(.text), false, .last_block_first, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .last_block_first, 0),
+    &corruptionSeed(.corpus, 131073, shapeContent(.text), false, .poke_fcs, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .append_markers, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .duplicate_frame, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), false, .skippable_prefix, 0),
+    &corruptionSeed(.period, 150_000, 17, true, .truncate, 0),
+    &corruptionSeed(.corpus, 131073, shapeContent(.words), true, .last_block_first, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), true, .poke_fcs, 0),
+    &corruptionSeed(.corpus, 4096, shapeContent(.text), true, .flip_trailer, 0),
+};
+
+test "zstd fuzz: encode corruption" {
+    try testing.fuzz({}, fuzzEncodeCorruption, .{ .corpus = encode_corruption_corpus });
+}
+
+// ---------------------------------------------------------------------------
+// Target 9: the Writer's consumer machinery and poison lifecycle
+// ---------------------------------------------------------------------------
+
+/// The `Io.Writer` operations `fuzzWriterMachinery` mixes: the same set as
+/// Writer.zig's "random write machinery sequences stay correct" test.
+const WriteOp = enum(u8) {
+    write_splat_all,
+    write_vec_all,
+    splat_bytes_all,
+    writable_slice,
+    byte_and_flush,
+    write_all,
+    /// A bare flush: the zero-data flush when nothing is buffered.
+    flush,
+};
+
+/// The Writer's consumer machinery: Smith-chosen `Io.Writer` operation
+/// sequences against a model of the bytes written.
+///
+/// Covers `drain`/`rebase`/`flush` accounting under the full `Io.Writer`
+/// contract (`writeSplatAll` with a splat count, `writeVecAll`,
+/// `splatBytesAll`, `writableSliceGreedy` + `advance` — which lands on
+/// `rebase` when the block region is full — `writeByte`, plain writes, bare
+/// flushes, and mid-stream flushes), the block emissions and window slides
+/// the operations force, the final empty last block, and the exact frame
+/// boundary through the streaming reader. The window log is Smith-chosen from
+/// the small classes to the default, so the block region, the slide, and the
+/// emission cadence all vary. The poison lifecycle runs after the frame: a
+/// `.ratio` writer, a sink that fills mid-frame, `finish` twice, and a write
+/// after `finish` must all report `error.WriteFailed`, and a finished or
+/// failed writer never reports a false success.
+fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
+    switch (rangeAtMost(smith, 0, 3)) {
+        0 => try machineryCase(10, smith),
+        1 => try machineryCase(12, smith),
+        2 => try machineryCase(14, smith),
+        else => try machineryCase(19, smith),
+    }
+    try writerPoison(smith);
+}
+
+/// One machinery frame at `window_log`: the op sequence, the model, the
+/// identity decode, and the exact boundary.
+fn machineryCase(comptime window_log: usize, smith: *Smith) !void {
+    var out: [machinery_out_max]u8 = undefined;
+    var fw: Io.Writer = .fixed(&out);
+    var buffer: Writer.Buffer(window_log) = undefined;
+    var w: Writer = .init(window_log, &fw, &buffer, .{});
+
+    var model: [machinery_max]u8 = undefined;
+    var model_len: usize = 0;
+
+    var a: [1024]u8 = undefined;
+    var b: [8192]u8 = undefined;
+    var pattern: [7]u8 = undefined;
+    smith.bytes(&a);
+    smith.bytes(&b);
+    smith.bytes(&pattern);
+
+    var remaining = machinery_max;
+    var ops: usize = 0;
+    while (ops < machinery_ops_max and !smith.eosWeightedSimple(15, 1)) : (ops += 1) {
+        const op = smith.value(WriteOp);
+        const a_len = rangeAtMost(smith, 0, a.len);
+        const b_len = rangeAtMost(smith, 0, b.len);
+        const p_len = rangeAtMost(smith, 1, pattern.len);
+        const splat = rangeAtMost(smith, 0, 2048);
+        const byte = smith.value(u8);
+        const flush_now = smith.boolWeighted(1, 1);
+        const max_written: usize = switch (op) {
+            .write_splat_all => a_len + b_len + p_len * splat,
+            .write_vec_all => a_len + b_len,
+            .splat_bytes_all => p_len * splat,
+            .writable_slice => b_len,
+            .byte_and_flush => 1,
+            .write_all => b_len,
+            .flush => 0,
+        };
+        if (max_written > remaining) continue;
+        remaining -= max_written;
+
+        switch (op) {
+            .write_splat_all => {
+                var data = [_][]const u8{ a[0..a_len], b[0..b_len], pattern[0..p_len] };
+                try w.writer.writeSplatAll(&data, splat);
+                try appendModel(&model, &model_len, a[0..a_len]);
+                try appendModel(&model, &model_len, b[0..b_len]);
+                for (0..splat) |_| try appendModel(&model, &model_len, pattern[0..p_len]);
+            },
+            .write_vec_all => {
+                var data = [_][]const u8{ a[0..a_len], b[0..b_len] };
+                try w.writer.writeVecAll(&data);
+                try appendModel(&model, &model_len, a[0..a_len]);
+                try appendModel(&model, &model_len, b[0..b_len]);
+            },
+            .splat_bytes_all => {
+                try w.writer.splatBytesAll(pattern[0..p_len], splat);
+                for (0..splat) |_| try appendModel(&model, &model_len, pattern[0..p_len]);
+            },
+            .writable_slice => {
+                // The File.Reader simple-mode path: a direct write into the
+                // block region, which lands on `rebase` when it is full.
+                const dest = try w.writer.writableSliceGreedy(1);
+                const n = @min(dest.len, b_len);
+                fastmem.copy(u8, dest[0..n], b[0..n]);
+                w.writer.advance(n);
+                try appendModel(&model, &model_len, b[0..n]);
+            },
+            .byte_and_flush => {
+                try w.writer.writeByte(byte);
+                try appendModel(&model, &model_len, &[_]u8{byte});
+                if (flush_now) try w.writer.flush();
+            },
+            .write_all => {
+                try w.writer.writeAll(b[0..b_len]);
+                try appendModel(&model, &model_len, b[0..b_len]);
+            },
+            .flush => try w.writer.flush(),
+        }
+    }
+    try w.finish();
+    const frame_len = fw.end;
+    // The sink is sized for the window ladder's worst case (the 1-KiB block
+    // region), the op budget's flushes, and the final empty block; the
+    // one-shot's `maxCompressedLength` budgets only a 128-KiB region's split.
+    try testing.expect(frame_len <= machinery_out_max);
+
+    // Identity through the one-shot, with the sentinel.
+    var plain: [machinery_max + guard_len]u8 = undefined;
+    sentinel.fill(&plain);
+    const n = try decode.decompress(out[0..frame_len], plain[0..model_len]);
+    try testing.expectEqual(model_len, n);
+    try testing.expectEqualSlices(u8, model[0..model_len], plain[0..n]);
+    try sentinel.expect(&plain, n);
+
+    // The exact frame boundary through the streaming reader.
+    try expectFrameBoundary(out[0..frame_len], model[0..model_len]);
+}
+
+/// Append `bytes` to the model; the op budget keeps the model inside its
+/// buffer, so an overflow is a bug, not input.
+fn appendModel(model: []u8, len: *usize, bytes: []const u8) !void {
+    if (bytes.len > model.len - len.*) return error.ModelOverflow;
+    fastmem.copy(u8, model[len.*..][0..bytes.len], bytes);
+    len.* += bytes.len;
+}
+
+/// The frame's exact end through the streaming reader: identity against the
+/// model, the clean end (no detail, state `done`), the trailer verified, and
+/// the input consumed through the frame's last byte — markers after it are
+/// the caller's.
+fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
+    var framed: [machinery_out_max + marker_len]u8 = undefined;
+    fastmem.copy(u8, framed[0..frame_bytes.len], frame_bytes);
+    fastmem.set(u8, framed[frame_bytes.len..][0..marker_len], marker_byte);
+    var got: [machinery_max + guard_len]u8 = undefined;
+    var fw: Io.Writer = .fixed(&got);
+    var rbuf: Reader.Buffer(fixture_window_len) = undefined;
+    var fixed_in: Io.Reader = .fixed(framed[0 .. frame_bytes.len + marker_len]);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    try pump(&r.reader, &fw, pumpLimit(expected.len));
+    try testing.expectEqual(expected.len, fw.end);
+    try testing.expectEqualSlices(u8, expected, got[0..fw.end]);
+    try testing.expectEqual(@as(?Reader.Error, null), r.err);
+    try testing.expectEqual(internal.reader.State.done, r.state);
+    try testing.expectEqual(frame_bytes.len, fixed_in.seek);
+    try expectTrailerConsistent(frame_bytes, frame_bytes.len, expected, true);
+    try expectStickyEnd(&r);
+}
+
+/// The poison lifecycle: a `.ratio` writer, a sink that fills mid-frame,
+/// `finish` twice, and a write after `finish` — every one reports
+/// `error.WriteFailed`, and no false success.
+fn writerPoison(smith: *Smith) !void {
+    var buffer: Writer.Buffer(10) = undefined;
+    switch (rangeAtMost(smith, 0, 3)) {
+        // `.ratio` is poisoned at `init`: every write and `finish` fails and
+        // the sink sees nothing. The one-shot's seat returns `Unimplemented`
+        // before any byte.
+        0 => {
+            var out: [64]u8 = undefined;
+            var fw: Io.Writer = .fixed(&out);
+            var w: Writer = .init(10, &fw, &buffer, .{ .level = .ratio });
+            try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
+            try testing.expectError(error.WriteFailed, w.finish());
+            try testing.expectEqual(@as(usize, 0), fw.end);
+            var target: [64]u8 = undefined;
+            sentinel.fill(&target);
+            try testing.expectError(
+                error.Unimplemented,
+                encode.compress("hello, zstd", &target, .{ .level = .ratio }),
+            );
+            try sentinel.expect(&target, 0);
+        },
+        // The sink fills mid-frame: the buffered block's emission fails and
+        // `finish` reports it — twice, never a false success — and the writer
+        // stays poisoned.
+        1 => {
+            var out: [8]u8 = undefined;
+            var fw: Io.Writer = .fixed(&out);
+            var w: Writer = .init(10, &fw, &buffer, .{});
+            try w.writer.writeAll("a" ** 512);
+            try testing.expectError(error.WriteFailed, w.finish());
+            try testing.expectError(error.WriteFailed, w.finish());
+            try testing.expectError(error.WriteFailed, w.writer.writeAll("more"));
+            try testing.expect(fw.end <= out.len);
+        },
+        // `finish` twice and a write after `finish` on a healthy writer: the
+        // frame is complete, the later calls fail, and the sink does not
+        // grow.
+        2 => {
+            var out: [256]u8 = undefined;
+            var fw: Io.Writer = .fixed(&out);
+            var w: Writer = .init(10, &fw, &buffer, .{});
+            try w.writer.writeAll("hello, zstd");
+            try w.finish();
+            const complete = fw.end;
+            try testing.expectError(error.WriteFailed, w.writer.writeAll("more"));
+            try testing.expectError(error.WriteFailed, w.finish());
+            try testing.expectEqual(complete, fw.end);
+        },
+        // A write after `finish` on an empty writer: the empty frame is
+        // written, the later write fails, and the frame still decodes to
+        // nothing.
+        else => {
+            var out: [64]u8 = undefined;
+            var fw: Io.Writer = .fixed(&out);
+            var w: Writer = .init(10, &fw, &buffer, .{});
+            try w.finish();
+            const complete = fw.end;
+            try testing.expectError(error.WriteFailed, w.writer.writeAll("late"));
+            try testing.expectEqual(complete, fw.end);
+            var nothing: [guard_len]u8 = undefined;
+            sentinel.fill(&nothing);
+            const n = try decode.decompress(out[0..complete], &nothing);
+            try testing.expectEqual(@as(usize, 0), n);
+            try sentinel.expect(&nothing, 0);
+        },
+    }
+}
+
+/// A machinery seed: the window-log choice, then one record per operation
+/// (the op, the slice lengths, the splat count, the byte, and the flush flag),
+/// a stop flag, and the poison case. Each op consumes its record whatever the
+/// op turns out to be, so the seed layout is fixed.
+fn machinerySeed(
+    comptime log_choice: u64,
+    comptime records: []const [7]u64,
+    comptime poison: u64,
+) [8 + 64 * records.len + 16]u8 {
+    var seed: [8 + 64 * records.len + 16]u8 = undefined;
+    mem.writeInt(u64, seed[0..8], log_choice, .little);
+    for (records, 0..) |record, index| {
+        const at = 8 + 64 * index;
+        mem.writeInt(u64, seed[at..][0..8], 0, .little); // eos: continue
+        for (record, 0..) |value, field| {
+            mem.writeInt(u64, seed[at + 8 + 8 * field ..][0..8], value, .little);
+        }
+    }
+    const stop = 8 + 64 * records.len;
+    mem.writeInt(u64, seed[stop..][0..8], 16, .little); // eos: stop
+    mem.writeInt(u64, seed[stop + 8 ..][0..8], poison, .little);
+    return seed;
+}
+
+/// Seeds for `fuzzWriterMachinery`: every op, every window class, and every
+/// poison case.
+const machinery_corpus: []const []const u8 = &.{
+    // One write at the default window: the frame is one block at `finish`.
+    &machinerySeed(3, &.{
+        .{ @intFromEnum(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
+    }, 2),
+    // The small window: the block region fills four times over one write.
+    &machinerySeed(0, &.{
+        .{ @intFromEnum(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.writable_slice), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.byte_and_flush), 0, 0, 1, 0, 0x5a, 1 },
+        .{ @intFromEnum(WriteOp.splat_bytes_all), 0, 0, 7, 512, 0, 0 },
+        .{ @intFromEnum(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+    }, 1),
+    // The splat path across the slide: the window compacts repeatedly.
+    &machinerySeed(1, &.{
+        .{ @intFromEnum(WriteOp.write_splat_all), 1024, 8192, 7, 2048, 0, 0 },
+    }, 0),
+    // Vector writes and byte writes at the 16-KiB class.
+    &machinerySeed(2, &.{
+        .{ @intFromEnum(WriteOp.write_vec_all), 1024, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.byte_and_flush), 0, 0, 1, 0, 0xa5, 1 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+    }, 3),
+    // Many writes at the default window: a block emits when the region fills.
+    &machinerySeed(3, &.{
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @intFromEnum(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+    }, 1),
+    // The zero-data flush alone.
+    &machinerySeed(3, &.{
+        .{ @intFromEnum(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+    }, 0),
+};
+
+test "zstd fuzz: writer machinery" {
+    try testing.fuzz({}, fuzzWriterMachinery, .{ .corpus = machinery_corpus });
+}
+
+// ---------------------------------------------------------------------------
+// Target 10: the encode amplification limits
+// ---------------------------------------------------------------------------
+
+/// The raw fallback's worst case for a `source_len`-byte source: the header
+/// form and block split the one-shot's ladder picks (`§3.1.1.1.1.1`,
+/// `§3.1.1.1.4`, `§3.1.1.2.4`), every block stored Raw, and the trailer.
+/// `maxCompressedLength` must cover it on every size, or the encoder has an
+/// input it cannot encode at its own bound.
+fn rawWorstCase(source_len: usize) usize {
+    const params = match_compress.Params.forSource(source_len);
+    const block_size = block_compress.blockSize(params);
+    const single_segment = (@as(u64, 1) << params.window_log) >= source_len;
+    const fcs_len: usize = if (source_len < 256)
+        1
+    else if (source_len < 65536 + 256)
+        2
+    else if (source_len < 0xffff_ffff)
+        4
+    else
+        8;
+    const header_len = frame.magic_len + 1 + @as(usize, @intFromBool(!single_segment)) + fcs_len;
+    const blocks = @max(1, (source_len + block_size - 1) / block_size);
+    return header_len + block.block_header_len * blocks + source_len + frame.checksum_len;
+}
+
+/// The encode-side amplification limits: the `maxCompressedLength` bound on
+/// every emission, the `BufferTooSmall` boundary, and the fallback ladder's
+/// worst case.
+///
+/// The incompressible source is the ladder's worst case: every block falls
+/// back to the raw form, so the frame's bytes are exactly the raw need
+/// (`header + 3 * blocks + source + trailer`) — the check that
+/// `maxCompressedLength` is tight enough for the fallback, and that one byte
+/// under the raw need fails `BufferTooSmall` with the cap held. Every
+/// emission is decoded back (identity, trailer verified), a Smith-chosen cap
+/// either succeeds with a shorter decodable frame or fails `BufferTooSmall`
+/// with the cap held, and the bound covers every size on the ladder.
+fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
+    const kind = smith.value(EncodeInput);
+    const size = ladderSize(smith, &encode_sizes, encode_max);
+    const content = smith.value(u64);
+    const raw_case = rangeAtMost(smith, 0, 3);
+
+    var source: [encode_max]u8 = undefined;
+    if (raw_case == 0) {
+        // The raw fallback's worst case: incompressible bytes.
+        golden.fillShape(.random, source[0..size]);
+    } else {
+        fillEncodeInput(kind, content, source[0..size]);
+    }
+
+    var target: [encode_bound + guard_len]u8 = undefined;
+    const bound = encode.maxCompressedLength(size);
+    const written = try encode.compress(source[0..size], target[0..bound], .{});
+    try testing.expect(written <= bound);
+    try expectTrailerConsistent(target[0..written], written, source[0..size], true);
+
+    // The raw need of this frame: the header, one 3-byte Block_Header per
+    // block, the source bytes, and the trailer. No emission exceeds it — the
+    // raw form is the ladder's ceiling.
+    const info = analyze(target[0..written]).?;
+    const header_len = frame.magic_len + info.header.bytes_consumed;
+    const raw_need = header_len +
+        block.block_header_len * info.block_count + size + frame.checksum_len;
+    try testing.expect(raw_need <= bound);
+    try testing.expect(written <= raw_need);
+
+    if (raw_case == 0) {
+        // The incompressible shape is the raw fallback exactly: every block
+        // stored Raw, so the frame's length is the raw need.
+        try testing.expectEqual(raw_need, written);
+        var cursor = frame.magic_len + info.header.bytes_consumed;
+        while (true) {
+            const bh = try block.parseHeader(target[cursor..]);
+            try testing.expectEqual(block.BlockType.raw, bh.block_type);
+            cursor += block.block_header_len + block.contentLength(bh);
+            if (bh.last_block) break;
+        }
+        // The frame-header write gates on a 14-byte target
+        // (`encode.zig`'s `frame_header_len_max`) whatever the frame's own
+        // header form is, so a target under it fails even when the frame's
+        // bytes would fit. At or above it the exact raw need succeeds; one
+        // byte under fails with the cap held.
+        const header_gate = frame.magic_len + 1 + 1 + 8;
+        const exact_cap = @max(raw_need, header_gate);
+        sentinel.fill(&target);
+        if (raw_need >= header_gate) {
+            const exact = try encode.compress(source[0..size], target[0..raw_need], .{});
+            try testing.expectEqual(raw_need, exact);
+            try sentinel.expect(&target, exact);
+        } else {
+            try testing.expectError(
+                error.BufferTooSmall,
+                encode.compress(source[0..size], target[0..raw_need], .{}),
+            );
+            try sentinel.expect(&target, raw_need);
+        }
+        sentinel.fill(&target);
+        try testing.expectError(
+            error.BufferTooSmall,
+            encode.compress(source[0..size], target[0 .. exact_cap - 1], .{}),
+        );
+        try sentinel.expect(&target, exact_cap - 1);
+    }
+
+    // A Smith-chosen cap: a shorter frame that still decodes to the source,
+    // or `BufferTooSmall` with the cap held.
+    const cap = rangeAtMost(smith, 0, bound);
+    sentinel.fill(&target);
+    var plain: [encode_out_max]u8 = undefined;
+    if (encode.compress(source[0..size], target[0..cap], .{})) |short| {
+        // A successful emission writes its frame into the target's front; a
+        // block whose entropy attempt fails partway can leave bytes past the
+        // returned length inside the target (the C's encoder does the same),
+        // so the checked property is the cap: nothing past the slice.
+        try testing.expect(short <= cap);
+        try sentinel.expect(&target, cap);
+        sentinel.fill(&plain);
+        const n = try decode.decompress(target[0..short], plain[0..size]);
+        try testing.expectEqual(size, n);
+        try testing.expectEqualSlices(u8, source[0..size], plain[0..n]);
+        try sentinel.expect(&plain, n);
+    } else |err| {
+        try testing.expectEqual(error.BufferTooSmall, err);
+        try sentinel.expect(&target, cap);
+    }
+
+    // Every size on the ladder: the bound covers the raw fallback's worst
+    // case (the header form and block split the ladder picks).
+    for (bound_sizes) |ladder_size| {
+        try testing.expect(rawWorstCase(ladder_size) <= encode.maxCompressedLength(ladder_size));
+    }
+}
+
+/// Seeds for `fuzzEncodeAmplification`: the raw-fallback class (the pinned
+/// tight case) and the compressible classes, at the ladder's boundaries.
+const encode_amplification_corpus: []const []const u8 = &.{
+    &encodeSeed(&encode_sizes, .corpus, 0, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .corpus, 1, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .corpus, 7, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .corpus, 1024, shapeContent(.text), 1),
+    &encodeSeed(&encode_sizes, .corpus, 65537, shapeContent(.text), 2),
+    &encodeSeed(&encode_sizes, .corpus, 131073, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .corpus, 262145, shapeContent(.text), 0),
+    &encodeSeed(&encode_sizes, .uniform, 262145, 0x1234, 0),
+    &encodeSeed(&encode_sizes, .uniform, 131073, 0x5678, 3),
+    &encodeSeed(&encode_sizes, .corpus, 16385, shapeContent(.zeros), 0),
+};
+
+test "zstd fuzz: encode amplification" {
+    try testing.fuzz({}, fuzzEncodeAmplification, .{ .corpus = encode_amplification_corpus });
+}
+
+// ---------------------------------------------------------------------------
 // Deterministic tests: fixed inputs, not driven by the fuzzer
 // ---------------------------------------------------------------------------
 
@@ -2625,4 +4000,22 @@ test "zstd fuzz: an oversized RLE block fails the same way on both paths" {
     try testing.expectEqual(Stop.read_failed, pumped.stop);
     try testing.expectEqual(Reader.Error.BlockOversize, r.err.?);
     try expectStickyFailure(&r);
+}
+
+test "zstd fuzz: the raw fallback fits maxCompressedLength on every class" {
+    // The bound is the encoder's promise to every caller that sizes a target
+    // with it: no source on the ladder may need more than the bound even when
+    // every block falls back to the raw form (the incompressible case).
+    for (bound_sizes) |size| {
+        try testing.expect(rawWorstCase(size) <= encode.maxCompressedLength(size));
+    }
+    // §3.1.1.1.4 + §3.1.1.2.4 — the bound's exact-tight case is the windowed
+    // 8-byte-FCS form: the 14-byte header, the raw headers of the blocks that
+    // do not divide evenly, the source, and the trailer land exactly on the
+    // bound. The form needs a size at or above 2^32 - 1, which only a 64-bit
+    // `usize` can hold (and only it can encode such a source anyway).
+    if (@bitSizeOf(usize) >= 64) {
+        const tight = 0xffff_ffff;
+        try testing.expectEqual(encode.maxCompressedLength(tight), rawWorstCase(tight));
+    }
 }

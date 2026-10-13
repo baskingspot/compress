@@ -252,7 +252,12 @@ const no_symbol: u32 = 0xffff_ffff;
 fn setMaxHeight(nodes: *NodeTable, last_non_null: u32, target_nb_bits: u5) u5 {
     const largest_bits: u5 = @intCast(nodes.at(@intCast(last_non_null)).nb_bits);
     if (largest_bits <= target_nb_bits) return largest_bits;
-    assert(largest_bits <= tablelog_max);
+    // The unlimited tree's depth is NOT bounded by tablelog_max: the C's
+    // `HUF_setMaxHeight` (huf_compress.c:376-380) flattens any depth onto
+    // the target (a skewed histogram's unlimited tree can be deeper than
+    // the cap; the depth is bounded only by the histogram's symbol count,
+    // which `nb_bits: u8` holds). The assert here was reachable through the
+    // public Writer with ordinary bytes; found by the encode-side fuzz wave.
 
     // Flatten every node over the cap and accumulate the rank cost the
     // flattening gives back, in units of `base_cost`.
