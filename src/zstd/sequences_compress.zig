@@ -74,10 +74,16 @@ const alphabet_count = sequences.alphabet_count;
 /// Compressed_Block with a nonzero sequence count updates it, which is the
 /// decoder's own rule.
 pub const State = struct {
-    /// Storage for the tables a block builds (the FSE_Compressed mode). A
-    /// Repeat_Mode leaves the slot it reuses untouched, so the previous
-    /// block's table survives.
-    built: [alphabet_count]fse_compress.Table = undefined,
+    /// Storage for the tables a block builds (the FSE_Compressed mode),
+    /// double-buffered per alphabet: a block always builds into the slot
+    /// `active` does not name, so an abandoned block — one the block layer
+    /// reverts to Raw or RLE — never overwrites the table a later
+    /// Repeat_Mode may reuse, and the revert restores only the small fields
+    /// (`Header`), never the 12 KiB of table storage.
+    built: [alphabet_count][2]fse_compress.Table = undefined,
+    /// Which of each alphabet's two slots `tables` may resolve into. A
+    /// build flips its alphabet's slot as it publishes the new table.
+    active: [alphabet_count]u1 = @splat(0),
     /// What each alphabet last resolved to, `null` until the frame's first
     /// sequences section with a nonzero count. Repeat_Mode reuses it, the way
     /// the decoder reuses its own resolved table.
@@ -88,6 +94,35 @@ pub const State = struct {
     /// exists in this package, so nothing sets it and Repeat_Mode is never
     /// selected — exactly the C's own no-dictionary behavior.
     repeat_valid: [alphabet_count]bool = @splat(false),
+
+    /// The state's mutable fields apart from the table storage: everything a
+    /// block's entropy attempt may redirect. The block layer snapshots one
+    /// before the attempt and restores it for a block it does not keep; the
+    /// `built` slots need no snapshot because an attempt writes only the
+    /// inactive slots, which no live entry of `tables` resolves into.
+    pub const Header = struct {
+        active: [alphabet_count]u1,
+        tables: [alphabet_count]?Resolved,
+        repeat_valid: [alphabet_count]bool,
+    };
+
+    /// The state's current header, for the block layer's pre-attempt snapshot.
+    pub fn header(state: *const State) Header {
+        return .{
+            .active = state.active,
+            .tables = state.tables,
+            .repeat_valid = state.repeat_valid,
+        };
+    }
+
+    /// Restore a snapshotted header: the revert half of a block the ladder
+    /// did not keep. The tables the snapshot's entries point into are the
+    /// active slots, which the abandoned attempt never wrote.
+    pub fn restore(state: *State, saved: *const Header) void {
+        state.active = saved.active;
+        state.tables = saved.tables;
+        state.repeat_valid = saved.repeat_valid;
+    }
 };
 
 /// What one alphabet resolved to (`§3.1.1.3.2.1`'s four modes, from the
@@ -503,8 +538,13 @@ fn writeTable(
                 if (count_1 >= 2048) .minus_one else .one,
             );
             const written = try fse_compress.writeDescription(target, &norm);
-            state.built[index] = fse_compress.buildTable(norm);
-            state.tables[index] = .{ .fse = &state.built[index] };
+            // Build into the alphabet's inactive slot, then publish: an
+            // abandoned block's build lands where no live table resolves,
+            // so the block layer's revert is the header alone.
+            const slot = 1 - state.active[index];
+            state.built[index][slot] = fse_compress.buildTable(norm);
+            state.active[index] = slot;
+            state.tables[index] = .{ .fse = &state.built[index][slot] };
             return written;
         },
     }

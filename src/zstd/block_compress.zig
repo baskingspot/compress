@@ -205,9 +205,12 @@ fn writeCompressible(
     // and RFC 8878 §3.1.1.5 skips non-Compressed blocks for offset history
     // — a Raw/RLE revert that restores the post-find values is a no-op and
     // leaves the history advanced (the C restores `dRepOriginal`, captured
-    // before its find: zstd_compress.c:4155-4160).
+    // before its find: zstd_compress.c:4155-4160). The sequences state is
+    // snapshotted by header: the attempt builds tables only into slots the
+    // header does not name, so the 12 KiB of table storage never needs
+    // copying either way.
     const literals_before = state.literals;
-    const sequences_before = state.sequences;
+    const sequences_before = state.sequences.header();
     const rep_before = state.rep;
     match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, &store);
     const compressed_size = writeEntropy(
@@ -224,7 +227,7 @@ fn writeCompressible(
         isRle(block_source);
     if (keep_rle or compressed_size == null) {
         state.literals = literals_before;
-        state.sequences = sequences_before;
+        state.sequences.restore(&sequences_before);
         state.rep = rep_before;
         if (keep_rle) return writeRle(state, target, block_source, last_block);
         return writeRaw(state, target, block_source, last_block);
