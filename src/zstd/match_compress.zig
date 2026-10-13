@@ -19,13 +19,17 @@
 //! one byte every 128 unmatched bytes (`kStepIncr`), so incompressible data
 //! is skipped progressively faster.
 //!
-//! Positions are frame offsets, and the caller owns the table (it must be
-//! zeroed and sized `1 << hashLog`) and the reps. A rep outside the block's
-//! addressable prefix is zeroed for the block and restored after, so the
-//! emitted history stays decodable (`§3.1.1.4`).
+//! Positions are offsets into the caller's `source` slice, and the caller
+//! owns the table (it must be zeroed and sized `1 << hashLog`) and the reps;
+//! a caller that moves its slice start rebases the table's entries by the
+//! same amount (`block_compress.rebaseTable`) so they stay slice-relative. A
+//! rep outside the block's addressable prefix is zeroed for the block and
+//! restored after, so the emitted history stays decodable (`§3.1.1.4`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1.4 (offsets), §3.1.1.5
 //! (the repeat offsets).
+//! Lineage: facebook/zstd v1.5.7 `zstd_fast.c`
+//! (`ZSTD_compressBlock_fast_noDict_generic`); attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -81,8 +85,9 @@ pub const Params = struct {
     /// The C's level-1 ladder for a one-shot with a known source size: the
     /// size class picks (windowLog, hashLog, minMatch) from `clevels.h`'s
     /// level-1 rows, then `ZSTD_adjustCParams_internal`
-    /// (`zstd_compress.c:1473-1586`) clamps the window to the next power of
-    /// two covering the source (floor 10) and the hash to `windowLog + 1`.
+    /// (`zstd_compress.c:1473-1586`) shrinks the window to the next power of
+    /// two covering the source, clamps the hash to that window plus one, and
+    /// floors the window at 10.
     pub fn forSource(source_len: usize) Params {
         // `ZSTD_getCParams_internal` (`zstd_compress.c:7759-7780`): the
         // class is `(rSize <= 256 KB) + (rSize <= 128 KB) + (rSize <= 16
@@ -111,10 +116,18 @@ pub const Params = struct {
             6
         else
             5;
-        const window_log = @max(@min(window_log_class, nextPow2Log(source_len)), 10);
+        // The adjust step's order (`ZSTD_adjustCParams_internal`,
+        // `zstd_compress.c:1548-1580`): the window first shrinks to the
+        // source's own log, the hash is clamped to that window plus one, and
+        // only then is the window floored to 10 (`ZSTD_WINDOWLOG_ABSOLUTEMIN`)
+        // for the frame header. Clamping the hash after the floor would leave
+        // it wider than the C's for sources of at most 512 bytes, where the
+        // floor is what moves the window.
+        const source_log = nextPow2Log(source_len);
+        const shrunk_window_log = @min(window_log_class, source_log);
         return .{
-            .window_log = window_log,
-            .hash_log = @min(hash_log_class, window_log + 1),
+            .window_log = @max(shrunk_window_log, 10),
+            .hash_log = @min(hash_log_class, shrunk_window_log + 1),
             .mls = mls,
         };
     }
@@ -192,11 +205,11 @@ pub const Store = struct {
 /// zeroed; `rep` is the frame's repeat-offset history (`§3.1.1.5`, seeded
 /// `{1, 4, 8}`), updated in place with the block's final rep1/rep2.
 ///
-/// `source` is the frame's bytes, so a match may read any byte before the
-/// block — but only the `1 << window_log` bytes in front of it, and never
-/// before `block_start - (1 << window_log)`: the finder's candidates and
-/// reps are bounded by that prefix, so an emitted offset always addresses
-/// retained history (`§3.1.1.4`).
+/// `source` holds the block's bytes and the history they may address, so a
+/// match may read any byte before the block — but never before
+/// `iend - (1 << window_log)`, where `iend` is the block's end: the finder's
+/// candidates and reps are bounded by that prefix, so an emitted offset is
+/// always below the declared Window_Size (`§3.1.1.4`).
 pub fn find(
     source: []const u8,
     block_start: usize,
@@ -212,8 +225,12 @@ pub fn find(
     const iend = block_start + block_size;
     const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
     // The block's prefix: the oldest byte an offset from this block may
-    // address (`ZSTD_getLowestPrefixIndex`, `zstd_compress_internal.h:1390`).
-    const prefix_start: usize = if (block_start > window_size) block_start - window_size else 0;
+    // address. The C derives it from the block's END
+    // (`ZSTD_getLowestPrefixIndex(ms, endIndex, windowLog)`, `zstd_fast.c:204`),
+    // not its start: a start-derived prefix lets a block whose end is past
+    // the window emit offsets above the declared Window_Size (RFC 8878
+    // §3.1.1.4), which strict decoders (klauspost) reject.
+    const prefix_start: usize = if (iend > window_size) iend - window_size else 0;
     // A zeroed table slot means "no candidate": the C's window indices start
     // above zero, so entry 0 sits below every prefix, while this port's frame
     // offsets start at zero and would make it position 0. The candidate floor
@@ -225,6 +242,7 @@ pub fn find(
         .iend = iend,
         .prefix_start = prefix_start,
         .candidate_floor = candidate_floor,
+        .window_size = window_size,
         // The C skips the frame's very first position (`ip0 += (ip0 ==
         // prefixStart)`, `zstd_fast.c:252`): a match there has no history.
         .ip0 = if (block_start == prefix_start) block_start + 1 else block_start,
@@ -240,8 +258,10 @@ pub fn find(
     var offset_saved2: u32 = 0;
     {
         // A rep that reaches before the prefix is invalid for this block and
-        // is restored after it (`zstd_fast.c:238-243,355-372`).
-        const max_rep: u32 = @intCast(scan.ip0 - prefix_start);
+        // is restored after it. The C measures the rep's reach from ip0's own
+        // window floor, not the block's (`zstd_fast.c:238-243,355-372`).
+        const window_low: usize = if (scan.ip0 > window_size) scan.ip0 - window_size else 0;
+        const max_rep: u32 = @intCast(scan.ip0 - window_low);
         if (scan.rep2 > max_rep) {
             offset_saved2 = scan.rep2;
             scan.rep2 = 0;
@@ -274,6 +294,9 @@ const Scan = struct {
     /// The lowest table entry that may be a candidate (`prefix_start`, and at
     /// least 1: a zeroed slot is "no candidate").
     candidate_floor: usize,
+    /// The declared Window_Size (`§3.1.1.1.2`): every emitted offset is
+    /// strictly below it (`§3.1.1.4`).
+    window_size: usize,
     /// The first unmatched byte: where the next sequence's literals start.
     anchor: usize,
     /// The scan position.
@@ -306,7 +329,7 @@ const Scan = struct {
             var hash0 = hashAt(source, scan.ip0, scan.params);
             var hash1 = hashAt(source, ip1, scan.params);
             var match_index: usize = hash_table[hash0];
-            inner: while (true) {
+            while (true) {
                 // The repcode pre-check at ip2: Repeated_Offset1 two bytes
                 // ahead beats the table candidate at ip0.
                 const rep_value = read32(source, ip2 - scan.rep1);
@@ -360,7 +383,10 @@ const Scan = struct {
                     step += 1;
                     next_step += step_incr;
                 }
-                if (ip3 >= scan.ilimit) break :inner;
+                // The C's `do ... while (ip3 < ilimit)` exits to `_cleanup`
+                // (`zstd_fast.c:348-350`), which leaves the scan loop; only a
+                // match's `goto _start` re-enters it (with `step` reset).
+                if (ip3 >= scan.ilimit) break :scan_loop;
             }
         }
     }
@@ -394,6 +420,10 @@ const Scan = struct {
     /// backward extension, and `base_length` is the bytes it counted.
     fn emitMatch(scan: *Scan, match_position: usize, offset_value: u32, base_length: usize) void {
         const source = scan.source;
+        // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded
+        // data must be smaller than Window_Size": the candidate floor and the
+        // rep restore bound every emission.
+        assert(scan.ip0 - match_position < scan.window_size);
         const match_length = base_length + count(
             source,
             scan.ip0 + base_length,
@@ -430,6 +460,8 @@ const Scan = struct {
         while (scan.rep2 > 0 and scan.ip0 <= scan.ilimit and
             read32(source, scan.ip0) == read32(source, scan.ip0 - scan.rep2))
         {
+            // The chain emits at rep2, the same strict window bound.
+            assert(scan.rep2 < scan.window_size);
             const run_length = count(
                 source,
                 scan.ip0 + 4,
@@ -537,7 +569,7 @@ fn expectTokensReproduce(
 ) !void {
     const iend = block_start + block_size;
     const window_size: usize = @as(usize, 1) << @intCast(window_log);
-    const prefix_start: usize = if (block_start > window_size) block_start - window_size else 0;
+    const prefix_start: usize = if (iend > window_size) iend - window_size else 0;
     var rep = rep_seed;
     var position = block_start;
     var literals_used: usize = 0;
@@ -553,8 +585,9 @@ fn expectTokensReproduce(
         const offset = try resolveOffset(&rep, sequence.literals_length, sequence.offset_value);
         try testing.expect(offset >= 1);
         // RFC 8878 §3.1.1.4 — the offset addresses retained history: at or
-        // after the block's prefix.
+        // after the block's prefix, and strictly below the declared window.
         try testing.expect(offset <= position - prefix_start);
+        try testing.expect(offset < window_size);
         try testing.expect(sequence.match_length >= min_match_length);
         var copied: u32 = 0;
         while (copied < sequence.match_length) : (copied += 1) {
@@ -756,4 +789,50 @@ test "the finder refuses candidates that reach before the prefix" {
         &store,
         .{ 1, 4, 8 },
     );
+}
+
+test "every emission stays strictly below the declared Window_Size" {
+    // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded data
+    // must be smaller than Window_Size". The prefix is derived from the
+    // block's END (`zstd_fast.c:204`); a prefix from its start lets a block
+    // whose end is past the window emit offsets up to Window_Size plus the
+    // block's own offset. This input plants a marker that is only reachable
+    // through the too-far prefix, so a regression moves the maximum offset
+    // above the window: klauspost's decoder rejects such a frame ("match
+    // offset bigger than current history") even though our decoder, the CLI,
+    // and libzstd accept it.
+    const allocator = testing.allocator;
+    const total: usize = 600 * 1024;
+    const source = try allocator.alloc(u8, total);
+    defer allocator.free(source);
+    var rng: DefaultPrng = .init(42);
+    rng.random().bytes(source);
+    // A unique 64-byte run at 100, repeated inside the windowed block that
+    // starts at 512 KiB, at block offset 200.
+    const marker = source[100..164];
+    fastmem.copy(u8, source[512 * 1024 + 200 ..][0..64], marker);
+    const params: Params = .forSource(total);
+    const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
+    const hash_table = try allocator.alloc(u32, @as(usize, 1) << @intCast(params.hash_log));
+    defer allocator.free(hash_table);
+    fastmem.set(u32, hash_table, 0);
+    const literals = try allocator.alloc(u8, 128 * 1024);
+    defer allocator.free(literals);
+    const seqs = try allocator.alloc(sequences_compress.Sequence, 128 * 1024 / 3 + 1);
+    defer allocator.free(seqs);
+    var rep = [3]u32{ 1, 4, 8 };
+    var block_start: usize = 0;
+    var max_offset: usize = 0;
+    while (block_start < total) {
+        const size = @min(128 * 1024, total - block_start);
+        var store: Store = .{ .literals = literals, .sequences = seqs };
+        find(source, block_start, size, params, hash_table, &rep, &store);
+        for (store.sequences[0..store.sequence_count]) |sequence| {
+            if (sequence.offset_value > 3) {
+                max_offset = @max(max_offset, sequence.offset_value - 3);
+            }
+        }
+        block_start += size;
+    }
+    try testing.expect(max_offset < window_size);
 }

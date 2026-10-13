@@ -10,7 +10,7 @@
 //! (`§3.1.1.3.2.1.2`). The per-alphabet choice is the C's fast-strategy
 //! ladder (`ZSTD_selectEncodingType`, `zstd_compress_sequences.c:157-235`):
 //! RLE when one code carries every sequence (Predefined instead at two or
-//! fewer sequences, TE5), Repeat while the previous table is valid,
+//! fewer sequences), Repeat while the previous table is valid,
 //! Predefined below the alphabet's `defaultNormLog` threshold or when the
 //! distribution is skewed, FSE otherwise.
 //!
@@ -21,6 +21,9 @@
 //! does this writer. The mode is implemented and round-trips all the same.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
+//! Lineage: facebook/zstd v1.5.7 `zstd_compress_sequences.c`
+//! (`ZSTD_selectEncodingType`, `ZSTD_buildCTable`, `ZSTD_encodeSequences_body`);
+//! attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -329,7 +332,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
     }
     // The modes byte: "bits 7-6 Literal_Lengths_Mode, 5-4 Offsets_Mode, 3-2
     // Match_Lengths_Mode, 1-0 Reserved", and "The last field, Reserved, must
-    // be all zeroes" (ZE4).
+    // be all zeroes".
     if (cursor >= target.len) return error.BufferTooSmall;
     target[cursor] = (@as(u8, @intFromEnum(modes[@intFromEnum(Alphabet.literals_lengths)])) << 6) |
         (@as(u8, @intFromEnum(modes[@intFromEnum(Alphabet.offsets)])) << 4) |
@@ -346,6 +349,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
             &stats[index],
             @intCast(source.len),
             state,
+            codeOf(alphabet, source[source.len - 1]),
         );
         resolved[index] = state.tables[index].?;
     }
@@ -385,7 +389,7 @@ fn writeSequenceCount(target: []u8, count: usize) Error!usize {
 ///
 /// - one code carries every sequence: RLE, or Predefined at two or fewer
 ///   sequences ("RLE uses 1 byte, but set_basic uses 5-6 bits per symbol",
-///   `:166-178`, TE5);
+///   `:166-178`);
 /// - a valid previous table and fewer than 1000 sequences: Repeat;
 /// - below the alphabet's `dynamicFse_nbSeq_min` (`(1 << defaultNormLog) * 9
 ///   >> 3`: 36 offset, 72 lengths) or a skewed distribution
@@ -432,6 +436,7 @@ fn writeTable(
     stats: *const Stats,
     sequence_count: u32,
     state: *State,
+    last_code: u8,
 ) Error!usize {
     const index = @intFromEnum(alphabet);
     const spec = specOf(alphabet);
@@ -460,13 +465,25 @@ fn writeTable(
                 2,
             );
             var norm: fse_compress.Norm = undefined;
+            // The C's last-symbol step (`zstd_compress_sequences.c:271-278`):
+            // the last sequence's code is excluded from the distribution
+            // when it appears more than once, and the low-probability
+            // decision follows the decremented count (`ZSTD_useLowProbCount`
+            // is evaluated on `nbSeq_1`, not `nbSeq`). The accuracy log stays
+            // the one `FSE_optimalTableLog` chose for the full count.
+            var counts = stats.counts;
+            var count_1 = sequence_count;
+            if (counts[last_code] > 1) {
+                counts[last_code] -= 1;
+                count_1 -= 1;
+            }
             try fse_compress.normalize(
                 &norm,
-                &stats.counts,
-                sequence_count,
+                &counts,
+                count_1,
                 stats.max_code,
                 accuracy_log,
-                if (sequence_count >= 2048) .minus_one else .one,
+                if (count_1 >= 2048) .minus_one else .one,
             );
             const written = try fse_compress.writeDescription(target, &norm);
             state.built[index] = fse_compress.buildTable(norm);
@@ -663,7 +680,7 @@ test "writeSequenceCount covers the three forms' boundaries" {
 
 test "a zero-sequence section is the single zero byte" {
     // RFC 8878 §3.1.1.3.2.1 — "there are no sequences. The sequence section
-    // stops here", and the C writes the 1-byte form (TE6). The state is
+    // stops here", and the C writes the 1-byte form. The state is
     // untouched: "The FSE tables used in Repeat_Mode are not updated."
     var target: [8]u8 = undefined;
     var state: State = .{};
@@ -773,7 +790,7 @@ test "the mode ladder follows the C's thresholds" {
         selectMode(.literals_lengths, &stats, 40, &state),
     );
     // The same shape at two sequences: Predefined, "since RLE uses 1 byte,
-    // but set_basic uses 5-6 bits per symbol" (TE5).
+    // but set_basic uses 5-6 bits per symbol").
     try testing.expectEqual(
         sequences.Mode.predefined,
         selectMode(.literals_lengths, &stats, 2, &state),

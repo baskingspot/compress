@@ -1,21 +1,26 @@
-//! zstd example CLI: `zstd decode [FILE|-] > out`. Shared scaffolding in
-//! `examples/cli.zig`.
+//! zstd example CLI: `zstd encode [FILE|-] > out`,
+//! `zstd decode [FILE|-] > out`. Shared scaffolding in `examples/cli.zig`.
 //!
-//! There is no zstd encoder, so the CLI leaves `encode` null and reports that
-//! direction as usage. `decode` runs the input through
-//! `zstd.Reader.streamAllAlloc`, which decodes every frame in turn (RFC 8878
-//! §3.1: the decompressed output is the concatenation of the frames).
-//! Skippable frames are consumed and ignored (§3.1.2), and empty input is a
-//! clean end. Bytes where a frame should start must be a valid frame magic,
-//! or the decode fails (`BadMagic` in the reader, surfaced by the pump as
-//! `error.ReadFailed`).
+//! `encode` runs the input through `zstd.Writer.streamAllAlloc`, which writes
+//! one frame: the streaming header (no Frame_Content_Size — a pipe's length
+//! is unknown when the header goes out), the block chain, and the checksum.
+//! The output is the CLI's own pipe class byte for byte (`zstd -1 -c <
+//! FILE`), not its file class: the one-shot `zstd.encode.compress` is the
+//! form that declares the exact Frame_Content_Size (single-segment under the
+//! window cap), and a streaming tool cannot know the length up front.
+//! `decode` runs the input through `zstd.Reader.streamAllAlloc`, which
+//! decodes every frame in turn (RFC 8878 §3.1: the decompressed output is the
+//! concatenation of the frames). Skippable frames are consumed and ignored
+//! (§3.1.2), and empty input is a clean end. Bytes where a frame should start
+//! must be a valid frame magic, or the decode fails (`BadMagic` in the
+//! reader, surfaced by the pump as `error.ReadFailed`).
 //!
 //! The default window buffer is 8 MiB + 256 KiB: the 8 MiB window that
-//! §3.1.1.1.2 recommends decoders support, plus block room. That is too large
-//! for a stack local under the usual 8 MiB stack limit, so `streamAllAlloc`
-//! allocates it from the run's arena for the call. The other examples buffer
-//! on the stack. The codec itself does not allocate; the allocator is this
-//! example's.
+//! §3.1.1.1.2 recommends decoders support, plus block room. The writer's
+//! buffer is 1.44 MiB (a 512 KiB window). Both are too large for a stack
+//! local under the usual 8 MiB stack limit, so the `*Alloc` pumps allocate
+//! them from the run's arena for the call. The codec itself does not
+//! allocate; the allocator is this example's.
 
 const std = @import("std");
 const Io = std.Io;
@@ -25,16 +30,32 @@ const testing = std.testing;
 const cli = @import("cli");
 const zstd = @import("zcompress").zstd;
 
+/// The codec's CLI surface: `main` runs it, the tests drive the same pumps.
+const codec: cli.Codec = .{
+    .name = "zstd",
+    .encode = encode,
+    .decode = decode,
+};
+
 pub fn main(init: std.process.Init) !u8 {
-    // No `encode`: there is no zstd encoder, so `cli.run` reports that
-    // direction as usage.
-    return cli.run(.{ .name = "zstd", .decode = decode }, init);
+    return cli.run(codec, init);
+}
+
+fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
+    // `streamAllAlloc` takes the default window (a 512 KiB window, the
+    // largest level 1 declares) from the arena for the call, then writes one
+    // finished frame (RFC 8878 §3.1).
+    _ = try zstd.Writer.streamAllAlloc(arena, in, out, .{});
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
     // `streamAllAlloc` takes the default window (8 MiB + 256 KiB) from the
     // arena for the call, then decodes every frame (RFC 8878 §3.1).
     _ = try zstd.Reader.streamAllAlloc(arena, in, out);
+}
+
+test "example: streaming round-trip" {
+    try cli.expectRoundTrip(codec, "hello hello hello, streaming zstd round-trip");
 }
 
 test "example: the decode pump walks a multi-frame file" {

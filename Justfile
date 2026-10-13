@@ -57,6 +57,13 @@ flate-oracle:
     zig build flate-oracle-harness
     uv run scripts/flate_oracle.py
 
+# Check zstd against the reference CLI and klauspost/compress (both decoder
+# shapes; klauspost is the strict Window_Size check the C decoder is not)
+zstd-oracle:
+    zig build zstd-oracle-harness
+    go build -C scripts/zstd_klauspost -o ../../zig-out/bin/zstd-klauspost .
+    uv run scripts/zstd_oracle.py
+
 # Generate the benchmark corpus in bench/corpus-gen/ and verify it against bench/corpus/SHA256SUMS
 corpus:
     zig build corpus

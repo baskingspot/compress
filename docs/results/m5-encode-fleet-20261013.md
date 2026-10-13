@@ -13,7 +13,7 @@ ships `Decompress` only, no encoder). The fix (the std-zstd-compress cells
 exclude like std-snappy always did) landed at 86a742c with the encode-row
 arm work; this run is the clean relaunch.
 
-## The encode verdict: byte-parity with the C's class, 2.5-4x the time
+## The encode verdict: the C's size class, 2.5-4x the time
 
 zstd encode, zcompress ÷ zstd-c v1.5.7 at its level 1 (median, lower =
 zcompress faster):
@@ -26,10 +26,15 @@ zcompress faster):
 | words-32K | 1.86 | 2.07 | 2.01 | 2.09 | 2.16 | 1.74 | 1.76 |
 | skewlit-32K | 3.08 | 3.86 | 3.71 | 4.83 | 4.67 | 3.55 | 3.64 |
 
-- **Byte-parity holds**: our level-1 output is the C's class exactly (the
-  corpus's `.zst` blobs decode through our decoder; the encode rows'
-  round-trips ride the correctness gate), with the deterministic +4-byte
-  XXH64 trailer the C's default omits.
+- **Size parity holds on this corpus**: every encode row's frame is its
+  `zstd -1` counterpart's size plus 4 bytes, the deterministic XXH64 trailer
+  the C's default omits. The run's own evidence is the sizes and the
+  round-trips that ride the correctness gate; byte-identity is a separate
+  claim with separate evidence (`src/zstd/AGENTS.md`, the sweeps, and the
+  `just zstd-oracle` lane). The corpus is ASCII-only and under 512 KiB, so
+  neither of the two classes that lane exists for — the FSE Huffman weight
+  form on bytes of 0x81 and above, and match offsets against the declared
+  Window_Size above 512 KiB — is exercised by these rows.
 - **The compressible shapes run 1.7-4.1x the C's time** — the first-pass
   port against the C's tuned level-1. The Intel targets are the slowest
   ratios (3.5-4.1x on compressible) while running the fastest absolute

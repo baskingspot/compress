@@ -147,6 +147,29 @@ pub fn build(b: *Build) void {
     );
     zlib_oracle_step.dependOn(&install_zlib_oracle.step);
 
+    // External-oracle harness (src/zstd/oracle.zig): encodes an input
+    // through both public forms and decodes one frame, for `just
+    // zstd-oracle`. Installed, not part of the module surface or the
+    // test/check steps.
+    const zstd_oracle_mod = b.createModule(.{
+        .root_source_file = b.path("src/zstd/oracle.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "zcompress", .module = zcompress_mod },
+        },
+    });
+    const zstd_oracle = b.addExecutable(.{
+        .name = "zstd-oracle",
+        .root_module = zstd_oracle_mod,
+    });
+    const install_zstd_oracle = b.addInstallArtifact(zstd_oracle, .{});
+    const zstd_oracle_step = b.step(
+        "zstd-oracle-harness",
+        "Install the zstd oracle-lane harness (zig-out/bin/zstd-oracle)",
+    );
+    zstd_oracle_step.dependOn(&install_zstd_oracle.step);
+
     // Unit tests: one test executable over the one module, covering every
     // codec's tests and the barrel's own. ztest still reports each test by
     // name.

@@ -48,7 +48,12 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader,
 `zstd.Writer.streamAll(19, in, out, &buffer, .{})` and
 `zstd.Reader.streamAll(1024 * 1024, in, out, &buffer)` pump a whole stream in
 one call; `just example zstd encode FILE > FILE.zst` and
-`just example zstd decode FILE.zst > FILE` run the example CLI.
+`just example zstd decode FILE.zst > FILE` run the example CLI. The example's
+`encode` streams, so its frame carries the FCS-unknown header and the
+streaming class — the bytes the CLI writes for `zstd -1 -c < FILE`. The
+one-shot `encode.compress` is the form that declares the exact
+Frame_Content_Size (single-segment when the input fits the window), which is
+what `zstd -1 FILE -o OUT` writes.
 
 ## API
 
@@ -152,10 +157,15 @@ state — so `encode` exposes only the names above.
   CLI convention); literals and sequences pick their entropy modes by the
   level-1 heuristics. Every frame is valid zstd that the CLI, libzstd, and this
   package's decoder accept, and the whole frame reproduces the pinned CLI
-  v1.5.7's `zstd -1` bytes on the corpus shapes. One deliberate difference: a
-  Huffman tree's equal-count symbols keep natural order here, where the C's
-  sort is unstable, so a tree description's bytes can differ from the CLI's
-  while decoding identically.
+  v1.5.7's `zstd -1` bytes on the corpus shapes, on the tests' fixtures, and
+  on the `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. Three
+  deliberate differences can show up outside that set, all of them the C's
+  own heuristics: a Huffman tree's equal-count symbols keep natural order
+  here, where the C's sort is unstable (a tree description's bytes can differ
+  while decoding identically); the C's two literals heuristics are not
+  ported, so a block the C stores as raw literals may come out Huffman-coded
+  here (a smaller frame); and the C v1.5.7's optional pre-block splitter is
+  not ported, so a compressible block can stay whole where the CLI cuts it.
 - **Encode streaming.** Nothing reaches `output` until the block region fills,
   you call `w.writer.flush()`, or `finish`; the frame header goes out with the
   first of those, and a `flush` with nothing buffered emits the header alone.
@@ -212,9 +222,9 @@ state — so `encode` exposes only the names above.
   buffer (128 KiB), and the sequence list (512 KiB) are stack scratch, the
   price of a one-shot with no allocator — give encoding threads 1 MiB or more.
   `encode.compressBuffered` and `Writer.streamAll` are the same encoders over a
-  caller-owned `Buffer`, and need about 40 KiB of thread stack (measured by the
-  same bisect: 37 KiB release, 41-57 KiB Debug, flat from 600 KiB to 1.5 MiB of
-  input).
+  caller-owned `Buffer`, and need about 64 KiB of thread stack (measured by the
+  same bisect: 37-48 KiB release, 41-57 KiB Debug, flat from 600 KiB to 1.5 MiB
+  of input; give them 64 KiB and keep the thread's own frames small).
 - **Allocation.** None while encoding or decoding. `Reader.streamFrameAlloc`
   and `Reader.streamAllAlloc` allocate one `Reader.DefaultBuffer` (8 MiB + 256
   KiB), and `Writer.streamAllAlloc` one `Writer.DefaultBuffer` (1.44 MiB), from
@@ -245,6 +255,9 @@ state — so `encode` exposes only the names above.
 reproduces the CLI's `zstd -1` bytes on the recorded fixtures — tables from the
 RFC, encode and decode round trips, and a check on every decode that no byte
 past the output was written.
+`just zstd-oracle` cross-checks both directions against the reference CLI and
+klauspost/compress on non-ASCII and over-512-KiB inputs, including the strict
+Window_Size check the C decoder does not make.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and `just check-32`
 runs a large-frame probe on wasm32-wasi under wasmtime. `just corpus` generates
 the hash-checked benchmark corpus, and `just bench` runs the local benchmarks;

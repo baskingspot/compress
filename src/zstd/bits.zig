@@ -11,7 +11,7 @@
 //! field written at a position is read back as the same value, so the bytes a
 //! writer produces are the bytes the matching reader consumes. The backward
 //! writer owns the end marker (`close`), which is why every stream it writes
-//! has a nonzero last byte (ZE7).
+//! has a nonzero last byte.
 //!
 //! The backward readers keep an exact bit position. A read past the start of the
 //! stream returns zeros and leaves `remainingBits` negative instead of failing,
@@ -20,6 +20,9 @@
 //! overflow (`§4.2.1.2`).
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
+//! Lineage (the writer inverses): facebook/zstd v1.5.7 `huf_compress.c`
+//! (`HUF_compress1X_usingCTable_internal`) and `fse_compress.c`
+//! (`FSE_compress_usingCTable`); attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -492,7 +495,7 @@ pub const BackwardWriter = struct {
 
     /// Close the stream (`§4.2.2`): "The last bit is used as a marker to
     /// signal the end of the stream", and the bits above it are zero fill.
-    /// The last byte is therefore never zero (ZE7).
+    /// The last byte is therefore never zero.
     pub fn close(self: *BackwardWriter) error{BufferTooSmall}!void {
         try self.writeBits(1, 1);
         const bytes = (self.bit_count + 7) / 8;

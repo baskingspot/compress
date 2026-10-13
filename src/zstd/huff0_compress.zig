@@ -12,9 +12,12 @@
 //! a weight, sequential from the lowest weight — Table 25's assignment, never
 //! the `§4.2.2` example's (errata 8195). A stream writes its symbols in
 //! reverse with a single 1-bit end mark, so the decoder reading backward
-//! recovers them in order and the last byte is never zero (ZE7).
+//! recovers them in order and the last byte is never zero.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
+//! Lineage: facebook/zstd v1.5.7 `huf_compress.c` (`HUF_buildCTable_wksp`,
+//! `HUF_writeCTable_wksp`, `HUF_compressWeights`, the stream writers);
+//! attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -250,14 +253,18 @@ const no_symbol: u32 = 0xffff_ffff;
 /// a repayment that overshoots is added back. Returns the tree's depth, which
 /// is at most `target_nb_bits`.
 fn setMaxHeight(nodes: *NodeTable, last_non_null: u32, target_nb_bits: u5) u5 {
+    // The cast's bound: an unlimited tree of depth `d` needs at least
+    // Fib(d + 2) bytes of source, so a 128-KiB block's depth is at most 27.
+    assert(nodes.at(@intCast(last_non_null)).nb_bits <= 31);
     const largest_bits: u5 = @intCast(nodes.at(@intCast(last_non_null)).nb_bits);
     if (largest_bits <= target_nb_bits) return largest_bits;
     // The unlimited tree's depth is NOT bounded by tablelog_max: the C's
     // `HUF_setMaxHeight` (huf_compress.c:376-380) flattens any depth onto
     // the target (a skewed histogram's unlimited tree can be deeper than
-    // the cap; the depth is bounded only by the histogram's symbol count,
-    // which `nb_bits: u8` holds). The assert here was reachable through the
-    // public Writer with ordinary bytes; found by the encode-side fuzz wave.
+    // the cap; the depth is bounded by the source's byte count, the
+    // Fibonacci bound asserted above, not by `nb_bits: u8`). An assert on
+    // the depth here was reachable through the public Writer with ordinary
+    // bytes; found by the encode-side fuzz wave.
 
     // Flatten every node over the cap and accumulate the rank cost the
     // flattening gives back, in units of `base_cost`.
@@ -411,20 +418,28 @@ fn codesFromWeights(table: *Table) void {
 /// when it is under half the direct form's size, as the C prefers it.
 pub fn writeTree(target: []u8, table: *const Table) Error!usize {
     const listed = table.symbol_count - 1;
-    if (listed > 128) return error.TreeNotDescribable;
     if (target.len < 1) return error.BufferTooSmall;
     var weights: [symbol_count_max - 1]u8 = undefined;
     for (0..listed) |symbol| weights[symbol] = table.weights[symbol];
 
     if (writeCompressedWeights(target[1..], weights[0..listed])) |series_len| {
-        if (series_len > 1 and series_len * 2 < listed) {
+        // `HUF_writeCTable_wksp` (`huf_compress.c:275-279`): the series form
+        // wins when it is more than one byte and under half the listed
+        // count, with the C's integer division (`hSize < maxSymbolValue / 2`).
+        if (series_len > 1 and series_len < listed / 2) {
             target[0] = @intCast(series_len);
             return series_len + 1;
         }
     } else |_| {}
 
     // "write raw values as 4-bits (max : 15)": the direct form, two weights
-    // per byte, high nibble first, the odd tail's low nibble zero.
+    // per byte, high nibble first, the odd tail's low nibble zero. Only the
+    // direct form is limited to 128 listed weights (`huf_compress.c:282`);
+    // the series form above covers the rest, so the check sits here, after
+    // the attempt. Checked before it, any tree listing more than 128 weights
+    // fell back to Raw literals — which is every block whose literals carry
+    // a byte of 0x81 or above.
+    if (listed > 128) return error.TreeNotDescribable;
     const byte_count = (@as(usize, listed) + 1) / 2;
     if (1 + byte_count > target.len) return error.BufferTooSmall;
     target[0] = @intCast(126 + table.symbol_count);
@@ -557,7 +572,7 @@ fn tableOfTree(tree: *const huff0.Tree) Table {
     return table;
 }
 
-/// The T1 pair's tree (`golden.pair_tree`): a hand-built, CLI-verified tree of
+/// The `pair_*` fixtures' tree (`golden.pair_tree`): a hand-built, CLI-verified tree of
 /// five listed weights plus the implied one.
 fn pairTable() Table {
     const tree = huff0.readTree(&golden.pair_tree) catch unreachable;
@@ -634,7 +649,7 @@ test "writeTree reproduces the reference encoder's tree descriptions" {
 }
 
 test "the streams reproduce the RFC's Table 25 example byte for byte" {
-    // RFC 8878 §4.2.1.3 (Table 25) — the T1 golden: the four literals of the
+    // RFC 8878 §4.2.1.3 (Table 25) — the pair golden: the four literals of the
     // §4.2.2 example through the example's tree write `01 0D`, which the CLI
     // and Zig std decode to `00 01 04 05` (errata 8195's `10 0D` is the
     // example's own, wrong, assignment). This is the Huffman path's day-one
@@ -751,5 +766,37 @@ fn writeHeader(
     };
     for (target[0..header_len], 0..) |*byte, index| {
         byte.* = @truncate(header_bits >> @intCast(8 * index));
+    }
+}
+
+test "a Fibonacci histogram's tree flattens onto the depth cap" {
+    // `HUF_buildCTable_wksp` (`huf_compress.c:723-757`) builds the unlimited
+    // tree first and `HUF_setMaxHeight` (`:376-493`) flattens it onto
+    // `HUF_optimalTableLog`'s cap. A Fibonacci-count histogram is the
+    // deepest a tree can be for its byte count — 20 symbols' unlimited tree
+    // is deeper than the 11-bit cap — so this pins the flattening path (and
+    // the absence of a pre-flattening depth assert, which ordinary Writer
+    // bytes reached; the fuzz wave that found it is in src/zstd/AGENTS.md).
+    var counts: [symbol_count_max]u32 = @splat(0);
+    var previous: u32 = 0;
+    var current: u32 = 1;
+    var total: u32 = 0;
+    for (0..20) |symbol| {
+        counts[symbol] = current;
+        total += current;
+        const next = previous + current;
+        previous = current;
+        current = next;
+    }
+    const histogram: Histogram = .{
+        .counts = counts,
+        .max_symbol = 19,
+        .largest = previous,
+    };
+    const table = try buildTable(&histogram, total);
+    try testing.expect(table.max_bits <= depth_max);
+    try testing.expect(table.max_bits > 0);
+    for (counts[0..20], 0..) |count, symbol| {
+        try testing.expectEqual(count != 0, table.codes[symbol].len != 0);
     }
 }

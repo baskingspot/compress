@@ -68,9 +68,12 @@ it before you change a kernel or make a performance claim.
   the tree builder, the weight-series writer, and the Huffman streams;
   `sequences_compress.zig` the sequences section and its interleaved
   bitstream; `literals_compress.zig` the literals ladder; `bits.zig` also
-  carries their writer inverses. Decoder-first: the public namespace is
-  `{Reader, decode}`; `encode.zig` and `Writer.zig` do not exist yet.
-  `bench.zig` is the local decode benchmark; the
+  carries their writer inverses. The encoders are `encode.zig` (the one-shot,
+  `ZSTD_compress`'s class) and `Writer.zig` (the streaming form), over
+  `block_compress.zig` and `match_compress.zig` (the C's `ZSTD_fast` port);
+  the public namespace is `{encode, decode, Writer, Reader}`. `oracle.zig` is
+  the external-oracle harness behind `just zstd-oracle`.
+  `bench.zig` is the local benchmark; the
   fleet rows live in `bench/zig/bench_zcompress.zig` (`just bench-run`). Fuzz
   targets are in `fuzz.zig`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
@@ -145,6 +148,11 @@ onto a nearly-full disk):
   (wbits 15), both directions (plus the FDICT refusal, the T5 FCHECK=31
   corner, and the exact stream boundary; the layer is
   `scripts/zlib_oracle.py`).
+- `just zstd-oracle`: external-oracle conformance for zstd — the reference
+  CLI v1.5.7 and klauspost/compress (the strict Window_Size check the C
+  decoder does not make), both directions and byte-parity with `zstd -1` on
+  non-ASCII and over-512-KiB inputs; the layer is `scripts/zstd_oracle.py`
+  with the `scripts/zstd_klauspost` decoder.
 - `just bench [ARGS]`: local benchmarks (zig-benchmark). Local numbers are
   never quoted as claims.
 - `just example <codec> ...`: run a codec's example CLI (e.g. `just example
@@ -204,9 +212,10 @@ Deviations, on purpose:
 - No Tracy zones — no profiler dependency in this repo. Observability is
   the benchmark harness plus disassembly.
 - The 70-line function limit is consciously overridden on `encodeBlock`'s
-  scan cascade (154 lines): centralizing that labeled control flow in the
-  parent is the Tiger rule that wins; its pure logic is already extracted
-  (`hash6`, `load64`, `emitLiteral`, `emitCopy`).
+  scan cascade (154 lines) and zstd's `match_compress.scanBlock` (71 lines):
+  centralizing that labeled control flow in the parent is the Tiger rule that
+  wins; the pure logic is already extracted (`hash6`, `load64`, `emitLiteral`,
+  `emitCopy`; `hashAt`, `match4Found`, `count`).
 - House lint is 100 columns (tighter than Tiger's 120).
 
 ## Rules

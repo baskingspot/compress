@@ -57,6 +57,21 @@ and dependency with a license that is not ours.
   Zig std's `std.compress.flate.Decompress.zig` (MIT, in-tree, studied).
   Reimplemented in this package's shape — wire-bit orientation, table
   packing, chain layout, and the completeness rules are ours; no code copied.
+- `src/zstd/` encoder (`match_compress.zig`, `block_compress.zig`,
+  `literals_compress.zig`, `sequences_compress.zig`, `fse_compress.zig`,
+  `huff0_compress.zig`, and the writer inverses in `bits.zig`): a port of the
+  algorithms in facebook/zstd v1.5.7 (BSD-3-Clause or GPLv2) — the level-1
+  fast match finder (`zstd_fast.c`), the block emission ladder
+  (`zstd_compress.c`), the literals and sequences sections
+  (`zstd_compress_literals.c`, `zstd_compress_sequences.c`), the FSE
+  normalize/table builder and description writer (`fse_compress.c`), and the
+  Huffman tree builder, tree-description writer, and streams
+  (`huf_compress.c`), including the hash primes and the FSE rounding table
+  (`rtbTable`). The algorithm is ported, not the code; `encode.zig` and
+  `Writer.zig` follow the same reference's frame-header and block-chain
+  emission (`ZSTD_writeFrameHeader`, `ZSTD_compressContinue_internal`).
+  Attribution: Copyright (c) Meta Platforms, Inc. and affiliates,
+  https://github.com/facebook/zstd.
 - `src/zstd/xxh64.zig`: a port of the XXH64 algorithm following Zig std's
   `std/hash/xxhash.zig` (MIT; itself the xxHash reference, public domain at
   github.com/Cyan4973/xxHash) with one deliberate change: the running byte
@@ -92,9 +107,11 @@ them; the rows are here so the debt is visible.
   FCHECK verification, no reserved-bit check), which the tests pin as
   divergences.
 - `src/zstd/`: the reference zstd C library and CLI v1.5.7 (BSD-3-Clause or
-  GPLv2) as a behavior oracle, run through the CLI rather than read; klauspost/compress
-  (BSD-3-Clause) `zstd/` for its error vocabulary and the decisions it makes
-  differently (it supports dictionaries); Zig std's zstd decoder (MIT) for its
+  GPLv2) as the encoder port's source (the port row above) and as the
+  behavior oracle for both directions; klauspost/compress (BSD-3-Clause)
+  `zstd/` for its error vocabulary, the level-1 encoder decisions it makes
+  differently (`TE1`-`TE5` in `src/zstd/AGENTS.md`), and the strict-window
+  decoder behind `just zstd-oracle`; Zig std's zstd decoder (MIT) for its
   `ReverseBitReader`, and for the unverified checksum and rejected dictionary
   frames that the tests pin as divergences.
 - madler/zlib's emission rules were verified through python3's `zlib` and `gzip`

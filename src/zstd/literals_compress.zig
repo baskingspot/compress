@@ -5,8 +5,9 @@
 //!
 //! `write` is the inverse of `literals.decode`, ladder for ladder
 //! (`ZSTD_compressLiterals`, `zstd_compress_literals.c:129-235`): Raw below
-//! the C's 64-literal floor (6 with a reusable tree) or when Huffman does not
-//! pay the minGain margin; RLE for one-byte literals; Compressed with a tree
+//! the C's 64-literal floor (the 6-literal floor needs a dictionary-validated
+//! tree, which this package cannot have) or when Huffman does not pay the
+//! minGain margin; RLE for one-byte literals; Compressed with a tree
 //! description and one stream below 256 literals, four above, the header's
 //! 3/4/5-byte form by the 1-KiB/16-KiB thresholds; Treeless when the previous
 //! block's tree still validates and is cheaper than a new description. The
@@ -14,9 +15,11 @@
 //! the decoder's section reader.
 //!
 //! The 11-bit depth cap is enforced while the tree is built (`§4.2.1`), so
-//! the serialized weights cannot exceed it (ZE14).
+//! the serialized weights cannot exceed it.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
+//! Lineage: facebook/zstd v1.5.7 `zstd_compress_literals.c`
+//! (`ZSTD_compressLiterals`); attribution in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -29,12 +32,14 @@ const huff0_compress = @import("huff0_compress.zig");
 const literals = @import("literals.zig");
 const golden = @import("golden.zig");
 
-/// Everything the literals encoder reports.
+/// Everything the literals encoder reports. Every Huffman bail-out
+/// (`huff0_compress.Error`) is handled inside `write` by falling back to the
+/// Raw form, as the C's `ZSTD_compressLiterals` does on a zero `cLitSize`.
 pub const Error = error{
     /// `target` cannot hold the section the writer produces. The caller sizes
     /// its target for the Raw form, which is the largest this ladder emits.
     BufferTooSmall,
-} || huff0_compress.Error;
+};
 
 /// The literals layer's cross-block state (`§3.1.1.3`): the tree of the
 /// frame's most recent Compressed_Literals_Block, which a
@@ -48,14 +53,17 @@ pub const State = struct {
 
 /// `§3.1.1.3.1.1` — "Raw literals below 64 bytes are not compressed" (the
 /// C's fast-strategy floor, `zstd_compress_literals.c:114-127`: `8 <<
-/// min(9 - strategy, 3)`), and 6 when a previous tree is reusable.
+/// min(9 - strategy, 3)`). The C's 6-literal floor applies only when the
+/// previous tree is `HUF_repeat_valid`, which only dictionary loading sets
+/// (`zstd_compress.c:5079`); no dictionary exists in this package, so the
+/// floor is always 64 here, as it is for any dictionary-free frame the C
+/// compresses.
 const min_literals_to_compress = 64;
-const min_literals_with_tree = 6;
 
 /// `ZSTD_minGain` (`zstd_compress_internal.h:677-683`) at the fast levels:
 /// `(srcSize >> 6) + 2`. Huffman is kept only when it beats this margin,
 /// which is also what keeps a compressed block inside a single-segment
-/// frame's Block_Maximum_Size (ZE9).
+/// frame's Block_Maximum_Size.
 fn minGain(source_len: usize) usize {
     return (source_len >> 6) + 2;
 }
@@ -65,13 +73,12 @@ fn minGain(source_len: usize) usize {
 ///
 /// Every path writes at most `source.len + 3` bytes (the Raw form), so a
 /// target sized for that cannot overflow; a smaller one fails
-/// `error.BufferTooSmall` before the write that would.
+/// `error.BufferTooSmall` before the write that would. An abandoned Huffman
+/// attempt leaves its scratch bytes in `target` before the Raw form is
+/// written over them, so the bytes past the returned length are unspecified
+/// (the C's `HUF_compress` writes into the caller's buffer the same way).
 pub fn write(source: []const u8, target: []u8, state: *State) Error!usize {
-    const min_to_compress: usize = if (state.table != null)
-        min_literals_with_tree
-    else
-        min_literals_to_compress;
-    if (source.len < min_to_compress) return writeRaw(source, target);
+    if (source.len < min_literals_to_compress) return writeRaw(source, target);
 
     const histogram = huff0_compress.Histogram.count(source);
     if (histogram.largest == source.len) {
@@ -86,15 +93,14 @@ pub fn write(source: []const u8, target: []u8, state: *State) Error!usize {
         return writeRaw(source, target);
     const header_len = compressedHeaderLength(source.len);
     if (target.len < header_len) return error.BufferTooSmall;
+    // A tree with no legal description, or a target too small for the
+    // description: the C's `HUF_compress` returns 0 on both
+    // (`huf_compress.c:262,283`), and `ZSTD_compressLiterals` then writes the
+    // Raw form (`zstd_compress_literals.c:180-184`).
     const description_len = huff0_compress.writeTree(
         target[header_len..],
         &table,
-    ) catch |err| switch (err) {
-        error.BufferTooSmall => return error.BufferTooSmall,
-        // A tree whose series has no legal description: Raw is the only form
-        // left.
-        else => return writeRaw(source, target),
-    };
+    ) catch return writeRaw(source, target);
 
     // "Check if using previous huffman table is beneficial": the previous
     // tree, when it still validates, wins if it saves the description's bytes
@@ -115,7 +121,11 @@ pub fn write(source: []const u8, target: []u8, state: *State) Error!usize {
     }
     const encode_table = reused orelse &table;
     const body_start = header_len + if (reused == null) description_len else 0;
-    const streams_len = try writeStreams(encode_table, source, target[body_start..]);
+    // The streams' own bail-outs (a target too small for them, the
+    // four-stream layout's floor and Jump_Table bound) are the C's `cSize ==
+    // 0` and take the Raw form too.
+    const streams_len = writeStreams(encode_table, source, target[body_start..]) catch
+        return writeRaw(source, target);
     const body_len = if (reused == null) description_len + streams_len else streams_len;
     // "If the compressed block is larger than the uncompressed one, sending
     // the uncompressed block ... is recommended" (`§3.1.1.2.4`): the minGain
@@ -223,7 +233,7 @@ fn writeStreams(
     table: *const huff0_compress.Table,
     source: []const u8,
     target: []u8,
-) Error!usize {
+) huff0_compress.Error!usize {
     if (source.len < 256) return huff0_compress.writeStream(target, source, table);
     return huff0_compress.writeFourStreams(target, source, table);
 }
@@ -355,7 +365,8 @@ test "every ladder rung decodes back through the landed decoder" {
 }
 
 test "the pair fixture's literals section is regenerated byte for byte" {
-    // RFC 8878 §4.2.1.3 (Table 25) + §3.1.1.3.1.1 — the T1 pair, the day-one
+    // RFC 8878 §4.2.1.3 (Table 25) + §3.1.1.3.1.1 — the `pair_*` fixtures, the
+    // day-one
     // byte-exact golden: given the example's tree and the four literals, the
     // section the writer produces must be the fixture's own bytes (a 3-byte
     // header, the tree, and the `01 0D` stream). The tree is injected rather
@@ -440,4 +451,55 @@ test "Treeless reuses the previous block's tree" {
     const raw_header = try literals.parseHeader(third_target[0..raw_len]);
     try testing.expectEqual(literals.BlockType.raw, raw_header.block_type);
     try testing.expectEqual(first_table.symbol_count, state.table.?.symbol_count);
+}
+
+test "a tree listing over 128 weights takes the FSE series, never Raw" {
+    // RFC 8878 §4.2.1.1 — the direct description's header byte is
+    // `127 + listed`, so at most 128 weights fit it (`huf_compress.c:282`),
+    // and the C tries the FSE series first (`:275-279`). A tree whose
+    // literals carry a byte of 0x81 or above lists more than 128 weights:
+    // checking the direct form's limit before the series attempt would send
+    // every such section to Raw, which is every UTF-8 text's first block.
+    var source: [2048]u8 = undefined;
+    for (&source, 0..) |*byte, index| {
+        byte.* = if (index % 16 == 0) @intCast(0x81 + (index / 16) % 8) else 'a';
+    }
+    var target: [4096]u8 = undefined;
+    var state: State = .{};
+    const written = try write(&source, &target, &state);
+    const header = try literals.parseHeader(target[0..written]);
+    try testing.expectEqual(literals.BlockType.compressed, header.block_type);
+    // The tree description's first byte is the series length (< 128) in the
+    // FSE form; the direct form's is `127 + listed` (>= 128 here).
+    try testing.expect(target[header.header_len] < 128);
+    var decoded: [4096]u8 = undefined;
+    var decode_state: literals.State = .{};
+    const section = try literals.decode(target[0..written], &decoded, &decode_state);
+    try testing.expectEqualSlices(u8, &source, section.bytes);
+}
+
+test "a Raw-sized target never fails the Huffman attempt" {
+    // RFC 8878 §3.1.1.3.1.2 — the Raw form is `source.len + 3` bytes, the
+    // largest this ladder emits, so a target that size must succeed on every
+    // input: an abandoned Huffman attempt (its tree description or streams
+    // running past the target) falls back to Raw, as the C's `HUF_compress`
+    // returning 0 does. Without the fallback the attempt's own
+    // `error.BufferTooSmall` escapes, and a caller sizing for the Raw form
+    // (the block layer's contract) sees a spurious failure.
+    var rng: std.Random.DefaultPrng = .init(77);
+    var target: [4099]u8 = undefined;
+    for (0..200) |round| {
+        var source: [4096]u8 = undefined;
+        const length = 64 + round * 19;
+        rng.random().bytes(source[0..length]);
+        // Skew it a little, so Huffman is attempted and stays near 8
+        // bits/symbol (the shape that writes the widest sections).
+        for (source[0..length], 0..) |*byte, index| {
+            if (index % 9 == 0) byte.* = 'e';
+        }
+        var state: State = .{};
+        const raw_len = rawHeaderLength(length) + length;
+        const written = try write(source[0..length], target[0..raw_len], &state);
+        try testing.expect(written <= raw_len);
+    }
 }

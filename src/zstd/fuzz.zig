@@ -2942,7 +2942,8 @@ fn oneShotByteClass(source: []const u8, out: []u8) !usize {
     }
 
     // §3.1.1.2 — the block chain: legal headers, Block_Maximum_Size, the
-    // first block never RLE (TE3), Last_Block exactly on the last block, the
+    // first block never RLE (the zstd ≤ 1.4.3 CLI convention), Last_Block
+    // exactly on the last block, the
     // chain ending at the trailer.
     var cursor = frame.magic_len + header.bytes_consumed;
     var blocks: usize = 0;

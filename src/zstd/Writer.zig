@@ -355,7 +355,7 @@ const stream_header_len = frame.magic_len + 1 + 1;
 /// trimming the history to `window_len` — the farthest a match may reach
 /// (`§3.1.1.4`). The caller re-derives the block region from `block_start`.
 /// The finder's table holds window-relative positions, so every entry drops
-/// by the bytes the slide discarded (`correctTable`).
+/// by the bytes the slide discarded (`block_compress.rebaseTable`).
 fn compact(w: *Writer) void {
     const keep = @min(w.block_start, w.window_len);
     const slide = w.block_start - keep;
@@ -366,24 +366,9 @@ fn compact(w: *Writer) void {
             w.window[keep..][0..w.writer.end],
             w.window[w.block_start..][0..w.writer.end],
         );
-        correctTable(w.hash_table, slide);
+        block_compress.rebaseTable(w.hash_table, slide);
     }
     w.block_start = keep;
-}
-
-/// Rebase the finder's table on a window slide: every entry that still
-/// points into the window drops by `slide`, and every entry that pointed at
-/// a dropped byte becomes zero — the table's "no candidate" value, which the
-/// finder's `candidate_floor` never reads as a position. `slide` is at most
-/// one block (`compact` runs right after an emission), so it fits the
-/// entries' `u32` positions.
-fn correctTable(hash_table: []u32, slide: usize) void {
-    assert(slide > 0);
-    assert(slide <= block_compress.max_block_size);
-    const drop: u32 = @intCast(slide);
-    for (hash_table) |*entry| {
-        entry.* = if (entry.* >= drop) entry.* - drop else 0;
-    }
 }
 
 // ---------------------------------------------------------------------------

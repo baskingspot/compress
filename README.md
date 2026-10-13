@@ -15,7 +15,7 @@ and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and needs Zig 0.16.
 | [`flate`](src/flate/README.md) | raw DEFLATE, RFC 1951 | encode, decode, streaming |
 | [`gzip`](src/gzip/README.md) | gzip, RFC 1952, over `flate` | encode, decode, streaming |
 | [`zlib`](src/zlib/README.md) | zlib, RFC 1950, over `flate` | encode, decode, streaming |
-| [`zstd`](src/zstd/README.md) | Zstandard, RFC 8878 | decode, streaming decode |
+| [`zstd`](src/zstd/README.md) | Zstandard, RFC 8878 | encode, decode, streaming |
 
 Each codec README documents its API, error sets, and buffer sizes. The specs
 are vendored in [`docs/research/specs/`](docs/research/specs/README.md). The
@@ -23,7 +23,7 @@ snappy `Reader` and `Writer` use a length-prefixed framing of this package's
 own, not Google's framing format. It has no end marker or checksum, so a stream
 cut at a block boundary reads as complete.
 
-Not implemented: the zstd encoder and brotli. The flate encoder writes
+Not implemented: brotli, and zstd's `.ratio` level. The flate encoder writes
 fixed-Huffman and stored blocks only, and gzip and zlib inherit that;
 `Level.ratio`, the dynamic-Huffman mode, returns `error.Unimplemented`.
 Dictionaries are unsupported: a zlib or zstd stream that needs one is rejected
@@ -50,8 +50,9 @@ const gzip = @import("zcompress").gzip;
 
 - The caller owns every buffer. One-shot functions take `source` and `target`
   slices, and the streaming types take a caller-provided buffer. The codecs do
-  not allocate. zstd's default streaming window is 8 MiB, too large for a
-  stack, so `zstd.Reader.streamAllAlloc` takes an allocator for it.
+  not allocate. zstd's default buffers are too large for a stack — an 8 MiB
+  window for `Reader`, 1.4 MiB for `Writer` — so the `*Alloc` pumps take an
+  allocator for them.
 - Streaming is `std.Io`: a `Writer` compresses into an `Io.Writer`, and a
   `Reader` decompresses from an `Io.Reader`.
 - Decoders return an error on corrupt input and, where the format allows it, on

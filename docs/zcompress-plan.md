@@ -256,7 +256,22 @@ proven closed on wasm32-wasi by `just check-32`, the standing 32-bit
 execution gate; the reviewer's final confirmation: M4 shippable). M4
 shipped.
 
-M5 — zstd encoder, fast level. M6 — brotli, decoder first (RFC 7932 —
+M5 — zstd encoder, fast level. The one-shot (`encode.compress`) and the
+streaming `Writer`, the CLI's level-1 byte class as the target, the
+CLI-verified fixtures, and the encoder's fuzz targets.
+Acceptance: `just test` and `just lint` green, with the CLI's own level-1
+bytes pinned for the fixture set; `just zstd-oracle` green (the reference CLI
+and klauspost/compress's strict Window_Size check on non-ASCII and
+over-512-KiB inputs); `just check-baseline` green; a fleet run committed with
+the encode rows (`docs/results/m5-encode-fleet-20261013.md`, run id
+`20261013T071421Z-m5-encode2`); and the closing review's blockers fixed and
+pinned by tests — the block-end prefix (`§3.1.1.4`), the FSE Huffman weight
+form for literals carrying bytes above 0x80, the FSE last-symbol count
+decrement, the one-shot's window rebase over 4 GiB, the hash-log clamp order
+for sources under 1 KiB, the scan's exit at a block's end, and the
+literals floor's dictionary gate. The encoder's fuzz targets land with it.
+
+M6 — brotli, decoder first (RFC 7932 —
 vendor it at M6; the google/brotli C reference is the oracle lane and the
 strongest-native competitor; the static dictionary is a sizing decision the
 M6 research owns).

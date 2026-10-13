@@ -1378,6 +1378,86 @@ pub const encode_skewlit_4096 = hex("28b52ffd64000f455b000a008d2d121080ad0efcdda
     "59f86fbbfdeab247ab3cec9dcd2f248288ce3063a46d02da94f21f19" ++
     "19157efbd849f64600d8cf5816ce26c702004002873f");
 
+/// The CLI's `zstd -1` frame for the 495-byte `words` input: 274 bytes. The
+/// smallest corpus prefix whose frame the FSE last-symbol count decrement
+/// (`zstd_compress_sequences.c:271-278`) changes: without it the norm, the
+/// built table, and the whole bitstream differ.
+pub const encode_words_495 = hex("28b52ffd64ef0025080036d12915a0256903807c6fe052b6f7b2b4442cfd" ++
+    "ffeffeab1a23002300230094c5a21262e194cd2aba399c70cd3da2593d0e" ++
+    "2d1794027e4739d313f6883ec054b4093d75984e19545f6e9a83680e57a7" ++
+    "ec018a1cc042d3bd68702eee112fa7ac9db294651e4527abe6400719ce88" ++
+    "5e987bbbdac9d4dc61cab306d5e09abed151c69a8b26a44cad02a38cb542" ++
+    "9f539653b9e6d9310b372d9726d3e3293bcc3547be2c21ee09b1287b0303" ++
+    "242010128224ec01db49303fe268a352d434085831494e03aa85f68ee04b" ++
+    "36e21b308d4b32087e0d3acf8801b1e3be254931e0f188be0585427bee4b" ++
+    "6c4a9418c4cc754a09da6ab878c7c1ece747b7c536d5d39d5f768f090005" ++
+    "7b81a3e1");
+/// The CLI's `zstd -1` frame for the scan-exit input: 1733 bytes. The input
+/// (`encode.zig`'s `fillScanExitInput`) is the corpus phrase (whose scan runs
+/// at step 2) followed by PRNG noise (which grows the step), with an 8-byte
+/// repeat planted in the block's last 16 bytes. The C's scan exits at
+/// `ip3 >= ilimit` without rescanning (`zstd_fast.c:348-350`); a restart with
+/// the step reset to 2 reaches the planted repeat and finds a match the C
+/// never visits (1729 bytes, a different frame).
+pub const encode_scan_exit = hex("28b52ffd640007bd3500c46a74686520717569636b2062726f776e20666f" ++
+    "78206a756d7073206f76657220746865206c617a7920646f672e78f9047a" ++
+    "eeb52e80a531eb89146c99a0f6c61443bf17dfb287084dd25a92244a0a62" ++
+    "794d61ed24956ee8862f1ad705bf777d24c22dd830445deada524f2b13c7" ++
+    "ebf8d08e1336b5850c30b8ce9dee04316e9d004332382972aed282b0d0a0" ++
+    "6c72aee87bfa3fd29db6a29a5834188424f1595f06b40e01a15043189d0e" ++
+    "acb3cecdbc966fe7bacfe74b0cacd5b1a79d75ce1a3a462a7ed8a4b7c284" ++
+    "e081ea06ebcb9302a3ae5e9528d187d85ee4b64d309ee0e4b7ac2fe1accf" ++
+    "42bc05e609cfa5aaac4915f892459f9fc56606681f5efba1fb255cbe0e0b" ++
+    "8a830a69f9118dde198bf829920b6672bdb0079e6204840f1859b5285719" ++
+    "c0641f8b6dff13ba15895672c275d377c3a4734fd8621ac9f06dcab1cce8" ++
+    "4cb95385a47393e6a86b9540fdecd7ec89b9ada9556b39062cbc2ab34326" ++
+    "0678dd01aa158e121cc5911700153f823ba78ca354cfe0e1e2598c575a4c" ++
+    "030cc67e852556e20a6f88f5a74483fcbdd8b8471f2e0dcf9aeb2bc69811" ++
+    "c2731724189b3b06e48639aa23b6b6307750a96b96bb3322b053193a7ce0" ++
+    "484ae5219ef8a7fc6ba8cf56c78c72ac35a54f2b4d1b1f83b08c77135a1d" ++
+    "8da0c6d7224e944caa945744815a86e3f2654ceb8085a12d70595e11c9fb" ++
+    "06f4249d3ac39a61feec0ff53b0f51624cb1defe52cb42f36b983fd0f175" ++
+    "9e271ea75b8e6ccb3c7bf521d33232836ec0f1a7267db6e06cf061095e56" ++
+    "8b1a77b5002663df10284cb8c56c9df8118cba475e66586ad6f2f9b55337" ++
+    "685f06ff9d5e73598e56cb64a27a2a8ca48df22199ac438f57860781c482" ++
+    "cf3716e7c4a76321820b4bf453e39bed20898e5e0b852efade197c1cfaf8" ++
+    "a03bc37458c8abdc9b06729d1f0d47b2775876ae8bdf86ec9e894f3bb80e" ++
+    "dc148a39759099ea8518a1c0d811dafbe7e53e3c9bf201c9238fbaf8c4ad" ++
+    "e58c8d9c6f9e596f45b754b68c1af34b317b29be43d627317b6b79f14170" ++
+    "f4138655bdfd757b879bf6805e1e04b8f51edb8766437127c3fe2ad69192" ++
+    "0484252fda4f0f04ab6630343109ee463f1d10d4a8eadc3ffaad85c99c3e" ++
+    "ae2a28282e679ec5de1f187f4abae729dce04217c8d9b04283bdff59a6af" ++
+    "12126c7a23e8f0f917c9eb8e85fd7c0fe24b53639015c92079f1648c614a" ++
+    "ce8362ec34d1fe0600216f7baf002783ebd6b9ea6d6432674ca6931c4982" ++
+    "6040a611b23d6b67105d807cacafa272c74524ce11e037d137f9f15509e4" ++
+    "6f5c095c07390f72af6f9584035469a15f1af9d3cc91d5d9b00c9ca9d87a" ++
+    "f0ae6ca62bc9b958481c6dcee885e5e8c0836f4b2cb9dfb039663b83312e" ++
+    "cc9b17e93fb10c62f6cc6591249123b819d03b83411c416436470b385813" ++
+    "4c9b7d0a9168a78c7222c1704c65eed4f6831213027903d2044507a0f22f" ++
+    "b9c198c62ceb715fa4f1982764f05141f78c9df28849cbf223438bd06fd4" ++
+    "443fb4f36ac102fdf581e9fbabcaf9e276b9a3b0ee5e1388bdf48a939a4a" ++
+    "188e85f0aefbd9fcb55a5feb1fe9ca697371d3387f23dd567ec436a07626" ++
+    "375dd8a7ed72af258f367d8dc87183b4640db14aba20fb0ecbcc83066e9d" ++
+    "35790d13c01eafa714473252926b247a03ec11b923cdfaedd74b039edb1d" ++
+    "a6a6f9f44a4e304babe551ee061387edb6d623491eab726ec7fc6bc22fa6" ++
+    "ff8ce5392b48e010eac4d6ef2e5e48d7eeacba2a46bdbe10659ec9dcdec9" ++
+    "045c7325f14227514b971f613ff9de11eb6db81b6cfab349098d6342b761" ++
+    "df0d568a2c98a8ce46d8e656a7ece4b0d5c04fe9bd29b051c9c51bf3ffa5" ++
+    "62f89cd3db96ce2fc73926109242b0413dd3cccfc91020c4c5e7a49b2f4f" ++
+    "ff33d59b0fc015298e55ef38413acf23c8db57ae4dee81dcb1662258d7c8" ++
+    "aab14d4ca518e9979e61180ec1e4d2ea152392ee0cdc9d53ae2cc4f9abb8" ++
+    "a1612fc71186bcb528c040ba807108d704933cf15779cb6643262796bce2" ++
+    "931829606f40cfc50f2c22b2d45ac0f5a28a0493b39ae0a048027c8ff9ee" ++
+    "ab75437246c1ba0ad7b1aec41802ff9dae5499d5fe558fb3a9b03ed325c8" ++
+    "5314be429e90e141935eb8cf5f6f10156d001faa9da6666fa0f8986b8eb4" ++
+    "ea0b6646f07e0ba882b7a6a9b176c28512041b94dfe26566d57cf3d45f17" ++
+    "1bf45ac3390c74322bb61b6954be87f68f7c7f0c76eac3e065abddaf26f3" ++
+    "40ec4a9d5a5596bf7ab6c26af6eb6f9b3dda6f3d77a11ed9a37f8775c836" ++
+    "b0b18fc898a3fa8514872a480832dc58a3ae8448d1f1f9342a8880b540e0" ++
+    "45b5890f57af7dcebd0a41880a4c077c0c20589a197f921ebb2e7e789831" ++
+    "3f8c8ccca011dd62fd31b4a362ccb4d4d817173046ad5796bf7468652071" ++
+    "75696300bc365d23007302004c5029c0106619a06e2f25");
+
 // The `encode_stream_*` fixtures are the CLI's own `zstd -1` frames for the
 // same shapes read from a **pipe** (`cat SHAPE | zstd -1`), where the size is
 // unknown: the streaming class (`ZSTD_getCParams(1, ZSTD_CONTENTSIZE_UNKNOWN,

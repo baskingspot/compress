@@ -80,8 +80,10 @@ pub fn maxCompressedLength(source_len: usize) usize {
 ///
 /// `target` must be at least `maxCompressedLength(source.len)`; a smaller
 /// one can still work when the source compresses, and otherwise fails with
-/// `error.BufferTooSmall` before writing past `target`. `target`'s contents
-/// are unspecified after a failure. Nothing is allocated.
+/// `error.BufferTooSmall` before writing past `target`. On success only the
+/// first `n` bytes are the frame: an abandoned entropy attempt leaves
+/// scratch bytes past `n`, so do not assume `target[n..]` was untouched.
+/// `target`'s contents are unspecified after a failure. Nothing is allocated.
 pub fn compress(source: []const u8, target: []u8, options: Options) Error!usize {
     // The convenience form: the heavy per-block arrays ride this frame, so
     // give encoding threads 1 MiB or more of stack (the README's figure).
@@ -124,16 +126,31 @@ pub fn compressBuffered(
         };
         const block_size = block_compress.blockSize(params);
         assert(block_size <= block_compress.max_block_size);
+        const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
+        // The finder's table holds positions relative to `base`, and `find`
+        // sees `source[base..]`. The base slides when the block start drifts
+        // a whole window past it — the Writer's `compact` condition — so no
+        // position ever exceeds the window plus one block, and a source over
+        // 4 GiB cannot overflow the table's `u32` entries (the C's own
+        // window rebase, `ZSTD_window_correctOverflow`, on its one-shot
+        // path). The emitted offsets are differences, so the slide changes
+        // no byte of the frame.
+        var base: usize = 0;
         var offset: usize = 0;
         while (offset < source.len) {
             const size = @min(block_size, source.len - offset);
+            if (offset - base > window_size) {
+                const slide = offset - base - window_size;
+                base += slide;
+                block_compress.rebaseTable(hash_table, slide);
+            }
             cursor += try block_compress.writeBlock(
                 &state,
                 &blocks,
                 params,
                 hash_table,
-                source,
-                offset,
+                source[base..],
+                offset - base,
                 size,
                 target[cursor..],
                 offset + size == source.len,
@@ -438,6 +455,12 @@ test "our level-1 frame is the CLI's own bytes" {
             .expected = &golden.encode_rle_65536,
         },
         .{
+            .name = "words-495",
+            .shape = .words,
+            .size = 495,
+            .expected = &golden.encode_words_495,
+        },
+        .{
             .name = "words-4096",
             .shape = .words,
             .size = 4096,
@@ -499,7 +522,7 @@ test "the emission ladder picks the CLI's block forms" {
     try testing.expectEqual(block.BlockType.raw, random_header.block_type);
     try testing.expectEqual(@as(usize, 32768), random_header.block_size);
     try testing.expect(random_header.last_block);
-    // The 600 KB text frame: windowed, eight blocks, the last one last.
+    // The 600 KB text frame: windowed, five blocks, the last one last.
     var big: [600 * 1024]u8 = undefined;
     golden.fillShape(.text, &big);
     const big_frame = try testing.allocator.alloc(u8, maxCompressedLength(big.len));
@@ -518,10 +541,120 @@ test "the emission ladder picks the CLI's block forms" {
     try testing.expectEqual(big_len - frame.checksum_len, cursor);
 }
 
+/// The scan-exit input's length: one block of the ladder's 128-KiB class.
+const scan_exit_len = 2048;
+/// The input's prefix: the corpus phrase, whose scan runs at step 2.
+const scan_exit_text_len = 384;
+/// Where the 8-byte repeat is planted: inside the block's last 16 bytes,
+/// where only a scan restarted with its step reset to 2 would reach it.
+const scan_exit_plant = 2033;
+
+/// Fill the scan-exit input: `scan_exit_text_len` bytes of the corpus phrase,
+/// then PRNG noise (which grows the scan's step), then the planted repeat.
+fn fillScanExitInput(source: []u8) void {
+    assert(source.len == scan_exit_len);
+    const phrase = "the quick brown fox jumps over the lazy dog. ";
+    for (source[0..scan_exit_text_len], 0..) |*byte, index| {
+        byte.* = phrase[index % phrase.len];
+    }
+    var rng: DefaultPrng = .init(0xB3B);
+    for (source[scan_exit_text_len..]) |*byte| byte.* = rng.random().int(u8);
+    fastmem.copy(u8, source[scan_exit_plant..][0..8], source[0..8]);
+}
+
+test "the scan stops at the block's end, never restarting at it" {
+    // The C's scan loop exits at `ip3 >= ilimit` into `_cleanup`
+    // (`zstd_fast.c:348-350`), which ends the block; only a match's
+    // `goto _start` re-enters with the step reset. A restart on the natural
+    // exit rescans the tail at step 2 and finds matches the C never visits:
+    // this input plants one in the block's last 16 bytes, and the CLI's own
+    // frame (the `encode_scan_exit` fixture) does not carry it.
+    var source: [scan_exit_len]u8 = undefined;
+    fillScanExitInput(&source);
+    const target = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
+    defer testing.allocator.free(target);
+    const written = try compress(&source, target, .{});
+    try testing.expectEqual(golden.encode_scan_exit.len, written);
+    try testing.expectEqualSlices(u8, &golden.encode_scan_exit, target[0..written]);
+}
+
+test "the one-shot encodes a source over 4 GiB" {
+    // The finder's table holds `u32` positions, so the one-shot slides the
+    // table's base with the block start (`rebaseTable`, the Writer's
+    // `compact` condition): a source over 4 GiB must not overflow a position
+    // (`match_compress`'s `@intCast`s) nor emit an offset past the declared
+    // Window_Size. 4 GiB of zeros is one match-rich first block and RLE
+    // blocks after it, so the frame is about 131 KiB and the target can stay
+    // small. The frame's header, block chain, and checksum are checked
+    // structurally; a full decode would need a second 4 GiB buffer.
+    // A 32-bit `usize` cannot hold the source at all (and its slices cannot
+    // reach past 4 GiB), so the test exists only on 64-bit targets. It needs
+    // about 4 GiB of memory plus the 1-MiB target.
+    if (@bitSizeOf(usize) >= 64) {
+        const total: usize = (1 << 32) + 256 * 1024;
+        const source = try std.heap.page_allocator.alloc(u8, total);
+        defer std.heap.page_allocator.free(source);
+        fastmem.set(u8, source, 0);
+        const target = try testing.allocator.alloc(u8, 1 << 20);
+        defer testing.allocator.free(target);
+        const written = try compress(source, target, .{});
+        try testing.expect(written < target.len);
+        const header = try frame.parseHeader(target[frame.magic_len..written]);
+        try testing.expectEqual(@as(?u64, total), header.content_size);
+        // The block chain: 128-KiB blocks of one repeated byte are RLE blocks
+        // after the first, and the chain ends at the trailer with Last_Block
+        // set on its last block (`§3.1.1.2`).
+        var cursor = headerLenFor(target, written);
+        var blocks: usize = 0;
+        while (true) {
+            const block_header = try block.parseHeader(target[cursor..written]);
+            cursor += block.block_header_len + block.contentLength(block_header);
+            blocks += 1;
+            if (block_header.last_block) break;
+        }
+        try testing.expectEqual((total - 1) / block_compress.max_block_size + 1, blocks);
+        try testing.expectEqual(written - frame.checksum_len, cursor);
+    }
+}
+
 /// The frame header's length, from the parsed descriptor: the magic, the
 /// descriptor, the optional Window_Descriptor, and the Frame_Content_Size
 /// field (`§3.1.1.1`).
 fn headerLenFor(frame_bytes: []const u8, frame_len: usize) usize {
     const header = frame.parseHeader(frame_bytes[frame.magic_len..frame_len]) catch unreachable;
     return frame.magic_len + header.bytes_consumed;
+}
+
+test "the Fibonacci histogram's deep literals tree round-trips" {
+    // The literals of a shuffled Fibonacci-count input carry a histogram
+    // whose unlimited Huffman tree is deeper than the 11-bit cap; the tree
+    // builder flattens it (`huff0_compress`'s test pins the builder), and
+    // the block round-trips through the landed decoder. This is the public
+    // path the depth assert used to abort on.
+    var source: [17710]u8 = undefined;
+    var index: usize = 0;
+    var previous: usize = 0;
+    var current: usize = 1;
+    var symbol: u8 = 'A';
+    while (index < source.len) {
+        const count = @min(current, source.len - index);
+        fastmem.set(u8, source[index..][0..count], symbol);
+        index += count;
+        symbol += 1;
+        const next = previous + current;
+        previous = current;
+        current = next;
+    }
+    // Shuffle deterministically (Fisher-Yates), so the literals keep the
+    // Fibonacci histogram without being one long run.
+    var rng: DefaultPrng = .init(0xF1B0);
+    var position: usize = source.len;
+    while (position > 1) {
+        position -= 1;
+        const swap = rng.random().uintLessThan(usize, position + 1);
+        const byte = source[position];
+        source[position] = source[swap];
+        source[swap] = byte;
+    }
+    _ = try expectRoundTrip(&source);
 }

@@ -20,6 +20,9 @@
 //! class they produce is the CLI's.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt
+//! Lineage: facebook/zstd v1.5.7 `fse_compress.c` (`FSE_normalizeCount`,
+//! `FSE_buildCTable_wksp`, `FSE_writeNCount_generic`); attribution in
+//! THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -64,7 +67,7 @@ pub const table_size_max = fse.table_size_max;
 
 /// The value a symbol below the accuracy log's resolution takes
 /// (`§4.1.1`'s "less than 1" probability, worth one point). The C's
-/// `ZSTD_useLowProbCount` (TE1): 1 until `nbSeq >= 2048`, then -1.
+/// `ZSTD_useLowProbCount`: 1 until `nbSeq >= 2048`, then -1.
 pub const LowProbability = enum(i16) {
     one = 1,
     minus_one = -1,
@@ -73,7 +76,7 @@ pub const LowProbability = enum(i16) {
 /// A normalized-count distribution (`§4.1.1`): the probability of each symbol
 /// from 0 to `symbol_count - 1`, on a scale of `1 << accuracy_log`, with -1
 /// for the "less than 1" probability. The sum, counting -1 as 1, is exactly
-/// `1 << accuracy_log` — the budget the description must land on (ZE13).
+/// `1 << accuracy_log` — the budget the description must land on.
 pub const Norm = struct {
     /// Only the first `symbol_count` entries are meaningful.
     counts: [symbol_count_max]i16,
@@ -368,7 +371,7 @@ fn distributeRemainder(
 }
 
 /// Whether the counts sum to exactly the budget, with -1 counting as 1: the
-/// property `§4.1.1`'s description depends on (ZE13).
+/// property `§4.1.1`'s description depends on.
 fn sumsToBudget(norm: *const Norm) bool {
     var sum: i32 = 0;
     for (norm.counts[0..norm.symbol_count]) |count| {
@@ -757,7 +760,7 @@ test "optimalAccuracyLog follows the C's ladder" {
 
 test "normalize lands on the budget and gives every present symbol a cell" {
     // RFC 8878 §4.1.1 — the distribution's points must land exactly on
-    // `1 << Accuracy_Log` (ZE13), with -1 worth one point, and a symbol with
+    // `1 << Accuracy_Log`, with -1 worth one point, and a symbol with
     // a nonzero count must never normalize to zero.
     var rng: DefaultPrng = .init(0xF5E0);
     const random = rng.random();

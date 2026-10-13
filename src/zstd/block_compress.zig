@@ -8,7 +8,7 @@
 //! writers' output is kept only when it beats `minGain = (size >> 6) + 2`;
 //! a block whose bytes are all one value becomes an RLE block once its
 //! compressed form is under 25 bytes — except the frame's first block, which
-//! is never RLE (TE3, the zstd ≤ 1.4.3 CLI convention); and an all-literals
+//! is never RLE (the zstd ≤ 1.4.3 CLI convention); and an all-literals
 //! block carries a `nbSeq == 0` sequences section. Raw and RLE blocks do not
 //! contribute to the frame's cross-block state: the entropy tables and the
 //! repeat offsets revert to what the previous block left
@@ -22,6 +22,9 @@
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1.2 (blocks), §3.1.1.5
 //! (the repeat offsets), §3.1.1 (the checksum).
+//! Lineage: facebook/zstd v1.5.7 `zstd_compress.c` (the block emission ladder,
+//! `ZSTD_compressBlock_internal` / `ZSTD_entropyCompressSeqStore`); attribution
+//! in THIRD_PARTY.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -43,7 +46,7 @@ const sequences_compress = @import("sequences_compress.zig");
 const xxh64 = @import("xxh64.zig");
 
 /// The largest sequence count one block can carry: every match is at least
-/// `min_match_length` bytes, so `max_block_size / 4 + 1` sequences cover the
+/// `min_match_length` bytes, so `max_block_size / 3 + 1` sequences cover the
 /// worst case.
 pub const max_sequences = max_block_size / match_compress.min_match_length + 1;
 
@@ -81,6 +84,22 @@ pub fn blockSize(params: match_compress.Params) usize {
     return @min(max_block_size, @as(usize, 1) << @intCast(params.window_log));
 }
 
+/// Rebase the finder's table on a window slide: every entry that still
+/// points into the window drops by `slide`, and every entry that pointed at
+/// a dropped byte becomes zero — the table's "no candidate" value, which the
+/// finder's `candidate_floor` never reads as a position. `slide` is at most
+/// one block, because both callers slide right after an emission (the
+/// Writer's `compact`, the one-shot's per-block base), so it fits the
+/// entries' `u32` positions.
+pub fn rebaseTable(hash_table: []u32, slide: usize) void {
+    assert(slide > 0);
+    assert(slide <= max_block_size);
+    const drop: u32 = @intCast(slide);
+    for (hash_table) |*entry| {
+        entry.* = if (entry.* >= drop) entry.* - drop else 0;
+    }
+}
+
 /// One frame's encoding state, threaded through its blocks: the entropy
 /// layers' cross-block tables, the repeat offsets, and the checksum.
 pub const State = struct {
@@ -96,7 +115,7 @@ pub const State = struct {
     /// decoder's `frame.State` folds it: Raw blocks inside their copy
     /// (`writeRaw`), Compressed and RLE blocks through `recordBlock`.
     checksum: xxh64.State = .{},
-    /// `§3.1.1.2.1` — the frame's first block is never RLE (TE3, the zstd ≤
+    /// `§3.1.1.2.1` — the frame's first block is never RLE (the zstd ≤
     /// 1.4.3 CLI compatibility rule).
     first_block: bool = true,
 
@@ -244,8 +263,7 @@ fn writeEntropy(
 
 /// `ZSTD_minGain` (`zstd_compress_internal.h:677-683`) at the fast levels:
 /// `(srcSize >> 6) + 2`. The margin is also the safety that keeps a
-/// Compressed block's size under a single-segment frame's Block_Maximum_Size
-/// (ZE9).
+/// Compressed block's size under a single-segment frame's Block_Maximum_Size.
 fn minGain(source_len: usize) usize {
     return (source_len >> 6) + 2;
 }
@@ -489,7 +507,8 @@ test "the ladder stores tiny and incompressible blocks raw" {
 test "the ladder picks RLE after the first block and Raw for noise" {
     // RFC 8878 §3.1.1.2.3 — "Block_Content ... consists of a single byte,
     // repeated Block_Size times". The first block of a frame is never RLE
-    // (TE3); a later all-one-value block is, and an incompressible one is
+    // (the compatibility rule above); a later all-one-value block is, and an
+    // incompressible one is
     // Raw.
     var rig: Rig = .{ .params = .{ .window_log = 13, .hash_log = 13, .mls = 6 } };
     var source: [6 * 1024]u8 = undefined;

@@ -18,12 +18,10 @@ as an `Io.File.Reader`, and stdout as an `Io.File.Writer`. Each codec's file
 gives `cli.run` a `cli.Codec`, which is the codec's name and its two streaming
 functions, and the tests run the same functions. Each function is one call to
 the codec's `Writer.streamAll` or `Reader.streamAll`, which buffer on the
-stack, so those tools allocate nothing. zstd decode calls
-`Reader.streamAllAlloc` instead, which takes the 8 MiB default window from the
-run's arena (`examples/zstd.zig`).
-
-zstd has no encoder, so `cli.Codec.encode` is null for it and `zstd encode`
-prints usage.
+stack, so those tools allocate nothing. zstd's two directions call the
+`*Alloc` pumps instead — a 512-KiB-window Writer buffer and an 8 MiB-window
+Reader buffer are too large for a stack — which take them from the run's
+arena (`examples/zstd.zig`).
 
 The stream format is the codec package's, not the example's. The snappy tool,
 for instance, reads and writes the package's length-prefixed framing, not
