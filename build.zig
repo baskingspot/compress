@@ -2,6 +2,13 @@ const std = @import("std");
 const Build = std.Build;
 const comptimePrint = std.fmt.comptimePrint;
 
+/// The codecs with an example CLI and a local bench (src/<codec>/bench.zig).
+const codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd" };
+
+/// The codecs with an oracle harness (src/<codec>/oracle.zig): every codec
+/// except snappy, whose conformance rides the flate family's lanes.
+const oracle_codecs = [_][]const u8{ "flate", "gzip", "zlib", "zstd" };
+
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
@@ -48,7 +55,7 @@ pub fn build(b: *Build) void {
         .optimize = optimize,
     });
 
-    inline for (.{ "snappy", "flate", "gzip", "zlib", "zstd" }) |name| {
+    inline for (codecs) |name| {
         const mod = b.createModule(.{
             .root_source_file = b.path(comptimePrint("examples/{s}.zig", .{name})),
             .target = target,
@@ -58,18 +65,18 @@ pub fn build(b: *Build) void {
                 .{ .name = "zcompress", .module = zcompress_mod },
             },
         });
-        const example = b.addExecutable(.{
+        const exe = b.addExecutable(.{
             .name = name,
             .root_module = mod,
         });
-        const run = b.addRunArtifact(example);
+        const run = b.addRunArtifact(exe);
         run.has_side_effects = true;
         if (b.args) |args| run.addArgs(args);
-        const example_step = b.step(
+        const step = b.step(
             comptimePrint("example-{s}", .{name}),
             comptimePrint("Run the {s} example CLI (encode|decode [FILE|-])", .{name}),
         );
-        example_step.dependOn(&run.step);
+        step.dependOn(&run.step);
         const example_tests = b.addTest(.{
             .root_module = mod,
             .test_runner = test_runner,
@@ -79,96 +86,29 @@ pub fn build(b: *Build) void {
         test_step.dependOn(&run_example_tests.step);
     }
 
-    // External-oracle harness (src/flate/oracle.zig): decodes one stream from
-    // a file into a caller-sized buffer, for `just flate-oracle`. Installed,
-    // not part of the module surface or the test/check steps.
-    const flate_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/flate/oracle.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
-        },
-    });
-    const flate_oracle = b.addExecutable(.{
-        .name = "flate-oracle",
-        .root_module = flate_oracle_mod,
-    });
-    const install_flate_oracle = b.addInstallArtifact(flate_oracle, .{});
-    const flate_oracle_step = b.step(
-        "flate-oracle-harness",
-        "Install the flate oracle-lane harness (zig-out/bin/flate-oracle)",
-    );
-    flate_oracle_step.dependOn(&install_flate_oracle.step);
-
-    // External-oracle harness (src/gzip/oracle.zig): decodes one member from
-    // a file into a caller-sized buffer (and encodes an input at a chosen
-    // level), for `just gzip-oracle`. Installed, not part of the module
-    // surface or the test/check steps.
-    const gzip_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/gzip/oracle.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
-        },
-    });
-    const gzip_oracle = b.addExecutable(.{
-        .name = "gzip-oracle",
-        .root_module = gzip_oracle_mod,
-    });
-    const install_gzip_oracle = b.addInstallArtifact(gzip_oracle, .{});
-    const gzip_oracle_step = b.step(
-        "gzip-oracle-harness",
-        "Install the gzip oracle-lane harness (zig-out/bin/gzip-oracle)",
-    );
-    gzip_oracle_step.dependOn(&install_gzip_oracle.step);
-
-    // External-oracle harness (src/zlib/oracle.zig): decodes one stream from
-    // a file into a caller-sized buffer (and encodes an input at a chosen
-    // level), for `just zlib-oracle`. Installed, not part of the module
-    // surface or the test/check steps.
-    const zlib_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/zlib/oracle.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
-        },
-    });
-    const zlib_oracle = b.addExecutable(.{
-        .name = "zlib-oracle",
-        .root_module = zlib_oracle_mod,
-    });
-    const install_zlib_oracle = b.addInstallArtifact(zlib_oracle, .{});
-    const zlib_oracle_step = b.step(
-        "zlib-oracle-harness",
-        "Install the zlib oracle-lane harness (zig-out/bin/zlib-oracle)",
-    );
-    zlib_oracle_step.dependOn(&install_zlib_oracle.step);
-
-    // External-oracle harness (src/zstd/oracle.zig): encodes an input
-    // through both public forms and decodes one frame, for `just
-    // zstd-oracle`. Installed, not part of the module surface or the
-    // test/check steps.
-    const zstd_oracle_mod = b.createModule(.{
-        .root_source_file = b.path("src/zstd/oracle.zig"),
-        .target = target,
-        .optimize = optimize,
-        .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
-        },
-    });
-    const zstd_oracle = b.addExecutable(.{
-        .name = "zstd-oracle",
-        .root_module = zstd_oracle_mod,
-    });
-    const install_zstd_oracle = b.addInstallArtifact(zstd_oracle, .{});
-    const zstd_oracle_step = b.step(
-        "zstd-oracle-harness",
-        "Install the zstd oracle-lane harness (zig-out/bin/zstd-oracle)",
-    );
-    zstd_oracle_step.dependOn(&install_zstd_oracle.step);
+    inline for (oracle_codecs) |name| {
+        const mod = b.createModule(.{
+            .root_source_file = b.path(comptimePrint("src/{s}/oracle.zig", .{name})),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zcompress", .module = zcompress_mod },
+            },
+        });
+        const exe = b.addExecutable(.{
+            .name = comptimePrint("{s}-oracle", .{name}),
+            .root_module = mod,
+        });
+        const install = b.addInstallArtifact(exe, .{});
+        const step = b.step(
+            comptimePrint("{s}-oracle-harness", .{name}),
+            comptimePrint(
+                "Install the {s} oracle-lane harness (zig-out/bin/{s}-oracle)",
+                .{ name, name },
+            ),
+        );
+        step.dependOn(&install.step);
+    }
 
     // Unit tests: one test executable over the one module, covering every
     // codec's tests and the barrel's own. ztest still reports each test by
@@ -308,92 +248,29 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
         }).?;
 
-        // zig-benchmark's addRunTest injects @import("benchmark") into the
-        // bench root module and generates the runner executable.
-        const snappy_bench_root = b.createModule(.{
-            .root_source_file = b.path("src/snappy/bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
-                .{ .name = "fastmem", .module = fastmem_mod },
-            },
-        });
-        const run_snappy_bench = benchmark.addRunTest(b, .{
-            .dependency = benchmark_dep,
-            .root_module = snappy_bench_root,
-        });
-        if (b.args) |args| run_snappy_bench.addArgs(args);
-
-        const flate_bench_root = b.createModule(.{
-            .root_source_file = b.path("src/flate/bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
-                .{ .name = "fastmem", .module = fastmem_mod },
-            },
-        });
-        const run_flate_bench = benchmark.addRunTest(b, .{
-            .dependency = benchmark_dep,
-            .root_module = flate_bench_root,
-        });
-        if (b.args) |args| run_flate_bench.addArgs(args);
-
-        const gzip_bench_root = b.createModule(.{
-            .root_source_file = b.path("src/gzip/bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
-                .{ .name = "fastmem", .module = fastmem_mod },
-            },
-        });
-        const run_gzip_bench = benchmark.addRunTest(b, .{
-            .dependency = benchmark_dep,
-            .root_module = gzip_bench_root,
-        });
-        if (b.args) |args| run_gzip_bench.addArgs(args);
-
-        const zlib_bench_root = b.createModule(.{
-            .root_source_file = b.path("src/zlib/bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
-                .{ .name = "fastmem", .module = fastmem_mod },
-            },
-        });
-        const run_zlib_bench = benchmark.addRunTest(b, .{
-            .dependency = benchmark_dep,
-            .root_module = zlib_bench_root,
-        });
-        if (b.args) |args| run_zlib_bench.addArgs(args);
-
-        // The zstd bench (src/zstd/bench.zig): decode only, over the
-        // benchmark corpus's reference frames (bench/corpus-gen/, made by
-        // `just corpus`), so the local rows match the harness's
-        // zstd/decompress cells.
-        const zstd_bench_root = b.createModule(.{
-            .root_source_file = b.path("src/zstd/bench.zig"),
-            .target = target,
-            .optimize = optimize,
-            .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
-                .{ .name = "fastmem", .module = fastmem_mod },
-            },
-        });
-        const run_zstd_bench = benchmark.addRunTest(b, .{
-            .dependency = benchmark_dep,
-            .root_module = zstd_bench_root,
-        });
-        if (b.args) |args| run_zstd_bench.addArgs(args);
-
         const bench_step = b.step("bench", "Run codec benchmarks (use -Doptimize=ReleaseFast)");
-        bench_step.dependOn(&run_snappy_bench.step);
-        bench_step.dependOn(&run_flate_bench.step);
-        bench_step.dependOn(&run_gzip_bench.step);
-        bench_step.dependOn(&run_zlib_bench.step);
-        bench_step.dependOn(&run_zstd_bench.step);
+
+        // zig-benchmark's addRunTest injects @import("benchmark") into each
+        // bench root module and generates the runner executable: one module
+        // per codec over src/<codec>/bench.zig with the shared import set
+        // (zcompress + fastmem). The zstd bench is decode-only (over the
+        // generated corpus frames); see src/zstd/bench.zig.
+        inline for (codecs) |name| {
+            const bench_root = b.createModule(.{
+                .root_source_file = b.path(comptimePrint("src/{s}/bench.zig", .{name})),
+                .target = target,
+                .optimize = optimize,
+                .imports = &.{
+                    .{ .name = "zcompress", .module = zcompress_mod },
+                    .{ .name = "fastmem", .module = fastmem_mod },
+                },
+            });
+            const run_bench = benchmark.addRunTest(b, .{
+                .dependency = benchmark_dep,
+                .root_module = bench_root,
+            });
+            if (b.args) |args| run_bench.addArgs(args);
+            bench_step.dependOn(&run_bench.step);
+        }
     }
 }
