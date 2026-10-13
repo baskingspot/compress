@@ -30,9 +30,11 @@ check-32:
     zig build probe32 && wasmtime zig-out/bin/zstd-probe32.wasm
 
 # Compile-only cross-target gate: catches 32-bit `usize`/shift/overflow
-# bugs and non-portable codegen at compile time, cheap (seconds per target).
-# The targets maximize difference from the dev box; freestanding targets are
-# excluded (the ztest runner needs an OS). Not a supported-platform claim.
+# bugs and non-portable codegen at compile time. The targets maximize
+# difference from the dev box; freestanding targets are excluded (the ztest
+# runner needs an OS). Not a supported-platform claim. CI owns this gate once
+# CI exists (burn CI cycles, not dev-box cycles); locally, run it before a
+# milestone close or a portability-sensitive change.
 check-baseline:
     zig build check -Dtarget=x86_64-linux
     zig build check -Dtarget=x86-linux
