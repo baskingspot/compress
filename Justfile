@@ -64,6 +64,14 @@ zstd-oracle:
     go build -C scripts/zstd_klauspost -o ../../zig-out/bin/zstd-klauspost .
     uv run scripts/zstd_oracle.py
 
+# Check brotli against the pinned reference CLI (brotli 1.2.0) and
+# andybalholm/brotli; the codec is decoder-only, so the lane is the decode
+# direction, with the Go encoder's streams as a second encoder family
+brotli-oracle:
+    zig build brotli-oracle-harness
+    go build -C scripts/brotli_go -o ../../zig-out/bin/brotli-go .
+    uv run scripts/brotli_oracle.py
+
 # Generate the benchmark corpus in bench/corpus-gen/ and verify it against bench/corpus/SHA256SUMS
 corpus:
     zig build corpus

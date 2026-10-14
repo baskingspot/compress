@@ -23,6 +23,7 @@ const fastmem = @import("fastmem");
 
 const bits = @import("bits.zig");
 const context = @import("context.zig");
+const decode = @import("decode.zig");
 const dictionary = @import("dictionary.zig");
 const distance = @import("distance.zig");
 const frame = @import("frame.zig");
@@ -557,48 +558,6 @@ fn applyCopy(
 // Tests
 // ---------------------------------------------------------------------------
 
-/// Drive a whole stream through the layers for the golden tests: the stream
-/// header, each meta-block (entropy-free and compressed), and the last
-/// byte's zero fill. This is the one-shot's composition (`decompress`) in
-/// test form; it lands in `decode.zig` with the public surface.
-fn decodeStream(source: []const u8, target: []u8) !usize {
-    var header: frame.Header = undefined;
-    var state: State = .{};
-    var br: bits.BitReader = .init(source);
-    const stream = try frame.readStreamHeader(bits.BitReader, &br);
-    var pos: usize = 0;
-    while (true) {
-        const meta = (try frame.nextMetaBlock(bits.BitReader, &br, &header)) orelse break;
-        if (meta.mlen > target.len - pos) return error.BufferTooSmall;
-        switch (meta.kind) {
-            .uncompressed => {
-                try br.takeBytes(target[pos..][0..meta.mlen]);
-                pos += meta.mlen;
-            },
-            .compressed => {
-                pos = try decodeMetaBlock(
-                    bits.BitReader,
-                    &br,
-                    &header,
-                    &state,
-                    target[0 .. pos + meta.mlen],
-                    pos,
-                    meta.mlen,
-                    stream.window_size,
-                );
-            },
-        }
-        if (meta.is_last) {
-            // §9.3 — "If the last command of the last non-empty meta-block
-            // does not end on a byte boundary, the unused bits in the last
-            // byte must be zeros."
-            try br.alignToByte();
-            break;
-        }
-    }
-    return pos;
-}
-
 test "command stream: the RFC 7932 §5 insert-and-copy range table" {
     // RFC 7932 §5's diagram, at every range's corners: bits 0..2 are the
     // copy length code within its range, bits 3..5 the insert length code.
@@ -817,7 +776,7 @@ test "command stream: the golden vectors decode byte-exact" {
     for (cases) |case| {
         var target: [4096]u8 = undefined;
         internal.sentinel.fill(&target);
-        const n = try decodeStream(case.bytes, &target);
+        const n = try decode.decompress(case.bytes, &target);
         try testing.expectEqual(case.plain.len, n);
         try testing.expectEqualSlices(u8, case.plain, target[0..n]);
         try internal.sentinel.expect(&target, n);
@@ -845,7 +804,7 @@ test "command stream: the CLI's own streams decode byte-exact" {
     for (cases) |case| {
         var target: [4096]u8 = undefined;
         internal.sentinel.fill(&target);
-        const n = try decodeStream(case.bytes, &target);
+        const n = try decode.decompress(case.bytes, &target);
         try testing.expectEqual(case.plain.len, n);
         try testing.expectEqualSlices(u8, case.plain, target[0..n]);
         try internal.sentinel.expect(&target, n);
@@ -861,18 +820,18 @@ test "command stream: RFC 7932 §9.3's MLEN accounting refusals" {
     internal.sentinel.fill(&target);
     try testing.expectError(
         error.BadBlockLength,
-        decodeStream(golden.mlen_insert_overrun.bytes, &target),
+        decode.decompress(golden.mlen_insert_overrun.bytes, &target),
     );
     try testing.expectError(
         error.BadBlockLength,
-        decodeStream(golden.mlen_copy_overrun.bytes, &target),
+        decode.decompress(golden.mlen_copy_overrun.bytes, &target),
     );
 
     // RFC 7932 §4 — a special code resolving to zero (the CLI's
     // FORMAT_DISTANCE (-16)).
     try testing.expectError(
         error.BadDistance,
-        decodeStream(golden.negative_special.bytes, &target),
+        decode.decompress(golden.negative_special.bytes, &target),
     );
 }
 
@@ -884,10 +843,10 @@ test "command stream: RFC 7932 §8's dictionary class refusals" {
     internal.sentinel.fill(&target);
     try testing.expectError(
         error.BadDictionary,
-        decodeStream(golden.dictionary_length.bytes, &target),
+        decode.decompress(golden.dictionary_length.bytes, &target),
     );
     try testing.expectError(
         error.BadTransform,
-        decodeStream(golden.dictionary_transform.bytes, &target),
+        decode.decompress(golden.dictionary_transform.bytes, &target),
     );
 }

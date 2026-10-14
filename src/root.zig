@@ -11,8 +11,9 @@ const std = @import("std");
 /// `Reader`. The decoder lands in layers — the bit reader, the stream header
 /// and meta-block ladder, the prefix codes, the context models, the distance
 /// layer, the command stream, and the static dictionary with its word
-/// transforms are in place, and the public surface follows with the layers
-/// that compose them. API: `src/brotli/README.md`. Format:
+/// transforms are in place, and `decode` composes them into the one-shot; the
+/// `Reader` follows with the layer that adapts them to `std.Io`. API:
+/// `src/brotli/README.md`. Format:
 /// docs/research/specs/rfc7932-brotli.txt.
 pub const brotli = @import("brotli/root.zig");
 /// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
@@ -50,6 +51,8 @@ test {
     _ = zstd;
     // The consumer surface, spelled the way a consumer spells it: names are
     // reached through the codec namespaces, and nothing is flat at the root.
+    _ = brotli.decode.decompress;
+    _ = brotli.decode.DecompressError;
     _ = flate.encode.Level;
     _ = flate.decode.decompress;
     _ = flate.Reader.streamAll;

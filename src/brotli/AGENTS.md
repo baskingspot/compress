@@ -19,7 +19,9 @@ marked **[sketch call]** and collected at the end.
 - **The surface is `{decode, Reader}` today (OQ2).** `brotli.decode.decompress`
   is the one-shot (`target` a cap, the decoded length returned; the format
   declares no size) and `brotli.Reader` the streaming decode, with
-  `Reader.Buffer(window_wbits)` and `Reader.streamAll`. The encoder seat
+  `Reader.Buffer(window_wbits)` and `Reader.streamAll`. `decode` landed with
+  `decode.zig` (slice 5); the `Reader` name arrives with `Reader.zig`. The
+  encoder seat
   (`encode`, `Writer`) is stated in the README, never silently absent; the
   barrel's `{Reader, Writer, encode, decode}` completes at the encoder
   milestone without reshaping these two. **[sketch call]** there is no
@@ -108,11 +110,12 @@ marked **[sketch call]** and collected at the end.
   16 KiB). The build checks the computed table size against the ceiling and
   returns `BadHuffmanCode` if it ever exceeds it: no conformant code-length set
   can (F2), and the check is what makes the region a hard bound rather than a
-  hope. **[sketch call]** the one-shot carries the same region as a comptime
-  stack local (about 691 KiB at the cap), because `decompress(source, target)`
-  has no buffer parameter; the README's Stack bullet states the figure. If it
-  bites, a `decompressBuffered` addition follows the zstd `compressBuffered`
-  precedent without reshaping the two names.
+  hope. **[sketch call, landed]** the one-shot carries the same region as a
+  comptime stack local (about 691 KiB at the cap, 707,204 bytes for
+  `frame.Header`), because `decompress(source, target)` has no buffer
+  parameter; the README's Stack bullet states the figure. If it bites, a
+  `decompressBuffered` addition follows the zstd `compressBuffered` precedent
+  without reshaping the two names.
 - **Extensions are out of scope (OQ7, T3).** The large-window extension: the
   RFC's invalid 0010001 pattern is refused with `BadWindowBits`, and the CLI's
   forced leniency (`BROTLI_DECODER_PARAM_LARGE_WINDOW` set unconditionally,
@@ -175,8 +178,11 @@ ring, the special codes, and the per-meta-block NPOSTFIX/NDIRECT tables),
 context IDs, the distance element, and the copy machinery), `dictionary.zig`
 (the §8 class's word fetch and transforms, over the generated
 `dictionary.bin` and `dictionary_data.zig`), `golden.zig` (the CLI-verified
-wire vectors and the test-side bit writer). Still to land: `decode.zig` (the
-one-shot and the shared decode state), `Reader.zig`.
+wire vectors, the test-side bit writer, and the §11.1 trivial compressor),
+and `decode.zig` (the one-shot and the shared decode state, slice 5). Still to
+land: `Reader.zig`. The oracle lane's files are `oracle.zig` (the decode-only
+harness), `scripts/brotli_oracle.py`, and `scripts/brotli_go/` (the Go
+reference).
 
 The command layer's shape, as landed: `decodeMetaBlock` takes a *linear*
 window — `[0..start)` is the stream's decoded prefix (the match history) and
@@ -202,6 +208,49 @@ length at the meta-block's end). That moved the copy's MLEN check below the
 distance read: a dictionary reference whose produced length fits is legal
 even when its copy length would not, and the read order matches the
 reference's (`ReadDistance` before the class branch).
+
+## The one-shot (slice 5)
+
+`decode.decompress` is the whole-stream walk in one function: the `§9.1`
+header, meta-block after meta-block through `frame.nextMetaBlock`, the
+dispatch over the three forms, the last meta-block's `§9.3` zero fill, and the
+returned decoded length. `target` is the window, so the command layer's
+`decodeMetaBlock` is called with `target[0..pos + mlen]` — the same shape the
+command layer's tests used before, now the public entry point; the target cap
+is checked before the call, so the command layer's MLEN accounting stays the
+invalid-stream class (`§9.3`), never `BufferTooSmall`.
+
+- **The error set is the README's list, name for name.** `DecompressError` is
+  an explicit literal (each name's doc comment cites the section), and a
+  comptime block asserts the set equals the README's vocabulary exactly: a
+  layer that gains a name fails the build rather than leaking an undocumented
+  error, and the `try`s in `decompress` prove every layer name is in the set
+  (their return types are the layers' composed sets).
+- **The shared state is two fields.** `decode.State` bundles the current
+  meta-block's `frame.Header` and the stream-scoped `command.State` (`§4`'s
+  ring plus the derived tables). The streaming `Reader` reuses the shape with
+  its header arena in the caller's `Buffer`; the walk itself stays the
+  one-shot's, because the reader's is ring-based, resumable, and interleaved
+  with flushes.
+- **The layers stay reachable under `decode`** (OQ2): `decode.prefix`,
+  `decode.context`, `decode.distance`, `decode.dictionary`, `decode.command`,
+  and `decode.frame`, each one line of doc, the zstd/flate precedent. The
+  README's API block documents `decompress` and `DecompressError` only; the
+  reachable layers are the same kind of internal surface `flate.decode` and
+  `zstd.decode` carry.
+- **The §11.1 trivial compressor moved to `golden.zig`** (`trivialBound`,
+  `trivialCompress`, `trivialCompressToBuf`): the frame and decode tests both
+  drive it, and the command layer's test-only `decodeStream` walk is gone —
+  its tests call `decode.decompress`.
+- **The oracle lane landed** (see Oracles): `just brotli-oracle` runs
+  `src/brotli/oracle.zig` + `scripts/brotli_oracle.py` + `scripts/brotli_go/`,
+  and `build.zig`'s `oracle_codecs` gained `brotli`.
+- **Deferred, and why.** The reference `tests/testdata/*.compressed*` corpus
+  (the 45 vectors) is not vendored and not fetchable in the lane (no network),
+  so the lane's live substitute is the CLI's and the Go encoder's own streams
+  (F8). The README's `just example brotli decode FILE.br` line needs the
+  example CLI, which pumps through `Reader.streamAll` — it lands with
+  `Reader.zig`.
 
 ## Register findings
 
@@ -272,6 +321,25 @@ not a decision.
   insert overrun and the copy overrun both reach `METABLOCK_DONE` and report
   `FORMAT_BLOCK_LENGTH_2 (-10)` — pinned by the two refusal vectors.
 
+- **F8 — the reference corpus row is not landable offline.** google/brotli
+  v1.2.0's `tests/testdata/*.compressed*` (the 45 decodable vectors) is
+  neither vendored here nor present in the nix store, and the lane has no
+  network, so the conformance lane's live substitute is the two references'
+  own encoders: 96 CLI streams (8 inputs × qualities 0..11, the pipe form),
+  18 file-form rows, the Go encoder's 40 streams, and the corruption and
+  truncation batteries. Vendoring the corpus (or a fetch step) stays open for
+  whoever wants the reference harness's exact shape
+  (`run-compatibility-test.cmake`).
+- **F9 — the CLI's automatic window is 24 for pipes and 10..19 for files.**
+  Measured over the oracle sweep: every one of the 96 stdin streams is WBITS
+  24 (the CLI cannot stat a pipe, so it uses the maximum), while a file input
+  gets 10 for a tiny file (F1's `21`), 14 for the 8 KiB text shape, 18 for
+  the 133 KiB RLE shape, and 19 for the 390 KiB RFC text — at every quality,
+  with q0 one step above the tiny-file case (18). F1's Reader decision
+  therefore splits by *source form*: a `Buffer(22)` refuses every
+  pipe-produced CLI stream (24) and decodes every file-produced one. The
+  oracle lane pins both classes (the file lane asserts the 1-byte file is 10
+  and the pipe form is 24).
 
 ## Errata register
 
@@ -477,10 +545,23 @@ three CLI text streams) and the CRC pins are the gates.
   (min(window, produced) with WBITS 10). `dictionary.zig`'s unit tests pin
   the two data CRCs, the DOFFSET recursion, the word selection, the
   transform classes (including both Ferment UTF-8 paths), and §8's 38-byte
-  bound over all 2,541 (length, transform) pairs.
+  bound over all 2,541 (length, transform) pairs. **Slice 5** adds
+  `decode.zig`'s twelve tests, all through the public `decompress`: the
+  README usage snippet (its cap, its length, its error path), the reachable
+  layers, the empty and last-metadata families (zero decoded bytes, sentinel
+  intact), the metadata and uncompressed forms, the whole golden corpus
+  (every hand-built vector plus all 20 CLI streams), the §11.1 trivial
+  compressor's 100,000-byte bound, the cap (`BufferTooSmall` before the
+  write, partial output, the exact-size fit), the trailing-bytes rule (T4),
+  the §9.3 last-byte fill (the CLI's `FORMAT_PADDING_2` vector), the named
+  refusals of every layer through the public entry point, and every strict
+  prefix of five streams (Truncated, never a short decode). The command
+  layer's tests now drive `decode.decompress` instead of their own walk.
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
+  The 45-vector reference corpus itself is not vendored (F8); the oracle lane
+  runs the two references' own streams instead.
 - **Every decode test carries the sentinel overrun check** (the house rule):
   output pre-filled, bytes past the decoded length untouched.
 - **Fuzz is the fuzz-engineer's lane.** The corners worth a target, from the
@@ -503,9 +584,16 @@ three CLI text streams) and the CRC pins are the gates.
   transform 121, index wrap), the transform ids' classes (the two Ferment
   UTF-8 paths, the omit overruns into the empty string), the emptiness guard,
   the transformed-length MLEN overrun, and a hostile `dictionary.bin` is not
-  a surface — the data is comptime and CRC-pinned, not input.
+  a surface — the data is comptime and CRC-pinned, not input. Slice 5's
+  surfaces: the one-shot's walk (a stream plus trailing bytes, a stream cut
+  anywhere, the empty input, the last-byte fill), the cap arithmetic
+  (`BufferTooSmall` before any write past the target, against §9.3's
+  invalid-stream MLEN class), and the composition's error-set mapping (any
+  input must fail with a name from `DecompressError`, never a panic or a
+  write past the cap) — the target is prefilled and the tail checked.
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
-  and `just check-baseline` the portable targets.
+  `just check-baseline` the portable targets, and `just brotli-oracle` the
+  differential lane against the two references (Oracles).
 
 ## Oracles
 
@@ -527,9 +615,36 @@ during research: the round trip (`brotli -q 11 -c`, then `-d -c | cmp`), the
 corruption battery with the CLI's reasons, the trailing/concatenation/empty
 lane (`-K` as the CLI's opt-in), the metadata lane (`-C`), the window lane
 (`-w 10..24` plus the auto-lgwin measurement), and the dictionary counter (the
-instrumented refuse-mode build). The lane lands as `src/brotli/oracle.zig` +
-`scripts/brotli_oracle.py` behind `just brotli-oracle` (the flate/gzip
-precedent).
+instrumented refuse-mode build).
+
+**Landed (slice 5).** `just brotli-oracle` = `src/brotli/oracle.zig` (the
+decode-only harness: `decode <stream-file> <cap-bytes>`), `scripts/brotli_go/`
+(the Go reference: `decode <stream-file>`, `encode <input-file> <quality>`),
+and `scripts/brotli_oracle.py` over `scripts/oracle_common.py`. One run covers,
+in about 20 seconds:
+
+- the differential sweep — 8 inputs × qualities 0..11, 96 CLI streams (the
+  pipe form, all WBITS 24) — each decoding through our one-shot at the exact
+  cap and through the Go reference, to the input bytes;
+- the window lane — `-w 10..24` on the text shape plus the four research
+  values on the other shapes, 23 rows;
+- the file lane — 18 rows over the size ladder, asserting the file form's
+  WBITS classes (10..19) against the pipe form's 24 (F9);
+- the metadata lane — the CLI's `-C` comment, verified by the CLI and
+  decoded by ours and Go;
+- the trailing/concatenation rows (T4) — ours ignores the tail, both
+  references refuse it, and the CLI's `-K` walks a doubled stream;
+- the empty family — 17 streams (the §7.2 table plus T5's terminators)
+  decoding to zero bytes through all three;
+- the truncation battery — 1,133 prefixes, refused by all three (§10);
+- the corruption battery (T6) — 142 flips, each asserting the references'
+  verdict: refuse together, or byte-identical output;
+- the Go encoder's 40 streams (qualities 0/1/5/9/11 × the 8 inputs) — a
+  second encoder family, decoded by ours and by the CLI.
+
+The corpus row (the 45 reference vectors) is deferred per F8. `just test`
+keeps the committed golden vectors (the CLI-verified ones) in the unit suite,
+so the lane is the differential half and the suite the byte-exact half.
 
 ## Performance
 
@@ -551,12 +666,13 @@ recorded fleet run, never local numbers.
 
 Collected for the review; each is also marked **[sketch call]** above.
 
-1. **The one-shot's tree region is a stack local (~650 KiB at the cap).** The
-   register fixed the streaming `Buffer`'s tree region and the one-shot's lack
-   of a window, but not where the one-shot's trees live. Options were a stack
-   local (chosen), a caller-buffer form (`decompressBuffered`), or an
-   allocator. If the figure bites, the buffered form is the zstd
-   `compressBuffered` remedy, an addition that does not reshape the two names.
+1. **The one-shot's tree region is a stack local (landed; 691 KiB at the
+   cap).** The register fixed the streaming `Buffer`'s tree region and the
+   one-shot's lack of a window, but not where the one-shot's trees live.
+   Options were a stack local (chosen), a caller-buffer form
+   (`decompressBuffered`), or an allocator. If the figure bites, the buffered
+   form is the zstd `compressBuffered` remedy, an addition that does not
+   reshape the two names.
 2. **The `BadStreamStart` split.** The notes name it (OQ3, OQ5) but give it no
    §3 taxonomy row; the sketch reads it as the walk's next-stream refusal, with
    `BadWindowBits` for a stream's own header.
@@ -565,9 +681,10 @@ Collected for the review; each is also marked **[sketch call]** above.
    single-stream contract; the walk follows the gzip/zstd rule.
 4. **No single-stream pump.** `streamAll` only (the zlib shape); a caller who
    wants exactly one stream drives `Reader`.
-5. **The tree region's byte figure.** The ~650 KiB budget uses the reference's
-   two-level table shape; the implementation's shape sets the final number, and
-   the README's Buffer/Stack figures move with it.
+5. **The tree region's byte figure (landed).** The ~650 KiB budget used the
+   reference's two-level table shape; the implementation's shape set the final
+   number — `frame.Header` is 707,204 bytes (the tree region plus the context
+   arena), the README's Stack figure.
 6. **Literals decode straight through.** No staging region: a literal's context
    is the output's own last two bytes, so literals are written directly into
    `target` (one-shot) or the history ring (streaming), and the streaming

@@ -595,17 +595,17 @@ test "uncompressed meta-blocks pass their bytes through" {
 
 test "uncompressed meta-blocks: the RFC 7932 §11.1 trivial compressor's streams" {
     // RFC 7932 §11.1: every N-byte input has a valid stream of at most
-    // N + (3 * (N >> 16) + 5) bytes. The C++ is ported below and its output
-    // decoded by the ladder; the 100,000-byte case meets the bound exactly
-    // (100,008 bytes), the fixture the research measured through both
-    // oracles.
+    // N + (3 * (N >> 16) + 5) bytes. The C++ is ported in `golden.zig` and
+    // its output decoded by the ladder; the 100,000-byte case meets the
+    // bound exactly (100,008 bytes), the fixture the research measured
+    // through both oracles.
     var source: [100_000]u8 = undefined;
     for (&source, 0..) |*byte, i| byte.* = @intCast((i * 7 + 3) & 0xFF);
 
-    const stream = try testing.allocator.alloc(u8, trivialBound(source.len));
+    const stream = try testing.allocator.alloc(u8, golden.trivialBound(source.len));
     defer testing.allocator.free(stream);
-    const stream_len = trivialCompress(&source, stream);
-    try testing.expectEqual(trivialBound(source.len), stream_len);
+    const stream_len = golden.trivialCompress(&source, stream);
+    try testing.expectEqual(golden.trivialBound(source.len), stream_len);
 
     const target = try testing.allocator.alloc(u8, source.len);
     defer testing.allocator.free(target);
@@ -616,7 +616,7 @@ test "uncompressed meta-blocks: the RFC 7932 §11.1 trivial compressor's streams
     try internal.sentinel.expect(target, n);
 
     // The research's small fixture: "hello world" (11 bytes) in 16 bytes.
-    const hello = trivialCompressToBuf("hello world");
+    const hello = golden.trivialCompressToBuf("hello world");
     try testing.expectEqual(@as(usize, 16), hello.len);
     var small: [16]u8 = undefined;
     internal.sentinel.fill(&small);
@@ -624,62 +624,6 @@ test "uncompressed meta-blocks: the RFC 7932 §11.1 trivial compressor's streams
     try testing.expectEqual(@as(usize, 11), small_n);
     try testing.expectEqualSlices(u8, "hello world", small[0..small_n]);
     try internal.sentinel.expect(&small, small_n);
-}
-
-/// `§11.1`'s bound: `N + (3 * (N >> 16) + 5)`.
-fn trivialBound(n: usize) usize {
-    return n + 3 * (n >> 16) + 5;
-}
-
-/// `§11.1`'s C++, ported: `[12]` (an empty metadata meta-block, which aligns
-/// the next header to a byte boundary), then 65536-byte uncompressed
-/// meta-blocks, then the final partial block, then `[3]` (ISLAST +
-/// ISLASTEMPTY). The C++'s `append(1, c)` truncates `c` to a byte.
-fn trivialCompress(source: []const u8, target: []u8) usize {
-    var w: ByteWriter = .{ .target = target };
-    if (source.len == 0) {
-        w.byte(0x06);
-        return w.pos;
-    }
-    w.byte(12);
-    var i: usize = 0;
-    while (i + 65535 < source.len) : (i += 65536) {
-        w.byte(248);
-        w.byte(255);
-        w.byte(15);
-        w.bytes(source[i..][0..65536]);
-    }
-    if (i < source.len) {
-        const r = source.len - i - 1;
-        w.byte(@truncate((r & 31) << 3));
-        w.byte(@truncate(r >> 5));
-        w.byte(@truncate(8 + (r >> 13)));
-        w.bytes(source[i..][0 .. r + 1]);
-    }
-    w.byte(3);
-    return w.pos;
-}
-
-const ByteWriter = struct {
-    target: []u8,
-    pos: usize = 0,
-
-    fn byte(self: *ByteWriter, value: u8) void {
-        self.target[self.pos] = value;
-        self.pos += 1;
-    }
-
-    fn bytes(self: *ByteWriter, values: []const u8) void {
-        fastmem.copy(u8, self.target[self.pos..][0..values.len], values);
-        self.pos += values.len;
-    }
-};
-
-fn trivialCompressToBuf(comptime source: []const u8) [trivialBound(source.len)]u8 {
-    var out: [trivialBound(source.len)]u8 = undefined;
-    const n = trivialCompress(source, &out);
-    assert(n <= out.len);
-    return out;
 }
 
 test "meta-block ladder: a compressed meta-block's header runs past the ladder" {

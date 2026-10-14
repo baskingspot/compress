@@ -7,7 +7,7 @@ const codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd" };
 
 /// The codecs with an oracle harness (src/<codec>/oracle.zig): every codec
 /// except snappy, whose conformance rides the flate family's lanes.
-const oracle_codecs = [_][]const u8{ "flate", "gzip", "zlib", "zstd" };
+const oracle_codecs = [_][]const u8{ "brotli", "flate", "gzip", "zlib", "zstd" };
 
 pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});

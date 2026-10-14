@@ -12,7 +12,14 @@
 //! decoder bug.
 //!
 //! `Packer` is the test-side half of that writer, so a test can rebuild a
-//! vector's fields or build a variant of it.
+//! vector's fields or build a variant of it; `trivialCompress` is the one
+//! wire builder that is not a `Packer` cascade, the RFC 7932 §11.1
+//! reference compressor both the frame and the decode tests drive.
+
+const std = @import("std");
+const assert = std.debug.assert;
+
+const fastmem = @import("fastmem");
 
 /// A whole brotli stream and the bytes it decodes to.
 pub const Stream = struct {
@@ -46,6 +53,73 @@ pub const Packer = struct {
 
     pub fn slice(self: *const Packer) []const u8 {
         return self.bytes[0 .. (self.bit_len + 7) / 8];
+    }
+};
+
+/// `§11.1`'s bound: `N + (3 * (N >> 16) + 5)`, the size of the stream
+/// `trivialCompress` writes for an `N`-byte input.
+///
+/// RFC 7932 §11.1: "if an input of N bytes is transformed by appending a
+/// special end-of-stream marker, then compressed using the uncompressed
+/// meta-block format ... the resulting data will not be more than N + (3 *
+/// (N >> 16) + 5) bytes long".
+pub fn trivialBound(n: usize) usize {
+    return n + 3 * (n >> 16) + 5;
+}
+
+/// `§11.1`'s C++, ported: `[12]` (an empty metadata meta-block, which aligns
+/// the next header to a byte boundary), then 65536-byte uncompressed
+/// meta-blocks, then the final partial block, then `[3]` (ISLAST +
+/// ISLASTEMPTY). The C++'s `append(1, c)` truncates `c` to a byte.
+///
+/// The caller guarantees `target.len >= trivialBound(source.len)`; returns
+/// the stream length.
+pub fn trivialCompress(source: []const u8, target: []u8) usize {
+    assert(target.len >= trivialBound(source.len));
+    var w: ByteWriter = .{ .target = target };
+    if (source.len == 0) {
+        w.byte(0x06);
+        return w.pos;
+    }
+    w.byte(12);
+    var i: usize = 0;
+    while (i + 65535 < source.len) : (i += 65536) {
+        w.byte(248);
+        w.byte(255);
+        w.byte(15);
+        w.bytes(source[i..][0..65536]);
+    }
+    if (i < source.len) {
+        const r = source.len - i - 1;
+        w.byte(@truncate((r & 31) << 3));
+        w.byte(@truncate(r >> 5));
+        w.byte(@truncate(8 + (r >> 13)));
+        w.bytes(source[i..][0 .. r + 1]);
+    }
+    w.byte(3);
+    return w.pos;
+}
+
+/// `trivialCompress` for a comptime-known input, returning the stream inline.
+pub fn trivialCompressToBuf(comptime source: []const u8) [trivialBound(source.len)]u8 {
+    var out: [trivialBound(source.len)]u8 = undefined;
+    const n = trivialCompress(source, &out);
+    assert(n <= out.len);
+    return out;
+}
+
+const ByteWriter = struct {
+    target: []u8,
+    pos: usize = 0,
+
+    fn byte(self: *ByteWriter, value: u8) void {
+        self.target[self.pos] = value;
+        self.pos += 1;
+    }
+
+    fn bytes(self: *ByteWriter, values: []const u8) void {
+        fastmem.copy(u8, self.target[self.pos..][0..values.len], values);
+        self.pos += values.len;
     }
 };
 
