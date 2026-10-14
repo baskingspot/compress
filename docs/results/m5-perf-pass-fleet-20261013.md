@@ -39,13 +39,22 @@ faster), old run → this run:
 - **The literal-heavy shapes regressed 1-3%, uniformly on all seven targets** —
   text/html/rle at both sizes. This is real, not noise: the compress noise floors
   are 0.22% (32K) and 0.58% (64K), and the intervals are disjoint (text-32K on
-  c7a: 1.686-1.694 → 1.732-1.742). The leading candidate is TE9's port price —
+  c7a: 1.686-1.694 → 1.732-1.742). ~~The leading candidate is TE9's port price —
   the suspect-uncompressible sample now scans the first and last 4 KiB of every
   Compressed-literals block before the Huffman attempt, the same scan the C pays
   for its emission parity; the bits.zig restructure's code layout is the other.
   Neither was measured in isolation on these shapes; the next pass's ranked lever
   is to make that scan early-exit (stop at the first byte over the threshold, the
-  C's own loop shape) or prove the cost lives elsewhere.
+  C's own loop shape) or prove the cost lives elsewhere.~~ **Correction (the
+  beat-everything pass, `8895881`)**: isolated pre/post-TE9 binaries disproved
+  the TE9 attribution — text/html/rle blocks never reach the 40,960-literal
+  threshold (html-64K carries 44 literals), so TE9's scan never runs on these
+  shapes; the regression was code layout. The TE9 port's real cost, measured on
+  the rows that do reach the path (mixed/random-64K, 0 sequences, always
+  suspect-scanned): -1.5-1.9%. The early-exit lever itself was tried and
+  reverted in that pass: the per-byte cap check costs more than the one final
+  max scan. The recorded future design is a branchless running umax with a
+  checkpointed compare every 512 bytes.
 
 - **Size parity unchanged**: every encode row's frame is its `zstd -1`
   counterpart's size plus 4 bytes — 98 of 98 target/case pairs, the deterministic
