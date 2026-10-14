@@ -331,12 +331,13 @@ const block_count_rows = [26]CountRow{
 };
 
 /// `§6` — one block count: a symbol from the 26-symbol count alphabet plus
-/// its fixed-width extra bits.
-fn readBlockCount(
+/// its fixed-width extra bits. The command layer reads the switches' counts
+/// through this too.
+pub fn readBlockCount(
     comptime Bits: type,
     br: *Bits,
     tree: *const huffman.BlockCountTree,
-) Errors(Bits)!u32 {
+) Bits.ErrorSet!u32 {
     const symbol = try tree.decode(Bits, br);
     const row = block_count_rows[symbol];
     return row.base + try br.take(row.extra_bits);

@@ -8,10 +8,11 @@
 const std = @import("std");
 
 /// brotli (RFC 7932) decoder: one-shot `decode.decompress` and the streaming
-/// `Reader`. The decoder lands in layers — the bit reader and the stream
-/// header and meta-block ladder are in place, and the public surface follows
-/// with the layers that compose it. API: `src/brotli/README.md`. Format:
-/// docs/research/specs/rfc7932-brotli.txt.
+/// `Reader`. The decoder lands in layers — the bit reader, the stream header
+/// and meta-block ladder, the prefix codes, the context models, the distance
+/// layer, and the command stream are in place, and the static dictionary and
+/// the public surface follow with the layers that compose them. API:
+/// `src/brotli/README.md`. Format: docs/research/specs/rfc7932-brotli.txt.
 pub const brotli = @import("brotli/root.zig");
 /// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
 /// and the streaming `Reader` and `Writer`. Caller-owned buffers, no heap

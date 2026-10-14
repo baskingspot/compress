@@ -169,11 +169,27 @@ Every BR row lands somewhere; the row text is in `brotli-notes.md` §2.
 The file split as landed: `bits.zig` (the LSB-first reader), `frame.zig` (the
 stream header, the meta-block ladder, and the compressed header's completion),
 `huffman.zig` (both tree forms, the table builder, and the OQ8 region),
-`context.zig` (the modes and the maps), `golden.zig` (the CLI-verified wire
-vectors and the test-side bit writer). Still to land: `decode.zig` (the
-one-shot and the shared decode state), `distance.zig` (the ring and the
-reconstruction), `dictionary.zig` (the generated data and the transforms),
-`Reader.zig`.
+`context.zig` (the modes and the maps), `distance.zig` (the four-distance
+ring, the special codes, and the per-meta-block NPOSTFIX/NDIRECT tables),
+`command.zig` (the insert-and-copy alphabet, the three block switches, the
+context IDs, the distance element, and the copy machinery), `golden.zig` (the
+CLI-verified wire vectors and the test-side bit writer). Still to land:
+`decode.zig` (the one-shot and the shared decode state), `dictionary.zig` (the
+generated data and the transforms), `Reader.zig`.
+
+The command layer's shape, as landed: `decodeMetaBlock` takes a *linear*
+window — `[0..start)` is the stream's decoded prefix (the match history) and
+`[start..start + mlen)` the meta-block's room, which is why the one-shot's
+target *is* the window — and returns the position after the meta-block. The
+copy machinery is `copyMatch`, a free function over `(window, pos,
+distance, length)`; the streaming ring will call it per contiguous segment and
+own the wrap, the flush interleaving, and the resumability. `fastmem.move` is
+deliberately not the overlap primitive: a move copies as through a temporary
+and preserves the source, while §10's overlapping reference replicates the
+pattern, so the overlap is a doubling run of `fastmem.copy` (the flate
+decoder's `copyMatch` shape). The literal context reads p1/p2 back out of the
+window, so a byte an uncompressed meta-block produced is context for the next
+compressed one with no extra state (§7.1, BR32).
 
 ## Register findings
 
@@ -221,6 +237,27 @@ not a decision.
   (`decode.c`: `BROTLI_STATE_HUFFMAN_CODE_*` → `METABLOCK_HEADER_2` →
   `CONTEXT_MODES` → `CONTEXT_MAP_1/2` → `TREE_GROUP`), and the interleaving is
   what makes "each count read needs its tree" true.
+- **F6 — the dictionary branch is the interim `DictionaryRequired`.** §8's
+  class boundary (a distance past `min(window size, produced)` is a dictionary
+  reference) and its length rule (4..24, else `BadDictionary`) are wired in the
+  command layer and pinned by CLI-verified vectors (`dictionary_word`,
+  `dictionary_length`, `window_bound` — the last proves the window half of the
+  minimum with WBITS 10 against 2000 produced bytes). A well-formed reference
+  is `error.DictionaryRequired` until the port lands; the name is the
+  dictionary-less build's, recorded in the notes, and the port replaces the
+  refusal with the word fetch. Measured over the 20 CLI vectors now in
+  `golden.zig` and a 60-case differential sweep (text / random / run / cycle /
+  mixed, 1..4096 bytes, q1..q4): the dictionary appears only on text, at q4
+  and up; the repetitive and incompressible shapes never reference it at any
+  quality. The port's fixtures are the three `cli_text_q5/q9/q11` streams
+  already stored, plus the two hand-built references.
+- **F7 — both MLEN overruns report `FORMAT_BLOCK_LENGTH_2` on one-shot-sized
+  streams.** F4's collapse to one name is exact: the C's
+  `FORMAT_BLOCK_LENGTH_1` fires only when the ring buffer flushes mid-meta-block
+  with a negative remaining length (a meta-block larger than the ring), so the
+  insert overrun and the copy overrun both reach `METABLOCK_DONE` and report
+  `FORMAT_BLOCK_LENGTH_2 (-10)` — pinned by the two refusal vectors.
+
 
 ## Errata register
 
@@ -347,7 +384,21 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   16 repeats, and the single-symbol code-length code);
   `context_map_stream` (§7.3's RLEMAX, zero runs, and IMTF — the map selects
   between two literal trees, so a decoder that ignored the IMTF bit emits
-  different bytes).
+  different bytes). **Slice 3** adds the command stream's set: the four
+  special-code/ring vectors (`special_codes`, `ring_init_second`,
+  `ring_init_third`, `ring_init_last`, `ring_no_push_zero` — the init 16/15/
+  11/4 code by code, and that symbol 0 does not push); `mlen_exact_insert`
+  (the ignored copy with no distance element) and the two overrun refusals;
+  `negative_special` (§4's zero-resolution refusal); the three switch
+  vectors (`block_switch_literal_t1` for T1, `block_switch_command`,
+  `distance_switch_t2` for erratum 6977); `ndirect` and `npostfix` (§4's
+  arithmetic); `distance_context` (§7.2); the three context-mode vectors
+  (§7.1); `dictionary_word`, `dictionary_length`, `window_bound` (§8's class
+  and length rule); `cross_meta_block` (§10's cross-boundary copy and the
+  stream-scoped ring); `uncompressed_context` (§7.1's p1 across a meta-block
+  boundary); and 20 CLI-generated streams (4 inputs × q1/q2/q5/q9/q11) of
+  which 17 decode byte-exact here and 3 carry dictionary references (F6). The
+  Lut0/Lut1/Lut2 tables are pinned by the RFC's own CRCs (§7.1).
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
@@ -363,7 +414,12 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   and the 16/17 modifier arithmetic, the single-symbol code-length code, the
   table-bound guard, the context map's RLE overrun and IMTF, and the
   code-length peek that reads padding at the stream's last byte (a decode that
-  must be `Truncated`, never a symbol).
+  must be `Truncated`, never a symbol). Slice 3's surfaces for the targets: the
+  block-type resolution (T1's init, the symbol-1 wrap, the explicit symbols),
+  the MLEN accounting's boundary (the ignored copy, the two overruns), §4's
+  zero-resolution `BadDistance`, §8's class boundary and length rule, the
+  ring's push exclusions (symbol 0, dictionary), the four context IDs, and
+  `copyMatch`'s overlap (distance < length, the one-byte run).
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
   and `just check-baseline` the portable targets.
 
