@@ -278,7 +278,17 @@ early-exit), mixed/random-32K 2.4-3.6x -> 1.15-1.38x (the 4-lane histogram),
 skewlit 3.1-5.9x -> 1.5-2.5x, words ~10-15% (countStats + the spill fix); the
 literal-heavy shapes regressed a real 1-3% on every target (TE9's per-block
 sample scan the leading candidate — the next pass's ranked lever). Size
-parity held: every row `zstd -1` + the 4-byte trailer.
+parity held: every row `zstd -1` + the 4-byte trailer. The beat-everything
+pass 1 (three lever commits through `8895881`: the double-buffer, the
+vectorized extension, the register-resident scan and fixed-schedule flushes)
+is adjudicated by `docs/results/m5-perf-pass2-fleet-20261014.md` (run id
+`20261014T104001Z-m5-perf-pass2`): the entropy shapes collapsed 25-45%
+(words 1.5-1.8x -> 1.13-1.32x, skewlit -> 1.27-1.55x), c7a/c8a took the
+literal-heavy shapes down 20-25%, Intel 15-18%, decode neutral on every row,
+klauspost beaten on words everywhere (0.66-0.80). The bar's named next
+levers: the checksum asymmetry (measured ~35% of html-64K encode time on
+ARM — a driver fairness fix, not a code lever) and the Intel-target profile
+for the 3.3-3.5x literal-heavy gap.
 
 M6 — brotli, decoder first. The one-shot (`decode.decompress`) and the
 streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` (default
