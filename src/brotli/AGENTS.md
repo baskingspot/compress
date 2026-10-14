@@ -658,8 +658,54 @@ three CLI text streams) and the CRC pins are the gates.
   runs the two references' own streams instead.
 - **Every decode test carries the sentinel overrun check** (the house rule):
   output pre-filled, bytes past the decoded length untouched.
-- **Fuzz is the fuzz-engineer's lane.** The corners worth a target, from the
-  register: T1's first-switch symbol 0, T5's last-metadata corner, T7's
+- **Fuzz is the fuzz-engineer's lane. Landed:** `fuzz.zig`'s eleven
+  targets, seeded from `golden.zig`'s vectors and the CLI's streams (nothing
+  generated is committed). The codec is decoder-only, so there is no
+  self-round-trip and no in-process reference encoder: the corpus's model
+  bytes *are* the round trip (the pinned CLI's own output, byte-exact), and
+  the differential available in-process is the one-shot against the streaming
+  `Reader` (`fuzzDifferential`: same verdict, same named class through
+  `sharedName`, same bytes, `§9.1`'s window cap, and T4's exact boundary).
+  The encoder half of the differential gap stays open until the encoder
+  milestone; `just brotli-oracle` is the external half. The targets:
+  `fuzzGoldenCorpus` (every vector at the exact cap, with slack, and one byte
+  short, the refusal classes pinned), `fuzzTruncation` (`§10`'s prefix rule,
+  both entry points), `fuzzCorruption` (the mutation taxonomy with the class
+  pinned wherever the wire rule fixes it), `fuzzDifferential`,
+  `fuzzReaderMachinery` (the consumer surface, the ring wrap,
+  `StreamTooLong`, the sticky end), `fuzzAmplification` (caps and the
+  zero-bit-command bomb: `bombStream`, eleven bytes declaring up to 16 MiB,
+  CLI-verified at its landing lengths), `fuzzBits` (`§1.5.1` against a
+  bit-at-a-time model), `fuzzHeaders` (the ladder and the invariants a parsed
+  `Header` must hold), `fuzzPrefixCodes` (both forms, the Kraft classes, the
+  table bound), `fuzzContextMaps`, and `fuzzDictionary` (the 121 transforms
+  against an independent model, `§8`'s word arithmetic against the model of
+  Appendix A/B, with the boundary pinned on both sides of transform 120). The
+  eight plain tests beside them run the whole corpus, the whole truncation
+  ladder, the bomb's MLEN boundary, the tree cap, the ring wrap and the
+  walk's `BadStreamStart`, the dictionary sweep (7,623 pairs) and the T6
+  measurement in `just test`, so a regression fails the suite before a fuzz
+  budget is spent. Every target caps its input, its output, and its call
+  count; a reader that neither serves nor fails is `error.PumpStalled`
+  (reported, never a timeout) — the bit seam's two hangs are that class.
+  One finding, recorded and not fixed here: `huffman.Tree.build` panics
+  ("integer does not fit in destination type", and undefined behavior in
+  ReleaseFast) on an over-subscribed length set whose Kraft sum exceeds the
+  15-bit scale, instead of returning `BadHuffmanCode` — the decoder's own
+  path never reaches it (`readComplexTree`'s `code_space` accumulator refuses
+  such a set first), so it is a public-API hazard under `decode.prefix`, not
+  a stream-reachable bug. `fuzzPrefixCodes` stays inside the contract the
+  decoder upholds. Gaps left open on purpose: the distance layer has no
+  target of its own (its arithmetic is exercised through the CLI-verified
+  `ndirect`/`npostfix`/ring vectors and the command stream, and pinned by
+  `distance.zig`'s unit tests); the layer targets feed arbitrary bytes to
+  the layers directly rather than through whole streams, so a layer bug that
+  only a real stream shape reaches is the whole-stream targets' to find; and
+  no target measures allocation, because the decoder allocates nothing (the
+  one-shot's region is a stack local and the reader's is the caller's
+  `Buffer`).
+- **Fuzz corners, from the register** (the targets' source list): T1's
+  first-switch symbol 0, T5's last-metadata corner, T7's
   simple-code widths, T6's error-or-difference rule, the walk's boundary (an
   over-end peek reaches the stream end through `rebase` — the pattern book's
   entry, `src/internal/AGENTS.md`), the `TooManyTrees` cap, and slice 2's
