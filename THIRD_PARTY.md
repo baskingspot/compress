@@ -59,6 +59,19 @@ and dependency with a license that is not ours.
   package's own two-pass construction, verified against that ceiling.
   Attribution: Copyright the Brotli Authors,
   https://github.com/google/brotli.
+- `src/brotli/dictionary.bin`, `src/brotli/dictionary_data.zig`,
+  `src/brotli/dictionary.zig`: the static dictionary (122,784 bytes) and the
+  121 word transforms, generated from RFC 7932's Appendix A hex and Appendix B
+  table by `scripts/brotli_dictionary_gen.py` — the vendored RFC text is the
+  only data source. The transforms' deduplicated representation (the
+  length-prefixed prefix/suffix pool, the pool-offset map, the
+  `[prefix id, elementary transform, suffix id]` triplets, and the
+  `cutOffTransforms` table) and the transform arithmetic (Ferment's case-flip
+  semantics, `BrotliTransformDictionaryWord`) follow google/brotli v1.2.0
+  (MIT) `c/common/transform.c`/`transform.h`. The generator and the port were
+  written from the RFC; the reference is the differential oracle. Attribution:
+  Copyright the Brotli Authors, https://github.com/google/brotli; the RFC's
+  authors for the data.
 - `src/flate/decode.zig` lineage: the two-level Huffman decode table (a
   9-bit primary table plus a chained chase for longer codes) follows the
   algorithm in zlib's `doc/algorithm.txt` (zlib license, studied), as used by

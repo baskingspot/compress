@@ -391,8 +391,8 @@ pub const context_mode_signed: Stream = .{
     .plain = "ABAB",
 };
 
-/// RFC 7932 §8 — a well-formed dictionary reference (the CLI decodes it to
-/// "Atime"); the interim DictionaryRequired until the dictionary port lands.
+/// RFC 7932 §8 — a well-formed dictionary reference: one literal 'A', then
+/// the dictionary word "time" (length 4, transform 0, the identity).
 /// Verified with the pinned CLI (brotli 1.2.0), which decodes to the plain
 /// bytes.
 pub const dictionary_word: Stream = .{
@@ -402,9 +402,86 @@ pub const dictionary_word: Stream = .{
     .plain = "Atime",
 };
 
-/// RFC 7932 §8 — a dictionary reference with copy length 3 (the CLI's
-/// FORMAT_DICTIONARY (-12)). Verified with the pinned CLI
-/// (brotli 1.2.0), which refuses it.
+/// RFC 7932 §8, Appendix B — transform 9 (["", FermentFirst, ""]) of the
+/// first four-byte word "time": "Time". Hand-built from the RFC's own
+/// tables and verified with the pinned CLI (brotli 1.2.0), which decodes to
+/// the plain bytes.
+pub const dictionary_ferment: Stream = .{
+    .bytes = &.{
+        0x62, 0x00, 0x00, 0x00, 0x44, 0x50, 0x08, 0x12, 0x26, 0x01, 0x01,
+    },
+    .plain = "Time",
+};
+
+/// RFC 7932 §8, Appendix B — transform 44 (["", FermentAll, ""]) over a
+/// three-byte UTF-8 sequence: the word "\xe2\x80\x99s" becomes
+/// "\xe2\x80\x9cS" (the third byte's `^ 5`, then the ASCII 's'). Verified
+/// with the pinned CLI (brotli 1.2.0), which decodes to the plain bytes.
+pub const dictionary_ferment_utf8: Stream = .{
+    .bytes = &.{
+        0x62, 0x00, 0x00, 0x00, 0x44, 0x50, 0x08, 0x12, 0xEA, 0x84, 0x0C,
+    },
+    .plain = "\xe2\x80\x9cS",
+};
+
+/// RFC 7932 §8, Appendix B — transform 73, the longest affix pair (" the "
+/// + " of the "): the word "time" becomes " the time of the ". Verified
+/// with the pinned CLI (brotli 1.2.0), which decodes to the plain bytes.
+pub const dictionary_affix: Stream = .{
+    .bytes = &.{
+        0x02, 0x02, 0x00, 0x00, 0x44, 0x50, 0x08, 0x12, 0x2C, 0x01, 0x09,
+    },
+    .plain = " the time of the ",
+};
+
+/// RFC 7932 §8, Appendix B — transform 54 (["", OmitFirst9, ""]) of the
+/// last 24-byte word (index 31 of 32): its first three Devanagari sequences
+/// are dropped. Verified with the pinned CLI (brotli 1.2.0), which decodes
+/// to the plain bytes.
+pub const dictionary_omit: Stream = .{
+    .bytes = &.{
+        0xC2, 0x01, 0x00, 0x00, 0x44, 0x50, 0x10, 0x13, 0xA1, 0xC6, 0x01,
+    },
+    .plain = "\xe0\xa4\xb0\xe0\xa4\xbf\xe0\xa4\xaf\xe0\xa4\xa4\xe0\xa4\xbe",
+};
+
+/// RFC 7932 §8, Appendix B — the identity transform of a 24-byte word (the
+/// longest length, the first word of its group): the reference's
+/// `cutOffTransforms[0]` fast path. Verified with the pinned CLI (brotli
+/// 1.2.0), which decodes to the plain bytes.
+pub const dictionary_identity_24: Stream = .{
+    .bytes = &.{
+        0xE2, 0x02, 0x00, 0x00, 0x44, 0x50, 0x10, 0x13, 0x90, 0x00,
+    },
+    .plain = "<script type=\"text/javas",
+};
+
+/// RFC 7932 §8, Appendix B — a transform that empties its word (OmitFirst9
+/// of a nine-byte word): the reference accepts it when the distance is
+/// above 120, so the command produces nothing and the next command's
+/// literal fills MLEN. Verified with the pinned CLI (brotli 1.2.0), which
+/// decodes to the plain bytes.
+pub const dictionary_empty: Stream = .{
+    .bytes = &.{
+        0x02, 0x00, 0x00, 0x00, 0x44, 0x50, 0x1D, 0x82, 0x48, 0xAC, 0x08, 0xB0,
+    },
+    .plain = "A",
+};
+
+/// RFC 7932 §8 — a dictionary reference whose transform id is 121: the
+/// CLI's FORMAT_TRANSFORM (-11) refusal. Verified with the pinned CLI
+/// (brotli 1.2.0, `brotli -d -v -c`), which refuses it.
+pub const dictionary_transform: Stream = .{
+    .bytes = &.{
+        0x62, 0x00, 0x00, 0x00, 0x44, 0x50, 0x08, 0x12, 0x2D, 0x01, 0x19,
+    },
+    .plain = "",
+};
+
+/// RFC 7932 §8 — a dictionary reference with copy length 3 ("The copy
+/// length for a static dictionary reference must be between 4 and 24"):
+/// the CLI's FORMAT_DICTIONARY (-12). Verified with the pinned CLI
+/// (brotli 1.2.0, `brotli -d -v -c`), which refuses it.
 pub const dictionary_length: Stream = .{
     .bytes = &.{
         0x62, 0x00, 0x00, 0x00, 0x44, 0x50, 0x24, 0x12, 0x50,
@@ -448,14 +525,14 @@ pub const ring_no_push_zero: Stream = .{
 
 /// RFC 7932 §8 — the maximum allowed distance is min(window size, produced): with
 /// WBITS 10 the window is 1008, so a distance of 1500 after 2000 produced
-/// bytes is a dictionary reference, not a window read (the CLI decodes
-/// 'A' × 2000 + 'lose'). Verified with the pinned CLI
-/// (brotli 1.2.0), which refuses it.
+/// bytes is a dictionary reference (the word "lose"), not a window read —
+/// the produced count alone would call it a window read. Verified with the
+/// pinned CLI (brotli 1.2.0), which decodes 'A' × 2000 + 'lose'.
 pub const window_bound: Stream = .{
     .bytes = &.{
         0xA1, 0x98, 0x3E, 0x00, 0x00, 0x11, 0x14, 0xE2, 0x05, 0xE8, 0xF8, 0x77,
     },
-    .plain = "",
+    .plain = "A" ** 2000 ++ "lose",
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):

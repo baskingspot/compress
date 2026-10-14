@@ -10,10 +10,10 @@
 //! slice instantiates `copyMatch` over contiguous segments and owns the wrap
 //! and the resumability.
 //!
-//! The dictionary port (§8's word table and 121 transforms) is its own
-//! layer: a distance past §8's maximum is detected here, and until the port
-//! lands a well-formed reference is `error.DictionaryRequired` — the
-//! dictionary-less build's name, which that layer replaces.
+//! The dictionary branch is §8's class boundary: a distance past the maximum
+//! allowed distance resolves through `dictionary.transformedWord` (the word
+//! table and the 121 transforms), and the transformed word writes like an
+//! insert — its *produced* length is what §9.3's MLEN accounting counts.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -23,6 +23,7 @@ const fastmem = @import("fastmem");
 
 const bits = @import("bits.zig");
 const context = @import("context.zig");
+const dictionary = @import("dictionary.zig");
 const distance = @import("distance.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
@@ -39,16 +40,13 @@ pub const Error = error{
     BadBlockLength,
     /// §8 — a static dictionary reference's copy length is outside 4..24.
     BadDictionary,
-    /// A well-formed §8 dictionary reference, refused until the dictionary
-    /// port lands: the port (the word table and the 121 transforms) is the
-    /// next layer, and this name goes with it.
-    DictionaryRequired,
 };
 
 /// The composed error set of the command stream for a bit source of `Bits`'s
-/// kind: the bit reader's refusals, this layer's names, and §4's.
+/// kind: the bit reader's refusals, this layer's names, §4's, and the
+/// dictionary layer's.
 pub fn Errors(comptime Bits: type) type {
-    return Bits.ErrorSet || Error || distance.Error;
+    return Bits.ErrorSet || Error || dictionary.Error || distance.Error;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,8 +418,18 @@ pub fn decodeMetaBlock(
         // element is not read either.
         if (pos == end) break;
 
-        if (command.copy_length > end - pos) return error.BadBlockLength;
-        pos = try applyCopy(Bits, br, header, &blocks, state, command, window, pos, window_size);
+        pos = try applyCopy(
+            Bits,
+            br,
+            header,
+            &blocks,
+            state,
+            command,
+            window,
+            pos,
+            end,
+            window_size,
+        );
     }
     assert(pos == end);
     return pos;
@@ -461,7 +469,11 @@ fn insertLiterals(
 
 /// §9.3, §4, §8 — the copy half of a command: the distance element (unless
 /// §5's implicit distance), §4's reconstruction, §8's window/dictionary
-/// class, and §10's match. Returns the position after the copy.
+/// class, and §10's match or dictionary word. Returns the position after the
+/// copy. `end` is the meta-block's end: the produced length — the copy length
+/// or the transformed word's — is checked against it before any write, since
+/// "the copy length, or the resulting dictionary word length would cause
+/// MLEN to be exceeded" is invalid (§9.3).
 fn applyCopy(
     comptime Bits: type,
     br: *Bits,
@@ -471,8 +483,11 @@ fn applyCopy(
     command: Command,
     window: []u8,
     pos: usize,
+    end: usize,
     window_size: u32,
 ) Errors(Bits)!usize {
+    assert(pos < end);
+    assert(end <= window.len);
     // §8 — "a maximum backward distance value, which is the minimum of the
     // window size and the number of uncompressed bytes produced": the
     // command's literals are already out, so they count.
@@ -504,14 +519,30 @@ fn applyCopy(
     if (resolved > max_allowed) {
         // §8 — a distance past the produced data "is treated as a reference
         // to a word in the static dictionary", and "the copy length for a
-        // static dictionary reference must be between 4 and 24". The word
-        // table and the transforms are the next layer; a well-formed
-        // reference is the interim refusal until they land.
-        if (command.copy_length < 4 or command.copy_length > 24) {
+        // static dictionary reference must be between 4 and 24".
+        if (command.copy_length < dictionary.min_word_len or
+            command.copy_length > dictionary.max_word_len)
+        {
             return error.BadDictionary;
         }
-        return error.DictionaryRequired;
+        var scratch: [dictionary.scratch_len]u8 = undefined;
+        const word = try dictionary.transformedWord(
+            &scratch,
+            resolved - max_allowed - 1,
+            command.copy_length,
+        );
+        // The reference's emptiness guard (`decode.c:2247`): a transform that
+        // empties the word is invalid when the distance code is at most 120.
+        // No RFC stream can reach it — the smallest emptying transform is
+        // OmitFirst4 (id 34), so an emptied word's word_id is at least
+        // 34 * 1024 — but the reference's reading is the port's.
+        if (word.len == 0 and resolved <= 120) return error.BadTransform;
+        if (word.len > end - pos) return error.BadBlockLength;
+        fastmem.copy(u8, window[pos..][0..word.len], word);
+        return pos + word.len;
     }
+
+    if (command.copy_length > end - pos) return error.BadBlockLength;
 
     // §4, §10 — "if distance code is not zero, and distance is not a static
     // dictionary reference, push distance to the ring buffer of last
@@ -529,8 +560,7 @@ fn applyCopy(
 /// Drive a whole stream through the layers for the golden tests: the stream
 /// header, each meta-block (entropy-free and compressed), and the last
 /// byte's zero fill. This is the one-shot's composition (`decompress`) in
-/// test form; it lands in `decode.zig` when that layer's dictionary half is
-/// ready.
+/// test form; it lands in `decode.zig` with the public surface.
 fn decodeStream(source: []const u8, target: []u8) !usize {
     var header: frame.Header = undefined;
     var state: State = .{};
@@ -775,6 +805,14 @@ test "command stream: the golden vectors decode byte-exact" {
         golden.cross_meta_block,
         golden.uncompressed_context,
         golden.ring_no_push_zero,
+        golden.dictionary_word,
+        golden.dictionary_ferment,
+        golden.dictionary_ferment_utf8,
+        golden.dictionary_affix,
+        golden.dictionary_omit,
+        golden.dictionary_identity_24,
+        golden.dictionary_empty,
+        golden.window_bound,
     };
     for (cases) |case| {
         var target: [4096]u8 = undefined;
@@ -789,11 +827,15 @@ test "command stream: the golden vectors decode byte-exact" {
 test "command stream: the CLI's own streams decode byte-exact" {
     // Generated by the pinned CLI (brotli 1.2.0) and stored with their
     // plaintext; the round trip is the encoder's own conformance evidence.
-    // The text at q5 and up references the dictionary (F6) and is the
-    // dictionary port's fixture, not this layer's.
+    // The text at q5 and up references the dictionary (F6): the encoder
+    // emits dictionary words only on text, at q4 and up, so the text rows
+    // are the dictionary port's live conformance streams.
     const cases = [_]golden.Stream{
         golden.cli_text_q1,
         golden.cli_text_q2,
+        golden.cli_text_q5,
+        golden.cli_text_q9,
+        golden.cli_text_q11,
         golden.cli_repeat_q5,
         golden.cli_repeat_q11,
         golden.cli_run_q9,
@@ -834,40 +876,18 @@ test "command stream: RFC 7932 §9.3's MLEN accounting refusals" {
     );
 }
 
-test "command stream: RFC 7932 §8's dictionary class" {
-    // A dictionary reference with a length in 4..24 is well-formed — the CLI
-    // decodes it to "Atime" — and is the interim refusal here until the
-    // dictionary port lands. A length outside 4..24 is the CLI's
-    // FORMAT_DICTIONARY (-12), a named error that stays.
+test "command stream: RFC 7932 §8's dictionary class refusals" {
+    // A length outside 4..24 is the CLI's FORMAT_DICTIONARY (-12), and a
+    // transform id above 120 the CLI's FORMAT_TRANSFORM (-11); both vectors
+    // were verified with the pinned CLI (`brotli -d -v -c`).
     var target: [4096]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectError(
-        error.DictionaryRequired,
-        decodeStream(golden.dictionary_word.bytes, &target),
-    );
     try testing.expectError(
         error.BadDictionary,
         decodeStream(golden.dictionary_length.bytes, &target),
     );
-
-    // The same class on real CLI output: its text streams at q5 and up
-    // reference the dictionary (measured over the 20 CLI vectors: q1 and q2
-    // never do, q5+ do on text and never on the repetitive inputs).
     try testing.expectError(
-        error.DictionaryRequired,
-        decodeStream(golden.cli_text_q5.bytes, &target),
-    );
-    try testing.expectError(
-        error.DictionaryRequired,
-        decodeStream(golden.cli_text_q11.bytes, &target),
-    );
-
-    // §8's other half: the maximum allowed distance is the *minimum* of the
-    // window size and the produced count. With WBITS 10 (window 1008) and
-    // 2000 bytes produced, a distance of 1500 is a dictionary reference —
-    // the produced count alone would call it a window read.
-    try testing.expectError(
-        error.DictionaryRequired,
-        decodeStream(golden.window_bound.bytes, &target),
+        error.BadTransform,
+        decodeStream(golden.dictionary_transform.bytes, &target),
     );
 }

@@ -172,10 +172,11 @@ stream header, the meta-block ladder, and the compressed header's completion),
 `context.zig` (the modes and the maps), `distance.zig` (the four-distance
 ring, the special codes, and the per-meta-block NPOSTFIX/NDIRECT tables),
 `command.zig` (the insert-and-copy alphabet, the three block switches, the
-context IDs, the distance element, and the copy machinery), `golden.zig` (the
-CLI-verified wire vectors and the test-side bit writer). Still to land:
-`decode.zig` (the one-shot and the shared decode state), `dictionary.zig` (the
-generated data and the transforms), `Reader.zig`.
+context IDs, the distance element, and the copy machinery), `dictionary.zig`
+(the §8 class's word fetch and transforms, over the generated
+`dictionary.bin` and `dictionary_data.zig`), `golden.zig` (the CLI-verified
+wire vectors and the test-side bit writer). Still to land: `decode.zig` (the
+one-shot and the shared decode state), `Reader.zig`.
 
 The command layer's shape, as landed: `decodeMetaBlock` takes a *linear*
 window — `[0..start)` is the stream's decoded prefix (the match history) and
@@ -190,6 +191,17 @@ pattern, so the overlap is a doubling run of `fastmem.copy` (the flate
 decoder's `copyMatch` shape). The literal context reads p1/p2 back out of the
 window, so a byte an uncompressed meta-block produced is context for the next
 compressed one with no extra state (§7.1, BR32).
+
+The §8 class boundary is `applyCopy`'s: a resolved distance above
+`min(window size, produced)` resolves through `dictionary.transformedWord`
+into a 38-byte scratch and writes like an insert, so §9.3's MLEN check is the
+*produced* length — the copy length for a window match, the transformed
+word's length for a dictionary reference (which can be shorter or longer than
+the copy length; the C detects the same overrun as a negative remaining
+length at the meta-block's end). That moved the copy's MLEN check below the
+distance read: a dictionary reference whose produced length fits is legal
+even when its copy length would not, and the read order matches the
+reference's (`ReadDistance` before the class branch).
 
 ## Register findings
 
@@ -237,20 +249,22 @@ not a decision.
   (`decode.c`: `BROTLI_STATE_HUFFMAN_CODE_*` → `METABLOCK_HEADER_2` →
   `CONTEXT_MODES` → `CONTEXT_MAP_1/2` → `TREE_GROUP`), and the interleaving is
   what makes "each count read needs its tree" true.
-- **F6 — the dictionary branch is the interim `DictionaryRequired`.** §8's
-  class boundary (a distance past `min(window size, produced)` is a dictionary
+- **F6 — the dictionary branch is closed; the class decodes.** §8's class
+  boundary (a distance past `min(window size, produced)` is a dictionary
   reference) and its length rule (4..24, else `BadDictionary`) are wired in the
-  command layer and pinned by CLI-verified vectors (`dictionary_word`,
-  `dictionary_length`, `window_bound` — the last proves the window half of the
-  minimum with WBITS 10 against 2000 produced bytes). A well-formed reference
-  is `error.DictionaryRequired` until the port lands; the name is the
-  dictionary-less build's, recorded in the notes, and the port replaces the
-  refusal with the word fetch. Measured over the 20 CLI vectors now in
-  `golden.zig` and a 60-case differential sweep (text / random / run / cycle /
-  mixed, 1..4096 bytes, q1..q4): the dictionary appears only on text, at q4
-  and up; the repetitive and incompressible shapes never reference it at any
-  quality. The port's fixtures are the three `cli_text_q5/q9/q11` streams
-  already stored, plus the two hand-built references.
+  command layer, and the word fetch — index/transform selection, the 121
+  transforms, the produced-length MLEN check — is `dictionary.zig`. The
+  interim `DictionaryRequired` name is gone. The measured split is test
+  coverage: the three `cli_text_q5/q9/q11` streams (slice 3's parked
+  refusals) decode byte-exact, `window_bound` proves the window half of the
+  minimum (WBITS 10, 2000 produced, distance 1500 -> the word "lose"), and
+  the port's sweep (56 CLI streams, 6 shapes x 8 qualities, 1.2 MB
+  compressed) decoded 5,381 dictionary words byte-exact: text at q4 and up
+  carries hundreds to 1,166 references per stream (q11 on the RFC text:
+  1,166 — the research's own figure), q1..q3 carry a handful or none, and
+  random and RLE shapes never reference it at any quality. The `-v` reasons
+  pin the refusals: `dictionary_length` is FORMAT_DICTIONARY (-12),
+  `dictionary_transform` (transform id 121) FORMAT_TRANSFORM (-11).
 - **F7 — both MLEN overruns report `FORMAT_BLOCK_LENGTH_2` on one-shot-sized
   streams.** F4's collapse to one name is exact: the C's
   `FORMAT_BLOCK_LENGTH_1` fires only when the ring buffer flushes mid-meta-block
@@ -340,6 +354,19 @@ The data is generated, never hand-copied: Appendix A's hex parses mechanically
 a commit-time script under `scripts/` (the flate-oracle pattern) — committed
 once, never re-run silently, never fetched at build time.
 
+**Landed (slice 4):** `scripts/brotli_dictionary_gen.py` parses the vendored
+RFC and writes two committed artifacts: `src/brotli/dictionary.bin` (Appendix
+A's 122,784 DICT bytes, embedded by `dictionary.zig` via `@embedFile`) and
+`src/brotli/dictionary_data.zig` (NDBITS, the pool, the map, the 121 triplets,
+and the cut-off table, as Zig source). The script asserts every check value
+the RFC prints (DICT 122,784/0x5136cb04, the flat sequence 648/0x3d965f81),
+the DOFFSET recursion's end (`DOFFSET[24] + 24 * 32 = 122,784`), the affix
+bound (13, transform 73), and the cut-off table (`{0, 12, 27, 23, 42, 63, 56,
+48, 59, 64}`, *computed* from the parsed Appendix B, not copied). Its output
+is `zig fmt` clean; `ruff`/`ty` cover it with the other scripts. The generated
+`dictionary_data.zig` is regenerated byte-identically on every run (checked
+by re-running the generator and diffing).
+
 | element | bytes | CRC-32 (the RFC's own claim) |
 |---|---|---|
 | DICT (Appendix A) | 122,784 | 0x5136cb04 |
@@ -359,7 +386,46 @@ other. The transformed-word bound is 38 bytes (T8), and the `word_id`
 arithmetic — `word_id = distance - (max allowed distance + 1)`, `index =
 word_id % NWORDS[length]`, `transform_id = word_id >> NDBITS[length]` (§8) —
 plus the Ferment UTF-8 case-flip semantics are where a dictionary bug hides;
-the seven dictionary-bearing goldens and the CRC pins are the gates.
+the dictionary-bearing goldens (the eight hand-built vectors below plus the
+three CLI text streams) and the CRC pins are the gates.
+
+**Landed, and where the shape went past the sketch:**
+
+- The pool's *order* is first use in Appendix B, not the C's own order (the
+  reference's pool order is hand-chosen — no generator in google/brotli
+  produces it). Only the transform semantics are pinned, and the
+  `dictionary_data.zig` header says so; the triplet *types* are the C's
+  numbering (`transform.h`), so the flat-form CRC test maps them back through
+  `rfcType` and proves the generated tables encode Appendix B's list exactly,
+  in order. The landing also parsed the C's `kPrefixSuffix`/map/triplets and
+  compared all 121 `(prefix, type, suffix)` triples with ours: zero
+  mismatches, and the C's pool is a permutation of ours (same 50 strings).
+  `dictionary.bin` is byte-identical to the C's `c/common/dictionary.bin`.
+- The 121 triplets' type bytes are validated at comptime (`<= OmitFirst9`);
+  the pool offsets come from the generated map, so a bad offset is a compile
+  error, not a misdecode.
+- `cut_off_transforms[0]` (0) is the identity fast path, as the C's
+  `decode.c` uses it; the other nine entries are the encoder's cut-off ids,
+  carried because the table is the reference's shape and the generator
+  *computes* it from Appendix B.
+- The Ferment guards: the RFC's `Ferment` checks `pos + 1 < word_len` /
+  `pos + 2 < word_len` before the flip; the C's `ToUpperCase` drops them and
+  writes one or two bytes past the word into its ring-buffer slack, where the
+  suffix copy (or the next word) overwrites them. The emitted bytes agree, so
+  the port implements the RFC's guarded form — the 38-byte scratch is never
+  written past its returned length.
+- The emptiness guard (T8) landed as the C reads it: `word.len == 0 and
+  distance <= 120` is `BadTransform`. For RFC streams the guard is
+  unreachable (the smallest emptying transform is OmitFirst4, id 34, so an
+  emptied word's `word_id` is at least 34 * 1024 and its distance above
+  120); the *acceptance* half — an emptied word at a distance above 120
+  produces nothing — is pinned by `dictionary_empty`.
+- The transform arithmetic is verified twice: `dictionary.zig`'s unit tests
+  cover the classes against Appendix B, and the landing sweep ran every
+  (length 4..24) x (transform 0..120) pair — 2,541 streams — through the
+  pinned CLI, then through `transformedWord`, byte-for-byte, and 56 real CLI
+  streams (6 shapes x 8 qualities) through the whole decoder (5,381
+  dictionary words; F6).
 
 ## Testing
 
@@ -398,7 +464,20 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   stream-scoped ring); `uncompressed_context` (§7.1's p1 across a meta-block
   boundary); and 20 CLI-generated streams (4 inputs × q1/q2/q5/q9/q11) of
   which 17 decode byte-exact here and 3 carry dictionary references (F6). The
-  Lut0/Lut1/Lut2 tables are pinned by the RFC's own CRCs (§7.1).
+  Lut0/Lut1/Lut2 tables are pinned by the RFC's own CRCs (§7.1). **Slice 4**
+  adds the dictionary's set, all hand-built from Appendix A/B and verified
+  with the pinned CLI: `dictionary_word` (the literal 'A' + "time"),
+  `dictionary_ferment` (transform 9, FermentFirst), `dictionary_ferment_utf8`
+  (transform 44, FermentAll over a three-byte sequence), `dictionary_affix`
+  (transform 73, the longest affix pair), `dictionary_omit` (transform 54,
+  OmitFirst9 of the last 24-byte word), `dictionary_identity_24` (the
+  identity fast path at the longest length), `dictionary_empty` (an emptied
+  word accepted at a distance above 120), `dictionary_transform` (transform
+  id 121, the CLI's FORMAT_TRANSFORM), and the now-decoding `window_bound`
+  (min(window, produced) with WBITS 10). `dictionary.zig`'s unit tests pin
+  the two data CRCs, the DOFFSET recursion, the word selection, the
+  transform classes (including both Ferment UTF-8 paths), and §8's 38-byte
+  bound over all 2,541 (length, transform) pairs.
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
@@ -419,7 +498,12 @@ the seven dictionary-bearing goldens and the CRC pins are the gates.
   the MLEN accounting's boundary (the ignored copy, the two overruns), §4's
   zero-resolution `BadDistance`, §8's class boundary and length rule, the
   ring's push exclusions (symbol 0, dictionary), the four context IDs, and
-  `copyMatch`'s overlap (distance < length, the one-byte run).
+  `copyMatch`'s overlap (distance < length, the one-byte run). Slice 4's
+  surfaces: the `word_id` arithmetic's boundaries (the last valid word_id,
+  transform 121, index wrap), the transform ids' classes (the two Ferment
+  UTF-8 paths, the omit overruns into the empty string), the emptiness guard,
+  the transformed-length MLEN overrun, and a hostile `dictionary.bin` is not
+  a surface — the data is comptime and CRC-pinned, not input.
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
   and `just check-baseline` the portable targets.
 
@@ -494,5 +578,6 @@ Collected for the review; each is also marked **[sketch call]** above.
 
 google/brotli v1.2.0 (MIT) and andybalholm/brotli v1.2.6 (MIT) were read and
 run as oracles during research; the RFC's appendices are the data source for
-the dictionary and the transforms. Attribution lands in `THIRD_PARTY.md` with
-the port.
+the dictionary and the transforms. Attribution landed in `THIRD_PARTY.md` with
+the port: the RFC's appendices are the data source, the C reference the
+representation, and `scripts/brotli_dictionary_gen.py` the generator.
