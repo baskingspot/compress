@@ -2,11 +2,11 @@
 
 zlib streams ([RFC 1950][rfc1950]) for Zig: a 2-byte header, a DEFLATE body, and
 a big-endian Adler-32 trailer. The compression is [flate](../flate/README.md)'s
-(RFC 1951); this package adds the framing, the checksum, and `std.Io` streaming.
-It is the `zcompress.zlib` namespace. It uses `std`, `fastmem`, and `src/flate/`
-(copy `src/zlib/` out with `src/flate/` and `src/internal/`), allocates nothing,
-and takes caller-owned buffers. The spec is vendored at
-`docs/research/specs/rfc1950-zlib.txt`.
+(RFC 1951); this package adds the framing, the preset dictionary (§2.2), the
+checksum, and `std.Io` streaming. It is the `zcompress.zlib` namespace. It uses
+`std`, `fastmem`, and `src/flate/` (copy `src/zlib/` out with `src/flate/` and
+`src/internal/`), allocates nothing, and takes caller-owned buffers. The spec
+is vendored at `docs/research/specs/rfc1950-zlib.txt`.
 
 ## Usage
 
@@ -24,7 +24,27 @@ fn roundTrip(gpa: std.mem.Allocator, source: []const u8) !void {
 
     const plain = try gpa.alloc(u8, source.len);
     defer gpa.free(plain);
-    const n = try zlib.decode.decompress(stream, plain);
+    const n = try zlib.decode.decompress(stream, plain, null);
+    std.debug.assert(std.mem.eql(u8, source, plain[0..n]));
+}
+```
+
+A preset dictionary (§2.2 FDICT) is raw caller bytes, fed to the compressor
+before any output and pre-seeding the decoder's 32 KiB window. The header's
+DICTID is the Adler-32 of the whole slice:
+
+```zig
+// dict: the dictionary bytes, both directions. A dictionary longer than
+// 32 KiB contributes only its last 32 KiB to the window; DICTID names the
+// whole, so decode needs the full slice.
+fn withDictionary(gpa: std.mem.Allocator, dict: []const u8, source: []const u8) !void {
+    const target = try gpa.alloc(u8, zlib.encode.maxCompressedLength(source.len));
+    defer gpa.free(target);
+    const stream = target[0..try zlib.encode.compress(source, target, .{ .dict = dict })];
+
+    const plain = try gpa.alloc(u8, source.len);
+    defer gpa.free(plain);
+    const n = try zlib.decode.decompress(stream, plain, dict);
     std.debug.assert(std.mem.eql(u8, source, plain[0..n]));
 }
 ```
@@ -41,7 +61,7 @@ fn compressTo(out: *std.Io.Writer, bytes: []const u8) !void {
 
 fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
     var buffer: zlib.Reader.Buffer = undefined; // 65,536 bytes
-    var r: zlib.Reader = .init(in, &buffer);
+    var r: zlib.Reader = .init(in, &buffer, null);
     _ = r.reader.streamRemaining(out) catch |err| switch (err) {
         error.ReadFailed => return r.err.?, // BadHeader, WrongChecksum, ...
         error.WriteFailed => return error.WriteFailed,
@@ -56,15 +76,17 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 ## API
 
 ```zig
-// One-shot
+// One-shot. `dict` is the stream's preset dictionary or `null` (§2.2): on
+// encode it sets FDICT and writes the Adler-32 of the whole slice as DICTID;
+// on decode it is checked against the header's DICTID before any body byte.
 zlib.encode.Level          // flate's level type: .fast (default), .@"0" to .@"9", .ratio
-zlib.encode.Options        // struct { level: Level = .fast }
+zlib.encode.Options        // struct { level: Level = .fast, dict: ?[]const u8 = null }
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize      // the stream's length
-zlib.decode.decompress(source: []const u8, target: []u8) DecompressError!usize
+zlib.decode.decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize
 zlib.decode.DecompressError = flate.decode.DecompressError || error{
-    BadHeader, DictionaryRequired, WrongChecksum,
+    BadHeader, DictionaryRequired, DictionaryMismatch, WrongChecksum,
 };
 
 // Streaming: write through `w.writer`, read through `r.reader`
@@ -74,10 +96,12 @@ zlib.Writer.finish(w: *Writer) Io.Writer.Error!void
 zlib.Writer.streamAll(in: *Io.Reader, out: *Io.Writer, options: Options)
     error{ ReadFailed, WriteFailed }!usize            // input bytes consumed
 zlib.Reader.Buffer = [65536]u8
-zlib.Reader.init(input: *Io.Reader, buffer: *Buffer) Reader
+zlib.Reader.init(input: *Io.Reader, buffer: *Buffer, dict: ?[]const u8) Reader
 zlib.Reader.err: ?Error    // the cause once `r.reader` returns error.ReadFailed
-zlib.Reader.Error = flate.Reader.Error || error{ BadHeader, DictionaryRequired, WrongChecksum };
-zlib.Reader.streamAll(in: *Io.Reader, out: *Io.Writer)
+zlib.Reader.Error = flate.Reader.Error || error{
+    BadHeader, DictionaryRequired, DictionaryMismatch, WrongChecksum,
+};
+zlib.Reader.streamAll(in: *Io.Reader, out: *Io.Writer, dict: ?[]const u8)
     error{ ReadFailed, WriteFailed }!usize            // decoded bytes written
 ```
 
@@ -95,12 +119,26 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   small, `compress` returns `error.BufferTooSmall` and the target's contents are
   unspecified. `decompress` treats `target` as a cap: a stream that decodes to
   more returns `error.BufferTooSmall`. Neither writes past `target`.
+- **Dictionaries.** The preset dictionary is raw caller bytes, both
+  directions (§2.2). On encode it is fed to the compressor before any output
+  (the window's oldest bytes) and named by the header's DICTID; on decode it
+  pre-seeds the window, and a distance may reach into it until the output
+  pushes it out of the 32 KiB window. A dictionary longer than 32 KiB
+  contributes only its last 32 KiB to the window, while DICTID names the
+  whole — supply the full slice on decode, or the Adler-32 compare fails. The
+  ADLER32 trailer covers the output excluding the dictionary. With FDICT
+  clear the stream names no dictionary and a supplied `dict` is unused; with
+  FDICT set and `dict` null the decode fails `DictionaryRequired` before any
+  body byte, and a dictionary whose Adler-32 is not DICTID fails
+  `DictionaryMismatch`.
 - **Corrupt input.** Decoding returns an error at the first invalid byte:
   `Truncated` (the input ends early, empty input included), `BadHeader` (CM is
   not 8, CINFO is above 7, or `CMF*256 + FLG` is not a multiple of 31),
-  `DictionaryRequired` (FDICT is set), `WrongChecksum` (the Adler-32 does not
-  match), or one of flate's errors for a malformed body (`InvalidBlockType`,
-  `InvalidCode`, `InvalidMatch`, and so on). FLEVEL is ignored.
+  `DictionaryRequired` (FDICT is set and `dict` is null), `DictionaryMismatch`
+  (`dict`'s Adler-32 is not the header's DICTID), `WrongChecksum` (the
+  Adler-32 does not match), or one of flate's errors for a malformed body
+  (`InvalidBlockType`, `InvalidCode`, `InvalidMatch`, and so on). FLEVEL is
+  ignored.
 - **The checksum is verified last.** The Adler-32 is compared after the body is
   decoded, so when `WrongChecksum` arrives the output already exists: treat
   output as unverified until decoding succeeds. A streaming caller must read to
@@ -121,14 +159,14 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   `decode.decompress` and `Reader.streamAll` use about 68 KiB. `Writer.streamAll`
   peaks near 288 KiB. A stack-allocated `Writer.Buffer` adds 96 KiB and a
   `Reader.Buffer` 64 KiB; heap-allocate them on a small stack.
-- **Output.** The encoder is deterministic: CMF is always `0x78` (deflate, 32 KiB
-  window), FDICT is never set, and FLEVEL follows the level (`encode.flgFor`).
-  The default header is `78 9c`; the empty stream is `78 9c 03 00 00 00 00 01`.
+- **Output.** The encoder is deterministic: CMF is always `0x78` (deflate,
+  32 KiB window), FLEVEL follows the level (`encode.flgFor`), and FDICT is set
+  exactly when `options.dict` is, with DICTID the Adler-32 of the whole
+  dictionary (most-significant byte first); otherwise FDICT is never set. The
+  default header is `78 9c`; the empty stream is `78 9c 03 00 00 00 00 01`.
 
 ## Limitations
 
-- No preset dictionaries. A stream with FDICT set returns `DictionaryRequired`
-  before any body byte is decoded, and the encoder never sets FDICT.
 - `.ratio` is not implemented. `compress` returns `error.Unimplemented`, and a
   `Writer` made with it fails every write and `finish`.
 - The encoder writes fixed-Huffman and stored blocks only, and `.@"1"` to `.@"9"`

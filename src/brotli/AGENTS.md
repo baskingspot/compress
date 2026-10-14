@@ -127,7 +127,11 @@ marked **[sketch call]** and collected at the end.
   dictionaries) are extension surfaces: a stream encoded with one is not an
   RFC 7932 stream, and its distances fall past the dictionary space and fail
   naturally (`BadDictionary`/`BadDistance`), so no dedicated refusal surface is
-  needed.
+  needed. The dictionary milestone verified the refusal live
+  (`dictionary-notes.md §5.2`: the CLI 1.2.0's `-D` stream decodes with `-D`,
+  fails without it, and fails here with the natural distance refusal) and lands
+  no brotli dictionary API; the milestone row in `docs/zcompress-plan.md`
+  records the negative.
 
 - **The prefix-code layer owns both forms and both Kraft rules (§3.4, §3.5).**
   `huffman.zig` reads the simple form (NSYM 1..4, ALPHABET_BITS as the width

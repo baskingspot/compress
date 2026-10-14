@@ -320,6 +320,44 @@ cost dominating the row — the brotli decode perf wave owns the
 diagnosis). The zstd rows re-measured at the same revision moved within
 noise — the brotli decoder cost them nothing.
 
+M7 — dictionaries, consume-first. zstd dictionaries (RFC 8878 §5): the
+formatted dictionary parsed at setup (`zstd.Dictionary.parse`, zero-copy over
+the caller's file bytes; `initRaw` for format-free content) and handed to the
+decoder (the seeded entropy tables and repcodes, the content as preset
+history with §5's expiry boundary enforced fail-closed) and the encoder
+(`encode.Options.dict`, the `repeat_valid` seats the M5 register recorded,
+the parity target `zstd -D dict -1`); then the zlib preset dictionary (RFC
+1950 §2.2 FDICT + the 32-KiB flate preset window, both directions,
+`dict: ?[]const u8`, the flate preset-history seam). gzip gains nothing (RFC
+1952 has no dictionary concept) and brotli gains nothing (the static
+dictionary already ships; the custom-dictionary path is an extension surface
+the decoder refuses naturally) — both negatives recorded in the research.
+Training is not a dependency: the dictionary file is an input; the `zstd` CLI
+trains (`--train`, fastCover, verified).
+The research is `docs/research/dictionary-notes.md` (the `DD`/`DE`/`ZL`
+matrices, the `DT` divergence rows, the `DQ` register with the API sketch
+options and recommendations); the API sketches are the dictionary sections of
+`src/zstd/README.md`, `src/zlib/README.md`, and `src/flate/README.md`,
+written first, with the `zstd.Dictionary` type, the third-parameter decode
+shape, and the fail-closed expiry boundary the review's decision points. The
+slices land decode-with-dictionary, then encode-with-dictionary, then the
+zlib preset.
+Acceptance: `just test` and `just lint` green; the zstd dictionary oracle
+lane green (decode: the CLI-trained dictionaries round-trip byte-exact both
+directions against the CLI's `-D` and klauspost's `WithDecoderDicts`, the
+mismatch matrix against the C's own `cli-tests/dictionaries` pins, the
+incomplete-statistics fixtures (`zero-weight-dict`,
+`http-dict-missing-symbols`) accepted, the expiry-boundary fixtures pinned
+with the CLI's verdicts recorded; encode: `zstd -D dict -1` byte-parity on
+the corpus shapes and the `-D` frames' decode through the CLI and this
+decoder); the zlib dictionary rows green in the zlib and flate oracle lanes
+(the four mismatch cases from the research as the error-name pins);
+`just check-baseline` green; the fuzz wave's dictionary targets (the C's
+`dictionary_*` fuzz shapes: parse, decode, round trip, raw round trip); a
+fleet run committed with the dictionary rows (the trained-dictionary corpus
+shapes, decode and encode arms); the closing review's blockers fixed and
+pinned by tests.
+
 ## Decisions made
 
 - Zig 0.16.0 only (2026-10-08). Revisit at 0.18: LLVM 23 restores loop
@@ -352,5 +390,3 @@ noise — the brotli decoder cost them nothing.
 - flate dynamic-Huffman ratio mode (OQ1): after the fast path wins —
   `Level.ratio` reserves the seat with `error.Unimplemented`, never silent
   aliasing.
-- flate preset dictionaries (OQ6): deferred; the decoder surface does not
-  preclude a dictionary entry point later.

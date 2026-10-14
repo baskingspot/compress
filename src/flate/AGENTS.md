@@ -33,8 +33,15 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   gives up history, which is the full 32 KiB once that much has been emitted.
   `rebase` emits all buffered input except the last `preserve` bytes and never
   discards any.
-- Preset dictionaries are deferred and undesigned (OQ6); nothing here precludes
-  an entry point.
+- Preset dictionaries are designed in the M7 sketch (OQ6 retired): the decode's
+  history region gains a caller-owned prefix (`dict: ?[]const u8` on
+  `decode.decompress`, `Reader.init`, and `Reader.streamAll`), and the encoder
+  pre-fills its table from the dictionary (`encode.Options.dict`; the density
+  is the measured choice — the C inserts every position at every level, Go's
+  level-1 skips the pre-hash — `dictionary-notes.md §4`, DQ6/DT7). The caller
+  vouches for the bytes on both sides: raw flate carries no identifier; zlib's
+  FDICT/DICTID is the checked form and drives this seam through
+  `framing.initReader`.
 
 ### Contracts the containers rely on
 
@@ -52,6 +59,10 @@ touching one.
   poisoned `Writer`, `error.ReadFailed` from `Writer.streamAll`.
 - A contiguous read the window cannot hold is `error.ReadFailed` with
   `err == .StreamTooLong`, never an assert.
+- The preset-history parameter. `decode.decompress`, `Reader.init`, and
+  `Reader.streamAll` take `dict: ?[]const u8`; zlib's `framing.zig` threads
+  its own through, and gzip has no dictionary concept. Run the flate and zlib
+  oracles after touching the two-region history.
 
 ### Checksum hook
 

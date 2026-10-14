@@ -48,11 +48,15 @@ writer will instantiate `internal.writer.VTable`.
   one frame and ignores what follows. Empty-input, skippable-frame, and
   trailing-garbage behavior is the README's and follows the CLI. A skippable
   Frame_Size is streamed past, never staged (gzip's XLEN rule).
-- **Dictionaries are refused, never skipped (OQ4, T11).** A nonzero
-  Dictionary_ID_Flag is `DictionaryRequired` at the first Dictionary_ID byte,
-  raw-content dictionaries included: §2 requires an unambiguous error for an
-  unsupported parameter (the zlib FDICT precedent). No dictionary entry point
-  exists; revisit if a use case lands.
+- **Dictionaries are consumed through a parse-once value (OQ4, T11 retired;
+  "The dictionary" below).** The M4 posture was refusal — `DictionaryRequired`
+  at the first Dictionary_ID byte, raw-content dictionaries included, §2's
+  unambiguous-error rule and the zlib FDICT precedent. The dictionary
+  milestone lands the entry point: `zstd.Dictionary` parses a formatted (§5)
+  or raw dictionary once, and both directions take `?*const Dictionary`.
+  `DictionaryRequired` keeps its meaning (no dictionary supplied); a supplied
+  dictionary whose ID does not match the frame's is `DictionaryMismatch` (the
+  C's own label, `zstd_decompress.c:716-719`).
 - **The checksum rides the block emission funnel (OQ7, T8).**
   Decoded bytes reach XXH64 exactly once, in order, with no container buffer.
   RLE and Compressed blocks fold in `frame.State.recordBlock`, handed exactly
@@ -369,6 +373,149 @@ sets can still hit the deliberate differences (TE8, TE11 below).
   under the window; the 1-MiB files windowed (descriptor `0x48`, 512 KiB) in 8
   blocks of 128 KiB. The target byte class is the CLI's; the TE rows are the
   only deliberate departures.
+
+## The dictionary (RFC 8878 §5; the M7 sketch)
+
+The dictionary milestone consumes dictionaries, never trains them. The
+research is `docs/research/dictionary-notes.md` (`dict-notes` below): its
+`DD`/`DE`/`ZL` matrices are the requirements, its `DT` rows the divergences,
+its `DQ` register the API questions, and its §11 the milestone row. The
+dictionary file is an input — the `zstd` CLI trains (`--train`, fastCover,
+verified live) — and nothing here depends on a trainer (DQ7: an in-repo one
+is a separate follow-up with its own oracle problem) **[sketch call 10]**. The
+negatives are the research's §5: gzip has no dictionary concept, and brotli's
+custom-dictionary path stays without an API **[sketch call 9]** (`dict-notes
+§5.2`; the brotli register's OQ7 row records the live verification). The
+slices land decode-with-dictionary first, then encode-with-dictionary, then
+the zlib preset (`dict-notes §11`).
+
+**The shape (DQ1-DQ4).** `zstd.Dictionary` is a parse-once, zero-copy,
+caller-owned value **[sketch call 2]** (the name sits at the namespace level:
+both directions take it). `Dictionary.parse(source)` reads the formatted form:
+the `0xEC30A437` LE magic, the Dictionary_ID, the entropy tables in §5's
+order (literals Huffman, offsets FSE, match lengths, literal lengths), the 12
+repcode bytes, then the content. `Dictionary.initRaw(content)` is the §5 raw
+form: content only, the default {1,4,8} seeds, no ID (the C's shape; DT5 —
+klauspost's ID-assigning raw form is not ported) **[sketch call 5]**. The
+value borrows `source` and carries both directions' tables — the decode
+side's three `fse.Table`s and the literals `Tree`/`DecodeTable`, the encode
+side's three `fse_compress.Table`s and the `huff0_compress.Table`, the
+repcodes, and the content slice — about 21 KiB, comptime-sized, no heap.
+`decode.decompress` takes `dict: ?*const Dictionary` as its third parameter
+and `Reader.init`
+plus the four pumps as their last **[sketch calls 1, 3]**; `encode.Options`
+gains `dict: ?*const Dictionary = null`; `Writer` and `Writer.streamAll`
+thread the options through unchanged. The migration is compile-checked:
+every existing callsite adds `, null`. The decode error sets gain
+`DictionaryMismatch` (the `decode.zig` and `Reader.zig` comptime vocabularies
+fail the build until both lists and the README's are updated);
+`DictionaryRequired` keeps its meaning.
+`Dictionary.parse`'s own error vocabulary is **[sketch call 4]**, and
+`maxCompressedLength` gains 4 bytes for the DID field **[sketch call 8]**.
+
+**The decode load (§2.1; DD1-DD12).** The parse reuses the landed readers in
+the C's order: `huff0.readTree` for the literals tree, `fse.readDescription`
+×3 with the caps (31/8, 52/9, 35/9), then the 12 repcode bytes checked
+nonzero and ≤ the content size (DT2: the references enforce the content size;
+§5's word is "dictionary size", and the content reading is the only one
+consistent with the trainer's output), then the content. Incomplete
+statistics are legal and accepted (DD11): the C through v1.5.5 errored on
+them, v1.5.6+ does not, and the format has no version field (DT6). The load
+seeds exactly the seats `frame.State.init` resets today (`frame.zig:395-397`:
+`literals.has_table`, `sequences.tables`, `sequences.repeat_offsets`) plus
+the content; nothing re-parses per frame or block (DD12). The content is
+preset history: `sequences.decode`'s single history region becomes two (the
+caller's dictionary content, then the output), and the addressable span
+follows §5 — the whole dictionary while the frame's decoded total is ≤
+Window_Size, the output's last Window_Size bytes after. That boundary is DT1:
+no reference enforces it exactly (the C's whole-buffer decoder checks only
+the history it holds, `zstd_decompress_block.c:930-933`; its streaming
+decoder ends dictionary access by buffer adjacency — DT8 names which C path
+a fixture cites). Ours is fail-closed, the T12 posture: `OffsetTooFar` at the
+reach **[sketch call 6]**, pinned by the oracle's hand-built frames with the
+CLI's verdicts recorded. A supplied dictionary whose ID matches decodes
+whatever the ID is: the reserved ranges are not enforced, since a decoder
+cannot know the registry **[sketch call 7]**.
+
+**The encode side (DE1-DE11).** `ZSTD_loadCEntropy`'s promotion rules are
+the contract (`dict-notes §3.1`): the literals tree is `repeat_valid` only on
+256 symbols with no zero weights; each FSE table only on full coverage with
+no zero counts; the offsets table must represent every offset up to
+`dictContentSize + 128 KiB`. A check-state table is never consulted at the
+fast level (facebook/zstd issue #3724), which the landed
+`sequences_compress.State.repeat_valid` seat already models. The repcodes
+seed from the dictionary's 12 bytes; the content is matchable history — the
+natural port is the two-region form (a pre-filled table over dictionary
+positions, candidates verified against the caller's dictionary slice), with
+the fill density the parity variable (`dict-notes §3.2`: the CLI's `-D` path
+is dtlm_full, the first candidate). The window and size class are sized from
+`srcSize + dictContentSize` (`Params.forSource`'s one-line seat), so the
+one-shot never expires the dictionary; the streaming `Writer` must stop
+reaching into it exactly at §5's boundary (DE6). The frame writes the DID in
+the smallest 1/2/4-byte form (DE8); there is no suppression knob — the
+honest form (`dict-notes §3.4`). The level-1 with-dictionary byte class is
+`dict-notes §3.5`: Treeless literals from the 6-literal floor, Repeat while
+valid and nbSeq < 1000, FSE above; the parity target is `zstd -D dict -1`,
+a new target, not an extension of `zstd -1`.
+
+**The test plan (the oracle rows, `dict-notes §8`).** The CLI trains the
+fixtures (`zstd --train -r <dir>` over the corpus shapes); the dict files and
+the CLI-generated frames land in `golden.zig` with the CLI's verdict recorded
+beside each. Decode: our decode of CLI `-D` frames against `zstd -D dict -d`
+and klauspost's `WithDecoderDicts`, byte-exact both directions; the mismatch
+matrix (no dict, wrong dict, raw dict) against the C's
+`tests/cli-tests/dictionaries/dictionary-mismatch.sh` pins; the
+incomplete-statistics fixtures (`zero-weight-dict`,
+`http-dict-missing-symbols`) accepted; the DT1 expiry fixtures (the T12
+methodology). Encode: `zstd -D dict -1` byte-parity on the corpus shapes,
+with `zstd -t` and our own decoder verifying every frame. The zlib rows are
+`src/zlib/AGENTS.md`'s.
+
+**The fuzz shapes (`dict-notes §8`).** The C's own targets are the model
+(`tests/fuzz/dictionary_{decompress,loader,round_trip,stream_round_trip}.c`,
+`raw_dictionary_round_trip.c`, and `invalidDictionaries.c`'s parse vectors): a
+`Dictionary.parse` target (no input may crash it; a parsed dictionary decodes
+its matching frames), a decode-with-dictionary target (the one-shot and the
+Reader agree), and the round-trip targets with and without a dictionary. Handed
+to the fuzz lane with the slices.
+
+**Sketch calls, collected for the review** (the M6 pattern; each is also
+marked above where it occurs):
+
+1. **The third parameter over a decode options struct (DQ2).** One form, no
+   duplicate names, and the compile-checked migration — the README carries the
+   reasoning. An options struct on decode is heavier than a single optional
+   pointer and still needs the streaming shape decided separately.
+2. **`Dictionary` sits at the namespace level.** The barrel rule reads "each
+   namespace exposes exactly `{Reader, Writer, encode, decode}`"; `Dictionary`
+   is the shared value type both directions take, not a fifth entry point — a
+   `Dictionary` under `decode` or `encode` would make the other reach across.
+   Matt's call whether the rule wants the type spelled `zstd.decode.Dictionary`
+   instead.
+3. **The pumps take the dictionary too.** `dict-notes DQ2` names `decompress`
+   and `Reader.init`; a pump without the parameter cannot decode a dictionary
+   stream, and a second pump family would double the surface.
+4. **`Dictionary.parse`'s error vocabulary.** `Truncated`,
+   `BadDictionaryMagic`, `InvalidDictionaryId` (DT4: ID 0 is rejected at
+   parse; the C is lenient), `InvalidDictionaryRepcode`, plus the reused
+   `MalformedHuffmanWeights` and `MalformedFseTable` from the shared readers.
+5. **`initRaw` is infallible** (the task's shape) and does not enforce §5's
+   8-byte floor; the C's raw path accepts shorter content too. No ID, ever
+   (DT5).
+6. **The expiry boundary is fail-closed (DT1).** No reference enforces §5's
+   rule as written; the oracle's first job pins ours against the C's lenient
+   path with the divergence named (DT8: which C path each fixture cites).
+7. **The reserved ID ranges are not enforced (DT3).** A supplied dictionary
+   whose ID matches decodes whatever the ID is; the encoder never chooses a
+   reserved ID itself, and a decoder cannot know the registry.
+8. **`maxCompressedLength` gains 4 bytes** for the Dictionary_ID field (an
+   18-byte header cap plus the checksum), so the documented bound covers a
+   dictionary frame.
+9. **The brotli negative is final** (`dict-notes §5.2`): no brotli dictionary
+   API; the CLI's `-D` streams are refused naturally (verified live), and
+   `src/brotli/AGENTS.md`'s OQ7 row records it.
+10. **Training is not a dependency (DQ7).** The dictionary file is an input;
+    the CLI trains; an in-repo trainer is a separate follow-up.
 
 ## Errata register
 

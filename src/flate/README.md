@@ -25,7 +25,7 @@ fn roundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
 
     const decoded = try gpa.alloc(u8, input.len); // the stream records no size: a cap
     defer gpa.free(decoded);
-    _ = try flate.decode.decompress(compressed[0..n], decoded);
+    _ = try flate.decode.decompress(compressed[0..n], decoded, null);
 }
 ```
 
@@ -40,8 +40,10 @@ fn compressStream(in: *std.Io.Reader, out: *std.Io.Writer) !void {
 }
 ```
 
-Decoding mirrors it: `flate.Reader.init(in, &buffer)`, then read through `&r.reader`.
-`Writer.streamAll` and `Reader.streamAll` pump a whole stream in one call.
+Decoding mirrors it: `flate.Reader.init(in, &buffer, null)`, then read through
+`&r.reader`. `Writer.streamAll` and `Reader.streamAll` pump a whole stream in
+one call; a preset dictionary is the trailing `dict` parameter on the decode
+entry points and `options.dict` on the encode ones.
 
 ## API
 
@@ -49,13 +51,15 @@ Decoding mirrors it: `flate.Reader.init(in, &buffer)`, then read through `&r.rea
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize
 encode.maxCompressedLength(input_len: usize) usize  // input_len + 5 * ceil(input_len / 65535) + 2
-encode.Options = struct { level: Level = .fast }
+encode.Options = struct { level: Level = .fast, dict: ?[]const u8 = null }
+    // dict: preset history in front of the stream (§3.2.3). The caller vouches
+    // for the bytes on both sides; zlib's FDICT/DICTID is the checked form.
 encode.Level = enum { fast, ratio, @"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"9" }
     // fast: fixed-Huffman blocks, or a stored block when that is smaller (the default)
     // @"0": stored blocks only. @"1" to @"9": the same as fast. ratio: reserved, not implemented
 encode.max_block_size = 65535, encode.history_len = 32768  // block size; match reach
 
-decode.decompress(source: []const u8, target: []u8) DecompressError!usize
+decode.decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize
 decode.DecompressError = error{
     BufferTooSmall,            // `target` cannot hold the output
     Truncated,                 // the input ended before the final block
@@ -63,7 +67,8 @@ decode.DecompressError = error{
     InvalidDynamicBlockHeader, // a bad header, HLIT > 286, HDIST > 30, or an empty precode
     OversubscribedHuffmanTree, IncompleteHuffmanTree, MissingEndOfBlockCode, // bad code lengths
     InvalidCode,               // a code that decodes to no legal symbol
-    InvalidMatch,              // a distance before the start of the output (§3.2.3)
+    InvalidMatch,              // a distance before the start of the history: the
+                               // dictionary's first byte, then the output's (§3.2.3)
 }
 
 Writer.Buffer = [98303]u8  // max_block_size + history_len
@@ -74,11 +79,12 @@ Writer.streamAll(in: *Io.Reader, out: *Io.Writer, options: encode.Options)
     error{ ReadFailed, WriteFailed }!usize
 
 Reader.Buffer = [65536]u8  // 2 * history_len
-Reader.init(input: *Io.Reader, buffer: *Buffer) Reader
+Reader.init(input: *Io.Reader, buffer: *Buffer, dict: ?[]const u8) Reader
 Reader.reader: Io.Reader   // read through &r.reader
 Reader.err: ?Error         // why error.ReadFailed happened: DecompressError without
                            // BufferTooSmall, plus StreamTooLong, ReadFailed, EndOfStream
-Reader.streamAll(in: *Io.Reader, out: *Io.Writer) error{ ReadFailed, WriteFailed }!usize
+Reader.streamAll(in: *Io.Reader, out: *Io.Writer, dict: ?[]const u8)
+    error{ ReadFailed, WriteFailed }!usize
 ```
 
 `Writer` and `Reader` also have an optional `checksum` hook for containers (`Checksum.zig`):
@@ -94,6 +100,13 @@ declarations in `encode` and `decode` are shared internals.
   block. A raw deflate stream records no decoded length, so `target` is a cap for
   `decompress`, which returns `error.BufferTooSmall` before the write that would
   overflow it.
+- **Preset dictionaries.** `dict` is history in front of the stream (§3.2.3):
+  a distance may reach into it, and it slides out of the 32 KiB window as the
+  output passes it. A dictionary longer than 32 KiB contributes only its last
+  32 KiB. On decode the caller vouches for the bytes — raw flate carries no
+  identifier — and on encode the dictionary is the window's oldest bytes. The
+  zlib container is the form that names one: its FDICT flag and DICTID check
+  the bytes before the body (RFC 1950 §2.2).
 - **Corrupt input.** Decoding stops at the first invalid element with the matching
   `DecompressError`. Nothing is written past `target`, but after an error it may hold
   a partial prefix of the output. `Reader` returns `error.ReadFailed` with the detail
@@ -134,7 +147,9 @@ declarations in `encode` and `decode` are shared internals.
   reserved for one: `compress` returns `error.Unimplemented` for it, a `Writer` made
   with it fails every write and `finish`, and `Writer.streamAll` returns
   `error.ReadFailed` before reading.
-- No preset dictionary support.
+- A preset dictionary on raw flate is unverified: no container carries an
+  identifier, so the caller vouches for the bytes on both sides. The zlib
+  container's FDICT/DICTID is the checked form.
 
 ## Testing and benchmarks
 

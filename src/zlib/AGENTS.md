@@ -22,20 +22,81 @@ or `Writer` must not move after first use. What is specific to zlib:
 - **A zero-byte input is `Truncated`** on every path (T2, OQ3): no stream began.
   `streamAll` reports it as the coarse `ReadFailed`. gzip's `streamAll` serves
   zero members instead.
-- **FDICT is rejected, never skipped** (OQ4, ZD3/ZD4). RFC 1950 §2.3 requires an
-  error when FDICT is set and the dictionary is not known, and this decoder
-  knows none. C zlib emits such streams when given a dictionary
-  (`containers-notes.md §5.5`). The answer is `DictionaryRequired`, raised at
-  the header before any body byte, for "no dictionary" and "wrong dictionary"
-  alike. It is never a silent skip of the four DICTID bytes and never std's
-  misparse of them as deflate data (T6). Dictionary support waits for a
-  dictionary entry point in flate (`flate-notes.md §6`, OQ6). The encoder never
-  sets FDICT.
+- **FDICT is checked, never skipped** (OQ4, ZD3/ZD4; "The preset dictionary"
+  below). RFC 1950 §2.3 requires an error when FDICT is set and the dictionary
+  is not known. The M3 posture collapsed "no dictionary" and "wrong
+  dictionary" into `DictionaryRequired` at the header before any body byte —
+  never a silent skip of the four DICTID bytes, never std's misparse of them
+  as deflate data (T6). The dictionary milestone splits the two:
+  `dict: ?[]const u8` on both directions, `DictionaryRequired` when FDICT is
+  set and `dict` is null, `DictionaryMismatch` when `dict`'s Adler-32 is not
+  the header's DICTID. The encoder sets FDICT exactly when given a dictionary.
 - **CMF, FLG, and ADLER32 are all checked** (ZD1). RFC 1950 §2.3 makes this a
   decoder MUST, where gzip's trailer check is optional by its RFC. std's zlib
   decoder is the lax outlier (T4, T6): it checks CM and CINFO only, has no FDICT
   handling, and never compares its footer. `golden.zig` pins the FCHECK and
   FDICT divergences by running std's decoder next to ours.
+
+## The preset dictionary (RFC 1950 §2.2; the M7 sketch)
+
+The dictionary is raw caller bytes — RFC 1950 has no dictionary file format
+("The dictionary is a sequence of bytes which are initially fed to the
+compressor without producing any compressed output", §2.2). The research is
+`dictionary-notes.md §4`; the surface follows the zstd sketch's error-name
+rule (DQ4/DQ5).
+
+- **The surface (DQ5).** `dict: ?[]const u8` on `decode.decompress` (third
+  parameter), `Reader.init` (last), `Reader.streamAll`, and `encode.Options`;
+  `Writer.init` and `Writer.streamAll` thread the options through unchanged.
+  The migration is compile-checked: every existing callsite adds `, null`. No
+  `Dictionary` type — there is nothing to parse; the check is one Adler-32
+  compare at the header.
+- **The wire.** Encode: FDICT (FLG bit 5) set, DICTID = the Adler-32 of the
+  whole dictionary, big-endian, written before the body (`deflate()`'s
+  INIT_STATE block, `deflateSetDictionary`; the C sets PRESET_DICT only when
+  bytes were inserted, so an empty slice is no dictionary). The ADLER32
+  trailer covers the output "excluding any dictionary data" (§2.2). Decode:
+  the header check reads DICTID and compares it against `dict`'s Adler-32
+  before any body byte. A dictionary longer than 32 KiB contributes only its
+  last 32 KiB to the window, while DICTID names the whole
+  (`deflateSetDictionary`'s tail cut, verified live): the caller supplies the
+  full bytes on both sides, and a tail-only slice fails `DictionaryMismatch`.
+- **The mismatch matrix.** FDICT set + `dict` null → `DictionaryRequired`
+  (the M3 name, unchanged); FDICT set + a wrong or truncated `dict` →
+  `DictionaryMismatch`; FDICT set + the right `dict` → decode; FDICT clear →
+  the stream names no dictionary and a supplied `dict` is unused.
+- **The flate seam (OQ6 retired).** The kernel gains the preset-history entry
+  point: the decode's history region gains a caller-owned prefix (the
+  dictionary rides in front of the output — the same two-region shape zstd's
+  content uses, minus every zstd complication: no entropy tables, no
+  repcodes, no ID arithmetic beyond one Adler-32 compare, no expiry rule —
+  the window is fixed 32 KiB and the dictionary is its oldest bytes, so once
+  the output passes 32 KiB the dictionary has slid out and the existing
+  distance-bound check already refuses it). `src/flate/AGENTS.md`'s OQ6 row
+  is retired by this; the parameter lands on the existing functions
+  (`decode.decompress`, `Reader.init`, `Reader.streamAll`,
+  `encode.Options.dict`), no new names.
+- **The encoder's pre-fill is a measurement, not a conformance duty (DQ6,
+  DT7).** The C inserts every dictionary position into its chains at every
+  level; Go's level-1 skips the pre-hash (`fillWindow`'s `level < 2` early
+  return, `deflate.go:181-185`). The flate oracle is round-trip conformance —
+  `scripts/flate_oracle.py` checks both directions' decodes, never
+  encoder-byte equality — so the slice measures the pre-fill densities on the
+  fleet corpus and keeps the winner (the checksum-interleave precedent). A
+  density changes ratio and speed, never a stream's validity.
+- **Tests (the oracle rows, `dictionary-notes.md §8`).** python3 zlib's
+  `zdict=` rows in `scripts/zlib_oracle.py` and `scripts/flate_oracle.py`:
+  the four mismatch cases (right, none, wrong, truncated) as the error-name
+  pins; the 40-KiB tail-cut round trip; the FDICT header bytes (FCHECK holds:
+  `78 bb` for the Go vector); and the existing FDICT fixtures
+  (`golden.dictionary_stream`, `golden.fcheck31_dict_stream`) become
+  decode-with-dictionary pins.
+- **Sketch calls.** (1) `dict` is ignored when FDICT is clear — the C's
+  `inflateSetDictionary` is a DICT-state call that only accepts a stream that
+  asked; ours ignores the parameter so one Reader can walk mixed streams.
+  (2) An empty slice is no dictionary: the C's PRESET_DICT gate needs inserted
+  bytes; `null` is the documented spelling. (3) The pre-fill density is DQ6's
+  measurement, not this sketch's call.
 
 ## Format notes and errata
 
