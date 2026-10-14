@@ -80,20 +80,20 @@ pub const State = struct {
     /// reverts to Raw or RLE — never overwrites the table a later
     /// Repeat_Mode may reuse, and the revert restores only the small fields
     /// (`Header`), never the 12 KiB of table storage.
-    built: [alphabet_count][2]fse_compress.Table = undefined,
+    built: std.EnumArray(Alphabet, [2]fse_compress.Table) = .initUndefined(),
     /// Which of each alphabet's two slots `tables` may resolve into. A
     /// build flips its alphabet's slot as it publishes the new table.
-    active: [alphabet_count]u1 = @splat(0),
+    active: std.EnumArray(Alphabet, u1) = .initFill(0),
     /// What each alphabet last resolved to, `null` until the frame's first
     /// sequences section with a nonzero count. Repeat_Mode reuses it, the way
     /// the decoder reuses its own resolved table.
-    tables: [alphabet_count]?Resolved = @splat(null),
+    tables: std.EnumArray(Alphabet, ?Resolved) = .initFill(null),
     /// The C's `FSE_repeat_valid` per alphabet: a table that covers its whole
     /// alphabet, which only a dictionary's entropy tables are promoted to
     /// (`ZSTD_dictNCountRepeat`, `zstd_compress.c:5044-5058`). No dictionary
     /// exists in this package, so nothing sets it and Repeat_Mode is never
     /// selected — exactly the C's own no-dictionary behavior.
-    repeat_valid: [alphabet_count]bool = @splat(false),
+    repeat_valid: std.EnumSet(Alphabet) = .empty,
 
     /// The state's mutable fields apart from the table storage: everything a
     /// block's entropy attempt may redirect. The block layer snapshots one
@@ -101,9 +101,9 @@ pub const State = struct {
     /// `built` slots need no snapshot because an attempt writes only the
     /// inactive slots, which no live entry of `tables` resolves into.
     pub const Header = struct {
-        active: [alphabet_count]u1,
-        tables: [alphabet_count]?Resolved,
-        repeat_valid: [alphabet_count]bool,
+        active: std.EnumArray(Alphabet, u1),
+        tables: std.EnumArray(Alphabet, ?Resolved),
+        repeat_valid: std.EnumSet(Alphabet),
     };
 
     /// The state's current header, for the block layer's pre-attempt snapshot.
@@ -391,7 +391,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
         (@as(u8, @intFromEnum(modes[@intFromEnum(Alphabet.match_lengths)])) << 2);
     cursor += 1;
 
-    var resolved: [alphabet_count]Resolved = undefined;
+    var resolved: std.EnumArray(Alphabet, Resolved) = .initUndefined();
     for (description_order) |alphabet| {
         const index = @intFromEnum(alphabet);
         cursor += try writeTable(
@@ -403,7 +403,7 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
             state,
             codeOf(alphabet, codesOf(source[source.len - 1])),
         );
-        resolved[index] = state.tables[index].?;
+        resolved.set(alphabet, state.tables.get(alphabet).?);
     }
     cursor += try writeBitstream(target[cursor..], source, &resolved);
     return cursor;
@@ -453,24 +453,23 @@ fn selectMode(
     sequence_count: u32,
     state: *State,
 ) sequences.Mode {
-    const index = @intFromEnum(alphabet);
     const spec = specOf(alphabet);
     // Predefined_Mode is not allowed for the offset alphabet once a code
     // above the default distribution's range appears
     // (`zstd_compress_sequences.c:2822`: `max <= DefaultMaxOff`).
     const default_allowed = stats.max_code <= spec.default_symbol_max;
     if (stats.most_frequent == sequence_count) {
-        state.repeat_valid[index] = false;
+        state.repeat_valid.remove(alphabet);
         if (default_allowed and sequence_count <= 2) return .predefined;
         return .rle;
     }
     if (default_allowed) {
-        if (state.repeat_valid[index] and sequence_count < 1000) return .repeat;
+        if (state.repeat_valid.contains(alphabet) and sequence_count < 1000) return .repeat;
         const dynamic_min = (@as(u32, 1) << spec.accuracy_log_default) * 9 >> 3;
         if (sequence_count < dynamic_min or
             stats.most_frequent < (sequence_count >> (spec.accuracy_log_default - 1)))
         {
-            state.repeat_valid[index] = false;
+            state.repeat_valid.remove(alphabet);
             return .predefined;
         }
     }
@@ -490,23 +489,22 @@ fn writeTable(
     state: *State,
     last_code: u8,
 ) Error!usize {
-    const index = @intFromEnum(alphabet);
     const spec = specOf(alphabet);
     switch (mode) {
         .predefined => {
-            state.tables[index] = .predefined;
+            state.tables.set(alphabet, .predefined);
             return 0;
         },
         .rle => {
             if (target.len < 1) return error.BufferTooSmall;
             target[0] = @intCast(stats.max_code);
-            state.tables[index] = .{ .rle = @intCast(stats.max_code) };
+            state.tables.set(alphabet, .{ .rle = @intCast(stats.max_code) });
             return 1;
         },
         .repeat => {
             // No bytes: the decoder reuses its previous table
             // (`§3.1.1.3.2.1`), and this writer keeps the matching one.
-            assert(state.tables[index] != null);
+            assert(state.tables.get(alphabet) != null);
             return 0;
         },
         .fse => {
@@ -541,10 +539,10 @@ fn writeTable(
             // Build into the alphabet's inactive slot, then publish: an
             // abandoned block's build lands where no live table resolves,
             // so the block layer's revert is the header alone.
-            const slot = 1 - state.active[index];
-            state.built[index][slot] = fse_compress.buildTable(norm);
-            state.active[index] = slot;
-            state.tables[index] = .{ .fse = &state.built[index][slot] };
+            const slot = 1 - state.active.get(alphabet);
+            state.built.getPtr(alphabet)[slot] = fse_compress.buildTable(norm);
+            state.active.set(alphabet, slot);
+            state.tables.set(alphabet, .{ .fse = &state.built.getPtr(alphabet)[slot] });
             return written;
         },
     }
@@ -564,7 +562,7 @@ fn writeTable(
 fn writeBitstream(
     target: []u8,
     source: []const Sequence,
-    resolved: *const [alphabet_count]Resolved,
+    resolved: *const std.EnumArray(Alphabet, Resolved),
 ) Error!usize {
     // The register-resident accumulator, for the same reason the Huffman
     // streams use it: six fields per sequence through a memory-resident
@@ -579,7 +577,7 @@ fn writeBitstream(
         const last_codes = codesOf(source[last]);
         for (description_order) |alphabet| {
             const index = @intFromEnum(alphabet);
-            const table = machineOf(resolved[index], alphabet) orelse continue;
+            const table = machineOf(resolved.get(alphabet), alphabet) orelse continue;
             states[index] = table.initState(codeOf(alphabet, last_codes));
         }
         try writeExtras(&accumulator, target, &written, source[last], last_codes);
@@ -606,7 +604,7 @@ fn writeBitstream(
         inline for (transition_order) |alphabet| {
             const state_index = @intFromEnum(alphabet);
             const code = codeOf(alphabet, codes);
-            switch (resolved[state_index]) {
+            switch (resolved.get(alphabet)) {
                 .rle => |symbol| assert(code == symbol),
                 else => |rest| {
                     const table = machineOf(rest, alphabet).?;
@@ -630,7 +628,7 @@ fn writeBitstream(
     // `FSE_flushCState` in the C's order: ML, OF, LL.
     for (flush_order) |alphabet| {
         const flush_index = @intFromEnum(alphabet);
-        if (machineOf(resolved[flush_index], alphabet)) |table| {
+        if (machineOf(resolved.get(alphabet), alphabet)) |table| {
             try accumulator.add(target, &written, states[flush_index], table.norm.accuracy_log);
         }
     }
@@ -762,7 +760,7 @@ test "a zero-sequence section is the single zero byte" {
     const written = try write(&target, &.{}, &state);
     try testing.expectEqual(@as(usize, 1), written);
     try testing.expectEqualSlices(u8, &.{0x00}, target[0..1]);
-    try testing.expect(state.tables[0] == null);
+    try testing.expect(state.tables.get(.literals_lengths) == null);
 }
 
 test "the writer's sections decode back through the landed decoder" {
@@ -914,7 +912,7 @@ test "the mode ladder follows the C's thresholds" {
     );
     // A valid previous table and under 1000 sequences: Repeat (the C's
     // `FSE_repeat_valid`, which only a dictionary sets).
-    state.repeat_valid[@intFromEnum(Alphabet.literals_lengths)] = true;
+    state.repeat_valid.insert(.literals_lengths);
     stats.max_code = 2;
     try testing.expectEqual(
         sequences.Mode.repeat,
@@ -955,8 +953,8 @@ test "Repeat_Mode's section carries no table and reuses the previous one" {
     const first_len = try write(&target, &first, &state);
     // The tables the first block resolved are now the frame's.
     for (description_order) |alphabet| {
-        try testing.expect(state.tables[@intFromEnum(alphabet)] != null);
-        state.repeat_valid[@intFromEnum(alphabet)] = true;
+        try testing.expect(state.tables.get(alphabet) != null);
+        state.repeat_valid.insert(alphabet);
     }
     var second_target: [4096]u8 = undefined;
     const second_len = try write(&second_target, &second, &state);
