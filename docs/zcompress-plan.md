@@ -291,13 +291,34 @@ ARM — a driver fairness fix, not a code lever) and the Intel-target profile
 for the 3.3-3.5x literal-heavy gap.
 
 M6 — brotli, decoder first. The one-shot (`decode.decompress`) and the
-streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` (default
-22) and the format's built-in static dictionary shipped unconditionally. The
+streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` and the
+format's built-in static dictionary shipped unconditionally. The
 research is `docs/research/brotli-notes.md` (the `BR` matrix, the `T`
 divergence rows, the `OQ` register; the RFC vendored at
 `docs/research/specs/rfc7932-brotli.txt`), the google/brotli C reference is
 the oracle lane and the strongest-native competitor, and the API sketch is
 `src/brotli/README.md`.
+Acceptance: the decoder shipped through six slices (the bit reader, the
+stream header and ladder, both prefix-code forms, the command stream with
+the distance ring, the static dictionary with its 121 transforms and the
+commit-time generator, and the streaming Reader with the ring and the
+resumable cursor) plus the example CLI, the dual-reference oracle lane
+(`just brotli-oracle`: the pinned CLI 1.2.0 and andybalholm v1.2.6), and the
+fuzz wave's 19 targets. The closing review (accept with required fixes)
+landed both blockers and all four majors fixed and pinned (`f7c6009` —
+the u64 seam proven by `src/brotli/probe32.zig` under `just check-32` with
+a 4.3 GB stream, the dictionary-MLEN check and four oracle-only rules
+pinned by fixtures). The window default is 24, the format's maximum (F9's
+re-measure: every pipe row is WBITS 24, the file form never above 19 —
+the library's 22 would refuse every pipe-produced CLI stream);
+`DefaultBuffer` ~16.7 MiB. The fleet run of record is
+`docs/results/m6-fleet-20261014.md` (run id `20261014T135257Z-m6-brotli`):
+the copy-structure shapes won (rle 0.11-0.51 everywhere, text/html on
+every ARM target), words (the dictionary path) 2.3-2.8x behind, skewlit
+2.9-4.0x, and the mixed/random 6-13x mechanism unidentified (a per-call
+cost dominating the row — the brotli decode perf wave owns the
+diagnosis). The zstd rows re-measured at the same revision moved within
+noise — the brotli decoder cost them nothing.
 
 ## Decisions made
 
