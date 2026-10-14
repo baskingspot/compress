@@ -532,11 +532,25 @@ pub fn writeStream(target: []u8, source: []const u8, table: *const Table) Error!
     var accumulator: bits.BackwardAccumulator = .init;
     var written: usize = 0;
     var index = source.len;
+    // Five codes at most 11 bits each (§4.2.1's limit) fit the container
+    // under any flush residue (55 + 7 <= 64), so the flush runs on a fixed
+    // per-group schedule: one predictable bounds branch per five symbols
+    // instead of one data-dependent fit check per symbol (the C's unrolled
+    // `HUF_compress1X_usingCTable` body, `huf_compress.c:1080-1110`).
+    while (index >= 5) {
+        try accumulator.flush(target, &written);
+        inline for (0..5) |_| {
+            index -= 1;
+            const code = table.codes[source[index]];
+            // Every literal must have a code: the caller built the tree from
+            // this very source.
+            assert(code.len > 0);
+            accumulator.addUnchecked(code.bits, code.len);
+        }
+    }
     while (index > 0) {
         index -= 1;
         const code = table.codes[source[index]];
-        // Every literal must have a code: the caller built the tree from this
-        // very source.
         assert(code.len > 0);
         try accumulator.add(target, &written, code.bits, code.len);
     }

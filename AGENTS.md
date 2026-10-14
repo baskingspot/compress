@@ -212,7 +212,8 @@ Deviations, on purpose:
 - No Tracy zones — no profiler dependency in this repo. Observability is
   the benchmark harness plus disassembly.
 - The 70-line function limit is consciously overridden on `encodeBlock`'s
-  scan cascade (154 lines) and zstd's `match_compress.scanBlock` (71 lines):
+  scan cascade (154 lines) and zstd's `match_compress.scanBlock` (160 lines,
+  register-resident with the shared match tail):
   centralizing that labeled control flow in the parent is the Tiger rule that
   wins; the pure logic is already extracted (`hash6`, `load64`, `emitLiteral`,
   `emitCopy`; `hashAt`, `match4Found`, `count`).

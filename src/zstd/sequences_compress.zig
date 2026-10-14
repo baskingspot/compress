@@ -589,13 +589,20 @@ fn writeBitstream(
         index -= 1;
         // "FSE_encodeSymbol(&stateOffsetBits, ofCode)" and the two that
         // follow: the transition bits, in the reverse of the decoder's
-        // update order.
+        // update order. A fixed two-flush schedule per sequence: the three
+        // transitions (at most 9 + 8 + 9 bits — the alphabets' accuracy
+        // logs) and the literals-length extra (at most 16) total 42 under
+        // any flush residue; the match-length and offset extras (at most 16
+        // and 31) take the second flush. The per-field fit checks — six
+        // data-dependent branches per sequence — become two predictable
+        // bounds branches.
         const codes = codesOf(source[index]);
         const transition_order = [alphabet_count]Alphabet{
             .offsets,
             .match_lengths,
             .literals_lengths,
         };
+        try accumulator.flush(target, &written);
         inline for (transition_order) |alphabet| {
             const state_index = @intFromEnum(alphabet);
             const code = codeOf(alphabet, codes);
@@ -604,17 +611,21 @@ fn writeBitstream(
                 else => |rest| {
                     const table = machineOf(rest, alphabet).?;
                     const transition = table.step(states[state_index], code);
-                    try accumulator.add(
-                        target,
-                        &written,
-                        transition.bits,
-                        transition.bit_count,
-                    );
+                    accumulator.addUnchecked(transition.bits, transition.bit_count);
                     states[state_index] = transition.state;
                 },
             }
         }
-        try writeExtras(&accumulator, target, &written, source[index], codes);
+        accumulator.addUnchecked(
+            source[index].literals_length,
+            sequences.literals_length_codes[codes.literals_lengths].extra_bits,
+        );
+        try accumulator.flush(target, &written);
+        accumulator.addUnchecked(
+            source[index].match_length - min_match_length,
+            sequences.match_length_codes[codes.match_lengths].extra_bits,
+        );
+        accumulator.addUnchecked(source[index].offset_value, codes.offsets);
     }
     // `FSE_flushCState` in the C's order: ML, OF, LL.
     for (flush_order) |alphabet| {

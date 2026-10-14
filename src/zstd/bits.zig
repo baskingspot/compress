@@ -587,6 +587,39 @@ pub const BackwardAccumulator = struct {
         self.bit_count += count;
     }
 
+    /// Flush the pending whole bytes unconditionally: the caller drives a
+    /// fixed flush schedule (a group's fields are bounded, so no per-field
+    /// check is needed) and the per-flush branch is the bounds check alone —
+    /// predictable until the target's end, where the per-field `add` check
+    /// would mispredict on the data's bit lengths. Flushing early moves only
+    /// whole bytes, so the stream is the `add` schedule's, exactly.
+    pub inline fn flush(
+        self: *BackwardAccumulator,
+        target: []u8,
+        written: *usize,
+    ) error{BufferTooSmall}!void {
+        const bytes = self.bit_count >> 3;
+        if (written.* + 8 <= target.len) {
+            writeInt(u64, target[written.*..][0..8], self.bits);
+        } else {
+            if (written.* + bytes > target.len) return error.BufferTooSmall;
+            for (0..bytes) |index| {
+                target[written.* + index] = @truncate(self.bits >> @intCast(8 * index));
+            }
+        }
+        written.* += bytes;
+        self.bits >>= @intCast(8 * bytes);
+        self.bit_count &= 7;
+    }
+
+    /// Append the low `count` bits of `value` with no flush: the caller's
+    /// fixed schedule guarantees they fit (`bit_count + count <= 64`).
+    pub inline fn addUnchecked(self: *BackwardAccumulator, value: u32, count: u6) void {
+        assert(self.bit_count + count <= 64);
+        self.bits |= (@as(u64, value) & mask64(@intCast(count))) << @intCast(self.bit_count);
+        self.bit_count += count;
+    }
+
     /// `BackwardWriter.close`: the single 1-bit end mark, then the zero fill
     /// to the byte boundary, so the last byte is never zero. Returns the
     /// stream's length in bytes.

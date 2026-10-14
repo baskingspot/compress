@@ -272,7 +272,16 @@ pub fn find(
             scan.rep1 = 0;
         }
     }
-    scan.scanBlock();
+    // The scan is instantiated per hash width (the C's per-mls copies,
+    // `zstd_fast.c:436-439`): the prime and the shift into the word's top
+    // are comptime inside, constants in registers rather than per-probe
+    // table loads.
+    switch (params.mls) {
+        5 => scan.scanBlock(5),
+        6 => scan.scanBlock(6),
+        7 => scan.scanBlock(7),
+        else => unreachable,
+    }
     // The restore rule (`zstd_fast.c:355-372`): the first valid rep wins its
     // slot, and an invalidated rep1 that became valid takes rep2's saved
     // value.
@@ -312,177 +321,221 @@ const Scan = struct {
     rep1: u32,
     rep2: u32,
 
+    /// What a found match hands to the shared tail: the candidate's position
+    /// (already backward-extended), the wire offset value, and the bytes the
+    /// extension counted.
+    const Found = struct {
+        position: usize,
+        offset_value: u32,
+        base_length: usize,
+    };
+
     /// The C's pipelined scan (`zstd_fast.c:255-353`): positions advance in
     /// adjacent pairs, and the step between pairs grows by one every 128
     /// unmatched bytes. The labeled control flow is the C's `goto _start` /
     /// `goto _offset` / `goto _match` shape, kept whole on purpose (the
-    /// house's `encodeBlock` precedent).
-    fn scanBlock(scan: *Scan) void {
+    /// house's `encodeBlock` precedent), and it is one function over local
+    /// scalars for the same reason the C is: the probe chain's state —
+    /// positions, reps, the anchor — must stay in registers, not round-trip
+    /// a state struct through memory every probe (measured: the out-of-line
+    /// match tail alone cost the match-dense shapes ~13%). The `scan` fields
+    /// are loaded once on entry and stored once on exit; the byte stream the
+    /// scan emits is unchanged.
+    fn scanBlock(scan: *Scan, comptime mls: u3) void {
         const source = scan.source;
+        const iend = scan.iend;
+        const ilimit = scan.ilimit;
+        const prefix_start = scan.prefix_start;
+        const candidate_floor = scan.candidate_floor;
+        const window_size = scan.window_size;
+        const hash_log = scan.params.hash_log;
         const hash_table = scan.hash_table;
+        const store = scan.store;
+        var ip0 = scan.ip0;
+        var anchor = scan.anchor;
+        var rep1 = scan.rep1;
+        var rep2 = scan.rep2;
+        var current0 = scan.current0;
+        defer {
+            scan.ip0 = ip0;
+            scan.anchor = anchor;
+            scan.rep1 = rep1;
+            scan.rep2 = rep2;
+            scan.current0 = current0;
+        }
         scan_loop: while (true) {
             var step: usize = step_size;
-            var next_step: usize = scan.ip0 + step_incr;
-            var ip1 = scan.ip0 + 1;
-            var ip2 = scan.ip0 + step;
+            var next_step: usize = ip0 + step_incr;
+            var ip1 = ip0 + 1;
+            var ip2 = ip0 + step;
             var ip3 = ip2 + 1;
-            if (ip3 >= scan.ilimit) break :scan_loop;
-            var hash0 = hashAt(source, scan.ip0, scan.params);
-            var hash1 = hashAt(source, ip1, scan.params);
+            if (ip3 >= ilimit) break :scan_loop;
+            var hash0 = hashAt(source, ip0, hash_log, mls);
+            var hash1 = hashAt(source, ip1, hash_log, mls);
             var match_index: usize = hash_table[hash0];
-            while (true) {
-                // The repcode pre-check at ip2: Repeated_Offset1 two bytes
-                // ahead beats the table candidate at ip0.
-                const rep_value = read32(source, ip2 - scan.rep1);
-                scan.current0 = scan.ip0;
-                hash_table[hash0] = @intCast(scan.ip0);
-                if (scan.rep1 > 0 and read32(source, ip2) == rep_value) {
-                    scan.ip0 = ip2;
-                    var match_position = scan.ip0 - scan.rep1;
-                    var base_length: usize = 4;
-                    // One byte of backward extension at most, which stops at
-                    // anchor + 1: the sequence keeps its literals.
-                    if (source[scan.ip0 - 1] == source[match_position - 1]) {
-                        scan.ip0 -= 1;
-                        match_position -= 1;
-                        base_length += 1;
+            const found: Found = find: {
+                while (true) {
+                    // The repcode pre-check at ip2: Repeated_Offset1 two
+                    // bytes ahead beats the table candidate at ip0.
+                    const rep_value = read32(source, ip2 - rep1);
+                    current0 = ip0;
+                    hash_table[hash0] = @intCast(ip0);
+                    if (rep1 > 0 and read32(source, ip2) == rep_value) {
+                        ip0 = ip2;
+                        var match_position = ip0 - rep1;
+                        var base_length: usize = 4;
+                        // One byte of backward extension at most, which stops
+                        // at anchor + 1: the sequence keeps its literals.
+                        if (source[ip0 - 1] == source[match_position - 1]) {
+                            ip0 -= 1;
+                            match_position -= 1;
+                            base_length += 1;
+                        }
+                        hash_table[hash1] = @intCast(ip1);
+                        break :find .{
+                            .position = match_position,
+                            .offset_value = repcode1_off_base,
+                            .base_length = base_length,
+                        };
                     }
-                    hash_table[hash1] = @intCast(ip1);
-                    scan.emitMatch(match_position, repcode1_off_base, base_length);
-                    continue :scan_loop;
+                    if (match4Found(source, ip0, match_index, candidate_floor)) {
+                        hash_table[hash1] = @intCast(ip1);
+                        break :find matchAt(
+                            source,
+                            &ip0,
+                            anchor,
+                            prefix_start,
+                            &rep1,
+                            &rep2,
+                            match_index,
+                        );
+                    }
+                    // The pair's second half: ip0 moves to ip1.
+                    match_index = hash_table[hash1];
+                    hash0 = hash1;
+                    hash1 = hashAt(source, ip2, hash_log, mls);
+                    ip0 = ip1;
+                    ip1 = ip2;
+                    ip2 = ip3;
+                    current0 = ip0;
+                    hash_table[hash0] = @intCast(ip0);
+                    if (match4Found(source, ip0, match_index, candidate_floor)) {
+                        // "Avoid writing an index if it's >= position where
+                        // search will resume": a match is at least 4 bytes,
+                        // so the scan resumes at ip0 + 4
+                        // (`zstd_fast.c:314-320`).
+                        if (step <= 4) hash_table[hash1] = @intCast(ip1);
+                        break :find matchAt(
+                            source,
+                            &ip0,
+                            anchor,
+                            prefix_start,
+                            &rep1,
+                            &rep2,
+                            match_index,
+                        );
+                    }
+                    match_index = hash_table[hash1];
+                    hash0 = hash1;
+                    hash1 = hashAt(source, ip2, hash_log, mls);
+                    ip0 = ip1;
+                    ip1 = ip2;
+                    ip2 = ip0 + step;
+                    ip3 = ip1 + step;
+                    if (ip2 >= next_step) {
+                        step += 1;
+                        next_step += step_incr;
+                    }
+                    // The C's `do ... while (ip3 < ilimit)` exits to
+                    // `_cleanup` (`zstd_fast.c:348-350`), which leaves the
+                    // scan loop; only a match's `goto _start` re-enters it
+                    // (with `step` reset).
+                    if (ip3 >= ilimit) break :scan_loop;
                 }
-                if (match4Found(source, scan.ip0, match_index, scan.candidate_floor)) {
-                    hash_table[hash1] = @intCast(ip1);
-                    scan.matchAt(match_index);
-                    continue :scan_loop;
+            };
+            // `_match` (`zstd_fast.c:402-420`): count the forward length,
+            // store the sequence, refill the table at the match's edges, and
+            // drain the offset-2 chain. `ip0` and `found.position` already
+            // include the backward extension, and `base_length` is the bytes
+            // it counted.
+            const match_position = found.position;
+            // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded
+            // data must be smaller than Window_Size": the candidate floor
+            // and the rep restore bound every emission.
+            assert(ip0 - match_position < window_size);
+            const match_length = found.base_length + count(
+                source,
+                ip0 + found.base_length,
+                match_position + found.base_length,
+                iend,
+            );
+            assert(match_length >= 4);
+            store.append(source, anchor, ip0, found.offset_value, @intCast(match_length));
+            ip0 += match_length;
+            anchor = ip0;
+            if (ip0 <= ilimit) {
+                // Fill the table at the match's edges (`zstd_fast.c:404-408`):
+                // the last position written before the match, two bytes on,
+                // and the position two before the new scan start.
+                hash_table[hashAt(source, current0 + 2, hash_log, mls)] = @intCast(current0 + 2);
+                hash_table[hashAt(source, ip0 - 2, hash_log, mls)] = @intCast(ip0 - 2);
+                // `zstd_fast.c:410-420` — the offset-2 immediate-repeat
+                // chain: while Repeated_Offset2 matches at the new position,
+                // emit back-to-back zero-literal repcode sequences, swapping
+                // rep1/rep2 each time (the swap is the decoder's §3.1.1.5
+                // shift at `literals_length == 0`).
+                while (rep2 > 0 and ip0 <= ilimit and
+                    read32(source, ip0) == read32(source, ip0 - rep2))
+                {
+                    // The chain emits at rep2, the same strict window bound.
+                    assert(rep2 < window_size);
+                    const run_length = count(source, ip0 + 4, ip0 + 4 - rep2, iend) + 4;
+                    const swap = rep1;
+                    rep1 = rep2;
+                    rep2 = swap;
+                    hash_table[hashAt(source, ip0, hash_log, mls)] = @intCast(ip0);
+                    store.append(source, anchor, ip0, repcode1_off_base, @intCast(run_length));
+                    ip0 += run_length;
+                    anchor = ip0;
                 }
-                // The pair's second half: ip0 moves to ip1.
-                match_index = hash_table[hash1];
-                hash0 = hash1;
-                hash1 = hashAt(source, ip2, scan.params);
-                scan.ip0 = ip1;
-                ip1 = ip2;
-                ip2 = ip3;
-                scan.current0 = scan.ip0;
-                hash_table[hash0] = @intCast(scan.ip0);
-                if (match4Found(source, scan.ip0, match_index, scan.candidate_floor)) {
-                    // "Avoid writing an index if it's >= position where
-                    // search will resume": a match is at least 4 bytes, so
-                    // the scan resumes at ip0 + 4 (`zstd_fast.c:314-320`).
-                    if (step <= 4) hash_table[hash1] = @intCast(ip1);
-                    scan.matchAt(match_index);
-                    continue :scan_loop;
-                }
-                match_index = hash_table[hash1];
-                hash0 = hash1;
-                hash1 = hashAt(source, ip2, scan.params);
-                scan.ip0 = ip1;
-                ip1 = ip2;
-                ip2 = scan.ip0 + step;
-                ip3 = ip1 + step;
-                if (ip2 >= next_step) {
-                    step += 1;
-                    next_step += step_incr;
-                }
-                // The C's `do ... while (ip3 < ilimit)` exits to `_cleanup`
-                // (`zstd_fast.c:348-350`), which leaves the scan loop; only a
-                // match's `goto _start` re-enters it (with `step` reset).
-                if (ip3 >= scan.ilimit) break :scan_loop;
             }
         }
     }
 
-    /// `_offset` (`zstd_fast.c:389-401`): a literal-offset match. The reps
-    /// shift, the match extends backward to the anchor and the prefix, and
-    /// the forward count closes it.
-    fn matchAt(scan: *Scan, match_position: usize) void {
+    /// `_offset` (`zstd_fast.c:389-401`): a literal-offset match's own part
+    /// before the shared tail — the reps shift, and the match extends
+    /// backward to the anchor and the prefix. A leaf over the scan's locals
+    /// (inline, so nothing spills); the forward count is the tail's.
+    inline fn matchAt(
+        source: []const u8,
+        ip0: *usize,
+        anchor: usize,
+        prefix_start: usize,
+        rep1: *u32,
+        rep2: *u32,
+        match_index: usize,
+    ) Found {
         // The table only ever holds positions the scan has passed, so a
         // candidate is always behind the current position: one table per
         // frame, blocks scanned in order.
-        assert(match_position < scan.ip0);
-        const offset: u32 = @intCast(scan.ip0 - match_position);
-        scan.rep2 = scan.rep1;
-        scan.rep1 = offset;
-        var match = match_position;
+        assert(match_index < ip0.*);
+        const offset: u32 = @intCast(ip0.* - match_index);
+        rep2.* = rep1.*;
+        rep1.* = offset;
+        var match = match_index;
         var base_length: usize = 4;
-        while (scan.ip0 > scan.anchor and match > scan.prefix_start and
-            scan.source[scan.ip0 - 1] == scan.source[match - 1])
+        while (ip0.* > anchor and match > prefix_start and
+            source[ip0.* - 1] == source[match - 1])
         {
-            scan.ip0 -= 1;
+            ip0.* -= 1;
             match -= 1;
             base_length += 1;
         }
-        scan.emitMatch(match, offset + 3, base_length);
-    }
-
-    /// `_match` (`zstd_fast.c:402-420`): count the forward length, store the
-    /// sequence, refill the table at the match's edges, and drain the
-    /// offset-2 chain. `scan.ip0` and `match_position` already include the
-    /// backward extension, and `base_length` is the bytes it counted.
-    fn emitMatch(scan: *Scan, match_position: usize, offset_value: u32, base_length: usize) void {
-        const source = scan.source;
-        // RFC 8878 §3.1.1.4 — "all offsets leading to previously decoded
-        // data must be smaller than Window_Size": the candidate floor and the
-        // rep restore bound every emission.
-        assert(scan.ip0 - match_position < scan.window_size);
-        const match_length = base_length + count(
-            source,
-            scan.ip0 + base_length,
-            match_position + base_length,
-            scan.iend,
-        );
-        assert(match_length >= 4);
-        scan.store.append(
-            source,
-            scan.anchor,
-            scan.ip0,
-            offset_value,
-            @intCast(match_length),
-        );
-        scan.ip0 += match_length;
-        scan.anchor = scan.ip0;
-        if (scan.ip0 <= scan.ilimit) {
-            // Fill the table at the match's edges (`zstd_fast.c:404-408`):
-            // the last position written before the match, two bytes on, and
-            // the position two before the new scan start.
-            const current = scan.current0;
-            scan.hash_table[hashAt(source, current + 2, scan.params)] = @intCast(current + 2);
-            scan.hash_table[hashAt(source, scan.ip0 - 2, scan.params)] = @intCast(scan.ip0 - 2);
-            scan.drainChain();
-        }
-    }
-
-    /// `zstd_fast.c:410-420` — the offset-2 immediate-repeat chain: while
-    /// Repeated_Offset2 matches at the new position, emit back-to-back
-    /// zero-literal repcode sequences, swapping rep1/rep2 each time (the
-    /// swap is the decoder's `§3.1.1.5` shift at `literals_length == 0`).
-    fn drainChain(scan: *Scan) void {
-        const source = scan.source;
-        while (scan.rep2 > 0 and scan.ip0 <= scan.ilimit and
-            read32(source, scan.ip0) == read32(source, scan.ip0 - scan.rep2))
-        {
-            // The chain emits at rep2, the same strict window bound.
-            assert(scan.rep2 < scan.window_size);
-            const run_length = count(
-                source,
-                scan.ip0 + 4,
-                scan.ip0 + 4 - scan.rep2,
-                scan.iend,
-            ) + 4;
-            const swap = scan.rep1;
-            scan.rep1 = scan.rep2;
-            scan.rep2 = swap;
-            scan.hash_table[hashAt(source, scan.ip0, scan.params)] = @intCast(scan.ip0);
-            scan.store.append(
-                source,
-                scan.anchor,
-                scan.ip0,
-                repcode1_off_base,
-                @intCast(run_length),
-            );
-            scan.ip0 += run_length;
-            scan.anchor = scan.ip0;
-        }
+        return .{
+            .position = match,
+            .offset_value = offset + 3,
+            .base_length = base_length,
+        };
     }
 };
 
@@ -502,11 +555,19 @@ inline fn match4Found(
 /// `ZSTD_hashPtr` (`zstd_compress_internal.h:930-948`): the `mls` bytes at
 /// `position` shifted into the word's top, multiplied by the width's prime,
 /// keeping the top `hash_log` bits.
-inline fn hashAt(source: []const u8, position: usize, params: Params) usize {
+inline fn hashAt(
+    source: []const u8,
+    position: usize,
+    hash_log: u6,
+    comptime mls: u3,
+) usize {
     assert(position + hash_read_size <= source.len);
     const word = readInt(u64, source[position..][0..8]);
-    const shift: u6 = @intCast(64 - @as(u7, params.hash_log));
-    return switch (params.mls) {
+    const shift: u6 = @intCast(64 - @as(u7, hash_log));
+    // Comptime `mls`: the scan is specialized per width (the C's per-mls
+    // instantiations, `zstd_fast.c:436-439`), so the prime is a loop-invariant
+    // constant in a register, not a per-probe table load.
+    return switch (mls) {
         5 => @intCast(((word << 24) *% prime5bytes) >> shift),
         6 => @intCast(((word << 16) *% prime6bytes) >> shift),
         7 => @intCast(((word << 8) *% prime7bytes) >> shift),
