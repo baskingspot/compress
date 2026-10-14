@@ -34,19 +34,20 @@ fn decode(gpa: std.mem.Allocator, stream: []const u8, out: *std.Io.Writer) !void
 }
 ```
 
-Streaming, through the `std.Io` interfaces. `Reader.Buffer(22)` is about
-4.7 MiB: keep it in static or heap storage.
+Streaming, through the `std.Io` interfaces. The default buffer is about
+16.7 MiB: keep it in static or heap storage.
 
 ```zig
 fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
-    var buffer: brotli.Reader.Buffer(22) = undefined;
-    var r: brotli.Reader = .init(22, in, &buffer);
+    var buffer: brotli.Reader.DefaultBuffer = undefined;
+    var r: brotli.Reader = .init(brotli.Reader.default_window_wbits, in, &buffer);
     _ = try r.reader.streamRemaining(out); // on ReadFailed, r.err says why
 }
 ```
 
-`brotli.Reader.streamAll(22, in, out, &buffer)` decodes every stream in `in`
-in one call; `just example brotli decode FILE.br > FILE` runs the example CLI.
+`brotli.Reader.streamAll(brotli.Reader.default_window_wbits, in, out, &buffer)`
+decodes every stream in `in` in one call; `just example brotli decode FILE.br
+> FILE` runs the example CLI.
 
 ## API
 
@@ -85,9 +86,10 @@ brotli.decode.DecompressError = error{
 // Streaming decode: one `Reader` decodes one stream. You own the `Buffer`,
 // which holds the sliding window and the meta-block trees.
 brotli.Reader.Buffer(comptime window_wbits: usize) type
-    // [(1 << window_wbits) + the meta-block tree region]u8; window_wbits is 10..24
-brotli.Reader.default_window_wbits: usize // 22: the reference encoder's default window
-brotli.Reader.DefaultBuffer // Buffer(22): about 4.6 MiB
+    // { ring: [(1 << window_wbits)]u8, header: the meta-block tree region };
+    // window_wbits is 10..24
+brotli.Reader.default_window_wbits: usize // 24: the format's maximum
+brotli.Reader.DefaultBuffer // Buffer(24): about 16.7 MiB
 brotli.Reader.init(comptime window_wbits: usize, input: *Io.Reader,
     buffer: *Buffer(window_wbits)) Reader
     // consume through `&r.reader`; `r.err: ?Error` holds the cause after ReadFailed
@@ -114,16 +116,19 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
   `error.BufferTooSmall` before any write that would pass the end. A `Reader`
   keeps the sliding window and the meta-block trees in the `Buffer` you give
   it: a `(1 << window_wbits)`-byte history ring — the window bound is
-  `(1 << window_wbits) - 16` (§9.1) — plus the tree region. `Buffer(22)` is
-  about 4.7 MiB.
+  `(1 << window_wbits) - 16` (§9.1) — plus the tree region. The default
+  `Buffer(24)` is about 16.7 MiB; `Buffer(22)` is about 4.7 MiB.
 - **The window.** The stream header's only field is WBITS (§9.1), a 1..7-bit
   code over 10..24 (16 is the single bit `0`); the window is
   `(1 << WBITS) - 16` bytes, 1,008 bytes to 16,777,200 (§9.1, §2).
   `Reader.Buffer(window_wbits)` fixes the cap at comptime, and a stream whose
   WBITS is above it fails `WindowTooLarge` before any meta-block byte. The
-  default 22 is the reference encoder's default window (4,194,288 bytes) and
-  decodes the reference CLI family unconfigured; 23 and 24 are one `Buffer(23)`
-  or `Buffer(24)` away. The pattern `0010001` — "invalid and must not be used"
+  default 24 is the format's maximum, and the measured reason is the reference
+  CLI's own behavior: its pipe form emits WBITS 24 for every stream it writes
+  (it cannot stat a pipe), while its file form picks 10..19 by input size. 22 —
+  the reference encoder library's own default window, 4,194,288 bytes — is one
+  `Buffer(22)` away and decodes the file family, at 4.7 MiB rather than 16.7.
+  The pattern `0010001` — "invalid and must not be used"
   (§9.1), and reused by the reference family as the marker for its large-window
   extension — is refused with `BadWindowBits`; there is no large-window surface
   here.
@@ -171,9 +176,10 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
   per distance tree) — so give decoding threads 1 MiB or more. A `Reader`
   keeps that region in its `Buffer` instead, and its own stack stays
   KiB-scale.
-- **Reader input.** `input` needs a buffer of at least 1 byte; `Io.Reader.fixed`
-  always qualifies. A contiguous `peek` or `take` is served up to the history
-  ring's room at the read position; a larger one fails with `StreamTooLong`.
+- **Reader input.** `input` needs a buffer of at least 4 bytes (the widest
+  field the bit reader assembles is 24 bits); `Io.Reader.fixed` always
+  qualifies. A contiguous `peek` or `take` is served up to the history ring's
+  room at the read position; a larger one fails with `StreamTooLong`.
 
 ## Limitations
 
@@ -202,8 +208,9 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
 `just test` runs the unit tests: the RFC's own check values (the dictionary,
 the transform table, and the three context Luts by CRC-32), the hand-built
 minimal streams (the empty family, the one-command streams, the rejection
-vectors), the reference fixture corpus decoded byte-exact, round trips, and a
-check on every decode that no byte past the decoded length was written.
+vectors), the reference fixture corpus decoded byte-exact through both the
+one-shot and the streaming reader, round trips, and a check on every decode
+that no byte past the decoded length was written.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and
 `just brotli-oracle` cross-checks the decoder against the reference CLI and
 andybalholm/brotli on the reference corpus. `just bench` runs the local benchmarks; local numbers

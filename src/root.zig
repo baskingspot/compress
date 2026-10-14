@@ -8,11 +8,7 @@
 const std = @import("std");
 
 /// brotli (RFC 7932) decoder: one-shot `decode.decompress` and the streaming
-/// `Reader`. The decoder lands in layers — the bit reader, the stream header
-/// and meta-block ladder, the prefix codes, the context models, the distance
-/// layer, the command stream, and the static dictionary with its word
-/// transforms are in place, and `decode` composes them into the one-shot; the
-/// `Reader` follows with the layer that adapts them to `std.Io`. API:
+/// `Reader`. Caller-owned buffers, no heap allocation. API:
 /// `src/brotli/README.md`. Format:
 /// docs/research/specs/rfc7932-brotli.txt.
 pub const brotli = @import("brotli/root.zig");
@@ -53,6 +49,7 @@ test {
     // reached through the codec namespaces, and nothing is flat at the root.
     _ = brotli.decode.decompress;
     _ = brotli.decode.DecompressError;
+    _ = brotli.Reader.streamAll;
     _ = flate.encode.Level;
     _ = flate.decode.decompress;
     _ = flate.Reader.streamAll;

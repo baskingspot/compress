@@ -20,7 +20,7 @@ marked **[sketch call]** and collected at the end.
   is the one-shot (`target` a cap, the decoded length returned; the format
   declares no size) and `brotli.Reader` the streaming decode, with
   `Reader.Buffer(window_wbits)` and `Reader.streamAll`. `decode` landed with
-  `decode.zig` (slice 5); the `Reader` name arrives with `Reader.zig`. The
+  `decode.zig` (slice 5), `Reader` with `Reader.zig` (slice 6). The
   encoder seat
   (`encode`, `Writer`) is stated in the README, never silently absent; the
   barrel's `{Reader, Writer, encode, decode}` completes at the encoder
@@ -50,12 +50,15 @@ marked **[sketch call]** and collected at the end.
 - **The window is the caller's and comptime-sized (OQ4).** `Reader.Buffer(
   window_wbits)` = `(1 << window_wbits)` bytes of history ring plus the tree
   region, and the buffer *is* the cap: a stream whose WBITS is above it fails
-  `WindowTooLarge` before any meta-block byte. The default is 22 — the
-  reference encoder's default (`BROTLI_DEFAULT_WINDOW`, a 4,194,288-byte
-  window) — which decodes the CLI family unconfigured (measured); 23 and 24 are
-  one bigger instantiation away. The ring is a power-of-two buffer with the
-  `-16` in the bound arithmetic (`§9.1`'s window size), the C's
-  `ringbuffer`/`ringbuffer_mask` shape. The RFC's §12 progressive-growth
+  `WindowTooLarge` before any meta-block byte. **The default is 24** (F9's
+  re-measure closed F1): the CLI's pipe form emits WBITS 24 for all 84 sweep
+  rows and its file form 10..19 by input size, so 22 — the reference encoder
+  library's own default — refuses every pipe-produced stream. 24 is the
+  format's maximum, so the default refuses nothing conformant, and the price is
+  the figure: `DefaultBuffer` is 16,777,216 + 707,204 = 17,484,420 bytes
+  (about 16.7 MiB) against `Buffer(22)`'s 4,901,508 (about 4.7). The ring is a
+  power-of-two buffer with the `-16` in the bound arithmetic (`§9.1`'s window
+  size), the C's `ringbuffer`/`ringbuffer_mask` shape. The RFC's §12 progressive-growth
   recommendation (start small, grow per meta-block) is a deliberate non-goal:
   the buffer is caller-owned, and growing it means reallocating nobody asked
   for. The one-shot has no window at all — `target` is the history — so
@@ -179,18 +182,23 @@ context IDs, the distance element, and the copy machinery), `dictionary.zig`
 (the §8 class's word fetch and transforms, over the generated
 `dictionary.bin` and `dictionary_data.zig`), `golden.zig` (the CLI-verified
 wire vectors, the test-side bit writer, and the §11.1 trivial compressor),
-and `decode.zig` (the one-shot and the shared decode state, slice 5). Still to
-land: `Reader.zig`. The oracle lane's files are `oracle.zig` (the decode-only
-harness), `scripts/brotli_oracle.py`, and `scripts/brotli_go/` (the Go
-reference).
+`decode.zig` (the one-shot and the shared decode state, slice 5), and
+`Reader.zig` (the streaming `Io.Reader` over the same layers, slice 6). The
+oracle lane's files are `oracle.zig` (the harness), `scripts/brotli_oracle.py`,
+and `scripts/brotli_go/` (the Go reference).
 
-The command layer's shape, as landed: `decodeMetaBlock` takes a *linear*
-window — `[0..start)` is the stream's decoded prefix (the match history) and
-`[start..start + mlen)` the meta-block's room, which is why the one-shot's
-target *is* the window — and returns the position after the meta-block. The
-copy machinery is `copyMatch`, a free function over `(window, pos,
-distance, length)`; the streaming ring will call it per contiguous segment and
-own the wrap, the flush interleaving, and the resumability. `fastmem.move` is
+The command layer's shape, as landed: the loop takes a `Window` — `bytes`,
+the index of the next output byte, the stream's produced count, the
+meta-block's remaining MLEN, and `§9.1`'s bound — and runs to the meta-block's
+end or the window's, whichever comes first. `decodeMetaBlock` (the one-shot)
+calls it once with the whole meta-block's room, so its target *is* the window;
+`step` with a `Cursor` is the same body stopped between any two bytes, which
+is what the streaming ring resumes from. The copy machinery is `copyMatch`, a
+free function over `(window, pos, distance, length)`: the ring passes
+contiguous segments, and its source may sit past `pos` (the ring's previous
+pass), where the pattern's head is copied from the wrapped source — through
+`fastmem.move` when the destination overlaps it in the buffer — and then
+doubled as before. `fastmem.move` is
 deliberately not the overlap primitive: a move copies as through a temporary
 and preserves the source, while §10's overlapping reference replicates the
 pattern, so the overlap is a doubling run of `fastmem.copy` (the flate
@@ -198,16 +206,62 @@ decoder's `copyMatch` shape). The literal context reads p1/p2 back out of the
 window, so a byte an uncompressed meta-block produced is context for the next
 compressed one with no extra state (§7.1, BR32).
 
-The §8 class boundary is `applyCopy`'s: a resolved distance above
-`min(window size, produced)` resolves through `dictionary.transformedWord`
-into a 38-byte scratch and writes like an insert, so §9.3's MLEN check is the
-*produced* length — the copy length for a window match, the transformed
-word's length for a dictionary reference (which can be shorter or longer than
-the copy length; the C detects the same overrun as a negative remaining
-length at the meta-block's end). That moved the copy's MLEN check below the
-distance read: a dictionary reference whose produced length fits is legal
-even when its copy length would not, and the read order matches the
-reference's (`ReadDistance` before the class branch).
+The §8 class boundary is the `step` loop's `.distance` phase: a resolved
+distance above `min(window size, produced)` resolves through
+`dictionary.transformedWord` into the cursor's 38-byte scratch and writes like
+an insert, so §9.3's MLEN check is the *produced* length — the copy length for
+a window match, the transformed word's length for a dictionary reference
+(which can be shorter or longer than the copy length; the C detects the same
+overrun as a negative remaining length at the meta-block's end). That moved
+the copy's MLEN check below the distance read: a dictionary reference whose
+produced length fits is legal even when its copy length would not, and the
+read order matches the reference's (`ReadDistance` before the class branch).
+The word lives in the cursor, not on the stack, because a ring may run out of
+room mid-word and resume.
+
+## The streaming Reader (slice 6)
+
+`Reader.zig` is the `Io.Reader`: the same layers, driven from an incremental
+input and writing into a ring the consumer reads out of.
+
+- **`Buffer(window_wbits)` is a struct, not a byte array**: `ring: [1 <<
+  window_wbits]u8` and `header: frame.Header`, so the tree region's alignment
+  is the compiler's (`frame.Header` is 4-aligned; a bare `[N]u8` would have
+  needed `@alignCast` at every decode). The README's API block states the
+  shape, and `@sizeOf(DefaultBuffer)` is pinned by a test so the README's
+  figures cannot drift.
+- **The ring is the serving region**, so a consumer must keep up within a
+  window's worth of output: the reader decodes into `[end, ring.len)` and the
+  consumer reads `[seek, end)`. When the ring fills the reader stops (the
+  flush); when the consumer has drained it the ring wraps (`seek = end = 0`)
+  and the history stays where it is. `end` is therefore both the ring index of
+  the next output byte and the `Io.Reader`'s end, and `produced` (the stream's
+  total) is what §8's bound and the dictionary class compare against — it
+  keeps growing after a wrap. A contiguous `peek`/`take` is served up to the
+  ring's room at the read position; a larger one is `StreamTooLong`, and
+  `rebase` wraps a drained full ring first so a consumer can keep peeking.
+- **`StreamBits` is the `Io.Reader`-driven bit source**: the layers are
+  generic over `Bits`, so the header, the ladder, the prefix codes, and the
+  command stream run the *same* code as the one-shot, pulling input whenever
+  the loaded slice runs out. The seam is `bits.BitReader.attach(source, base)`
+  plus `loadedBytes()`: `pull` gives the input back every byte the accumulator
+  has loaded and then forces one read, because a plain `fill(1)` would return
+  on the byte the accumulator already holds and the caller's loop would make
+  no progress. A byte-level `takeBytes`/`skipBytes` drains the accumulator's
+  whole bytes first, then reads the slice. **The input's buffer must hold at
+  least four bytes** (the widest field is 24 bits); the README says so.
+- **The end is exact (T4)**: the `.end` phase checks §9.3's zero fill and then
+  gives the input back the bytes the stream consumed, so `input`'s position at
+  a clean end is the next stream's first byte. `streamAll` walks there; a tail
+  that cannot begin a stream fails `BadStreamStart` (F10).
+- **The uncompressed payload** writes into the ring in segments (bounded by
+  the ring's end), the **metadata payload** is skipped by the ladder without
+  touching the ring, and the **compressed form** runs `command.step` until the
+  ring is full, then flushes.
+- **The error set is the README's**, with the comptime vocabulary check the
+  one-shot uses: every `DecompressError` name except `BufferTooSmall` (the ring
+  is the caller's buffer) plus `WindowTooLarge`, `BadStreamStart`,
+  `StreamTooLong`, `ReadFailed`, and `EndOfStream`.
 
 ## The one-shot (slice 5)
 
@@ -257,17 +311,13 @@ invalid-stream class (`§9.3`), never `BufferTooSmall`.
 Rows discovered while landing a layer; each is a fact the next slice carries,
 not a decision.
 
-- **F1 — the CLI's default window is not 22 for small inputs.** `printf 'A' |
-  brotli -c` emits `0f` (WBITS 24) and a one-byte file emits `21` (WBITS 10);
-  the auto-lgwin sweep's "10 for tiny inputs, 17-19 through 400 KB" is the
-  same behavior. The README's "the default is 22 — the reference encoder's
-  default ... which decodes the CLI family unconfigured (measured)" is a
-  *library* default, not a CLI fact, and it needs the re-measure before the
-  Reader's OQ4 default is pinned: a `Buffer(22)` would refuse a typical CLI
-  stream as `WindowTooLarge`. The Reader slice re-runs the CLI lane (the 45
-  corpus vectors plus the auto-lgwin sweep), records the WBITS histogram here,
-  and moves the exported default (or states the instantiation the caller
-  needs) with it.
+- **F1 — closed by F9's re-measure (slice 6).** `printf 'A' | brotli -c`
+  emits `0f` (WBITS 24) and a one-byte file emits `21` (WBITS 10): the CLI's
+  automatic window is a *source-form* behavior, not a size threshold. The
+  README's "the default is 22 ... which decodes the CLI family unconfigured"
+  was a library default the CLI never emits, and it is corrected: the exported
+  default is 24, the format's maximum, which is what the pipe form emits (F9).
+  A `Buffer(22)` — 4.7 MiB rather than 16.7 — decodes the file family.
 - **F2 — the tree table's ceiling is the reference's, and the build guards
   it.** `kMaxHuffmanTableSize` is a *proven* ceiling (google/brotli v1.2.0
   `c/dec/huffman.c`, "13.4% maximum overhead"; THIRD_PARTY.md). This package's
@@ -330,16 +380,44 @@ not a decision.
   truncation batteries. Vendoring the corpus (or a fetch step) stays open for
   whoever wants the reference harness's exact shape
   (`run-compatibility-test.cmake`).
-- **F9 — the CLI's automatic window is 24 for pipes and 10..19 for files.**
-  Measured over the oracle sweep: every one of the 96 stdin streams is WBITS
-  24 (the CLI cannot stat a pipe, so it uses the maximum), while a file input
-  gets 10 for a tiny file (F1's `21`), 14 for the 8 KiB text shape, 18 for
-  the 133 KiB RLE shape, and 19 for the 390 KiB RFC text — at every quality,
-  with q0 one step above the tiny-file case (18). F1's Reader decision
-  therefore splits by *source form*: a `Buffer(22)` refuses every
-  pipe-produced CLI stream (24) and decodes every file-produced one. The
-  oracle lane pins both classes (the file lane asserts the 1-byte file is 10
-  and the pipe form is 24).
+- **F9 — the CLI's automatic window is 24 for pipes and 10..19 for files.
+  Re-measured for the Reader's default (slice 6).** Over 7 shapes (empty, a
+  1-byte file, the 8 KiB text, 64 KiB of random, 136 KB of RLE, the 390 KB RFC
+  text, and the 81 KB notes) x 12 qualities = 84 rows: **every pipe row is
+  WBITS 24** (the CLI cannot stat a pipe, so it uses the maximum), and the file
+  form's histogram is `{10: 20, 14: 10, 17: 20, 18: 22, 19: 12}` — never above
+  19. The Reader's default is therefore 24, the format's maximum, which refuses
+  nothing conformant; the README's default line and its size figures move with
+  it. The oracle lane pins both classes (the file lane asserts the 1-byte file
+  is 10 and the pipe form is 24).
+
+- **F10 — `BadStreamStart` is the start position's name for §9.1's invalid
+  pattern, and the one-shot keeps `BadWindowBits` for it.** The register's
+  sketch call wanted the two names split by a *completed-stream count* ("the
+  walk found bytes" vs "your stream is bad"), but with the README's API block
+  there is nowhere to thread that count: `streamAll` reports only the coarse
+  `ReadFailed`, and a caller who "drives a `Reader` for the cause" starts a
+  fresh one, which would report the stream's own name. So the split is by
+  entry point: `decompress` reads a stream's own header and names the pattern
+  `BadWindowBits` (T3, the large-window marker — the oracle lane's refusal
+  row), while a `Reader` is only ever at a *start position* (its own, or the
+  walk's next iteration), where the bytes "cannot begin a stream": both are
+  `BadStreamStart`. That is what the README's Behavior section says, and it
+  keeps both names reachable — `BadWindowBits` stays in the Reader's set by
+  the README's vocabulary rule, never raised there.
+- **F11 — the streaming bit seam needs an explicit slice base.** `attach`
+  cannot assume its slice begins at the byte holding the next unconsumed bit:
+  the reader's own count and the input's buffer coordinates drift apart (a
+  fill slides the buffer; the walk starts a second `Reader` at a nonzero
+  input position), so `attach(source, base)` carries the stream byte
+  `source[0]` is and `loadedBytes()` names the first byte the accumulator has
+  not read. `pull` gives the input back everything loaded — a plain `fill(1)`
+  would return on the byte the accumulator already holds, and the caller's
+  loop would spin — and forces one read; the streaming `takeBytes`/`skipBytes`
+  drain the accumulator's whole bytes first, which is also what makes the
+  byte-level slice reads exact. The input's buffer must hold at least 4 bytes
+  (the widest field is 24 bits): with 1 byte the reader can never assemble a
+  `take(32)`, and the fill that would add more asserts in std's `rebase`.
 
 ## Errata register
 
@@ -557,6 +635,22 @@ three CLI text streams) and the CRC pins are the gates.
   refusals of every layer through the public entry point, and every strict
   prefix of five streams (Truncated, never a short decode). The command
   layer's tests now drive `decode.decompress` instead of their own walk.
+  **Slice 6** adds `Reader.zig`'s fifteen tests — the README's streaming
+  snippet through `DefaultBuffer`, the whole golden corpus and the empty,
+  metadata, and uncompressed families through `streamAll`-shaped streaming
+  decodes, the exact input boundary after every one of them, the
+  `WindowTooLarge` cap, the walk (a doubled stream, the zero-byte clean end, a
+  `BadStreamStart` tail with a `Reader` driven for the cause), the consumer
+  machinery (the zero-length poll, `StreamTooLong` past the ring's room, a
+  sticky failure, a peek-driven consumer across wraps), a one-byte-at-a-time
+  input through a 4-byte buffer, the ring's untouched tail (the streaming
+  sentinel check), the named refusals of every layer, every strict prefix of
+  `cli_small_window` and of the empty family, and the README's size figures
+  pinned with `@sizeOf` — plus `bits.zig`'s `attach` test and `command.zig`'s
+  exhaustive ring-copy sweep (every position x distance x length against the
+  byte-at-a-time §10 reading). The new golden vector is `cli_small_window`
+  (`brotli -q 9 -w 10`, 4,400 bytes in 49, one copy of 4,355 at distance 45),
+  whose ring wrap under a `Buffer(10)` is deterministic.
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
@@ -591,6 +685,15 @@ three CLI text streams) and the CRC pins are the gates.
   invalid-stream MLEN class), and the composition's error-set mapping (any
   input must fail with a name from `DecompressError`, never a panic or a
   write past the cap) — the target is prefilled and the tail checked.
+  Slice 6's surfaces: the streaming reader over the same corpus, with the
+  input handed over in small chunks (the `pull` seam: an over-end peek must
+  reach the input's end and report `Truncated`, never spin), a ring small
+  enough to wrap mid-copy (a match whose source is the ring's previous pass)
+  and to fill mid-command and mid-dictionary-word (the resumable `step`), the
+  flush at the window bound with a consumer that reads in odd-sized peeks, the
+  `WindowTooLarge` cap, `StreamTooLong` at the ring's room, the walk's
+  `BadStreamStart` at a tail, and the end-of-stream toss (the input position
+  must be the stream's last byte + 1, never past it).
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
   `just check-baseline` the portable targets, and `just brotli-oracle` the
   differential lane against the two references (Oracles).
@@ -618,18 +721,27 @@ lane (`-K` as the CLI's opt-in), the metadata lane (`-C`), the window lane
 instrumented refuse-mode build).
 
 **Landed (slice 5).** `just brotli-oracle` = `src/brotli/oracle.zig` (the
-decode-only harness: `decode <stream-file> <cap-bytes>`), `scripts/brotli_go/`
-(the Go reference: `decode <stream-file>`, `encode <input-file> <quality>`),
-and `scripts/brotli_oracle.py` over `scripts/oracle_common.py`. One run covers,
-in about 20 seconds:
+harness: `decode <stream-file> <cap-bytes>` for the one-shot and, since slice
+6, `stream <stream-file> <window-wbits>` for `Reader.streamAll`),
+`scripts/brotli_go/` (the Go reference: `decode <stream-file>`,
+`encode <input-file> <quality>`), and `scripts/brotli_oracle.py` over
+`scripts/oracle_common.py`. One run covers, in about 20 seconds:
 
 - the differential sweep — 8 inputs × qualities 0..11, 96 CLI streams (the
   pipe form, all WBITS 24) — each decoding through our one-shot at the exact
   cap and through the Go reference, to the input bytes;
+- the same 96 streams through the streaming reader (`stream ... 24`), each
+  decoded twice: once as written and once doubled, which is the walk at T4's
+  boundary;
+- the ring lane — the `-w 10..24` text streams through a `Buffer` of the same
+  size, so the reader's ring wraps under real copies, plus F9's cap row: the
+  same pipe stream (WBITS 24) refused by `Buffer(22)` and decoded by
+  `Buffer(24)`;
 - the window lane — `-w 10..24` on the text shape plus the four research
   values on the other shapes, 23 rows;
 - the file lane — 18 rows over the size ladder, asserting the file form's
-  WBITS classes (10..19) against the pipe form's 24 (F9);
+  WBITS classes (10..19) against the pipe form's 24 (F9), each also decoded
+  through the streaming reader at `Buffer(19)`;
 - the metadata lane — the CLI's `-C` comment, verified by the CLI and
   decoded by ours and Go;
 - the trailing/concatenation rows (T4) — ours ignores the tail, both

@@ -4,11 +4,11 @@
 //! of literals and matches into the decoded window (§8's window/dictionary
 //! class, §10's overlap rule).
 //!
-//! The command loop writes into a caller-owned linear window: for the
-//! one-shot the decoded output *is* the match history (`§8`), so a match
-//! reads back from `window[..pos]`. The streaming reader's ring wraps; its
-//! slice instantiates `copyMatch` over contiguous segments and owns the wrap
-//! and the resumability.
+//! The command loop writes into a caller-owned `Window`: for the one-shot the
+//! decoded output *is* the match history (`§8`), so a match reads back from
+//! `window.bytes[..pos]`. The streaming reader's window is a ring, so its
+//! `copyMatch` segments reach into the ring's previous pass, and `step`
+//! stops at the ring's end for the reader to flush and wrap it.
 //!
 //! The dictionary branch is §8's class boundary: a distance past the maximum
 //! allowed distance resolves through `dictionary.transformedWord` (the word
@@ -325,31 +325,50 @@ fn switchBlock(
 /// so it is not `fastmem.move`: a move copies as through a temporary and
 /// preserves the source, which is a different string.
 ///
-/// `match_distance >= 1`, `match_distance <= pos`, and
-/// `pos + length <= window.len` are the caller's guarantees; the match is a
-/// window read, never a dictionary one (§8).
+/// `match_distance >= 1` and `pos + length <= window.len` are the caller's
+/// guarantees; the match is a window read, never a dictionary one (§8).
+/// When `match_distance > pos` the source sits past `pos`: the window is a
+/// ring and the pattern reaches into its previous pass — the streaming
+/// reader's shape (`Reader.ring`). The one-shot's linear window never takes
+/// that branch, because a distance is at most the bytes produced.
 pub fn copyMatch(window: []u8, pos: usize, match_distance: u32, length: u32) void {
     assert(match_distance > 0);
-    assert(match_distance <= pos);
     const back: usize = match_distance;
     const len: usize = length;
     assert(pos <= window.len);
     assert(len <= window.len - pos);
+    // A distance past `pos` reads the ring's previous pass, so the source is
+    // in the buffer exactly when the distance is within the window.
+    assert(back <= window.len);
 
-    if (back >= len) {
-        fastmem.copy(u8, window[pos..][0..len], window[pos - back ..][0..len]);
-        return;
+    // The pattern's first byte is `back` back from `pos`, wrapping the ring
+    // when the match reaches into the previous pass.
+    const source: usize = if (back <= pos) pos - back else pos + window.len - back;
+    const head = @min(back, len);
+    const first = @min(head, window.len - source);
+    if (source > pos) {
+        // The source's tail (or all of it) is the ring's previous pass, which
+        // the destination may overlap in the buffer even though the two are
+        // logically disjoint: `move` gives the plain copy's semantics.
+        fastmem.move(u8, window[pos..][0..first], window[source..][0..first]);
+    } else {
+        fastmem.copy(u8, window[pos..][0..first], window[source..][0..first]);
     }
+    if (first < head) {
+        // The pattern wrapped: its rest is the ring's front, at or before
+        // `pos` because the head is at most `back` bytes.
+        fastmem.copy(u8, window[pos + first ..][0 .. head - first], window[0..][0 .. head - first]);
+    }
+    if (head == len) return;
     if (back == 1) {
         // The one-byte run: every byte is the one before it.
-        fastmem.set(u8, window[pos..][0..len], window[pos - 1]);
+        fastmem.set(u8, window[pos + head ..][0 .. len - head], window[pos]);
         return;
     }
-    // Overlapping: write one period, then double the written region until
+    // Overlapping: the pattern is out, so double the written region until
     // `len` bytes are out. Every copy's destination starts at or past its
     // source's end, so each is a plain `fastmem.copy`.
-    fastmem.copy(u8, window[pos..][0..back], window[pos - back ..][0..back]);
-    var written: usize = back;
+    var written: usize = head;
     while (written < len) {
         const n = @min(written, len - written);
         fastmem.copy(u8, window[pos + written ..][0..n], window[pos..][0..n]);
@@ -368,6 +387,79 @@ pub fn copyMatch(window: []u8, pos: usize, match_distance: u32, length: u32) voi
 pub const State = struct {
     ring: distance.Ring = .{},
     tables: distance.Tables = .{},
+
+    /// §4 — derive this meta-block's distance tables from NPOSTFIX and
+    /// NDIRECT (`§3.3`'s alphabet size, `16 + NDIRECT + (48 << NPOSTFIX)`).
+    /// The four-distance ring is stream-scoped and is never reset.
+    pub fn beginMetaBlock(self: *State, header: *const frame.Header) void {
+        self.tables.init(
+            header.npostfix,
+            header.ndirect,
+            16 + @as(u16, header.ndirect) + (@as(u16, 48) << header.npostfix),
+        );
+    }
+};
+
+/// The window a command stream decodes into. The decoded bytes are the match
+/// history (`§8`), so a match reads back from what this already holds.
+///
+/// The one-shot's window is linear: `bytes` is the target prefix, `pos` the
+/// linear position, and `produced` the same number. The streaming reader's is
+/// a ring of `1 << window_wbits` bytes: `pos` is the ring index of the next
+/// output byte and `produced` keeps counting past the wrap, so it — not `pos`
+/// — is what `§8`'s window bound and the dictionary class compare against.
+pub const Window = struct {
+    /// The history and the room. `pos <= bytes.len` always; the streaming
+    /// reader flushes and wraps when `pos == bytes.len`.
+    bytes: []u8,
+    /// The index in `bytes` of the next output byte.
+    pos: usize,
+    /// The stream's produced count.
+    produced: u64,
+    /// `§9.3` — the meta-block's remaining MLEN. Zero when the meta-block is
+    /// complete.
+    left: u32,
+    /// `§9.1` — the stream's window size, `(1 << WBITS) - 16`.
+    bound: u32,
+};
+
+/// The command stream's state across `step` calls: the block switches (`§6`)
+/// and the command in flight, with how much of its insert and copy are left.
+/// `decodeMetaBlock` runs it to completion in one call; the streaming reader
+/// runs it in bounded steps as its ring makes room.
+pub const Cursor = struct {
+    blocks: Blocks,
+    command: Command = .{
+        .insert_length = 0,
+        .copy_length = 0,
+        .implicit_distance = true,
+        .distance_context = 0,
+    },
+    /// The insert and copy lengths of `command` still to write.
+    insert_left: u32 = 0,
+    copy_left: u32 = 0,
+    /// The copy's resolved distance (`§4`, `§8`).
+    distance: u32 = 0,
+    /// `§8` — the transformed word in flight and how much of it is out. The
+    /// word is built here, not on the stack, because a ring may run out of
+    /// room mid-word.
+    word: [dictionary.scratch_len]u8 = undefined,
+    word_left: u32 = 0,
+    word_written: u32 = 0,
+    phase: Phase = .command,
+
+    pub const Phase = enum {
+        /// The next command's symbol and lengths (`§5`).
+        command,
+        /// The command's literals (`§9.3`).
+        literals,
+        /// The distance element and `§8`'s class branch.
+        distance,
+        /// A dictionary word, in segments.
+        word,
+        /// A match, in segments.
+        copy,
+    };
 };
 
 /// §9.3, §10 — decode one compressed meta-block's command stream into
@@ -390,168 +482,247 @@ pub fn decodeMetaBlock(
 ) Errors(Bits)!usize {
     assert(start <= window.len);
     assert(mlen <= window.len - start);
-    state.tables.init(
-        header.npostfix,
-        header.ndirect,
-        16 + @as(u16, header.ndirect) + (@as(u16, 48) << header.npostfix),
-    );
-    var blocks: Blocks = .init(header);
-    var pos = start;
-    const end = start + mlen;
-    while (pos < end) {
-        // §9.3 — the insert-and-copy block switch, before the length code.
-        try consumeSymbol(Bits, br, header, &blocks, .command);
-        const command = try readCommand(
-            Bits,
-            br,
-            &header.trees.command[blocks.current(.command)],
-        );
-
-        // §9.3 — "if the number of literals to insert ... would cause MLEN
-        // to be exceeded, then the stream should be rejected as invalid".
-        if (command.insert_length > end - pos) return error.BadBlockLength;
-        pos = try insertLiterals(Bits, br, header, &blocks, window, pos, command.insert_length);
-
-        // §9.3 — "If the total number of uncompressed bytes produced after
-        // the insert part of the last command equals MLEN, then the copy
-        // length of the last command is ignored ... In this case, the copy
-        // length of the last command can have any value": the distance
-        // element is not read either.
-        if (pos == end) break;
-
-        pos = try applyCopy(
-            Bits,
-            br,
-            header,
-            &blocks,
-            state,
-            command,
-            window,
-            pos,
-            end,
-            window_size,
-        );
-    }
-    assert(pos == end);
-    return pos;
+    state.beginMetaBlock(header);
+    var cursor: Cursor = .{ .blocks = .init(header) };
+    var w: Window = .{
+        .bytes = window,
+        .pos = start,
+        .produced = start,
+        .left = mlen,
+        .bound = window_size,
+    };
+    while (w.left > 0) try step(Bits, br, header, state, &cursor, &w);
+    assert(w.pos == start + mlen);
+    return w.pos;
 }
 
-/// §9.3 — the insert half of a command: `insert_length` literals, each
-/// decoded with the tree its literal block type and §7.1 context ID select.
-/// The caller guarantees the room (`pos + insert_length <= window.len`) and
-/// has checked the MLEN accounting.
+/// §9.3, §10 — one bounded step of the command stream: decode commands until
+/// the meta-block is complete (`window.left == 0`) or the window has no room
+/// left (`window.pos == window.bytes.len`). The one-shot's window always has
+/// room for the whole meta-block, so its whole decode is one call; the
+/// streaming reader's ring is full at its end, and the reader flushes and
+/// wraps it before stepping again.
+///
+/// Every write is capped by the room and by MLEN, so the phase machine can
+/// stop between any two bytes; the state it resumes from is `cursor`, plus
+/// the window's position, produced count, and remaining length.
+pub fn step(
+    comptime Bits: type,
+    br: *Bits,
+    header: *const frame.Header,
+    state: *State,
+    cursor: *Cursor,
+    window: *Window,
+) Errors(Bits)!void {
+    assert(window.pos <= window.bytes.len);
+    while (window.left > 0 and window.pos < window.bytes.len) {
+        switch (cursor.phase) {
+            .command => {
+                // §9.3 — the insert-and-copy block switch, before the length
+                // code.
+                try consumeSymbol(Bits, br, header, &cursor.blocks, .command);
+                const command = try readCommand(
+                    Bits,
+                    br,
+                    &header.trees.command[cursor.blocks.current(.command)],
+                );
+                // §9.3 — "if the number of literals to insert ... would cause
+                // MLEN to be exceeded, then the stream should be rejected as
+                // invalid".
+                if (command.insert_length > window.left) return error.BadBlockLength;
+                cursor.command = command;
+                cursor.insert_left = command.insert_length;
+                cursor.phase = .literals;
+            },
+            .literals => {
+                // The run is capped by the room, by MLEN, and by what the
+                // command's insert still owes, so it never wraps a ring.
+                const n: u32 = @intCast(@min(
+                    window.bytes.len - window.pos,
+                    @min(cursor.insert_left, window.left),
+                ));
+                try insertLiterals(
+                    Bits,
+                    br,
+                    header,
+                    &cursor.blocks,
+                    window.bytes[window.pos..][0..n],
+                    prevByte(window, 1),
+                    prevByte(window, 2),
+                );
+                advance(window, n);
+                cursor.insert_left -= n;
+                if (cursor.insert_left == 0) {
+                    // §9.3 — "If the total number of uncompressed bytes
+                    // produced after the insert part of the last command
+                    // equals MLEN, then the copy length of the last command is
+                    // ignored ... In this case, the copy length of the last
+                    // command can have any value": the distance element is not
+                    // read either.
+                    if (window.left == 0) return;
+                    cursor.phase = .distance;
+                }
+            },
+            .distance => {
+                const command = cursor.command;
+                // §8 — "a maximum backward distance value, which is the
+                // minimum of the window size and the number of uncompressed
+                // bytes produced": the command's literals are already out, so
+                // they count.
+                const max_allowed: u32 = @intCast(@min(@as(u64, window.bound), window.produced));
+
+                var symbol: u16 = 0;
+                var resolved: u32 = undefined;
+                if (command.implicit_distance) {
+                    // §5 — "the distance code of the command is set to zero
+                    // (the last distance reused)": no distance element is
+                    // read.
+                    resolved = state.ring.get(3);
+                } else {
+                    // §9.3 — the distance block switch, before the distance
+                    // code, and only when a distance is read (erratum 6977,
+                    // T2).
+                    try consumeSymbol(Bits, br, header, &cursor.blocks, .distance);
+                    const block_type = cursor.blocks.current(.distance);
+                    const tree_index = header.context.distance_map[
+                        @as(usize, block_type) * 4 + command.distance_context
+                    ];
+                    symbol = try header.trees.distance[tree_index].decode(Bits, br);
+                    if (symbol < 16) {
+                        resolved = try distance.special(&state.ring, symbol);
+                    } else {
+                        const dextra = try br.take(state.tables.extra_bits[symbol]);
+                        resolved = state.tables.resolve(symbol, dextra);
+                    }
+                }
+
+                if (resolved > max_allowed) {
+                    // §8 — a distance past the produced data "is treated as a
+                    // reference to a word in the static dictionary", and "the
+                    // copy length for a static dictionary reference must be
+                    // between 4 and 24".
+                    if (command.copy_length < dictionary.min_word_len or
+                        command.copy_length > dictionary.max_word_len)
+                    {
+                        return error.BadDictionary;
+                    }
+                    const word = try dictionary.transformedWord(
+                        &cursor.word,
+                        resolved - max_allowed - 1,
+                        command.copy_length,
+                    );
+                    // The reference's emptiness guard (`decode.c:2247`): a
+                    // transform that empties the word is invalid when the
+                    // distance code is at most 120. No RFC stream can reach
+                    // it — the smallest emptying transform is OmitFirst4 (id
+                    // 34), so an emptied word's word_id is at least
+                    // 34 * 1024 — but the reference's reading is the port's.
+                    if (word.len == 0 and resolved <= 120) return error.BadTransform;
+                    if (word.len > window.left) return error.BadBlockLength;
+                    cursor.word_left = @intCast(word.len);
+                    cursor.word_written = 0;
+                    cursor.phase = .word;
+                    continue;
+                }
+
+                if (command.copy_length > window.left) return error.BadBlockLength;
+
+                // §4, §10 — "if distance code is not zero, and distance is
+                // not a static dictionary reference, push distance to the
+                // ring buffer of last distances": an implicit distance is not
+                // a symbol and never pushes.
+                if (!command.implicit_distance and symbol != 0) state.ring.push(resolved);
+
+                cursor.distance = resolved;
+                cursor.copy_left = command.copy_length;
+                cursor.phase = .copy;
+            },
+            .word => {
+                // An emptied word (`§8`'s transforms can produce nothing) is
+                // a no-op, not a stall.
+                if (cursor.word_written == cursor.word_left) {
+                    cursor.phase = .command;
+                    continue;
+                }
+                const n: u32 = @intCast(@min(
+                    window.bytes.len - window.pos,
+                    @min(cursor.word_left - cursor.word_written, window.left),
+                ));
+                fastmem.copy(
+                    u8,
+                    window.bytes[window.pos..][0..n],
+                    cursor.word[cursor.word_written..][0..n],
+                );
+                advance(window, n);
+                cursor.word_written += n;
+                if (cursor.word_written == cursor.word_left) cursor.phase = .command;
+            },
+            .copy => {
+                const n: u32 = @intCast(@min(
+                    window.bytes.len - window.pos,
+                    @min(cursor.copy_left, window.left),
+                ));
+                copyMatch(window.bytes, window.pos, cursor.distance, n);
+                advance(window, n);
+                cursor.copy_left -= n;
+                if (cursor.copy_left == 0) cursor.phase = .command;
+            },
+        }
+    }
+}
+
+/// §9.3 — move the window by `n` produced bytes: the position, the stream's
+/// produced count, and the remaining MLEN all move together.
+fn advance(window: *Window, n: u32) void {
+    assert(n <= window.left);
+    assert(n <= window.bytes.len - window.pos);
+    window.pos += @intCast(n);
+    window.produced += n;
+    window.left -= n;
+}
+
+/// §7.1 — the `back`th byte before the next output byte (`back` is 1 or 2):
+/// "the last uncompressed byte ... and the byte before it", both zero at the
+/// stream's start. A ring wraps, so the byte may sit at its end.
+fn prevByte(window: *const Window, back: usize) u8 {
+    if (window.produced < back) return 0;
+    return window.bytes[
+        if (back <= window.pos)
+            window.pos - back
+        else
+            window.pos + window.bytes.len - back
+    ];
+}
+
+/// §9.3 — the insert half of a command: one literal per byte of `target`,
+/// each decoded with the tree its literal block type and §7.1 context ID
+/// select. `p1` and `p2` are the two bytes before the run — "regardless of
+/// whether these bytes are produced by uncompressed meta-blocks, backward
+/// references, static dictionary references, or by literal insertions" — and
+/// they advance inside the run, which never wraps a ring (callers cap it at
+/// the window's room).
 fn insertLiterals(
     comptime Bits: type,
     br: *Bits,
     header: *const frame.Header,
     blocks: *Blocks,
-    window: []u8,
-    pos: usize,
-    insert_length: u32,
-) Errors(Bits)!usize {
-    assert(pos <= window.len);
-    assert(insert_length <= window.len - pos);
-    var p = pos;
-    var i: u32 = 0;
-    while (i < insert_length) : (i += 1) {
+    target: []u8,
+    p1: u8,
+    p2: u8,
+) Errors(Bits)!void {
+    var previous = p1;
+    var before = p2;
+    for (target) |*byte| {
         // §9.3 — the literal block switch, before each literal.
         try consumeSymbol(Bits, br, header, blocks, .literal);
         const block_type = blocks.current(.literal);
-        const p1 = if (p >= 1) window[p - 1] else 0;
-        const p2 = if (p >= 2) window[p - 2] else 0;
-        const cid = literalContext(header.context.modes[block_type], p1, p2);
+        const cid = literalContext(header.context.modes[block_type], previous, before);
         const tree_index = header.context.literal_map[@as(usize, block_type) * 64 + cid];
         const literal = try header.trees.literal[tree_index].decode(Bits, br);
-        window[p] = @intCast(literal);
-        p += 1;
+        byte.* = @intCast(literal);
+        before = previous;
+        previous = @intCast(literal);
     }
-    return p;
-}
-
-/// §9.3, §4, §8 — the copy half of a command: the distance element (unless
-/// §5's implicit distance), §4's reconstruction, §8's window/dictionary
-/// class, and §10's match or dictionary word. Returns the position after the
-/// copy. `end` is the meta-block's end: the produced length — the copy length
-/// or the transformed word's — is checked against it before any write, since
-/// "the copy length, or the resulting dictionary word length would cause
-/// MLEN to be exceeded" is invalid (§9.3).
-fn applyCopy(
-    comptime Bits: type,
-    br: *Bits,
-    header: *const frame.Header,
-    blocks: *Blocks,
-    state: *State,
-    command: Command,
-    window: []u8,
-    pos: usize,
-    end: usize,
-    window_size: u32,
-) Errors(Bits)!usize {
-    assert(pos < end);
-    assert(end <= window.len);
-    // §8 — "a maximum backward distance value, which is the minimum of the
-    // window size and the number of uncompressed bytes produced": the
-    // command's literals are already out, so they count.
-    const max_allowed: u32 = if (pos < window_size) @intCast(pos) else window_size;
-
-    var symbol: u16 = 0;
-    var resolved: u32 = undefined;
-    if (command.implicit_distance) {
-        // §5 — "the distance code of the command is set to zero (the last
-        // distance reused)": no distance element is read.
-        resolved = state.ring.get(3);
-    } else {
-        // §9.3 — the distance block switch, before the distance code, and
-        // only when a distance is read (erratum 6977, T2).
-        try consumeSymbol(Bits, br, header, blocks, .distance);
-        const block_type = blocks.current(.distance);
-        const tree_index = header.context.distance_map[
-            @as(usize, block_type) * 4 + command.distance_context
-        ];
-        symbol = try header.trees.distance[tree_index].decode(Bits, br);
-        if (symbol < 16) {
-            resolved = try distance.special(&state.ring, symbol);
-        } else {
-            const dextra = try br.take(state.tables.extra_bits[symbol]);
-            resolved = state.tables.resolve(symbol, dextra);
-        }
-    }
-
-    if (resolved > max_allowed) {
-        // §8 — a distance past the produced data "is treated as a reference
-        // to a word in the static dictionary", and "the copy length for a
-        // static dictionary reference must be between 4 and 24".
-        if (command.copy_length < dictionary.min_word_len or
-            command.copy_length > dictionary.max_word_len)
-        {
-            return error.BadDictionary;
-        }
-        var scratch: [dictionary.scratch_len]u8 = undefined;
-        const word = try dictionary.transformedWord(
-            &scratch,
-            resolved - max_allowed - 1,
-            command.copy_length,
-        );
-        // The reference's emptiness guard (`decode.c:2247`): a transform that
-        // empties the word is invalid when the distance code is at most 120.
-        // No RFC stream can reach it — the smallest emptying transform is
-        // OmitFirst4 (id 34), so an emptied word's word_id is at least
-        // 34 * 1024 — but the reference's reading is the port's.
-        if (word.len == 0 and resolved <= 120) return error.BadTransform;
-        if (word.len > end - pos) return error.BadBlockLength;
-        fastmem.copy(u8, window[pos..][0..word.len], word);
-        return pos + word.len;
-    }
-
-    if (command.copy_length > end - pos) return error.BadBlockLength;
-
-    // §4, §10 — "if distance code is not zero, and distance is not a static
-    // dictionary reference, push distance to the ring buffer of last
-    // distances": an implicit distance is not a symbol and never pushes.
-    if (!command.implicit_distance and symbol != 0) state.ring.push(resolved);
-
-    copyMatch(window, pos, resolved, command.copy_length);
-    return pos + command.copy_length;
 }
 
 // ---------------------------------------------------------------------------
@@ -736,6 +907,42 @@ test "command stream: every distance and length pair replicates §10's run" {
             }
             copyMatch(&got, pos, @intCast(d), @intCast(len));
             try testing.expectEqualSlices(u8, want[0 .. pos + len], got[0 .. pos + len]);
+        }
+    }
+}
+
+test "command stream: §10's copy on a ring, every distance and length" {
+    // The streaming reader's window is a ring: the destination never wraps
+    // (the caller caps every segment at the ring's end), and the source may
+    // sit past `pos`, in the ring's previous pass. The byte-at-a-time §10
+    // reading over the same ring is the reference.
+    const ring_len = 64;
+    const window_size = ring_len - 16; // §9.1's `(1 << WBITS) - 16`
+    var logical: [8 * ring_len]u8 = undefined;
+    for (&logical, 0..) |*byte, i| byte.* = @intCast((i * 7 + 3) % 251);
+
+    var want: [ring_len]u8 = undefined;
+    var got: [ring_len]u8 = undefined;
+    // Every position the reader can stop at (all ring offsets), every
+    // distance the window admits, and lengths on both sides of the distance.
+    var pos: usize = 0;
+    while (pos < ring_len) : (pos += 1) {
+        const produced = 4 * ring_len + pos; // several passes in
+        for (0..ring_len) |i| {
+            const value = logical[(produced - ring_len + i) % logical.len];
+            want[i] = value;
+            got[i] = value;
+        }
+        for (1..window_size + 1) |back| {
+            for ([_]usize{ 1, 2, 3, 5, 47, 48, 49, 100, 200 }) |len| {
+                const n = @min(len, ring_len - pos);
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    want[pos + i] = want[(pos + i + ring_len - back) % ring_len];
+                }
+                copyMatch(&got, pos, @intCast(back), @intCast(n));
+                try testing.expectEqualSlices(u8, &want, &got);
+            }
         }
     }
 }

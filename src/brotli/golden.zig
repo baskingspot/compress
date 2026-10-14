@@ -672,6 +672,23 @@ pub const cli_text_q11: Stream = .{
     .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
 };
 
+/// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -w 10 -c`):
+/// 'the quick brown fox jumps over the lazy dog\n' ** 100, 4,400 bytes of
+/// output in a 49-byte stream whose declared window is 1,008 bytes (`§9.1`).
+/// One copy of 4,355 bytes at distance 45, so a streaming reader with a
+/// `Buffer(10)` (a 1,024-byte ring) wraps its ring under the copy and reads
+/// the match out of the ring's previous pass — the ring's live vector.
+pub const cli_small_window: Stream = .{
+    .bytes = &.{
+        0xA1, 0x78, 0x89, 0x00, 0x20, 0x9A, 0x27, 0xED, 0x96, 0xA9, 0xF3, 0x4A,
+        0x1C, 0x22, 0x4F, 0xE5, 0xF8, 0x73, 0x14, 0x89, 0x7E, 0x2B, 0x2B, 0x33,
+        0x93, 0xE0, 0x8C, 0x70, 0xCA, 0xD3, 0x10, 0x78, 0x91, 0x57, 0xED, 0x03,
+        0xDC, 0xA2, 0x20, 0xF7, 0x45, 0x00, 0x28, 0xF6, 0x3F, 0x78, 0x46, 0xE3,
+        0x01,
+    },
+    .plain = "the quick brown fox jumps over the lazy dog\n" ** 100,
+};
+
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):
 /// 'abcdefgh' ** 20.
 pub const cli_repeat_q1: Stream = .{

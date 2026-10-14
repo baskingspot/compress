@@ -7,7 +7,9 @@ cover the CLI's whole quality range (0..11, the dictionary-bearing q4-and-up
 class included), the window flag's range, the metadata lane (`-C`), the
 trailing-bytes and concatenation rules (T4 of src/brotli/AGENTS.md), the empty
 family, the truncation battery, and the corruption battery under the
-no-checksum rule (T6).
+no-checksum rule (T6). The streaming half of the lane (`stream <file> <wbits>`)
+pumps the same streams through `brotli.Reader.streamAll`, so the ring, the
+window cap, and the input seams are checked against the same references.
 
 Run it with `just brotli-oracle`; brotli comes from the flake (the pinned
 1.2.0) and the Go reference from scripts/brotli_go. The harness is built from
@@ -91,6 +93,17 @@ def our_decode(stream: bytes, cap: int) -> bytes:
     return common.harness_output(harness, "decode", stream, str(cap))
 
 
+def our_stream(stream: bytes, wbits: int) -> bytes:
+    """Our streaming reader, through the oracle harness, at `wbits`."""
+    return common.harness_output(harness, "stream", stream, str(wbits))
+
+
+def our_stream_result(stream: bytes, wbits: int) -> bytes | None:
+    """The streaming reader's decode, or None where it refuses."""
+    result = common.run_harness(harness, "stream", stream, str(wbits))
+    return result.stdout if result.returncode == 0 else None
+
+
 def our_decode_result(stream: bytes, cap: int) -> bytes | None:
     """Our one-shot's decode, or None where it refuses."""
     result = common.run_harness(harness, "decode", stream, str(cap))
@@ -165,6 +178,24 @@ def sweep(rows: list[tuple[str, bytes]], *flags: str) -> int:
     return count
 
 
+def stream_sweep(rows: list[tuple[str, bytes]], *flags: str, wbits: int = 24) -> int:
+    """The same rows through the streaming reader: the walk decodes the CLI's
+    stream to the input bytes, and it consumes exactly through the stream's
+    last byte. Returns the row count."""
+    count = 0
+    for desc, data in rows:
+        stream = cli_encode(data, *flags)
+        label = f"stream {desc}, {' '.join(flags)} at {wbits}"
+        got = our_stream(stream, wbits)
+        assert got == data, f"our streaming decode ({label}): {len(got)} bytes, want {len(data)}"
+        # A second stream after the first is the walk's next iteration, so the
+        # doubled stream decodes twice.
+        doubled = our_stream(stream + stream, wbits)
+        assert doubled == data + data, f"our streaming walk ({label})"
+        count += 1
+    return count
+
+
 # 1. The differential sweep: every input at every quality 0..11. Quality 4 and
 #    up is where the encoder starts emitting dictionary references on text
 #    (F6), so this is the dictionary port's live conformance lane.
@@ -174,6 +205,21 @@ assert b"brotli 1.2.0" in version.stdout + version.stderr, f"unexpected CLI: {ve
 qualities = [str(q) for q in range(12)]
 sweep_inputs = inputs()
 swept = sum(sweep(sweep_inputs, "-q", q) for q in qualities)
+
+# 1b. The streaming reader over the same sweep: the CLI's pipe family is
+#     WBITS 24 (F9), so the default buffer decodes every row, and the walk
+#     decodes a doubled stream twice.
+streamed = sum(stream_sweep(sweep_inputs, "-q", q) for q in qualities)
+
+# 1c. The ring: -w 10..24 on the text shape through a Buffer of the same size,
+#     so the reader's ring wraps under real copies, plus the cap: a pipe
+#     stream (WBITS 24) refused by a Buffer(22).
+ring_rows = 0
+for w in range(10, 25):
+    ring_rows += stream_sweep([("text", common.SHAPES["text"])], "-q", "11", "-w", str(w), wbits=w)
+pipe_stream = cli_encode(common.SHAPES["text"], "-q", "11")
+assert our_stream_result(pipe_stream, 22) is None, "Buffer(22) must refuse a WBITS-24 pipe stream"
+assert our_stream(pipe_stream, 24) == common.SHAPES["text"], "Buffer(24) must decode it"
 
 # 2. The window lane: -w 10..24 on the text shape (the header's WBITS is the
 #    stream's own, and the one-shot has no cap, so every value must decode),
@@ -344,6 +390,8 @@ assert stdin_windows == {24}, f"stdin streams are not WBITS 24: {stdin_windows}"
 print(
     "brotli-oracle: "
     f"{swept} CLI streams over {len(sweep_inputs)} inputs x {len(qualities)} qualities, "
+    f"+ {streamed} of them through the streaming reader (doubled, too), "
+    f"+ {ring_rows} ring rows (Buffer(10..24)), "
     f"+ {window_rows} window rows, + {metadata_rows} metadata row, "
     f"+ {boundary_rows} boundary rows, + {len(empty_family)} empty-family streams, "
     f"+ {truncations} truncations, + {corruptions} corruptions, "

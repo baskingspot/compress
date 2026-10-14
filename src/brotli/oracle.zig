@@ -5,10 +5,14 @@
 //!
 //! Usage:
 //!   brotli-oracle decode <stream-file> <cap-bytes> > out
+//!   brotli-oracle stream <stream-file> <window-wbits> > out
 //!
 //! `decode` writes the decoded bytes of one brotli stream to stdout, with the
-//! output capped at `cap-bytes`. Exits 1 on a usage or codec error and prints
-//! the error name to stderr.
+//! output capped at `cap-bytes` (the one-shot). `stream` pumps the same file
+//! through `brotli.Reader.streamAll` with a `Buffer(window-wbits)`: every
+//! concatenated stream is decoded, and the reader's ring, window cap, and
+//! input seams are the ones under test. Exits 1 on a usage or codec error and
+//! prints the error name to stderr.
 
 const std = @import("std");
 const Io = std.Io;
@@ -23,15 +27,11 @@ pub fn main(init: std.process.Init) !u8 {
     const io = init.io;
     const arena = init.arena.allocator();
     const args = try init.minimal.args.toSlice(arena);
-    if (args.len != 4 or !std.mem.eql(u8, args[1], "decode")) {
-        print("usage: brotli-oracle decode <stream-file> <cap-bytes> > out\n", .{});
+    if (args.len != 4) {
+        print("usage: brotli-oracle decode|stream <stream-file> <cap-or-wbits> > out\n", .{});
         return 1;
     }
 
-    const cap = std.fmt.parseInt(usize, args[3], 10) catch {
-        print("brotli-oracle: cap must be a byte count, got '{s}'\n", .{args[3]});
-        return 1;
-    };
     const file = try Io.Dir.cwd().openFile(io, args[2], .{
         .allow_directory = false,
         .follow_symlinks = true,
@@ -43,13 +43,47 @@ pub fn main(init: std.process.Init) !u8 {
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
     defer stdout_writer.interface.flush() catch {};
 
-    const source = try file_reader.interface.allocRemaining(arena, .limited(max_stream_len));
-    const target = try arena.alloc(u8, cap);
+    if (std.mem.eql(u8, args[1], "decode")) {
+        const cap = std.fmt.parseInt(usize, args[3], 10) catch {
+            print("brotli-oracle: cap must be a byte count, got '{s}'\n", .{args[3]});
+            return 1;
+        };
+        const source = try file_reader.interface.allocRemaining(arena, .limited(max_stream_len));
+        const target = try arena.alloc(u8, cap);
+        const decoded_len = brotli.decode.decompress(source, target) catch |err| {
+            print("brotli-oracle: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        try stdout_writer.interface.writeAll(target[0..decoded_len]);
+        return 0;
+    }
 
-    const decoded_len = brotli.decode.decompress(source, target) catch |err| {
-        print("brotli-oracle: {s}\n", .{@errorName(err)});
-        return 1;
-    };
-    try stdout_writer.interface.writeAll(target[0..decoded_len]);
-    return 0;
+    if (std.mem.eql(u8, args[1], "stream")) {
+        const wbits = std.fmt.parseInt(usize, args[3], 10) catch {
+            print("brotli-oracle: window_wbits must be 10..24, got '{s}'\n", .{args[3]});
+            return 1;
+        };
+        switch (wbits) {
+            inline 10...24 => |w| {
+                const buffer = try arena.create(brotli.Reader.Buffer(w));
+                _ = brotli.Reader.streamAll(
+                    w,
+                    &file_reader.interface,
+                    &stdout_writer.interface,
+                    buffer,
+                ) catch |err| {
+                    print("brotli-oracle: {s}\n", .{@errorName(err)});
+                    return 1;
+                };
+                return 0;
+            },
+            else => {
+                print("brotli-oracle: window_wbits must be 10..24, got {d}\n", .{wbits});
+                return 1;
+            },
+        }
+    }
+
+    print("usage: brotli-oracle decode|stream <stream-file> <cap-or-wbits> > out\n", .{});
+    return 1;
 }

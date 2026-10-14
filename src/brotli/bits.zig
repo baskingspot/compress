@@ -44,7 +44,11 @@ pub const BitReader = struct {
     pub const ErrorSet = Error;
 
     source: []const u8,
-    /// Next source byte not yet loaded into `bits`.
+    /// The stream byte `source[0]` is. `bit_pos` counts from the stream's
+    /// start, so a reader can be handed a fresh slice of the same stream
+    /// anywhere (`attach`); the one-shot's single slice keeps it at zero.
+    source_base: usize = 0,
+    /// Next source byte not yet loaded into `bits`, relative to `source`.
     next_byte: usize,
     /// Unconsumed bits, LSB first: bit 0 is the next bit on the wire.
     bits: u64,
@@ -55,12 +59,26 @@ pub const BitReader = struct {
     bit_pos: u64,
 
     pub fn init(source: []const u8) BitReader {
-        return .{ .source = source, .next_byte = 0, .bits = 0, .bit_count = 0, .bit_pos = 0 };
+        return .{
+            .source = source,
+            .source_base = 0,
+            .next_byte = 0,
+            .bits = 0,
+            .bit_count = 0,
+            .bit_pos = 0,
+        };
     }
 
     /// Bits of `source` not yet consumed.
     pub fn availableBits(self: *const BitReader) u64 {
-        return @as(u64, self.source.len) * 8 - self.bit_pos;
+        return @as(u64, self.source_base + self.source.len) * 8 - self.bit_pos;
+    }
+
+    /// The stream byte after the last one loaded into `bits`. The bytes
+    /// before it are the accumulator's; the streaming reader gives the input
+    /// that many bytes back before it reads more (`brotli.Reader`).
+    pub fn loadedBytes(self: *const BitReader) usize {
+        return self.source_base + self.next_byte;
     }
 
     /// True at a byte boundary: where the uncompressed payload and the
@@ -110,14 +128,14 @@ pub const BitReader = struct {
         if (skip != 0) {
             if (try self.take(skip) != 0) return error.BadPadding;
         }
-        self.rebase();
+        self.rewind();
     }
 
     /// Copy the next `target.len` bytes out — an uncompressed meta-block's
     /// payload (`§9.2`). Only valid at a byte boundary.
     pub fn takeBytes(self: *BitReader, target: []u8) Error!void {
         assert(self.atByteBoundary());
-        self.rebase();
+        self.rewind();
         if (self.source.len - self.next_byte < target.len) return error.Truncated;
         fastmem.copy(u8, target, self.source[self.next_byte..][0..target.len]);
         self.next_byte += target.len;
@@ -129,7 +147,7 @@ pub const BitReader = struct {
     /// valid at a byte boundary.
     pub fn skipBytes(self: *BitReader, count: u32) Error!void {
         assert(self.atByteBoundary());
-        self.rebase();
+        self.rewind();
         if (self.source.len - self.next_byte < count) return error.Truncated;
         self.next_byte += count;
         self.bit_pos += @as(u64, count) * 8;
@@ -149,12 +167,28 @@ pub const BitReader = struct {
     /// Drop the buffered whole bytes back to `source`. Valid only at a byte
     /// boundary, where the buffered bits are whole unconsumed bytes, so
     /// rewinding loses nothing.
-    fn rebase(self: *BitReader) void {
+    pub fn rewind(self: *BitReader) void {
         assert(self.bit_pos % 8 == 0);
         assert(self.bit_count % 8 == 0);
-        self.next_byte = @intCast(self.bit_pos / 8);
+        assert(self.bit_pos / 8 >= self.source_base);
+        self.next_byte = @as(usize, @intCast(self.bit_pos / 8)) - self.source_base;
         self.bits = 0;
         self.bit_count = 0;
+    }
+
+    /// Continue over a fresh slice of the same stream: `base` is the stream
+    /// byte `source[0]` is, and the slice must cover every byte the
+    /// accumulator has not loaded (`loadedBytes()`). The bits already
+    /// buffered stay put, so the streaming reader hands this reader a new
+    /// window of its input without losing the partial byte
+    /// (`brotli.Reader`).
+    pub fn attach(self: *BitReader, source: []const u8, base: usize) void {
+        const loaded = self.loadedBytes();
+        assert(base <= loaded);
+        assert(base + source.len >= loaded);
+        self.source = source;
+        self.source_base = base;
+        self.next_byte = loaded - base;
     }
 };
 
@@ -230,6 +264,38 @@ test "bit reader: alignToByte accepts zero fill and rejects nonzero fill" {
     var aligned: BitReader = .init(&[_]u8{0xFF});
     try aligned.alignToByte();
     try testing.expectEqual(@as(u32, 0xFF), try aligned.take(8));
+}
+
+test "bit reader: attach continues over a fresh slice without losing bits" {
+    // The streaming reader's seam: the loaded slice runs out mid-integer, and
+    // the bits already buffered survive the switch to the next slice.
+    const first = [_]u8{0b1010_0110};
+    const rest = [_]u8{ 0b0000_1111, 0b0101_0101 };
+    var br: BitReader = .init(&first);
+    try testing.expectEqual(@as(u32, 0b110), try br.take(3));
+    // `attach` takes the slice that begins at the byte holding the next
+    // unconsumed bit (here the same byte, nothing consumed whole yet), so the
+    // three buffered bits stay put and the next reads continue across it.
+    br.attach(&first, 0);
+    try testing.expectEqual(@as(u32, 0b10100), try br.take(5));
+    // Now the first slice is spent: the reader hands over the rest.
+    br.attach(&rest, 1);
+    try testing.expectEqual(@as(u32, 0b1111), try br.take(4));
+    try testing.expectEqual(@as(u32, 0b0000), try br.take(4));
+    try testing.expectEqual(@as(u32, 0b0101_0101), try br.take(8));
+    try testing.expectError(error.Truncated, br.take(1));
+    try testing.expectEqual(@as(u64, 0), br.availableBits());
+
+    // A byte-aligned attach: the whole buffered bytes are given back by
+    // `rewind` and re-read from the new slice.
+    const bytes = [_]u8{ 0b0000_0110, 0x5A };
+    var aligned: BitReader = .init(&bytes);
+    try testing.expectEqual(@as(u32, 0b110), try aligned.take(3));
+    try aligned.alignToByte();
+    aligned.rewind();
+    try testing.expectEqual(@as(usize, 1), aligned.next_byte);
+    aligned.attach(bytes[1..], 1);
+    try testing.expectEqual(@as(u32, 0x5A), try aligned.take(8));
 }
 
 test "bit reader: takeBytes and skipBytes read at a byte boundary" {
