@@ -47,8 +47,11 @@ pub const BitReader = struct {
     /// The stream byte `source[0]` is. `bit_pos` counts from the stream's
     /// start, so a reader can be handed a fresh slice of the same stream
     /// anywhere (`attach`); the one-shot's single slice keeps it at zero.
-    source_base: usize = 0,
+    /// u64: a stream's compressed input can run past 2^32 bytes, where the
+    /// stream position does not fit a 32-bit `usize` (`just check-32`).
+    source_base: u64 = 0,
     /// Next source byte not yet loaded into `bits`, relative to `source`.
+    /// A slice is at most an input buffer, so a `usize` is exact here.
     next_byte: usize,
     /// Unconsumed bits, LSB first: bit 0 is the next bit on the wire.
     bits: u64,
@@ -71,13 +74,13 @@ pub const BitReader = struct {
 
     /// Bits of `source` not yet consumed.
     pub fn availableBits(self: *const BitReader) u64 {
-        return @as(u64, self.source_base + self.source.len) * 8 - self.bit_pos;
+        return (self.source_base + self.source.len) * 8 - self.bit_pos;
     }
 
     /// The stream byte after the last one loaded into `bits`. The bytes
     /// before it are the accumulator's; the streaming reader gives the input
     /// that many bytes back before it reads more (`brotli.Reader`).
-    pub fn loadedBytes(self: *const BitReader) usize {
+    pub fn loadedBytes(self: *const BitReader) u64 {
         return self.source_base + self.next_byte;
     }
 
@@ -171,7 +174,9 @@ pub const BitReader = struct {
         assert(self.bit_pos % 8 == 0);
         assert(self.bit_count % 8 == 0);
         assert(self.bit_pos / 8 >= self.source_base);
-        self.next_byte = @as(usize, @intCast(self.bit_pos / 8)) - self.source_base;
+        // The absolute position minus the slice's base is an offset inside
+        // the slice, so it fits a `usize` on every target.
+        self.next_byte = @intCast(self.bit_pos / 8 - self.source_base);
         self.bits = 0;
         self.bit_count = 0;
     }
@@ -182,13 +187,14 @@ pub const BitReader = struct {
     /// buffered stay put, so the streaming reader hands this reader a new
     /// window of its input without losing the partial byte
     /// (`brotli.Reader`).
-    pub fn attach(self: *BitReader, source: []const u8, base: usize) void {
+    pub fn attach(self: *BitReader, source: []const u8, base: u64) void {
         const loaded = self.loadedBytes();
         assert(base <= loaded);
         assert(base + source.len >= loaded);
         self.source = source;
         self.source_base = base;
-        self.next_byte = loaded - base;
+        // As in `rewind`: the difference is an offset inside the new slice.
+        self.next_byte = @intCast(loaded - base);
     }
 };
 
@@ -296,6 +302,30 @@ test "bit reader: attach continues over a fresh slice without losing bits" {
     try testing.expectEqual(@as(usize, 1), aligned.next_byte);
     aligned.attach(bytes[1..], 1);
     try testing.expectEqual(@as(u32, 0x5A), try aligned.take(8));
+}
+
+test "bit reader: the stream position arithmetic is 64-bit" {
+    // A reader whose stream has already run past 2^32 bytes: `source_base`,
+    // `loadedBytes` and `rewind` count from the stream's start in u64, and
+    // only the offset inside the slice narrows to `usize` — the arithmetic
+    // that must not wrap on a 32-bit target (`just check-32`).
+    const source = [_]u8{0xA5};
+    const base: u64 = (@as(u64, 1) << 32) + 7;
+    var br: BitReader = .{
+        .source = &source,
+        .source_base = base,
+        .next_byte = 1,
+        .bits = 0,
+        .bit_count = 0,
+        .bit_pos = base * 8,
+    };
+    try testing.expectEqual(@as(u64, 8), br.availableBits());
+    try testing.expectEqual(base + 1, br.loadedBytes());
+    br.rewind();
+    try testing.expectEqual(@as(usize, 0), br.next_byte);
+    try testing.expectEqual(@as(u32, 0xA5), try br.take(8));
+    try testing.expectEqual(@as(u64, 0), br.availableBits());
+    try testing.expectEqual(base + 1, br.loadedBytes());
 }
 
 test "bit reader: takeBytes and skipBytes read at a byte boundary" {

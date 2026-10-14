@@ -906,6 +906,24 @@ test "compressed header: the arena's byte figure" {
     try testing.expectEqual(@as(usize, 707_204), @sizeOf(Header));
 }
 
+test "compressed header: RFC 7932 §6's block-count rows tile the count space" {
+    // The RFC's table: each row's range ends one below the next row's base.
+    // Row 0 is anchored here and the loop pins the 24 rows above it, so a
+    // base mutated by one no longer fits the row below; the last row's range
+    // top is the RFC's 16793840.
+    try testing.expectEqual(@as(u32, 1), block_count_rows[0].base);
+    inline for (0..25) |i| {
+        try testing.expectEqual(
+            block_count_rows[i + 1].base,
+            block_count_rows[i].base + (@as(u32, 1) << block_count_rows[i].extra_bits),
+        );
+    }
+    try testing.expectEqual(
+        @as(u32, 16793840),
+        block_count_rows[25].base + (@as(u32, 1) << 24) - 1,
+    );
+}
+
 test "compressed header: RFC 7932 §6's first block count" {
     // NBLTYPESL = 2 reads the literal block-type tree, the block-count tree,
     // and the first literal block count (§9.2). The count tree is a simple

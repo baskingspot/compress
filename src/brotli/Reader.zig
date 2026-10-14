@@ -18,7 +18,6 @@ const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
 const testing = std.testing;
-const Allocator = std.mem.Allocator;
 
 const fastmem = @import("fastmem");
 
@@ -53,12 +52,12 @@ pub fn Buffer(comptime window_wbits: usize) type {
 /// The default window cap, 24 — the format's maximum (`§9.1`). Measured
 /// (F9): the reference CLI's pipe form emits WBITS 24 for every stream it
 /// writes, and its file form 10..19 by input size, so 24 decodes both
-/// unconfigured. `Buffer(22)` (4.7 MiB rather than 16.8) decodes the file
+/// unconfigured. `Buffer(22)` (4.7 MiB rather than 16.7) decodes the file
 /// family only.
 pub const default_window_wbits: usize = 24;
 
 /// `Buffer(default_window_wbits)`: a 16 MiB ring plus the tree region, about
-/// 16.8 MiB — keep it in static or heap storage.
+/// 16.7 MiB — keep it in static or heap storage.
 pub const DefaultBuffer = Buffer(default_window_wbits);
 
 /// The reader's error set: the one-shot decoder's `DecompressError` without
@@ -178,7 +177,9 @@ const Reader = @This();
 reader: Io.Reader,
 /// The stream's input, consumed exactly through the stream's last byte.
 /// Later bytes stay unread, so the caller can start another `Reader` there.
-/// Its buffer must hold at least one byte.
+/// Its buffer must hold at least four bytes (the widest field the bit reader
+/// assembles is 24 bits, and the peek table reads eight at a time);
+/// `Io.Reader.fixed` always qualifies.
 input: *Io.Reader,
 /// The history ring: the buffer's front `1 << window_wbits` bytes, and the
 /// same slice as `reader.buffer` (the region the consumer reads from).
@@ -261,7 +262,8 @@ pub fn init(comptime window_wbits: usize, input: *Io.Reader, buffer: *Buffer(win
 /// previous one ended. An input that holds nothing at all decodes to zero
 /// bytes (the walk's clean end); bytes at a start position that cannot begin
 /// a stream fail `error.ReadFailed` (the cause is `BadStreamStart`). `in`
-/// needs a buffer of at least one byte. Does not allocate.
+/// needs a buffer of at least four bytes (see `init`); `Io.Reader.fixed`
+/// always qualifies. Does not allocate.
 pub fn streamAll(
     comptime window_wbits: usize,
     in: *Io.Reader,
@@ -528,7 +530,9 @@ const StreamBits = struct {
     /// byte and the caller's loop would make no progress.
     fn pull(self: *StreamBits) ErrorSet!bool {
         const br = &self.r.bit_reader;
-        self.r.input.toss(br.loadedBytes() - br.source_base);
+        // The bytes of the current slice the accumulator has loaded, an
+        // offset inside the input buffer (so a `usize` on every target).
+        self.r.input.toss(@intCast(br.loadedBytes() - br.source_base));
         var filled = true;
         // Bytes the input buffers beyond the slice the reader holds are new
         // to it: it starts with an empty slice, and the walk's `peekByte` may
@@ -560,8 +564,8 @@ const StreamBits = struct {
     fn tossConsumed(self: *StreamBits) void {
         const br = &self.r.bit_reader;
         assert(br.bit_pos / 8 >= br.source_base);
-        const consumed: usize = @intCast(br.bit_pos / 8);
-        self.r.input.toss(consumed - br.source_base);
+        const consumed: u64 = br.bit_pos / 8;
+        self.r.input.toss(@intCast(consumed - br.source_base));
         br.attach(self.r.input.buffered(), consumed);
     }
 };
@@ -683,7 +687,7 @@ test "Reader: the error vocabulary is the README's list" {
 }
 
 test "Reader: the README's streaming snippet decodes a stream" {
-    // The README's Usage snippet, as written: `DefaultBuffer` (16.8 MiB, in
+    // The README's Usage snippet, as written: `DefaultBuffer` (16.7 MiB, in
     // static or heap storage), `init`, and `streamRemaining` through the
     // `Io.Reader` interface; on ReadFailed, `err` says why.
     const buffer = try testing.allocator.create(DefaultBuffer);
@@ -758,6 +762,7 @@ test "Reader: the golden corpus decodes byte-exact through the streaming path" {
         golden.cli_digits_q9,
         golden.cli_digits_q11,
         golden.cli_small_window,
+        golden.cli_golden_q9_w16,
     };
     for (cases) |case| try expectStream(default_window_wbits, case.bytes, case.plain, buffer);
 
@@ -970,9 +975,10 @@ test "Reader: the layers' named refusals through the streaming path" {
         // RFC 7932 §3.4 — a duplicate symbol, and a symbol past the alphabet.
         .{ .stream = golden.duplicate_symbol_streams[0], .want = error.SimpleHuffmanSame },
         .{ .stream = golden.out_of_alphabet_streams[0], .want = error.SimpleHuffmanAlphabet },
-        // RFC 7932 §9.3 — both MLEN overruns are one class (F4).
+        // RFC 7932 §9.3 — all three MLEN overruns are one class (F4).
         .{ .stream = golden.mlen_insert_overrun.bytes, .want = error.BadBlockLength },
         .{ .stream = golden.mlen_copy_overrun.bytes, .want = error.BadBlockLength },
+        .{ .stream = golden.dictionary_mlen_overrun.bytes, .want = error.BadBlockLength },
         // RFC 7932 §4 — a special code resolving to zero.
         .{ .stream = golden.negative_special.bytes, .want = error.BadDistance },
         // RFC 7932 §8 — a dictionary length outside 4..24, and a transform

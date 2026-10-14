@@ -298,10 +298,13 @@ fn switchBlock(
     const max_types = header.block_types[index];
     if (max_types == 1) {
         // §9.3 — a single-type category's switch "appears only if
-        // NBLTYPESx >= 2", and §10 gives it the count 16777216: one
-        // meta-block cannot produce that many symbols, so this re-arm is
-        // unreachable for any stream and keeps the count honest without
-        // reading a switch that is not on the wire.
+        // NBLTYPESx >= 2", and §10 gives it the count 16777216. No
+        // meta-block's *output* reaches that count (MLEN is at most 2^24),
+        // but its command stream can: a command that produces nothing — an
+        // emptied dictionary word at a distance above 120 — still spends
+        // one, so about 30 MB of input runs the count out and re-arms it
+        // here, without reading a switch that is not on the wire. The C
+        // reference re-arms the same way.
         blocks.counts[index] = 1 << 24;
         return;
     }
@@ -800,7 +803,12 @@ test "command stream: RFC 7932 §5's command decode" {
     var packer: golden.Packer = .{};
     var br: bits.BitReader = .init(packer.slice());
     var tree: huffman.CommandTree = undefined;
-    try tree.build(&[_]u4{0} ** 704);
+    // A complete two-symbol set satisfies `build`'s Kraft precondition; the
+    // commands below ride `single`, so the tables are never read.
+    var blank_lens: [704]u4 = @splat(0);
+    blank_lens[0] = 1;
+    blank_lens[1] = 1;
+    try tree.build(&blank_lens);
     // A zero-length single-symbol tree is `single`, built by readTree's
     // simple form; here set it directly (the tree's `single` field).
     tree.single = 8;
@@ -841,6 +849,19 @@ test "command stream: RFC 7932 §5's length tables" {
     try testing.expectEqual(@as(u32, 2), copy_base[0]);
     try testing.expectEqual(@as(u32, 2118), copy_base[23]);
     try testing.expectEqual(@as(u32, 16779333), copy_base[23] + (@as(u32, 1) << 24) - 1);
+    // Every row's range ends one below the next row's base, so the two
+    // anchors above pin all 24 rows of each table: a base mutated by one no
+    // longer fits the row above it (only rows 0 and 23 were pinned before).
+    inline for (0..23) |i| {
+        try testing.expectEqual(
+            insert_base[i + 1],
+            insert_base[i] + (@as(u32, 1) << insert_extra[i]),
+        );
+        try testing.expectEqual(
+            copy_base[i + 1],
+            copy_base[i] + (@as(u32, 1) << copy_extra[i]),
+        );
+    }
 }
 
 test "context IDs: RFC 7932 §7.1's four modes" {
@@ -1022,7 +1043,8 @@ test "command stream: RFC 7932 §9.3's MLEN accounting refusals" {
     // RFC 7932 §9.3 — "In any other case, if the number of literals to
     // insert, the copy length, or the resulting dictionary word length would
     // cause MLEN to be exceeded, then the stream should be rejected as
-    // invalid." The CLI reports FORMAT_BLOCK_LENGTH_2 (-10) for both (F4).
+    // invalid." The CLI reports FORMAT_BLOCK_LENGTH_2 (-10) for all three
+    // (F4).
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     try testing.expectError(
@@ -1032,6 +1054,10 @@ test "command stream: RFC 7932 §9.3's MLEN accounting refusals" {
     try testing.expectError(
         error.BadBlockLength,
         decode.decompress(golden.mlen_copy_overrun.bytes, &target),
+    );
+    try testing.expectError(
+        error.BadBlockLength,
+        decode.decompress(golden.dictionary_mlen_overrun.bytes, &target),
     );
 
     // RFC 7932 §4 — a special code resolving to zero (the CLI's

@@ -118,10 +118,15 @@ pub fn Tree(comptime bound: usize) type {
         /// symbol order, 0 meaning the symbol does not occur (`§3.2`).
         /// `lens.len` is the declared alphabet size, at most `bound`.
         ///
-        /// `error.BadHuffmanCode` when the two-level table would exceed the
-        /// storage: no conformant code-length set can — the storage is the
-        /// reference's proven ceiling — but the check is what makes the
-        /// region a hard bound rather than a hope.
+        /// `error.BadHuffmanCode` when `lens` is not a complete prefix code
+        /// — `§3.5`: "the sum of (32768 >> code length) over all the non-zero
+        /// code lengths ... must be equal to 32768" — or when the two-level
+        /// table would exceed the storage: no conformant code-length set
+        /// can, the storage is the reference's proven ceiling, but the check
+        /// is what makes the region a hard bound rather than a hope. The
+        /// wire path (`readComplexTree`'s `code_space` accumulator) refuses a
+        /// bad set first, so a caller of this public entry gets the refusal
+        /// rather than a table built from an over- or under-subscribed set.
         pub fn build(self: *Self, lens: []const u4) Error!void {
             assert(lens.len > 0);
             assert(lens.len <= bound);
@@ -130,9 +135,17 @@ pub fn Tree(comptime bound: usize) type {
 
             // §3.2, steps 1-2: the length histogram and the smallest code of
             // each length. A length of 0 means the symbol is absent, and
-            // `bl_count[0]` is 0 by definition.
+            // `bl_count[0]` is 0 by definition. The histogram pass also sums
+            // the Kraft weights: an over-subscribed set would overflow the
+            // canonical `next_code` below, and an under-subscribed one has no
+            // table at all.
             var count: [16]u16 = @splat(0);
-            for (lens) |len| count[len] += 1;
+            var kraft: u32 = 0;
+            for (lens) |len| {
+                count[len] += 1;
+                if (len != 0) kraft += @as(u32, 0x8000) >> @intCast(len);
+            }
+            if (kraft != 0x8000) return error.BadHuffmanCode;
             count[0] = 0;
             var next_code: [16]u16 = @splat(0);
             var code: u32 = 0;
@@ -543,6 +556,22 @@ test "prefix codes: a code longer than the root table takes the subtable" {
     packCode(&second, 0b111111111111111, 15);
     var br2: bits.BitReader = .init(second.slice());
     try testing.expectEqual(@as(u16, 15), try tree.decode(bits.BitReader, &br2));
+}
+
+test "prefix codes: a set that is not a complete code is BadHuffmanCode" {
+    // RFC 7932 §3.5 — "the sum of (32768 >> code length) over all the
+    // non-zero code lengths ... must be equal to 32768". 200 one-bit codes
+    // is 200 * 16384: the canonical `next_code` accumulator used to overflow
+    // the `u16` it stores on a set like this one (a panic in Debug and
+    // ReleaseSafe, undefined behavior in ReleaseFast) before the table was
+    // even built.
+    var tree: LiteralTree = undefined;
+    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{1} ** 200)));
+    // Under-subscribed: three two-bit codes leave 24,576 of the 32,768
+    // unassigned, so there is no table to build. The all-zero set is the
+    // degenerate case.
+    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{2} ** 3)));
+    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{0} ** 256)));
 }
 
 test "prefix codes: the two-level table never overflows a short read" {

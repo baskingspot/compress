@@ -798,6 +798,7 @@ fn applyMutation(
     run: usize,
     value: usize,
 ) []const u8 {
+    @setEvalBranchQuota(20_000);
     assert(out.len >= base.len + growth_max);
     const len = base.len;
     switch (op) {
@@ -1587,7 +1588,7 @@ fn fuzzBits(_: void, smith: *Smith) anyerror!void {
     const ops = 1 + rangeAtMost(smith, 0, 31);
     var op: usize = 0;
     while (op < ops) : (op += 1) {
-        const pos = br.bit_pos;
+        const pos: usize = @intCast(br.bit_pos);
         switch (rangeAtMost(smith, 0, 5)) {
             0, 1 => {
                 const n: u6 = @intCast(1 + rangeAtMost(smith, 0, bits.max_read_bits - 1));
@@ -1804,27 +1805,21 @@ fn prefixAt(comptime T: type, smith: *Smith, source: []const u8) !void {
 }
 
 /// The `build` surface: a Smith-chosen length set either refuses with
-/// `BadHuffmanCode` (the table bound's name) or builds, and a table built
-/// from a *complete* set decodes every root window to a symbol inside the
-/// alphabet without starving.
+/// `BadHuffmanCode` or builds, and a table built from a *complete* set
+/// decodes every root window to a symbol inside the alphabet without
+/// starving.
 ///
-/// `build`'s contract is the caller's: `readComplexTree`'s `§3.5` Kraft
-/// accumulator refuses an over-subscribed set before it ever reaches the
-/// table, and a set past the 15-bit scale makes `build`'s canonical
-/// `next_code` accumulator overflow the `u16` it stores — a panic (and, in
-/// ReleaseFast, undefined behavior) rather than `BadHuffmanCode`. That gap
-/// is recorded in the fuzz report; this target stays inside the contract the
-/// decoder upholds, and covers the two classes that remain: the table-bound
-/// refusal and the complete build.
+/// `build` itself refuses a set that is not a complete prefix code — its
+/// `§3.5` Kraft check covers the over-subscribed sets that used to overflow
+/// the canonical `next_code` accumulator (the fuzz report's finding) — so an
+/// arbitrary length set is inside the contract here, and the refusal classes
+/// are the Kraft equality and the table bound.
 fn buildAt(comptime T: type, smith: *Smith) !void {
     var lens: [T.alphabet_size]u4 = @splat(0);
     const n = 1 + rangeAtMost(smith, 0, T.alphabet_size - 1);
     for (lens[0..n]) |*len| len.* = @intCast(rangeAtMost(smith, 0, 15));
-    const sum = kraftSum(lens[0..n]);
-    if (sum > 1 << 15) return;
     var tree: T = undefined;
     if (tree.build(lens[0..n])) |_| {
-        if (sum != 1 << 15) return;
         // Every eight-bit root window, with eight more bits behind it: a
         // complete code is at most 15 bits, so each decode lands inside the
         // alphabet and consumes at least one bit.
@@ -1846,16 +1841,6 @@ fn buildAt(comptime T: type, smith: *Smith) !void {
     } else |err| {
         try testing.expectEqual(error.BadHuffmanCode, err);
     }
-}
-
-/// `§3.2`'s completeness: the Kraft sum over the code lengths, `2^15` for a
-/// complete set (the scale `readComplexTree` accumulates to 32768).
-fn kraftSum(lens: []const u4) u32 {
-    var sum: u32 = 0;
-    for (lens) |len| {
-        if (len != 0) sum += @as(u32, 1) << (15 - len);
-    }
-    return sum;
 }
 
 /// The prefix-code layer's composed error set.

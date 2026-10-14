@@ -9,7 +9,9 @@
 //! verified against the pinned CLI (brotli 1.2.0, the flake's) with
 //! `brotli -d -c` — and the rejections with `brotli -d -v -c` — before
 //! landing: a vector the reference refuses would be a broken fixture, not a
-//! decoder bug.
+//! decoder bug. One fixture, `cli_golden_q9_w16`, is too large to inline:
+//! its stream and the input text it decodes to live in `testdata/` and are
+//! read with `@embedFile` (the shape the flate golden corpus uses).
 //!
 //! `Packer` is the test-side half of that writer, so a test can rebuild a
 //! vector's fields or build a variant of it; `trivialCompress` is the one
@@ -563,6 +565,17 @@ pub const dictionary_length: Stream = .{
     .plain = "",
 };
 
+/// RFC 7932 §9.3 — a dictionary reference whose word would exceed MLEN:
+/// `dictionary_word` with MLEN 4, so the one literal 'A' plus "time" does
+/// not fit. The CLI reports FORMAT_BLOCK_LENGTH_2 (-10) and refuses it;
+/// verified with the pinned CLI (brotli 1.2.0, `brotli -d -v -c`).
+pub const dictionary_mlen_overrun: Stream = .{
+    .bytes = &.{
+        0x62, 0x00, 0x00, 0x00, 0x44, 0x50, 0x28, 0x12, 0x50,
+    },
+    .plain = "",
+};
+
 /// RFC 7932 §10, §4 — a copy across a meta-block boundary, and the stream-scoped
 /// distance ring: the second meta-block's implicit distance is the first's
 /// push. Verified with the pinned CLI
@@ -838,4 +851,23 @@ pub const cli_digits_q11: Stream = .{
         0x14, 0x00, 0x08, 0x94, 0xD3, 0xD9, 0x7B,
     },
     .plain = "0123456789" ** 40,
+};
+
+/// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -w 16 -c`): the
+/// largest CLI fixture, over this file's own text at the commit that landed
+/// it, frozen as `testdata/cli_golden_q9_w16.in` (later edits to this file do
+/// not move it). One stream carries the four rules the oracle lane alone used
+/// to catch — an implicit-distance command followed by a distance read, a
+/// dictionary reference followed by distance code 0 (§4's push exclusions), a
+/// code-length run of 17 next to a 16, and an alphabet whose first length
+/// symbol is 16 (§3.5's "the previous length is taken to be 8") — and each
+/// mutant of those four fails the tests that decode it. Which shapes a stream
+/// carries is the encoder's choice, not a property of the format: at `-q 11`
+/// this text's stream drops the first-length-16 tree, so the pair is frozen
+/// at the quality that carries all four. The stream is the CLI's byte-exact
+/// encode of the `.in` bytes — `brotli -d -c` returns them unchanged — and
+/// the tests decode it through both layers.
+pub const cli_golden_q9_w16: Stream = .{
+    .bytes = @embedFile("testdata/cli_golden_q9_w16.br"),
+    .plain = @embedFile("testdata/cli_golden_q9_w16.in"),
 };

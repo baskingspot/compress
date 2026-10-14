@@ -72,7 +72,7 @@ brotli.decode.DecompressError = error{
     BadCodeLengthCode,     // the code-length code is not a complete prefix code
     BadHuffmanCode,        // a code-length sequence breaks §3.5's rules
     // block types and the meta-block length (§6, §9.3):
-    BadBlockLength,      // a block count, or the meta-block length accounting
+    BadBlockLength,      // the meta-block length accounting (§9.3)
     // context maps (§7.3):
     ContextMapRepeat,    // a context map's zero-run overruns the map
     // distances and the dictionary (§4, §8):
@@ -208,14 +208,22 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
 `just test` runs the unit tests: the RFC's own check values (the dictionary,
 the transform table, and the three context Luts by CRC-32), the hand-built
 minimal streams (the empty family, the one-command streams, the rejection
-vectors), the reference fixture corpus decoded byte-exact through both the
-one-shot and the streaming reader, round trips, and a check on every decode
-that no byte past the decoded length was written.
-`just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and
-`just brotli-oracle` cross-checks the decoder against the reference CLI and
-andybalholm/brotli on the reference corpus. `just bench` runs the local benchmarks; local numbers
-are not performance claims. Design notes, the divergence register, and the
-fixture inventory are in [`AGENTS.md`](AGENTS.md).
+vectors), and the streams the pinned reference CLI wrote — the small text,
+repeat, run, and digits inputs at five qualities, the `-w 10` ring vector,
+and one 34,382-byte mixed text — each decoded byte-exact through both the
+one-shot and the streaming reader, with a check on every decode that no byte
+past the decoded length was written. The codec is decoder-only, so there is
+no round trip to test: the CLI's own output is the encoder evidence, and the
+45-vector reference corpus is not vendored.
+`just fuzz 1M` runs the fuzz targets (ReleaseSafe only). `just brotli-oracle`
+cross-checks the decoder against the pinned reference CLI (brotli 1.2.0) and
+andybalholm/brotli over streams both encoders wrote: the CLI's quality sweep
+(eight inputs × qualities 0..11), its window, file, metadata, and
+trailing-byte lanes, and the Go port's own 40 streams, with the truncation
+and corruption batteries asserting the references' verdicts. `just bench`
+runs the local benchmarks; local numbers are not performance claims. Design
+notes, the divergence register, and the fixture inventory are in
+[`AGENTS.md`](AGENTS.md).
 
 ## License
 

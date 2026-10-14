@@ -651,6 +651,20 @@ three CLI text streams) and the CRC pins are the gates.
   byte-at-a-time §10 reading). The new golden vector is `cli_small_window`
   (`brotli -q 9 -w 10`, 4,400 bytes in 49, one copy of 4,355 at distance 45),
   whose ring wrap under a `Buffer(10)` is deterministic.
+- **The close review's vectors.** `dictionary_mlen_overrun` pins §9.3's
+  dictionary-word MLEN check — the word "time" after one literal in a
+  four-byte meta-block, the CLI's `FORMAT_BLOCK_LENGTH_2` (-10) — in the
+  command, `decode` and `Reader` refusal lists. `cli_golden_q9_w16` is the
+  pinned CLI's `-q 9 -w 16` output over this file's text at its landing
+  commit, 34,382 bytes in 8,192, vendored under `testdata/`: one stream that
+  kills the four mutants the oracle alone used to catch — §4's
+  implicit-distance push exclusion and its dictionary-reference twin, §3.5's
+  16/17 repeat-count reset, and §3.5's first-length-16 rule ("the previous
+  length is taken to be 8"). It decodes byte-exact through the one-shot and
+  the streaming reader, with the sentinel check; a mutation run against each
+  of the four fails that test through both layers. The quality is part of the
+  fixture: at `-q 11` the same text's stream drops the first-length-16 tree,
+  so the flags and the input pair are frozen together.
 - **The golden corpus** (the fixture plan above) is the conformance bar; the
   reference harness's shape is `run-compatibility-test.cmake` (decode plus a
   SHA512 compare). The empty family doubles as a wire-format specification.
@@ -688,15 +702,16 @@ three CLI text streams) and the CRC pins are the gates.
   budget is spent. Every target caps its input, its output, and its call
   count; a reader that neither serves nor fails is `error.PumpStalled`
   (reported, never a timeout) — the bit seam's two hangs are that class.
-  One finding, recorded and not fixed here: `huffman.Tree.build` panics
+  The fuzz report's one finding is fixed: `huffman.Tree.build` used to panic
   ("integer does not fit in destination type", and undefined behavior in
   ReleaseFast) on an over-subscribed length set whose Kraft sum exceeds the
-  15-bit scale, instead of returning `BadHuffmanCode` — the decoder's own
-  path never reaches it (`readComplexTree`'s `code_space` accumulator refuses
-  such a set first), so it is a public-API hazard under `decode.prefix`, not
-  a stream-reachable bug. `fuzzPrefixCodes` stays inside the contract the
-  decoder upholds. Gaps left open on purpose: the distance layer has no
-  target of its own (its arithmetic is exercised through the CLI-verified
+  15-bit scale, instead of returning `BadHuffmanCode`. The decoder's own path
+  never reached it (`readComplexTree`'s `code_space` accumulator refuses such
+  a set first), so it was a public-API hazard under `decode.prefix`, not a
+  stream-reachable bug; `build` now checks §3.5's Kraft equality itself, so
+  any length set either builds or is `BadHuffmanCode`, and `fuzzPrefixCodes`
+  feeds it arbitrary sets. Gaps left open on purpose: the distance layer has
+  no target of its own (its arithmetic is exercised through the CLI-verified
   `ndirect`/`npostfix`/ring vectors and the command stream, and pinned by
   `distance.zig`'s unit tests); the layer targets feed arbitrary bytes to
   the layers directly rather than through whole streams, so a layer bug that
@@ -741,8 +756,12 @@ three CLI text streams) and the CRC pins are the gates.
   `BadStreamStart` at a tail, and the end-of-stream toss (the input position
   must be the stream's last byte + 1, never past it).
 - `just test` gates the unit tests, `just fuzz` the targets (ReleaseSafe only),
-  `just check-baseline` the portable targets, and `just brotli-oracle` the
-  differential lane against the two references (Oracles).
+  `just check-baseline` the portable targets, `just brotli-oracle` the
+  differential lane against the two references (Oracles), and `just check-32`
+  the 32-bit probes: `src/brotli/probe32.zig` decodes one stream whose
+  compressed input runs past 2^32 bytes (257 metadata meta-blocks of 16 MiB,
+  generated on the fly) on wasm32-wasi under wasmtime, which is the only place
+  the bit reader's u64 stream position can be seen narrowing to a `usize`.
 
 ## Oracles
 
@@ -794,7 +813,9 @@ harness: `decode <stream-file> <cap-bytes>` for the one-shot and, since slice
   references refuse it, and the CLI's `-K` walks a doubled stream;
 - the empty family — 17 streams (the §7.2 table plus T5's terminators)
   decoding to zero bytes through all three;
-- the truncation battery — 1,133 prefixes, refused by all three (§10);
+- the truncation battery — 1,135 prefixes, refused by all three (§10);
+  the count follows the sampled input files' sizes, so it moves by a few
+  whenever one of them is edited (`src/brotli/AGENTS.md` is one);
 - the corruption battery (T6) — 142 flips, each asserting the references'
   verdict: refuse together, or byte-identical output;
 - the Go encoder's 40 streams (qualities 0/1/5/9/11 × the 8 inputs) — a

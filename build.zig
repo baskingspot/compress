@@ -207,35 +207,36 @@ pub fn build(b: *Build) void {
     bench_vendor.setCwd(b.path("bench"));
     bench_vendor_step.dependOn(&bench_vendor.step);
 
-    // The 32-bit probe (src/zstd/probe32.zig): decodes frames with very large
-    // totals on a usize=32 target, where a 32-bit length wrap is observable.
-    // It is built for wasm32-wasi in ReleaseSafe (a wrap panics) with an
-    // explicit 8 MiB stack (the window buffer lives on it), and `just
-    // check-32` runs it under wasmtime. It is a correctness check, not a
-    // benchmark, so it sits outside the lazy benchmark block below and never
-    // depends on the benchmark package.
+    // The 32-bit probes (src/zstd/probe32.zig, src/brotli/probe32.zig): decode
+    // inputs whose totals run past 2^32 on a usize=32 target, where a 32-bit
+    // wrap is observable. Both are built for wasm32-wasi in ReleaseSafe (a
+    // wrap panics) with an explicit 8 MiB stack (the codecs' scratch lives on
+    // it), and `just check-32` runs them under wasmtime. They are correctness
+    // checks, not benchmarks, so they sit outside the lazy benchmark block
+    // below and never depend on the benchmark package.
     const probe32_target = b.resolveTargetQuery(.{
         .cpu_arch = .wasm32,
         .os_tag = .wasi,
     });
-    const probe32_mod = b.createModule(.{
-        .root_source_file = b.path("src/zstd/probe32.zig"),
-        .target = probe32_target,
-        .optimize = .ReleaseSafe,
-    });
-    probe32_mod.addImport("fastmem", fastmem_mod);
-    probe32_mod.addImport("zcompress", zcompress_mod);
-    const probe32_exe = b.addExecutable(.{
-        .name = "zstd-probe32",
-        .root_module = probe32_mod,
-    });
-    probe32_exe.stack_size = 8 * 1024 * 1024;
-    const install_probe32 = b.addInstallArtifact(probe32_exe, .{});
     const probe32_step = b.step(
         "probe32",
-        "Build the 32-bit proof probe (wasm32-wasi; run under wasmtime)",
+        "Build the 32-bit proof probes (wasm32-wasi; run under wasmtime)",
     );
-    probe32_step.dependOn(&install_probe32.step);
+    inline for (.{ "zstd", "brotli" }) |name| {
+        const probe32_mod = b.createModule(.{
+            .root_source_file = b.path(comptimePrint("src/{s}/probe32.zig", .{name})),
+            .target = probe32_target,
+            .optimize = .ReleaseSafe,
+        });
+        probe32_mod.addImport("fastmem", fastmem_mod);
+        probe32_mod.addImport("zcompress", zcompress_mod);
+        const probe32_exe = b.addExecutable(.{
+            .name = comptimePrint("{s}-probe32", .{name}),
+            .root_module = probe32_mod,
+        });
+        probe32_exe.stack_size = 8 * 1024 * 1024;
+        probe32_step.dependOn(&b.addInstallArtifact(probe32_exe, .{}).step);
+    }
 
     // Benchmarks. The benchmark dependency is lazy in the zon: while it is
     // unfetched, b.lazyImport returns null and no bench step is defined. The

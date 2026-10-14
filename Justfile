@@ -25,9 +25,12 @@ lint:
 fmt:
     zig fmt src build.zig
 
-# Decode very large zstd frames on a 32-bit target (wasm32-wasi under wasmtime)
+# Decode very large streams on a 32-bit target (wasm32-wasi under wasmtime):
+# the zstd probe's frames and the brotli probe's >4 GiB stream.
 check-32:
-    zig build probe32 && wasmtime zig-out/bin/zstd-probe32.wasm
+    zig build probe32
+    wasmtime zig-out/bin/zstd-probe32.wasm
+    wasmtime zig-out/bin/brotli-probe32.wasm
 
 # Compile-only cross-target gate: catches 32-bit `usize`/shift/overflow
 # bugs and non-portable codegen at compile time. The targets maximize

@@ -372,6 +372,23 @@ test "decompress decodes the CLI's own streams, every shape and quality" {
     for (cases) |case| try expectDecode(case.bytes, case.plain);
 }
 
+test "decompress decodes the CLI's largest stream byte-exact" {
+    // `cli_golden_q9_w16`: the pinned CLI's own output over the frozen
+    // `.in` bytes (golden.zig's text at the commit that landed the fixture),
+    // 34,382 bytes in 8,192. One stream pins the four §4/§3.5 rules the
+    // oracle lane alone used to catch: the implicit-distance and
+    // dictionary-reference push exclusions, the 16/17 repeat reset, and the
+    // first-length-16 rule.
+    const plain = golden.cli_golden_q9_w16.plain;
+    const target = try testing.allocator.alloc(u8, plain.len);
+    defer testing.allocator.free(target);
+    internal.sentinel.fill(target);
+    const n = try decompress(golden.cli_golden_q9_w16.bytes, target);
+    try testing.expectEqual(plain.len, n);
+    try testing.expectEqualSlices(u8, plain, target[0..n]);
+    try internal.sentinel.expect(target, n);
+}
+
 test "decompress decodes RFC 7932 §11.1's trivial compressor's streams" {
     // RFC 7932 §11.1 — every N-byte input has a valid stream of at most
     // N + (3 * (N >> 16) + 5) bytes; the 100,000-byte case meets the bound
@@ -471,7 +488,8 @@ test "decompress reports the layers' named refusals" {
         error.SimpleHuffmanAlphabet,
         decompress(golden.out_of_alphabet_streams[0], &target),
     );
-    // RFC 7932 §9.3 — both MLEN overruns are one class (F4).
+    // RFC 7932 §9.3 — the three MLEN overruns are one class (F4): the
+    // insert, the copy, and a dictionary word that runs past MLEN.
     try testing.expectError(
         error.BadBlockLength,
         decompress(golden.mlen_insert_overrun.bytes, &target),
@@ -479,6 +497,10 @@ test "decompress reports the layers' named refusals" {
     try testing.expectError(
         error.BadBlockLength,
         decompress(golden.mlen_copy_overrun.bytes, &target),
+    );
+    try testing.expectError(
+        error.BadBlockLength,
+        decompress(golden.dictionary_mlen_overrun.bytes, &target),
     );
     // RFC 7932 §4 — a special code resolving to zero (FORMAT_DISTANCE).
     try testing.expectError(error.BadDistance, decompress(golden.negative_special.bytes, &target));
