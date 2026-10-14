@@ -23,15 +23,16 @@ last physical core of the box, isolated through systemd
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
 | `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `EncodeAll` at SpeedFastest and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
 | `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
 | `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
 | `googlesnappy` | bench/drivers/google-snappy/bench_snappy.cc | google/snappy 1.3.1 raw blocks (`snappy::RawCompress`, `RawUncompress`), both directions | cmake (static `snappy`) with zig-cc and zig-c++ wrappers, per target and CPU |
 | `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_compressCCtx` at level 1 and `ZSTD_decompressDCtx`, both directions | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
+| `brotli-c` | bench/drivers/c/bench_brotli.c | google/brotli v1.2.0 `BrotliDecoderCreateInstance` + `BrotliDecoderDecompressStream` over the whole stream, allocating from a pre-faulted bump arena, decode only | cmake (static `brotlidec` and `brotlicommon`, no tools or tests) with a zig-cc wrapper, per target and CPU |
 | `aa` | the `zc` binary again | the A/A noise floor | none |
 
-The sources of the four native arms are pinned by release-tarball URL and hash
+The sources of the five native arms are pinned by release-tarball URL and hash
 in `bench/build.zig.zon`, a separate build root, so that the root package and
 `zig build test` never fetch them. `zig build bench-vendor` (the root step
 delegates to `bench/build.zig`) materializes them under
@@ -42,6 +43,14 @@ zstd rows run both directions on the arms that carry the codec: zc (the
 level-`.fast` one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
 the level-1 class. The in-binary std.compress.zstd rows stay decode only: the
 std library ships no zstd compressor.
+
+brotli rows are decode only, on zc and brotli-c: zcompress ships no brotli
+encoder, and the std library ships no brotli at all. The C decoder has no
+reset, so every brotli-c iteration creates, runs, and destroys one decoder
+instance; its allocations come from an arena rewound per stream instead of
+`malloc`, the same "codec alone" rule the other native arms follow. The C
+decoder decodes through its ring buffer and copies out; the zc one-shot
+decodes in place. That copy is part of what the rows measure.
 
 ## Corpus
 
@@ -56,12 +65,19 @@ bench files (`src/flate/bench.zig`). `words` and `skewlit` are literals-heavy
 shapes that exercise zstd's Huffman path.
 
 Next to each raw file sit reference blobs: `.flate`, `.gz`, `.zz`, and `.snappy`
-from the zcompress encoders, and `.zst` from the pinned zstd CLI (v1.5.7, from
-the flake). Every arm's decompression rows decode these identical bytes. The
+from the zcompress encoders, `.zst` from the pinned zstd CLI (v1.5.7, from
+the flake), and `.br` from the pinned brotli CLI (1.2.0, from the flake). Every arm's decompression rows decode these identical bytes. The
 CLI writes the `.zst` frames at level 1, the fast class that every arm's rows
 measure, except for `words` and `skewlit`, which use level 19 so that their
 frames carry Huffman-coded literals. The frames carry XXH64 checksums, and the
 generator checks each one byte for byte with our decoder before writing it.
+The `.br` streams are quality 11, the CLI's default, for every shape. The
+CLI reads each file by path, so it sizes the window to the file (WBITS 16 for
+32 KiB, 17 for 64 KiB). The generator checks each stream byte for byte with
+our decoder before writing it. Brotli has no checksum, so the check is the
+only integrity gate. On this corpus `random` and `mixed` come out as
+uncompressed meta-blocks, so their rows measure copies rather than entropy
+decoding.
 
 The generator compares every file it writes with `SHA256SUMS` and exits with an
 error on any difference, missing file, or extra file. The harness checks again

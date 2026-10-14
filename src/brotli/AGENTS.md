@@ -812,8 +812,10 @@ ships none and std ships none (both verified). The arms that exist:
 - **google/brotli C v1.2.0** — the native ceiling and the oracle. The decoder
   is one 105-KB `decode.c` with no assembly on the decode side; the numbers
   mean the band the decoder targets.
-- **andybalholm/brotli v1.2.6** — the Go class, the plan's "performance class is
-  klauspost" line mapped onto brotli.
+- **andybalholm/brotli v1.2.6** — the oracle's Go reference (the conformance
+  lane's second reference), not a fleet arm: the M6 run races google/brotli's
+  C decoder only, and the missing competitors (klauspost/compress ships no
+  brotli, std ships none) are recorded in the results file.
 - **zcompress** — ours.
 
 The fleet run records the missing arms (the M4 precedent: the competitor-set

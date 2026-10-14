@@ -1,14 +1,14 @@
-"""Source resolution and content-addressed cross builds for the six arms.
+"""Source resolution and content-addressed cross builds for the seven arms.
 
 Every arm cross-builds on this host; the boxes only execute. The zc arm is
 `zig build fleet-bench` from the measured source tree. The klauspost arm is
 `go build` of bench/drivers/klauspost (go.mod pins klauspost/compress to a
-commit). The libdeflate, zlib-ng, google/snappy, and zstd arms compile release
-tarballs with `zig cc` or `zig c++`. The tarballs are pinned by url+hash in
-bench/build.zig.zon, and `zig build bench-vendor` delegates to the bench/ build
-root, which fetches them and materializes the trees under
-bench/zig-out/bench-src/. zlib-ng, google/snappy, and zstd configure through
-cmake with zig toolchain wrappers. The flake provides cmake and go.
+commit). The libdeflate, zlib-ng, google/snappy, zstd, and brotli arms compile
+release tarballs with `zig cc` or `zig c++`. The tarballs are pinned by
+url+hash in bench/build.zig.zon, and `zig build bench-vendor` delegates to the
+bench/ build root, which fetches them and materializes the trees under
+bench/zig-out/bench-src/. zlib-ng, google/snappy, zstd, and brotli configure
+through cmake with zig toolchain wrappers. The flake provides cmake and go.
 """
 
 import errno
@@ -26,7 +26,7 @@ from ec2bench.config import Config
 from ec2bench.parallel import Outcome, parallel, progress
 from ec2bench.runs import git
 
-ARMS = ("zc", "klauspost", "libdeflate", "zlibng", "googlesnappy", "zstd-c")
+ARMS = ("zc", "klauspost", "libdeflate", "zlibng", "googlesnappy", "zstd-c", "brotli-c")
 # The competitor version labels, as reported in results. The content pins (the
 # release-tarball url+hash) live in bench/build.zig.zon; `zig build
 # bench-vendor` materializes the fetched trees.
@@ -34,11 +34,12 @@ LIBDEFLATE_VERSION = "v1.26"
 ZLIBNG_VERSION = "2.3.3"
 SNAPPY_VERSION = "1.3.1"
 ZSTD_C_VERSION = "v1.5.7"
+BROTLI_C_VERSION = "v1.2.0"
 # The local research checkout (~/code/klauspost-compress), pinned in go.mod.
 KLAUSPOST_VERSION = "v1.18.1-0.20250402062133-8df4d013ff17"
 # The C-arm sources, as `zig build bench-vendor` installs them (the bench
 # tool's own build root: bench/build.zig, bench/build.zig.zon).
-VENDOR_ARMS = ("libdeflate", "zlibng", "googlesnappy", "zstd")
+VENDOR_ARMS = ("libdeflate", "zlibng", "googlesnappy", "zstd", "brotli")
 VENDOR_DIR = Path("bench") / "zig-out" / "bench-src"
 
 GO_ARCHES = {"x86_64": "amd64", "arm64": "arm64"}
@@ -546,6 +547,92 @@ def build_zstdc(config: Config, source: Vendor, target: str, zig_version: str) -
     return Build("zstd-c", target, prefix, prefix / "bin" / "bench-zstd-c", sha_key(key_data))
 
 
+def build_brotlic(config: Config, source: Vendor, target: str, zig_version: str) -> Build:
+    """The brotli-c arm: google/brotli's cmake under a zig-cc wrapper, as for
+    zstd; the driver links the static decoder and common libraries (the
+    encoder library is never built)."""
+    settings = config.targets[target]
+    driver = config.root / "bench" / "drivers" / "c"
+    driver_hash = hash_paths([driver / "cbench.h", driver / "bench_brotli.c"])
+    key_data = [
+        "brotli-c",
+        driver_hash,
+        settings["zig_target"],
+        settings["zig_cpu"],
+        zig_version,
+        BROTLI_C_VERSION,
+        source.tree_hash,
+        "v1",
+    ]
+
+    def install(temporary: Path) -> None:
+        # cmake wants a single compiler path: wrap the zig cc cross flags.
+        wrapper = temporary / "zig-cc"
+        wrapper.write_text(
+            '#!/bin/sh\nexec zig cc {} "$@"\n'.format(" ".join(target_flags(settings)))
+        )
+        wrapper.chmod(0o755)
+        library = temporary / "brotli-build"
+        checked(
+            [
+                "cmake",
+                "-S",
+                str(source.path),
+                "-B",
+                str(library),
+                "-DCMAKE_SYSTEM_NAME=Linux",
+                "-DCMAKE_SYSTEM_PROCESSOR="
+                + ("aarch64" if settings["arch"] == "arm64" else "x86_64"),
+                f"-DCMAKE_C_COMPILER={wrapper}",
+                "-DCMAKE_TRY_COMPILE_TARGET_TYPE=STATIC_LIBRARY",
+                "-DBUILD_SHARED_LIBS=OFF",
+                "-DBROTLI_BUILD_TOOLS=OFF",
+                "-DBROTLI_DISABLE_TESTS=ON",
+                "-DCMAKE_BUILD_TYPE=Release",
+            ],
+            config.root,
+            temporary / "cmake-configure.log",
+        )
+        checked(
+            [
+                "cmake",
+                "--build",
+                str(library),
+                "--target",
+                "brotlidec",
+                "brotlicommon",
+                "-j",
+                str(os.cpu_count() or 1),
+            ],
+            config.root,
+            temporary / "cmake-build.log",
+        )
+        (temporary / "bin").mkdir()
+        checked(
+            [
+                "zig",
+                "cc",
+                *cc_flags(settings),
+                f'-DCBENCH_TARGET="{settings["zig_target"]}"',
+                f'-DCBENCH_CPU="{settings["zig_cpu"]}"',
+                f'-DZIG_VERSION="{zig_version}"',
+                f'-DCOMPETITOR_VERSION="{BROTLI_C_VERSION}"',
+                f"-I{source.path}/c/include",
+                str(driver / "bench_brotli.c"),
+                # The decoder library before the common one it depends on.
+                str(library / "libbrotlidec.a"),
+                str(library / "libbrotlicommon.a"),
+                "-o",
+                str(temporary / "bin" / "bench-brotli-c"),
+            ],
+            config.root,
+            temporary / "build.log",
+        )
+
+    prefix = finalize(config, key_data, install)
+    return Build("brotli-c", target, prefix, prefix / "bin" / "bench-brotli-c", sha_key(key_data))
+
+
 def build_all(
     config: Config, source: Source, targets: list[str]
 ) -> tuple[dict[str, Outcome[Build]], dict[str, Vendor]]:
@@ -554,21 +641,27 @@ def build_all(
     vendors = vendor(config)
     pairs = {f"{arm}/{target}": (arm, target) for arm in ARMS for target in targets}
 
+    # The native arms: the builder and the vendor tree it compiles.
+    native = {
+        "libdeflate": (build_libdeflate, "libdeflate"),
+        "zlibng": (build_zlibng, "zlibng"),
+        "googlesnappy": (build_googlesnappy, "googlesnappy"),
+        "zstd-c": (build_zstdc, "zstd"),
+        "brotli-c": (build_brotlic, "brotli"),
+    }
+
     def build(name: str) -> Build:
         arm, target = pairs[name]
-        match arm:
-            case "zc":
-                return build_zc(config, source, target, zig_version)
-            case "klauspost":
-                return build_klauspost(config, target)
-            case "libdeflate":
-                return build_libdeflate(config, vendors["libdeflate"], target, zig_version)
-            case "zlibng":
-                return build_zlibng(config, vendors["zlibng"], target, zig_version)
-            case "googlesnappy":
-                return build_googlesnappy(config, vendors["googlesnappy"], target, zig_version)
-            case _:
-                return build_zstdc(config, vendors["zstd"], target, zig_version)
+        if arm == "zc":
+            return build_zc(config, source, target, zig_version)
+        if arm == "klauspost":
+            return build_klauspost(config, target)
+        # A new ARMS entry without a builder must fail, never fall through to
+        # another arm's binary under this arm's name.
+        if arm not in native:
+            raise ValueError(f"No build for arm {arm}")
+        builder, tree = native[arm]
+        return builder(config, vendors[tree], target, zig_version)
 
     return parallel(pairs, build, workers=os.cpu_count() or 1), vendors
 
@@ -582,6 +675,7 @@ def arm_revisions(source: Source) -> dict[str, str]:
         "zlibng": ZLIBNG_VERSION,
         "googlesnappy": SNAPPY_VERSION,
         "zstd-c": ZSTD_C_VERSION,
+        "brotli-c": BROTLI_C_VERSION,
     }
 
 
@@ -606,6 +700,7 @@ def provenance(
                 "tree_sha256": vendors["googlesnappy"].tree_hash,
             },
             "zstd": {"version": ZSTD_C_VERSION, "tree_sha256": vendors["zstd"].tree_hash},
+            "brotli": {"version": BROTLI_C_VERSION, "tree_sha256": vendors["brotli"].tree_hash},
         },
         "builds": {
             key: {

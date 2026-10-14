@@ -10,17 +10,20 @@
 //! Implementations in this binary:
 //!   - `zc`  — the zcompress one-shots: flate/gzip/zlib at level .fast and
 //!     the snappy raw block codec, both directions, plus the zstd one-shot
-//!     (level .fast, the CLI's level-1 class), both directions.
+//!     (level .fast, the CLI's level-1 class), both directions, and the
+//!     brotli one-shot decode (zcompress ships no brotli encoder, so its
+//!     brotli rows are decode only).
 //!   - `std` — std.compress.flate with Container raw/gzip/zlib at level_1
 //!     (the fast class), both directions, plus std.compress.zstd decode
 //!     (std's zstd ships no compressor, so its zstd rows stay decode only).
-//!     The in-binary competitor: its rows pair with the `zc` rows inside
-//!     the same process.
+//!     std ships no snappy and no brotli. The in-binary competitor: its rows
+//!     pair with the `zc` rows inside the same process.
 //!
-//! Decompression rows decode the reference blobs produced by the corpus
-//! generator (the zcompress encoders), so every arm's decoder sees the same
-//! bytes. The warmup pass of each cell verifies the round trip; `--check`
-//! runs the whole matrix as a correctness gate and reports one JSON line.
+//! Decompression rows decode the reference blobs the corpus generator
+//! writes (the zcompress encoders; the pinned zstd and brotli CLIs for the
+//! `.zst` and `.br` streams), so every arm's decoder sees the same bytes.
+//! The warmup pass of each cell verifies the round trip; `--check` runs the
+//! whole matrix as a correctness gate and reports one JSON line.
 //!
 //! Usage: bench-zcompress --corpus DIR [--suite standard|quick] [--seed N]
 //!         [--samples N] [--sample-ms MS] [--filter SUB] [--impl zc,std]
@@ -45,7 +48,7 @@ const std_zstd = std.compress.zstd;
 // the entropy pair's `.zst` blobs are the CLI at level 19.
 const shapes = [_][]const u8{ "text", "random", "html", "rle", "mixed", "words", "skewlit" };
 const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
-const codecs = [_][]const u8{ "flate", "gzip", "zlib", "snappy", "zstd" };
+const codecs = [_][]const u8{ "flate", "gzip", "zlib", "snappy", "zstd", "brotli" };
 const directions = [_][]const u8{ "compress", "decompress" };
 const decode_only = [_][]const u8{"decompress"};
 
@@ -56,16 +59,26 @@ fn blobExt(codec: []const u8) []const u8 {
     if (mem.eql(u8, codec, "gzip")) return "gz";
     if (mem.eql(u8, codec, "zlib")) return "zz";
     if (mem.eql(u8, codec, "zstd")) return "zst";
+    if (mem.eql(u8, codec, "brotli")) return "br";
     return codec;
 }
 
+/// Whether an implementation carries a codec at all: std ships no snappy
+/// and no brotli.
+fn carries(impl: []const u8, codec: []const u8) bool {
+    if (!mem.eql(u8, impl, "std")) return true;
+    return !mem.eql(u8, codec, "snappy") and !mem.eql(u8, codec, "brotli");
+}
+
 /// The directions one implementation carries for a codec. Every codec is
-/// both directions except std's zstd: std.compress.zstd ships only
-/// Decompress, so the std zstd rows decode the pinned CLI's reference
+/// both directions except std's zstd and brotli: std.compress.zstd ships
+/// only Decompress, so the std zstd rows decode the pinned CLI's reference
 /// frames (bench/zig/corpus.zig) and the zc arm carries the compress rows
-/// alone.
+/// alone; zcompress ships no brotli encoder, so the zc brotli rows decode
+/// the pinned brotli CLI's reference streams.
 fn codecDirections(impl: []const u8, codec: []const u8) []const []const u8 {
     if (mem.eql(u8, codec, "zstd") and mem.eql(u8, impl, "std")) return &decode_only;
+    if (mem.eql(u8, codec, "brotli")) return &decode_only;
     return &directions;
 }
 
@@ -136,7 +149,8 @@ fn parseArgs(args: []const []const u8) !Options {
     return options;
 }
 
-/// One corpus case: the raw bytes and the four reference blobs, loaded once.
+/// One corpus case: the raw bytes and one reference blob per codec, loaded
+/// once.
 const Case = struct {
     shape: []const u8,
     size: usize,
@@ -182,7 +196,7 @@ const Bench = struct {
     /// the codec carries) is selected.
     fn anyRow(bench: Bench, case: Case, codec: []const u8) bool {
         for (bench.options.impls.list()) |impl| {
-            if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "snappy")) continue;
+            if (!carries(impl, codec)) continue;
             for (codecDirections(impl, codec)) |direction| {
                 if (bench.selected(case, codec, direction)) return true;
             }
@@ -260,6 +274,8 @@ fn loadCase(bench: *Bench, shape: []const u8, size: usize) !Case {
 // ---------------------------------------------------------------------------
 
 fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const u8) !usize {
+    // brotli is decode only (codecDirections gates every loop above).
+    assert(!mem.eql(u8, codec, "brotli"));
     const target = bench.compressed;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
@@ -308,6 +324,8 @@ fn decompressOne(bench: *Bench, impl: []const u8, codec: []const u8, blob: []con
             return zcompress.zlib.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zstd"))
             return zcompress.zstd.decode.decompress(blob, target);
+        if (mem.eql(u8, codec, "brotli"))
+            return zcompress.brotli.decode.decompress(blob, target);
         return zcompress.snappy.decode.decompressBlock(blob, target);
     }
     return stdDecompress(bench, codec, blob);
@@ -335,11 +353,11 @@ fn stdDecompress(bench: *Bench, codec: []const u8, blob: []const u8) !usize {
 fn checkCase(bench: *Bench, case: Case) !?[]const u8 {
     for (bench.options.impls.list()) |impl| {
         for (codecs, 0..) |codec, k| {
-            if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "snappy")) continue;
+            if (!carries(impl, codec)) continue;
             if (!bench.anyRow(case, codec)) continue;
             bench.cases += 1;
-            // Decode-only cells (std's zstd) have no round trip: the
-            // reference-blob decode below is the whole check.
+            // Decode-only cells (std's zstd, brotli) have no round trip:
+            // the reference-blob decode below is the whole check.
             if (codecDirections(impl, codec).len == 2) {
                 const n = compressOne(bench, impl, codec, case.raw) catch |err| {
                     return @errorName(err);
@@ -409,7 +427,7 @@ fn measure(bench: *Bench) !void {
             bench.cases += selected_codecs;
             for (impls) |impl| {
                 for (codecs, 0..) |codec, k| {
-                    if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "snappy")) continue;
+                    if (!carries(impl, codec)) continue;
                     if (!bench.anyRow(case, codec)) continue;
                     if (codecDirections(impl, codec).len == 2) {
                         const n = try compressOne(bench, impl, codec, case.raw);
@@ -427,7 +445,7 @@ fn measure(bench: *Bench) !void {
             for (0..bench.options.samples) |sample_index| {
                 for (bench.options.impls.list()) |impl| {
                     for (codecs, 0..) |codec, k| {
-                        if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "snappy")) continue;
+                        if (!carries(impl, codec)) continue;
                         for (codecDirections(impl, codec)) |direction| {
                             if (!bench.selected(case, codec, direction)) continue;
                             try sample(bench, case, codec, k, impl, direction, @intCast(sample_index));

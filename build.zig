@@ -3,11 +3,11 @@ const Build = std.Build;
 const comptimePrint = std.fmt.comptimePrint;
 
 /// The codecs with an example CLI (examples/<codec>.zig). brotli's is
-/// decode-only, and it has no local bench yet.
+/// decode-only.
 const example_codecs = [_][]const u8{ "brotli", "snappy", "flate", "gzip", "zlib", "zstd" };
 
 /// The codecs with a local bench (src/<codec>/bench.zig).
-const bench_codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd" };
+const bench_codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd", "brotli" };
 
 /// The codecs with an oracle harness (src/<codec>/oracle.zig): every codec
 /// except snappy, whose conformance rides the flate family's lanes.
@@ -257,8 +257,8 @@ pub fn build(b: *Build) void {
         // zig-benchmark's addRunTest injects @import("benchmark") into each
         // bench root module and generates the runner executable: one module
         // per codec over src/<codec>/bench.zig with the shared import set
-        // (zcompress + fastmem). The zstd bench is decode-only (over the
-        // generated corpus frames); see src/zstd/bench.zig.
+        // (zcompress + fastmem). The brotli bench is decode-only (over the
+        // generated corpus streams); see src/brotli/bench.zig.
         inline for (bench_codecs) |name| {
             const bench_root = b.createModule(.{
                 .root_source_file = b.path(comptimePrint("src/{s}/bench.zig", .{name})),

@@ -37,6 +37,8 @@ def parse_summary(text: str, arm: str) -> dict[str, Any]:
         raise ValueError(f"{arm}: invalid correctness status")
     if type(result.get("cases")) is not int or result["cases"] <= 0:
         raise ValueError(f"{arm}: correctness ran no cases")
+    if result.get("arm") != arm:
+        raise ValueError(f"{arm}: the summary names arm {result.get('arm')!r}")
     return result
 
 

@@ -29,6 +29,11 @@
             .hash = "N-V-__8AAPZ7fwBg4JoCzM_0o2A8wxH2hsUUeiU1iuZv53L5",
             .lazy = true,
         },
+        .brotli = .{
+            .url = "https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz",
+            .hash = "N-V-__8AAJudKgCQCuIiH6MJjAiIJHfg_tT_Ew-0vZwVkCo_",
+            .lazy = true,
+        },
     },
     .paths = .{
         "build.zig",

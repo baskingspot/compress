@@ -1,9 +1,10 @@
 /* Shared harness for the native competitor arms (bench/README.md): the C
- * drivers (libdeflate, zlib-ng, zstd) and the C++ driver (google/snappy). The
- * driver defines impl_compress/impl_decompress, the ARM/IMPL/TOOL strings,
- * and the codec set (CBENCH_CODECS, CBENCH_CODEC_COUNT), then includes
- * this header. Same CLI, corpus, and schema-v1 JSONL as the zcompress
- * driver: one process is one round of this arm.
+ * drivers (libdeflate, zlib-ng, zstd, brotli) and the C++ driver
+ * (google/snappy). The driver defines impl_compress/impl_decompress, the
+ * ARM/IMPL/TOOL strings, and the codec set (CBENCH_CODECS,
+ * CBENCH_CODEC_COUNT), then includes this header. Same CLI, corpus, and
+ * schema-v1 JSONL as the zcompress driver: one process is one round of this
+ * arm.
  *
  * Decompression rows decode the corpus's reference blobs; the warmup pass
  * of each cell verifies the round trip; --check runs the whole matrix as
@@ -71,6 +72,7 @@ static const char *blob_ext(const char *codec)
     if (!strcmp(codec, "gzip")) return "gz";
     if (!strcmp(codec, "zlib")) return "zz";
     if (!strcmp(codec, "zstd")) return "zst";
+    if (!strcmp(codec, "brotli")) return "br";
     return codec;
 }
 

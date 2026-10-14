@@ -26,6 +26,10 @@ Where the competitor pins came from:
 - google/snappy 1.3.1: the snappy competitor named in `docs/zcompress-plan.md`
   ("Benchmark methodology").
 - zstd v1.5.7: the tag in `docs/research/zstd-notes.md` §6.1.
+- google/brotli v1.2.0: the tag in `docs/research/brotli-notes.md` §8, the
+  same tag as the flake's brotli CLI that writes the `.br` corpus streams
+  (the CLI's q11 output is byte-identical to the tarball's encoder built
+  with zig cc, FMA contraction on or off, and on wasm32-wasi).
 - klauspost/compress `v1.18.1-0.20250402062133-8df4d013ff17`: commit 8df4d01 of
   the local research checkout (`~/code/klauspost-compress`, `v1.18.0-5-g8df4d01`
   in `docs/research/zstd-notes.md` §6.2), pinned in
@@ -35,6 +39,22 @@ Where the competitor pins came from:
 
 - The corpus shape list is repeated in `bench/zig/corpus.zig`,
   `bench/zig/bench_zcompress.zig`, `bench/zcompress_bench/jsonl.py` (twice),
-  `bench/drivers/c/cbench.h`, `bench/drivers/klauspost/main.go`, and
-  `src/zstd/bench.zig`. A new shape updates all of them and
-  `bench/corpus/SHA256SUMS` in the same commit.
+  `bench/drivers/c/cbench.h`, `bench/drivers/klauspost/main.go`,
+  `src/zstd/bench.zig`, and `src/brotli/bench.zig`. A new shape updates all
+  of them and `bench/corpus/SHA256SUMS` in the same commit.
+- The codec list is repeated in `bench/zig/bench_zcompress.zig` (`codecs`,
+  `blobExt`, `carries`, `codecDirections`), `bench/drivers/c/cbench.h`
+  (`blob_ext`), and `bench/zcompress_bench/jsonl.py` (`Sample.codec`,
+  `STD_ABSENT`, `applicable`). A new codec updates all of them. A codec or
+  direction that an implementation in a binary does not carry must be
+  excluded in `applicable`, or every round fails the sample-set check at
+  round 0.
+- The corpus anchor is append-only. A new reference blob appends its rows
+  after the existing ones, in the order the generator hashes them (the
+  sorted `.zst` rows, then the sorted `.br` rows), and no existing row
+  changes.
+- brotli-c allocates from a bump arena (`bench_brotli.c`). The library has
+  no decoder reset, and `BrotliDecoderDecompress` makes 4 to 10 malloc/free
+  pairs per stream on this corpus (52 to 114 KiB, measured with a counting
+  allocator). The arena keeps musl's allocator out of the timed loop, the
+  way the other native arms keep allocation out by reusing their contexts.

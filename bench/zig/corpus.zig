@@ -12,7 +12,8 @@
 //! every implementation's decoder sees identical input bytes.
 //!
 //! The `.zst` blobs come from the pinned zstd CLI instead (v1.5.7, from the
-//! flake), because zcompress has no zstd encoder. The CLI runs at the shape's
+//! flake), so the decode rows read the reference encoder's own frames — the
+//! one shape every zstd decoder must handle. The CLI runs at the shape's
 //! `zstdLevel`: level 1 matches the fast class of the other rows, and the
 //! entropy shapes (`words`, `skewlit`) use level 19, whose matcher leaves the
 //! literals to the Huffman streams that the level-1 rows never exercise. The
@@ -21,6 +22,18 @@
 //! writing it. Every run checks the CLI's version first (`zstd_cli_version`),
 //! so a different PATH binary fails the run instead of silently rewriting the
 //! corpus.
+//!
+//! The `.br` streams come from the pinned brotli CLI (1.2.0, from the flake),
+//! because zcompress has no brotli encoder. Every shape uses quality 11, the
+//! CLI's default and the class of a precompressed `.br` asset; quality is a
+//! coverage choice here, not a fairness one, since no arm compresses brotli.
+//! The CLI reads the file by path, so it picks the window from the file size
+//! (WBITS 16 for 32 KiB, 17 for 64 KiB) and passes the size as a hint; piping
+//! the same bytes through stdin writes WBITS 24 and different streams. The
+//! generator decodes each stream with our decoder
+//! (`zcompress.brotli.decode.decompress`) and requires the raw bytes back
+//! before writing it, and checks `brotli --version` against
+//! `brotli_cli_version` first.
 //!
 //! After writing every file the generator checks the result against the
 //! committed anchor, file by file, and fails naming any disagreement. The
@@ -88,6 +101,14 @@ fn zstdLevel(shape: Shape) []const u8 {
 /// different PATH binary cannot silently produce blobs the committed corpus
 /// was not generated with.
 const zstd_cli_version = "v1.5.7";
+
+/// The pinned brotli CLI version the `.br` reference streams come from
+/// (1.2.0, the flake; the same tag as the brotli-c arm's source pin).
+const brotli_cli_version = "brotli 1.2.0";
+
+/// The brotli CLI quality of every shape's `.br` stream: 11, the CLI's
+/// default (`-Z`, `--best`).
+const brotli_cli_quality = "11";
 
 /// The four one-shot encoders' error unions: they share the payload (`usize`,
 /// the produced length) and their error sets coerce to this one, so
@@ -176,7 +197,8 @@ pub fn main(init: std.process.Init) !void {
         dir_path = arg;
     }
     try refuseCommittedDir(arena, dir_path);
-    try checkZstdCli(io, arena);
+    try checkCliVersion(io, arena, "zstd", zstd_cli_version);
+    try checkCliVersion(io, arena, "brotli", brotli_cli_version);
 
     try Io.Dir.cwd().createDirPath(io, dir_path);
     var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
@@ -198,28 +220,16 @@ pub fn main(init: std.process.Init) !void {
             try writeBlob(io, arena, dir, &sums, base_name, "zz", target, zcompress.zlib.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, zcompress.snappy.encode.compressBlock(raw, target));
             try writeZstdBlob(io, arena, dir, dir_path, shape, base_name, raw);
+            try writeBrotliBlob(io, arena, dir, dir_path, base_name, raw);
         }
     }
 
-    // The .zst frames just written: hash them into the manifest (sorted,
-    // after the generated rows), so the manifest reproduces the committed
-    // SHA256SUMS byte for byte.
-    var names: std.ArrayList([]const u8) = .empty;
-    var iterator = dir.iterate();
-    while (try iterator.next(io)) |entry| {
-        if (entry.kind == .file and mem.endsWith(u8, entry.name, ".zst")) {
-            try names.append(arena, try arena.dupe(u8, entry.name));
-        }
-    }
-    mem.sort([]const u8, names.items, {}, struct {
-        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
-            return mem.order(u8, a, b) == .lt;
-        }
-    }.lessThan);
-    for (names.items) |name| {
-        const blob = try dir.readFileAlloc(io, name, arena, .unlimited);
-        try writeFile(io, arena, dir, &sums, name, blob);
-    }
+    // The CLI-written streams: hash them into the manifest, sorted, after the
+    // generated rows — the .zst frames, then the .br streams, the order the
+    // anchor grew in — so the manifest reproduces the committed SHA256SUMS
+    // byte for byte.
+    try hashSorted(io, arena, dir, &sums, ".zst");
+    try hashSorted(io, arena, dir, &sums, ".br");
 
     // The committed anchor is what the harness trusts, so the generated
     // bytes must reproduce it before the manifest is written.
@@ -296,20 +306,90 @@ fn writeZstdBlob(
     }
 }
 
-/// `zstd --version` against the pin: a mismatch fails the run before any
-/// blob is written, so the committed corpus's provenance is the pinned CLI
-/// alone.
-fn checkZstdCli(io: Io, arena: Allocator) !void {
-    const result = try std.process.run(arena, io, .{ .argv = &.{ "zstd", "--version" } });
+/// Compress `raw` with the pinned brotli CLI at `brotli_cli_quality`, reading
+/// the file by path (the file form: the CLI sizes the window to the file),
+/// and write the stream as `<base_name>.br`, but only after our decoder
+/// reproduces the raw bytes exactly. The manifest entry is added by the
+/// sorted `.br` pass in main.
+fn writeBrotliBlob(
+    io: Io,
+    arena: Allocator,
+    dir: Io.Dir,
+    dir_path: []const u8,
+    base_name: []const u8,
+    raw: []const u8,
+) !void {
+    const path = try std.fmt.allocPrint(arena, "{s}/{s}", .{ dir_path, base_name });
+    const result = try std.process.run(arena, io, .{
+        .argv = &.{ "brotli", "-c", "-q", brotli_cli_quality, "--", path },
+    });
     switch (result.term) {
-        .exited => |code| if (code != 0) return error.ZstdCliFailed,
-        else => return error.ZstdCliFailed,
+        .exited => |code| if (code != 0) {
+            std.debug.print("corpus: brotli CLI failed on {s}: {s}\n", .{
+                base_name, result.stderr,
+            });
+            return error.BrotliCliFailed;
+        },
+        else => return error.BrotliCliFailed,
     }
-    if (mem.indexOf(u8, result.stdout, zstd_cli_version) == null) {
-        std.debug.print("corpus: `zstd --version` is not the pinned {s}: {s}\n", .{
-            zstd_cli_version, result.stdout,
+    const back = try arena.alloc(u8, raw.len);
+    const n = zcompress.brotli.decode.decompress(result.stdout, back) catch |err| {
+        std.debug.print("corpus: our brotli decoder rejected the CLI stream for {s}: {s}\n", .{
+            base_name, @errorName(err),
         });
-        return error.ZstdCliVersionMismatch;
+        return err;
+    };
+    if (n != raw.len or !mem.eql(u8, back, raw)) return error.BrotliBlobMismatch;
+    const name = try std.fmt.allocPrint(arena, "{s}.br", .{base_name});
+    const current: ?[]u8 = dir.readFileAlloc(io, name, arena, .unlimited) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => |e| return e,
+    };
+    if (current == null or !mem.eql(u8, current.?, result.stdout)) {
+        try dir.writeFile(io, .{ .sub_path = name, .data = result.stdout });
+    }
+}
+
+/// Hash every `ext` file in `dir` into the manifest, in name order.
+fn hashSorted(
+    io: Io,
+    arena: Allocator,
+    dir: Io.Dir,
+    sums: *std.ArrayList(u8),
+    ext: []const u8,
+) !void {
+    var names: std.ArrayList([]const u8) = .empty;
+    var iterator = dir.iterate();
+    while (try iterator.next(io)) |entry| {
+        if (entry.kind == .file and mem.endsWith(u8, entry.name, ext)) {
+            try names.append(arena, try arena.dupe(u8, entry.name));
+        }
+    }
+    mem.sort([]const u8, names.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    for (names.items) |name| {
+        const blob = try dir.readFileAlloc(io, name, arena, .unlimited);
+        try writeFile(io, arena, dir, sums, name, blob);
+    }
+}
+
+/// `<tool> --version` against the pin: a mismatch fails the run before any
+/// blob is written, so the committed corpus's provenance is the pinned CLIs
+/// alone.
+fn checkCliVersion(io: Io, arena: Allocator, tool: []const u8, pin: []const u8) !void {
+    const result = try std.process.run(arena, io, .{ .argv = &.{ tool, "--version" } });
+    switch (result.term) {
+        .exited => |code| if (code != 0) return error.CliFailed,
+        else => return error.CliFailed,
+    }
+    if (mem.indexOf(u8, result.stdout, pin) == null) {
+        std.debug.print("corpus: `{s} --version` is not the pinned {s}: {s}\n", .{
+            tool, pin, result.stdout,
+        });
+        return error.CliVersionMismatch;
     }
 }
 

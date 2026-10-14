@@ -3,7 +3,7 @@
 A file is a meta record, one sample record per (case, implementation, sample)
 measurement, and an end record. Every benchmark driver (the Zig binary in
 bench/zig/bench_zcompress.zig, the Go klauspost driver, the C
-libdeflate/zlib-ng/zstd drivers, and the C++ google/snappy driver) emits this
+libdeflate/zlib-ng/zstd/brotli drivers, and the C++ google/snappy driver) emits this
 schema over the same hash-pinned corpus. The parser is the contract: a record
 that does not validate fails the round.
 """
@@ -22,6 +22,8 @@ SCHEMA = 1
 SHAPES = ("text", "random", "html", "rle", "mixed", "words", "skewlit")
 SIZES = (32768, 65536)
 SHA256_HEX = r"^[0-9a-f]{64}$"
+# The codecs the std library ships no implementation of, either direction.
+STD_ABSENT = frozenset({"snappy", "brotli"})
 
 
 class Record(BaseModel):
@@ -70,7 +72,7 @@ class Meta(Record):
 class Sample(Record):
     type: Literal["sample"]
     case: str
-    codec: Literal["flate", "gzip", "zlib", "snappy", "zstd"]
+    codec: Literal["flate", "gzip", "zlib", "snappy", "zstd", "brotli"]
     direction: Literal["compress", "decompress"]
     shape: Literal["text", "random", "html", "rle", "mixed", "words", "skewlit"]
     size: int
@@ -106,9 +108,9 @@ class Measurement:
 
 def applicable(meta: Meta, sample: Sample) -> list[str]:
     """The implementations that must report this case: the std rows skip snappy
-    (std ships no snappy) and zstd compression (std.compress.zstd ships no
-    encoder)."""
-    std_skips = sample.codec == "snappy" or (
+    and brotli (std ships neither) and zstd compression (std.compress.zstd
+    ships no encoder)."""
+    std_skips = sample.codec in STD_ABSENT or (
         sample.codec == "zstd" and sample.direction == "compress"
     )
     return [impl for impl in meta.impls if not (impl == "std" and std_skips)]
@@ -168,8 +170,8 @@ def validate_samples(meta: Meta, samples: list[Sample], end: End) -> None:
     for sample in samples:
         if sample.impl not in meta.impls:
             raise ValueError(f"Sample implementation {sample.impl} is outside the meta list")
-        if sample.impl == "std" and sample.codec == "snappy":
-            raise ValueError("The std implementation has no snappy row")
+        if sample.impl == "std" and sample.codec in STD_ABSENT:
+            raise ValueError(f"The std implementation has no {sample.codec} row")
         key = (sample.case, sample.impl, sample.sample)
         if key in seen:
             raise ValueError(f"Duplicate sample {key}")
