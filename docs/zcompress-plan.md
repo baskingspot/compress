@@ -338,6 +338,22 @@ The research is `docs/research/dictionary-notes.md` (the `DD`/`DE`/`ZL`
 matrices, the `DT` divergence rows, the `DQ` register with the API sketch
 options and recommendations); the API sketches are the dictionary sections of
 `src/zstd/README.md`, `src/zlib/README.md`, and `src/flate/README.md`,
+approved by Matt 2026-10-14 ("send it").
+Acceptance, met 2026-10-14: the three slices landed and gated — zstd
+decode-with-dict (`871ef35`: the third-parameter migration across every
+callsite, the entropy seeds and virtual-past content, the DICTID matrix, the
+fail-closed expiry pinned by hand-built frames, the oracle's 24 dictionary
+rows), zstd encode-with-dict (`5aadcb5`: the promotion rules on the M5
+encoder's own seats — the repeat_valid row the M5 register recorded as
+unreachable-without-a-dictionary closes — the match region searching the
+content as virtual past, the `zstd -D -1` parity across both header forms,
+the oracle at 34 dictionary rows), and the zlib preset both directions
+(`872dadd`: FDICT/DICTID with the whole-dict Adler-32, the >32-KiB tail rule,
+the four mismatch cases, the flate seam's optional history, the flate-family
+oracles' with-dict rows — zlib at 88 container rows against python3 zlib's
+zdict forms, flate's 12 dictionary rows). The suite is 670 tests; every
+gate green (check-baseline on all five targets, the clean-cache fuzz 10K
+full-set).
 written first, with the `zstd.Dictionary` type, the third-parameter decode
 shape, and the fail-closed expiry boundary the review's decision points. The
 slices land decode-with-dictionary, then encode-with-dictionary, then the
