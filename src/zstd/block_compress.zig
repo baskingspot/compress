@@ -415,6 +415,8 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
         &decoded,
         0,
         @as(u64, 1) << rig.params.window_log,
+        0,
+        &.{},
         &literals_state,
         &sequences_state,
         null,

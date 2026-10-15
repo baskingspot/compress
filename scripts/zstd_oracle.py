@@ -29,6 +29,14 @@ not, so its decoder is the strict check). Run it with `just zstd-oracle`;
 zstd and go come from the flake. The harness is built from
 src/zstd/oracle.zig, the klauspost decoder from scripts/zstd_klauspost. The
 shared plumbing is in scripts/oracle_common.py.
+
+The dictionary rows (RFC 8878 §5) train a dictionary with the CLI itself
+(`zstd --train -r <dir>` over the corpus shapes), compress every shape with
+`-D`, and require every frame to decode through our one-shot (the
+`decode-dict` harness mode) and klauspost's `WithDecoderDicts`; the
+mismatch rows pin the error names (no dictionary, a second trained
+dictionary), and the hand-built §5 boundary pair records the pinned CLI's
+verdict against ours (it decodes the late reach, we refuse it — DT1).
 """
 
 import random
@@ -82,8 +90,16 @@ def _inputs() -> list[tuple[str, bytes, bool]]:
         ("non-ASCII utf-8 (1 MiB)", non_ascii(1024 * 1024), True),
         ("520-KiB period", period * 2 + period[:41], True),
         ("mixed binary (1.5 MiB)", bytes(mixed[:1_500_000]), False),
-        ("long text (2 MiB)", b"the quick brown fox jumps over the lazy dog. " * 44_000, True),
-        ("RFC 8878 text", (root / "docs/research/specs/rfc8878-zstd.txt").read_bytes(), True),
+        (
+            "long text (2 MiB)",
+            b"the quick brown fox jumps over the lazy dog. " * 44_000,
+            True,
+        ),
+        (
+            "RFC 8878 text",
+            (root / "docs/research/specs/rfc8878-zstd.txt").read_bytes(),
+            True,
+        ),
         # The brotli RFC text triggers the C v1.5.7's pre-block splitter (its
         # frames carry four split blocks, ours three whole ones — TE8 in
         # src/zstd/AGENTS.md), so only its round-trip rows run: the class is
@@ -97,7 +113,11 @@ def _inputs() -> list[tuple[str, bytes, bool]]:
         # Two repo files whose literals list more than 128 weights: without
         # the FSE weight form either row alone fails parity (src/zstd/AGENTS.md
         # is 23616 bytes against the CLI's 18402).
-        ("repo prose (src/zstd/AGENTS.md)", (root / "src/zstd/AGENTS.md").read_bytes(), True),
+        (
+            "repo prose (src/zstd/AGENTS.md)",
+            (root / "src/zstd/AGENTS.md").read_bytes(),
+            True,
+        ),
         ("repo prose (README.md)", (root / "README.md").read_bytes(), True),
     ]
 
@@ -163,6 +183,252 @@ def klauspost_decode(frame: bytes, expected: bytes) -> None:
             raise AssertionError(f"klauspost rejected the frame: {result.stderr.decode().strip()}")
 
 
+def our_decode_dict(frame: bytes, cap: int, dict: bytes) -> subprocess.CompletedProcess:
+    """Our one-shot decode of `frame` with `dict` (the harness's `decode-dict`)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        dict_path = Path(tmp) / "dict.bin"
+        frame_path.write_bytes(frame)
+        dict_path.write_bytes(dict)
+        return run([str(harness), "decode-dict", str(frame_path), str(cap), str(dict_path)])
+
+
+def our_decode_raw_dict(frame: bytes, cap: int, content: bytes) -> subprocess.CompletedProcess:
+    """Our one-shot decode of `frame` with `content` as a raw dictionary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        dict_path = Path(tmp) / "dict.bin"
+        frame_path.write_bytes(frame)
+        dict_path.write_bytes(content)
+        return run([str(harness), "decode-raw", str(frame_path), str(cap), str(dict_path)])
+
+
+def our_decode_nodict(frame: bytes, cap: int) -> subprocess.CompletedProcess:
+    """Our one-shot decode of `frame` with no dictionary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        frame_path.write_bytes(frame)
+        return run([str(harness), "decode", str(frame_path), str(cap)])
+
+
+def cli_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
+    """The CLI's `-D dict -1` frame: the file form (exact FCS) or the pipe
+    form (the FCS-unknown header)."""
+    if pipe:
+        with tempfile.TemporaryDirectory() as tmp:
+            dict_path = Path(tmp) / "dict.bin"
+            dict_path.write_bytes(dict)
+            result = run(["zstd", "-D", str(dict_path), "-1", "-q", "-c"], data)
+            if result.returncode != 0:
+                raise AssertionError(f"zstd -D -1 -c failed: {result.stderr.decode().strip()}")
+            return result.stdout
+    with tempfile.TemporaryDirectory() as tmp:
+        source = Path(tmp) / "in"
+        target = Path(tmp) / "out.zst"
+        dict_path = Path(tmp) / "dict.bin"
+        source.write_bytes(data)
+        dict_path.write_bytes(dict)
+        result = run(
+            [
+                "zstd",
+                "-D",
+                str(dict_path),
+                "-1",
+                "-q",
+                "-f",
+                str(source),
+                "-o",
+                str(target),
+            ]
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"zstd -D -1 failed: {result.stderr.decode().strip()}")
+        return target.read_bytes()
+
+
+def cli_dict_decode(frame: bytes, dict: bytes) -> subprocess.CompletedProcess:
+    """The CLI's own `zstd -D dict -d` of one frame."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        dict_path = Path(tmp) / "dict.bin"
+        frame_path.write_bytes(frame)
+        dict_path.write_bytes(dict)
+        return run(["zstd", "-D", str(dict_path), "-d", "-q", "-c", str(frame_path)])
+
+
+def klauspost_decode_dict(
+    frame: bytes, expected: bytes, dict: bytes
+) -> subprocess.CompletedProcess:
+    """klauspost's `WithDecoderDicts` decode of one frame."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        plain_path = Path(tmp) / "plain"
+        dict_path = Path(tmp) / "dict.bin"
+        frame_path.write_bytes(frame)
+        plain_path.write_bytes(expected)
+        dict_path.write_bytes(dict)
+        return run([str(klauspost), str(frame_path), str(plain_path), str(dict_path)])
+
+
+def train_dictionary(samples: list[bytes], maxdict: int) -> bytes:
+    """The pinned CLI trains a dictionary over `samples` (`zstd --train -r`)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        sample_dir = Path(tmp) / "train"
+        sample_dir.mkdir()
+        for index, sample in enumerate(samples):
+            (sample_dir / f"s{index:02d}.txt").write_bytes(sample)
+        out = Path(tmp) / "dict.bin"
+        result = run(
+            [
+                "zstd",
+                "--train",
+                "-q",
+                "-r",
+                str(sample_dir),
+                "-o",
+                str(out),
+                f"--maxdict={maxdict}",
+            ]
+        )
+        if result.returncode != 0:
+            raise AssertionError(f"zstd --train failed: {result.stderr.decode().strip()}")
+        return out.read_bytes()
+
+
+def check_dictionary_rows() -> int:
+    """The `-D` rows: the CLI trains, we decode. Returns the row count."""
+    # The training set: the corpus shapes, sliced so the trainer sees several
+    # samples (the CLI wants the source at least 10x the dictionary).
+    rows = [
+        ("text", common.SHAPES["text"], True),
+        ("random", common.SHAPES["random"], True),
+        ("rle", common.SHAPES["rle"], True),
+        ("long text (multi-block)", common.SHAPES["long text (multi-block)"], True),
+    ]
+    samples = []
+    for _, data, _ in rows:
+        samples.extend(data[at : at + 2048] for at in range(0, min(len(data), 16 * 1024), 2048))
+    dictionary = train_dictionary(samples, 4096)
+    # A second dictionary: the mismatch seat.
+    other = train_dictionary(samples[1:], 4096)
+    assert dictionary != other, "two trainings produced the same bytes"
+
+    checked = 0
+    for desc, data, _ in rows:
+        if not data:
+            continue
+        for pipe in (False, True):
+            frame = cli_dict_frame(data, dictionary, pipe=pipe)
+            # The CLI's own decode is the reference.
+            cli = cli_dict_decode(frame, dictionary)
+            if cli.returncode != 0:
+                raise AssertionError(f"zstd -D -d failed ({desc}): {cli.stderr.decode().strip()}")
+            assert cli.stdout == data, (
+                f"CLI -D decode ({desc}): {len(cli.stdout)} bytes, want {len(data)}"
+            )
+            # Ours, with the dictionary.
+            ours = our_decode_dict(frame, len(data), dictionary)
+            if ours.returncode != 0:
+                raise AssertionError(
+                    f"our -D decode failed ({desc}): {ours.stderr.decode().strip()}"
+                )
+            assert ours.stdout == data, f"our -D decode ({desc}): {len(ours.stdout)} bytes"
+            # klauspost's WithDecoderDicts.
+            kp = klauspost_decode_dict(frame, data, dictionary)
+            if kp.returncode != 0:
+                raise AssertionError(
+                    f"klauspost -D decode failed ({desc}): {kp.stderr.decode().strip()}"
+                )
+            checked += 1
+
+        # The mismatch matrix: a frame that names the dictionary's ID must
+        # fail `DictionaryRequired` without one and `DictionaryMismatch` with
+        # another (the CLI fails both with "Dictionary mismatch").
+        frame = cli_dict_frame(data, dictionary)
+        bare = our_decode_nodict(frame, len(data))
+        if bare.returncode == 0:
+            raise AssertionError(f"no-dictionary decode succeeded ({desc})")
+        assert b"DictionaryRequired" in bare.stderr, bare.stderr
+        wrong = our_decode_dict(frame, len(data), other)
+        if wrong.returncode == 0:
+            raise AssertionError(f"wrong-dictionary decode succeeded ({desc})")
+        assert b"DictionaryMismatch" in wrong.stderr, wrong.stderr
+        # A raw dictionary names no ID, so it is a mismatch too (the CLI's
+        # "Dictionary mismatch" for the same shape).
+        raw = our_decode_raw_dict(frame, len(data), data[:4096])
+        assert raw.returncode != 0 and b"DictionaryMismatch" in raw.stderr, raw.stderr
+        checked += 3
+
+    # The C's incomplete-statistics fixture (`zero-weight-dict`, committed in
+    # src/zstd/testdata): the CLI compresses with it and we decode the frame.
+    zero_weight = (root / "src/zstd/testdata/dict-zero-weight.bin").read_bytes()
+    data = common.SHAPES["text"]
+    frame = cli_dict_frame(data, zero_weight)
+    ours = our_decode_dict(frame, len(data), zero_weight)
+    if ours.returncode != 0:
+        raise AssertionError(f"zero-weight decode failed: {ours.stderr.decode().strip()}")
+    assert ours.stdout == data, "zero-weight decode bytes"
+    checked += 1
+
+    # The §5 boundary pair (the hand-built fixtures in golden.zig, same
+    # bytes): the pinned CLI decodes both — the second reads the dictionary
+    # across the boundary — and ours decodes the first and refuses the
+    # second with `OffsetTooFar` (the fail-closed DT1 decision).
+    boundary = bytes.fromhex(
+        "37a430ec2a00000084432010731000e0a0a1d2d1b6d9480d"
+        "141f012010b4d0bf00141f012010b4d0bf0001000000020000000300000058595a"
+    )
+    boundary_short = bytes.fromhex(
+        "37a430ec2a00000084432010731000e0a0a1d2d1b6d9480d"
+        "141f012010b4d0bf00141f012010b4d0bf000100000002000000020000005859"
+    )
+    frame_ok = bytes.fromhex("28b52ffd01002a022000413d000000010006001908")
+    frame_over = bytes.fromhex("28b52ffd01002a022000410a0000413d000000010006001908")
+    frame_straddle = bytes.fromhex("28b52ffd01002a022000413d000000010004001908")
+    expected_ok = b"A" * 1024 + b"XYZ"
+    expected_straddle = b"A" * 1024 + b"ZAA"
+    for name, frame in (
+        ("at the boundary", frame_ok),
+        ("past the boundary", frame_over),
+    ):
+        cli = cli_dict_decode(frame, boundary)
+        if cli.returncode != 0:
+            raise AssertionError(f"the CLI refused the {name} frame: {cli.stderr.decode().strip()}")
+        if name == "at the boundary":
+            assert cli.stdout == expected_ok, "the CLI's boundary decode bytes"
+            ours = our_decode_dict(frame, len(expected_ok), boundary)
+            if ours.returncode != 0:
+                raise AssertionError(f"our boundary decode failed: {ours.stderr.decode().strip()}")
+            assert ours.stdout == expected_ok, "our boundary decode bytes"
+        else:
+            # The CLI's leniency recorded: it decodes the late reach (reading
+            # the dictionary's tail and the output's first byte).
+            assert cli.stdout == b"A" * 1025 + b"YZA", "the CLI's late-reach bytes"
+            ours = our_decode_dict(frame, 2048, boundary)
+            if ours.returncode == 0:
+                raise AssertionError("our decode accepted the late reach")
+            assert b"OffsetTooFar" in ours.stderr, ours.stderr
+            # The short-content dictionary is a reach past the content: the
+            # CLI reads a byte in front of it, we refuse.
+            short_cli = cli_dict_decode(frame_ok, boundary_short)
+            assert short_cli.returncode == 0, "the CLI refused the short-content frame"
+            short = our_decode_dict(frame_ok, 2048, boundary_short)
+            if short.returncode == 0:
+                raise AssertionError("our decode accepted the short-content reach")
+            assert b"OffsetTooFar" in short.stderr, short.stderr
+        checked += 1
+    # The straddling match: one dictionary byte and the output's own first
+    # two. The CLI and ours agree on it.
+    cli = cli_dict_decode(frame_straddle, boundary)
+    if cli.returncode != 0 or cli.stdout != expected_straddle:
+        raise AssertionError(f"the CLI's straddle decode: {cli.stderr.decode().strip()}")
+    ours = our_decode_dict(frame_straddle, len(expected_straddle), boundary)
+    if ours.returncode != 0 or ours.stdout != expected_straddle:
+        raise AssertionError(f"our straddle decode: {ours.stderr.decode().strip()}")
+    checked += 1
+    return checked
+
+
 def check(desc: str, data: bytes, parity: bool) -> None:
     """Every row for one input, all three decoders and the byte parity."""
     frames = {"one-shot": our_oneshot(data), "Writer": our_stream(data)}
@@ -205,9 +471,11 @@ rows = _inputs()
 for desc, data, parity in rows:
     check(desc, data, parity)
 parity_rows = sum(1 for _, _, parity in rows if parity)
+dict_rows = check_dictionary_rows()
 
 print(
     f"zstd-oracle: {len(rows)} inputs x 2 encoder forms -> zstd -t, zstd -d, "
     "klauspost DecodeAll + stream, our decode; byte parity with zstd -1 on "
-    f"both header forms for {parity_rows} of them: OK"
+    f"both header forms for {parity_rows} of them; {dict_rows} dictionary "
+    "rows (CLI-trained, the mismatch matrix, and the §5 boundary): OK"
 )

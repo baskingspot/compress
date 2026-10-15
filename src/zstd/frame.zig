@@ -24,6 +24,7 @@ const fastmem = @import("fastmem");
 
 const block = @import("block.zig");
 const common = @import("common.zig");
+const Dictionary = @import("Dictionary.zig");
 const golden = @import("golden.zig");
 const internal = @import("../internal/root.zig");
 const literals = @import("literals.zig");
@@ -41,11 +42,18 @@ pub const Error = error{
     /// `§3.1.1.1.1.4` — descriptor bit 3: "Its value must be zero. A decoder
     /// compliant with this specification version must ensure it is not set."
     ReservedBitSet,
-    /// `§3.1.1.1.3`, `§5` — Dictionary_ID_Flag is set: the frame needs a
-    /// dictionary this decoder does not have. Raised at the first
-    /// Dictionary_ID byte, before any body byte; the ID is never skipped or
-    /// interpreted.
+    /// `§3.1.1.1.3`, `§5` — the frame's Dictionary_ID. A frame that names a
+    /// nonzero ID needs a dictionary: none supplied is `DictionaryRequired`,
+    /// a supplied one whose ID differs is `DictionaryMismatch` (a raw
+    /// dictionary's 0 included). A frame with no ID field, or one whose
+    /// value is 0 ("0 means no Dictionary_ID"), decodes with or without a
+    /// dictionary. Both checks run once the header is parsed, before any
+    /// body byte; the ID field itself is read, never skipped.
     DictionaryRequired,
+    /// `§3.1.1.1.3`, `§5` — the frame names a Dictionary_ID and the supplied
+    /// dictionary's ID does not match it (the C's own label,
+    /// `zstd_decompress.c:716-719`). Raised before any body byte.
+    DictionaryMismatch,
     /// `§3.1.1.1.4` — Frame_Content_Size against the frame's actual decoded
     /// total: a running bound (`recordBlock`, `§8`'s smaller-than-actual
     /// vector) and a frame-end check (`checkContentSize`).
@@ -201,6 +209,10 @@ pub const Header = struct {
     /// against the decoded length (`State.recordBlock`,
     /// `State.checkContentSize`), never used to size anything.
     content_size: ?u64,
+    /// `§3.1.1.1.3` — Dictionary_ID; `null` when DID_Field_Size is 0. A
+    /// nonzero value is the ID the frame's dictionary must carry
+    /// (`checkDictionary`); 0 means no Dictionary_ID.
+    dictionary_id: ?u32,
     /// `§3.1.1.1.1.5` — Content_Checksum_Flag: the 4-byte trailer.
     checksum: bool,
     /// The Frame_Header's length, 2-14 bytes (`§3.1.1.1`): the descriptor
@@ -219,13 +231,17 @@ pub const HeaderParser = struct {
     /// The Frame_Header_Descriptor byte, once read.
     descriptor: u8 = 0,
     /// The current field's bytes consumed so far, and its little-endian
-    /// value (the Window_Descriptor's one byte, the FCS's up to eight).
+    /// value (the Dictionary_ID's up to four bytes, the FCS's up to eight).
+    /// Both reset when a field completes: the Dictionary_ID and the
+    /// Frame_Content_Size are separate fields that share them.
     taken: usize = 0,
     value: u64 = 0,
     /// The two sizes the header implies; 0 / `null` until their fields are
-    /// complete.
+    /// complete. `dictionary_id` is `null` until the field is complete, and
+    /// stays `null` when the flag is 0.
     window_size: u64 = 0,
     content_size: ?u64 = null,
+    dictionary_id: ?u32 = null,
     /// The Frame_Header's bytes consumed (`§3.1.1.1`: 2-14).
     total: usize = 0,
 
@@ -244,6 +260,7 @@ pub const HeaderParser = struct {
             .descriptor = parser.descriptor,
             .window_size = parser.window_size,
             .content_size = parser.content_size,
+            .dictionary_id = parser.dictionary_id,
             .checksum = parser.descriptor & descriptor_checksum != 0,
             .bytes_consumed = parser.total,
         };
@@ -255,7 +272,9 @@ pub const HeaderParser = struct {
     /// header feeds once. Every stage of a non-empty slice either consumes a
     /// byte or fails, so a driver always makes progress. The input ending
     /// inside the header is the driver's `Truncated`: the parser is just not
-    /// `done` yet. Fails with `ReservedBitSet` or `DictionaryRequired`.
+    /// `done` yet. Fails with `ReservedBitSet`; the Dictionary_ID field is
+    /// read whole, and the dictionary it names is checked by
+    /// `checkDictionary` once the header is parsed.
     pub fn feed(parser: *HeaderParser, bytes: []const u8) Error!usize {
         var consumed: usize = 0;
         while (consumed < bytes.len and parser.stage != .done) {
@@ -292,10 +311,25 @@ pub const HeaderParser = struct {
                 return 1;
             },
             .dictionary => {
-                // §3.1.1.1.3 + §5 — the frame references a dictionary. The
-                // refusal lands at the first Dictionary_ID byte, before any
-                // body byte, and no byte of the ID is interpreted.
-                return error.DictionaryRequired;
+                // §3.1.1.1.3, Table 5 — the Dictionary_ID field, 1/2/4 bytes
+                // little-endian, read whole: the value is what
+                // `checkDictionary` compares with the supplied dictionary's
+                // ID once the header is parsed. The field is part of the
+                // header, so no body byte is read before the check.
+                const need = didFieldSize(parser.descriptor);
+                assert(need > 0);
+                const take = @min(need - parser.taken, bytes.len);
+                for (bytes[0..take], 0..) |byte, index| {
+                    parser.value |= @as(u64, byte) << @intCast(8 * (parser.taken + index));
+                }
+                parser.taken += take;
+                parser.total += take;
+                if (parser.taken < need) return take;
+                parser.dictionary_id = @intCast(parser.value);
+                parser.value = 0;
+                parser.taken = 0;
+                parser.stage = if (fcsFieldSize(parser.descriptor) > 0) .fcs else .done;
+                return take;
             },
             .fcs => {
                 const need = fcsFieldSize(parser.descriptor);
@@ -335,14 +369,33 @@ pub const HeaderParser = struct {
 /// Parse a whole Frame_Header from the front of `source`, the bytes *after*
 /// the Magic_Number (`§3.1.1.1`). The streaming reader drives `HeaderParser`
 /// directly instead. Fewer bytes than the header needs is the input's end:
-/// `Truncated`. The parser's own errors are `ReservedBitSet` and
-/// `DictionaryRequired`.
+/// `Truncated`. The parser's own error is `ReservedBitSet`; the
+/// Dictionary_ID it reads is checked by `checkDictionary`.
 pub fn parseHeader(source: []const u8) Error!Header {
     var parser: HeaderParser = .{};
     const consumed = try parser.feed(source);
     if (!parser.done()) return error.Truncated;
     assert(consumed <= source.len);
     return parser.header();
+}
+
+/// `§3.1.1.1.3` + `§5` — the Dictionary_ID matrix, run once the header is
+/// parsed and before any body byte: a frame with no Dictionary_ID field, or
+/// one whose value is 0 ("0 means no Dictionary_ID"), decodes with or
+/// without a dictionary; a frame that names a nonzero ID needs one. None
+/// supplied is `DictionaryRequired`; a supplied dictionary whose ID differs —
+/// a raw dictionary's 0 included, since it names none — is
+/// `DictionaryMismatch`, the C's own label for the same case
+/// (`zstd_decompress.c:716-719`). The reserved ID ranges are not enforced
+/// (DT3): a decoder cannot know the registry.
+pub fn checkDictionary(header: Header, dict: ?*const Dictionary) error{
+    DictionaryRequired,
+    DictionaryMismatch,
+}!void {
+    const frame_id = header.dictionary_id orelse return;
+    if (frame_id == 0) return;
+    const dictionary = dict orelse return error.DictionaryRequired;
+    if (dictionary.id != frame_id) return error.DictionaryMismatch;
 }
 
 /// `§3.1.1.1.2` — "a decoder is allowed to reject a compressed frame that
@@ -367,11 +420,17 @@ pub const State = struct {
     /// The parsed Frame_Header (`§3.1.1.1`).
     header: Header,
     /// The Huffman tree a Treeless_Literals_Block reuses (`§3.1.1.3`), one
-    /// per frame.
+    /// per frame; a dictionary seeds its table pointer.
     literals: literals.State = .{},
     /// The three decoding tables and the repeat offsets a Repeat_Mode reuses
-    /// (`§3.1.1.3`, `§3.1.1.5`), one per frame.
+    /// (`§3.1.1.3`, `§3.1.1.5`), one per frame; a dictionary seeds its
+    /// table pointers and its repeat offsets.
     sequences: sequences.State = .{},
+    /// `§5` — the dictionary content, the preset history in front of the
+    /// frame's output. Empty without a dictionary. Borrowed: the caller's
+    /// dictionary must outlive the state (the same lifetime the seeded table
+    /// pointers carry).
+    dict_content: []const u8 = &.{},
     /// `§3.1.1` — the decoded bytes' XXH64, folded per block. A frame without
     /// the checksum flag folds nothing, since nothing will be verified.
     checksum: xxh64.State = .{},
@@ -390,13 +449,29 @@ pub const State = struct {
     /// block builds it. Returning one by value copied the whole aggregate,
     /// undefined payload included, which was a measurable cost on 32-64 KiB
     /// frames.
-    pub fn init(state: *State, header: Header) void {
+    ///
+    /// A dictionary seeds exactly the seats this resets: `literals.table`
+    /// (pointing at the dictionary's decode table when it has entropy), the
+    /// three `sequences.tables` (pointing at its parsed tables), and
+    /// `sequences.repeat_offsets` (its 12 bytes, or the {1,4,8} seed for a
+    /// raw one). Nothing is copied: the state's pointers reach into the
+    /// caller-owned dictionary, which must outlive the state.
+    pub fn init(state: *State, header: Header, dict: ?*const Dictionary) void {
         state.header = header;
-        state.literals.has_table = false;
+        state.literals.table = null;
         state.sequences.tables = @splat(null);
         state.sequences.repeat_offsets = sequences.repeat_offsets_start;
+        state.dict_content = &.{};
         state.checksum = .{};
         state.decoded_len = 0;
+        const dictionary = dict orelse return;
+        state.dict_content = dictionary.content;
+        state.sequences.repeat_offsets = dictionary.repeat_offsets;
+        if (!dictionary.has_entropy) return;
+        state.literals.table = &dictionary.literals_table;
+        inline for (0..sequences.alphabet_count) |index| {
+            state.sequences.tables[index] = &dictionary.sequence_tables[index];
+        }
     }
 
     /// Decode one block from the front of `source` (its Block_Header) into
@@ -423,6 +498,8 @@ pub const State = struct {
             // layer's history accounting takes.
             @intCast(state.decoded_len),
             state.header.window_size,
+            state.decoded_len,
+            state.dict_content,
             &state.literals,
             &state.sequences,
             checksum,
@@ -522,8 +599,11 @@ fn decodeFrame(bytes: []const u8, target: []u8, progress: *usize) !usize {
     progress.* = 0;
     try testing.expectEqual(Kind.zstandard, try classify(bytes));
     const header = try parseHeader(bytes[magic_len..]);
+    // The one-shot's dictionary check, with no dictionary: a frame that
+    // names one fails `DictionaryRequired` before any block byte.
+    try checkDictionary(header, null);
     var state: State = undefined;
-    state.init(header);
+    state.init(header, null);
     var cursor = magic_len + header.bytes_consumed;
     while (true) {
         const section = state.decodeBlock(bytes[cursor..], target) catch |err| {
@@ -727,25 +807,38 @@ test "parseHeader: the unused bit is never interpreted, the reserved bit fails" 
     }
 }
 
-test "parseHeader refuses dictionaries at the first Dictionary_ID byte" {
+test "parseHeader reads the Dictionary_ID field in each Table 5 size" {
     // RFC 8878 §3.1.1.1.3 — the Dictionary_ID "contains the ID of the
     // dictionary required to properly decode the frame"; §5 leaves
     // acquisition out of band and §2 demands "an unambiguous error code".
-    // This decoder refuses at the first Dictionary_ID byte, before any body
-    // byte; the CLI fails both fixtures with "Dictionary mismatch".
-    try testing.expectError(error.DictionaryRequired, parseHeader(&.{ 0x01, 0x00, 0x2a }));
-    try testing.expectError(error.DictionaryRequired, parseHeader(&.{ 0x02, 0x00, 0x2a, 0x2b }));
-    try testing.expectError(error.DictionaryRequired, parseHeader(&.{
-        0x03, 0x00, 0x44, 0x33, 0x22, 0x11,
-    }));
-    // The refusal is not gated on the whole field being present: the first
-    // byte alone is enough, and the rest of the ID is never read.
-    try testing.expectError(error.DictionaryRequired, parseHeader(&.{ 0x03, 0x00, 0x44 }));
-    // A header cut before the first Dictionary_ID byte is the input's end
+    // The field is read whole, in each of Table 5's sizes, and
+    // `checkDictionary` is what refuses: no dictionary is
+    // `DictionaryRequired` (the CLI's "Dictionary mismatch"), a mismatched
+    // one is `DictionaryMismatch`.
+    const one = try parseHeader(&.{ 0x01, 0x00, 0x2a });
+    try testing.expectEqual(@as(?u32, 0x2a), one.dictionary_id);
+    try testing.expectError(error.DictionaryRequired, checkDictionary(one, null));
+    const two = try parseHeader(&.{ 0x02, 0x00, 0x2a, 0x2b });
+    try testing.expectEqual(@as(?u32, 0x2b2a), two.dictionary_id);
+    const four = try parseHeader(&.{ 0x03, 0x00, 0x44, 0x33, 0x22, 0x11 });
+    try testing.expectEqual(@as(?u32, 0x11223344), four.dictionary_id);
+    // §3.1.1.1.1.6's DID flag 0: the field is absent, so no dictionary is
+    // needed and a supplied one is never mismatched.
+    const none = try parseHeader(&.{ 0x00, 0x00 });
+    try testing.expectEqual(@as(?u32, null), none.dictionary_id);
+    try checkDictionary(none, null);
+    // "0 means no Dictionary_ID": a present zero is a declaration like any
+    // other, and the C's guard (`fParams.dictID && ...`) skips the check for
+    // it (DD9's "nonzero"); the CLI decodes such a frame without a
+    // dictionary.
+    const zero = try parseHeader(&.{ 0x01, 0x00, 0x00 });
+    try testing.expectEqual(@as(?u32, 0), zero.dictionary_id);
+    try checkDictionary(zero, null);
+    // A header cut inside the Dictionary_ID field is the input's end
     // (`Truncated`), the same rule as everywhere else in the frame — the CLI
-    // agrees on both shapes ("premature end" for the cut one, "Dictionary
-    // mismatch" for the complete one).
+    // agrees ("premature end").
     try testing.expectError(error.Truncated, parseHeader(&.{ 0x03, 0x00 }));
+    try testing.expectError(error.Truncated, parseHeader(&.{ 0x03, 0x00, 0x44 }));
     try testing.expectError(error.Truncated, parseHeader(&.{0x01}));
     try testing.expectError(error.Truncated, parseHeader(&.{0x00}));
     // The DID field sizes themselves (Table 5), and the header's 14-byte
@@ -755,6 +848,31 @@ test "parseHeader refuses dictionaries at the first Dictionary_ID byte" {
     try testing.expectEqual(@as(usize, 2), didFieldSize(0x02));
     try testing.expectEqual(@as(usize, 4), didFieldSize(0x03));
     try testing.expectEqual(@as(usize, 14), 1 + 1 + 4 + 8);
+}
+
+test "checkDictionary is the §5 ID matrix" {
+    // RFC 8878 §3.1.1.1.3 + §5 — a frame that names a nonzero ID needs the
+    // matching dictionary: none supplied is `DictionaryRequired`, a
+    // different one is `DictionaryMismatch`. A raw dictionary names no ID
+    // (0), so it never matches a frame that declares one (DT5). The CLI's
+    // verdicts: the right dictionary decodes; no dictionary, a wrong one, a
+    // raw one, and another trained dictionary's ID all fail "Dictionary
+    // mismatch".
+    const header = try parseHeader(&.{ 0x01, 0x00, 0x2a });
+    // A raw dictionary's ID is 0, so it is always a mismatch for a nonzero
+    // frame ID.
+    const raw = Dictionary.initRaw("raw content");
+    try testing.expectError(error.DictionaryMismatch, checkDictionary(header, &raw));
+    var parsed = Dictionary.initRaw("raw content");
+    parsed.id = 0x2a;
+    try checkDictionary(header, &parsed);
+    parsed.id = 0x2b;
+    try testing.expectError(error.DictionaryMismatch, checkDictionary(header, &parsed));
+    // The reserved ranges are not enforced (DT3): any nonzero ID matches
+    // when the dictionary carries it, and a mismatch is a mismatch wherever
+    // the value sits.
+    parsed.id = 0x11223344;
+    try testing.expectError(error.DictionaryMismatch, checkDictionary(header, &parsed));
 }
 
 test "parseHeader is byte-fed" {
@@ -930,9 +1048,10 @@ test "the fold is independent of the block boundaries" {
         .descriptor = descriptor_checksum,
         .window_size = 1024,
         .content_size = null,
+        .dictionary_id = null,
         .checksum = true,
         .bytes_consumed = 2,
-    });
+    }, null);
     try state.recordBlock(first);
     try state.recordBlock(second);
     try testing.expectEqual(@as(usize, first.len + second.len), state.decoded_len);
@@ -948,9 +1067,10 @@ test "the fold is independent of the block boundaries" {
         .descriptor = 0,
         .window_size = 1024,
         .content_size = null,
+        .dictionary_id = null,
         .checksum = false,
         .bytes_consumed = 2,
-    });
+    }, null);
     try plain.recordBlock(first);
     try testing.expectEqual(@as(u32, 0x51D8E999), plain.checksum.final());
 }

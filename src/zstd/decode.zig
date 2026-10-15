@@ -28,6 +28,8 @@ pub const block = @import("block.zig");
 /// bound is `min(Window_Size, this)`.
 pub const max_block_size = block.max_block_size;
 const common = @import("common.zig");
+/// A parsed dictionary (§5), the value both directions take.
+pub const Dictionary = @import("Dictionary.zig");
 /// The frame layer (`§3.1`): the Magic_Number, the Frame_Header, the block
 /// chain, the checksum trailer, and skippable frames.
 pub const frame = @import("frame.zig");
@@ -58,6 +60,7 @@ comptime {
         "BadMagic",
         "ReservedBitSet",
         "DictionaryRequired",
+        "DictionaryMismatch",
         "BlockOversize",
         "ReservedBlock",
         "MalformedLiteralsHeader",
@@ -92,6 +95,16 @@ comptime {
 /// Decode one Zstandard frame from `source` into `target` and return the
 /// decoded length.
 ///
+/// `dict` seeds the frame's starting state (`§5`): the literals tree, the
+/// three sequences tables, and the repeat offsets come from the dictionary
+/// when it has entropy, and its content is the preset history a match may
+/// reach into while the frame's decoded total is at most Window_Size. `null`
+/// is the no-dictionary decode. A frame that names a nonzero Dictionary_ID
+/// needs the matching dictionary: without one it is `DictionaryRequired`, and
+/// with one whose ID differs it is `DictionaryMismatch`. A frame that names
+/// no ID (or names 0) decodes either way, a supplied dictionary still
+/// seeding it. `dict` is borrowed for the call; its bytes must outlive it.
+///
 /// Leading skippable frames (`§3.1.2`) are skipped. The frame ends after its
 /// last block, or after the 4-byte Content_Checksum when the header sets the
 /// checksum flag. Bytes after the frame are ignored and the number of bytes
@@ -112,7 +125,11 @@ comptime {
 /// output, which must not be used. A Compressed block keeps a 128 KiB literals
 /// scratch on the stack and the frame state is about 16 KiB. Nothing is
 /// allocated.
-pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
+pub fn decompress(
+    source: []const u8,
+    target: []u8,
+    dict: ?*const Dictionary,
+) DecompressError!usize {
     var cursor: usize = 0;
     // §3.1.2 — "skippable frames simply need to be skipped, and their
     // content ignored, resuming decoding after the skippable frame".
@@ -137,8 +154,10 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     // begins.
     const header = try frame.parseHeader(source[cursor..]);
     cursor += header.bytes_consumed;
+    // §3.1.1.1.3 + §5 — the Dictionary_ID check, before any body byte.
+    try frame.checkDictionary(header, dict);
     var state: frame.State = undefined;
-    state.init(header);
+    state.init(header, dict);
     // §3.1.1.2 — "Each frame must have at least 1 block, but there is no
     // upper limit on the number of blocks per frame": the chain ends at the
     // Last_Block flag, and `decodeBlock` records each block's output in the
@@ -189,9 +208,14 @@ fn skippableLength(source: []const u8) error{Truncated}!usize {
 /// Decode `source` into a fresh sentinel-filled target and check the output and
 /// the bytes past it: the shape every decode test runs.
 fn expectDecode(source: []const u8, expected: []const u8) !void {
+    try expectDecodeDict(source, null, expected);
+}
+
+/// `expectDecode` with a dictionary supplied (`§5`).
+fn expectDecodeDict(source: []const u8, dict: ?*const Dictionary, expected: []const u8) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    const written = try decompress(source, &target);
+    const written = try decompress(source, &target, dict);
     try golden.expectDecoded(&target, written, expected);
 }
 
@@ -201,9 +225,19 @@ fn expectDecode(source: []const u8, expected: []const u8) !void {
 /// leaves their output behind, which a caller must not use, and the byte the
 /// failing check refused was never written.
 fn expectDecodeError(err: DecompressError, source: []const u8, written: usize) !void {
+    try expectDecodeDictError(err, source, null, written);
+}
+
+/// `expectDecodeError` with a dictionary supplied (`§5`).
+fn expectDecodeDictError(
+    err: DecompressError,
+    source: []const u8,
+    dict: ?*const Dictionary,
+    written: usize,
+) !void {
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectError(err, decompress(source, &target));
+    try testing.expectError(err, decompress(source, &target, dict));
     try internal.sentinel.expect(&target, written);
 }
 
@@ -268,7 +302,7 @@ test "decompress decodes the CLI's multi-block checksummed frame" {
     corrupt[corrupt.len - 1] ^= 0xff;
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectError(error.WrongChecksum, decompress(&corrupt, &target));
+    try testing.expectError(error.WrongChecksum, decompress(&corrupt, &target, null));
     // The output of a failed decode is not trusted, but the bytes the frame
     // did write are exactly the frame's: the sentinel past the frame's
     // length proves the decode never wrote past its declared content.
@@ -322,7 +356,10 @@ test "decompress skips skippable frames and resumes after them" {
     // bytes served (the CLI decodes all sixteen to zero bytes cleanly).
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectEqual(@as(usize, 0), try decompress(&golden.skippable_sixteen, &target));
+    try testing.expectEqual(
+        @as(usize, 0),
+        try decompress(&golden.skippable_sixteen, &target, null),
+    );
     try internal.sentinel.expect(&target, 0);
     // The magic one past the range is neither family, and a truncated
     // skippable is the input's end.
@@ -347,13 +384,13 @@ test "decompress's cardinality rules for the empty and short inputs" {
     // skippable frames.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    try testing.expectError(error.Truncated, decompress(&.{}, &target));
-    try testing.expectError(error.Truncated, decompress(&.{ 0x28, 0xb5 }, &target));
+    try testing.expectError(error.Truncated, decompress(&.{}, &target, null));
+    try testing.expectError(error.Truncated, decompress(&.{ 0x28, 0xb5 }, &target, null));
     // The magic alone: the frame began, the header did not.
-    try testing.expectError(error.Truncated, decompress(&golden.frame_magic, &target));
+    try testing.expectError(error.Truncated, decompress(&golden.frame_magic, &target, null));
     try testing.expectError(
         error.Truncated,
-        decompress(golden.skippable_prefix[0 .. golden.skippable_prefix.len - 1], &target),
+        decompress(golden.skippable_prefix[0 .. golden.skippable_prefix.len - 1], &target, null),
     );
     try internal.sentinel.expect(&target, 0);
 }
@@ -407,21 +444,24 @@ test "decompress caps the output at target" {
     // window buffer to grow: `target` is the cap and the history both.
     var small: [7]u8 = undefined;
     internal.sentinel.fill(&small);
-    try testing.expectError(error.BufferTooSmall, decompress(&golden.frame_raw, &small));
+    try testing.expectError(error.BufferTooSmall, decompress(&golden.frame_raw, &small, null));
     try internal.sentinel.expect(&small, 0);
     // A zero-cap target: the empty frame decodes, anything else does not.
     var none: [0]u8 = undefined;
-    try testing.expectEqual(@as(usize, 0), try decompress(&golden.frame_raw_empty, &none));
-    try testing.expectError(error.BufferTooSmall, decompress(&golden.frame_raw, &none));
+    try testing.expectEqual(@as(usize, 0), try decompress(&golden.frame_raw_empty, &none, null));
+    try testing.expectError(error.BufferTooSmall, decompress(&golden.frame_raw, &none, null));
     // An RLE block declaring 128 KB into 100 bytes, and the amplification
     // vector: a compressed block whose sequence declares more than the cap.
     var hundred: [100]u8 = undefined;
     internal.sentinel.fill(&hundred);
-    try testing.expectError(error.BufferTooSmall, decompress(&golden.frame_rle_max, &hundred));
+    try testing.expectError(
+        error.BufferTooSmall,
+        decompress(&golden.frame_rle_max, &hundred, null),
+    );
     try internal.sentinel.expect(&hundred, 0);
     try testing.expectError(
         error.BufferTooSmall,
-        decompress(&golden.frame_sequences_predefined, hundred[0..2]),
+        decompress(&golden.frame_sequences_predefined, hundred[0..2], null),
     );
     try internal.sentinel.expect(&hundred, 0);
     // The exact fit decodes, one byte under does not: the cap is the frame's
@@ -432,13 +472,13 @@ test "decompress caps the output at target" {
     internal.sentinel.fill(&exact);
     try testing.expectEqual(
         @as(usize, 77),
-        try decompress(&golden.frame_sequences_predefined, &exact),
+        try decompress(&golden.frame_sequences_predefined, &exact, null),
     );
     try testing.expectEqualSlices(u8, &golden.sequences_predefined_expected, &exact);
     try internal.sentinel.expect(&exact, 77);
     try testing.expectError(
         error.BufferTooSmall,
-        decompress(&golden.frame_sequences_predefined, hundred[0..76]),
+        decompress(&golden.frame_sequences_predefined, hundred[0..76], null),
     );
     try internal.sentinel.expect(&hundred, 76);
 }
@@ -458,7 +498,7 @@ test "decompress's history is the output, so a match cannot reach before it" {
     // Window_Size.
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
-    const written = try decompress(&golden.frame_window_1k, &target);
+    const written = try decompress(&golden.frame_window_1k, &target, null);
     try testing.expectEqual(@as(usize, 2048 + 3), written);
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
@@ -468,15 +508,143 @@ test "decompress's history is the output, so a match cannot reach before it" {
     // the addressable span (the history region plus the block's own writes),
     // not Window_Size alone.
     internal.sentinel.fill(&target);
-    const span = try decompress(&golden.frame_window_1k_span, &target);
+    const span = try decompress(&golden.frame_window_1k_span, &target, null);
     try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);
     try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
     try internal.sentinel.expect(&target, span);
     // The 128 KB window sibling, whose decoded length passes both
     // Block_Maximum_Size and Window_Size.
     internal.sentinel.fill(&target);
-    const wide = try decompress(&golden.frame_window_128k, &target);
+    const wide = try decompress(&golden.frame_window_128k, &target, null);
     try testing.expectEqual(@as(usize, 2 * 131072 + 3), wide);
     try testing.expectEqualSlices(u8, "BBB", target[262144..262147]);
     try internal.sentinel.expect(&target, wide);
+}
+
+// ---------------------------------------------------------------------------
+// Dictionary tests (RFC 8878 §5). The fixtures are `golden.zig`'s: the pinned
+// CLI v1.5.7 trained the dictionaries, wrote every `-D` frame, and its own
+// `zstd -D <dict> -d` decodes each to the plaintext beside it (the verdicts
+// are recorded on the fixtures). The hand-built expiry pair's CLI verdicts
+// are recorded too — the divergence the fail-closed boundary creates.
+// ---------------------------------------------------------------------------
+
+test "decompress decodes the CLI's dictionary frames" {
+    // §5 — a parsed dictionary seeds the frame: its entropy tables (the
+    // CLI's first block is Treeless literals and Repeat sequences, so the
+    // dictionary's tables are load-bearing), its repeat offsets, and its
+    // content. Each fixture is the CLI's own `-D` frame; each expectation is
+    // the CLI's own decode of it.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    try expectDecodeDict(golden.dict_frame_s00, &trained, golden.dict_s00);
+    try expectDecodeDict(golden.dict_frame_big, &trained, golden.dict_big);
+    // The same frame with `--no-dictID`: no ID to check, but the dictionary
+    // still seeds it — Treeless literals from block 0 are legal only because
+    // of the dictionary's tree.
+    try expectDecodeDict(golden.dict_frame_s00_noid, &trained, golden.dict_s00);
+    // The 1-byte DID form, and a raw-content dictionary (no ID, no tables;
+    // the frame's block is self-contained).
+    const id_100 = try Dictionary.parse(golden.dict_100);
+    try expectDecodeDict(golden.dict_frame_s01_r100, &id_100, golden.dict_s01);
+    const raw = Dictionary.initRaw(golden.dict_s02);
+    try expectDecodeDict(golden.dict_frame_s01_raw, &raw, golden.dict_s01);
+    // The incomplete-statistics dictionary's own frame (DD11).
+    const zero_weight = try Dictionary.parse(golden.dict_zero_weight);
+    try expectDecodeDict(golden.dict_frame_zw, &zero_weight, golden.dict_s00);
+    // The same frames decode with a dictionary that is not needed: a frame
+    // with no DID field decodes with or without one (DD10). The plain frame
+    // has DID flag 0, so a supplied dictionary seeds a frame that never used
+    // it and the output is unchanged.
+    try expectDecodeDict(&golden.frame_checksum, &trained, "abcd");
+}
+
+test "decompress's dictionary matrix: required, mismatch, raw, and no-ID" {
+    // DD9/DD10 — the frame's Dictionary_ID against the supplied dictionary:
+    // a frame that names a nonzero ID needs the matching one (`DictionaryRequired`
+    // with none, `DictionaryMismatch` with a different one), and a frame
+    // that names none decodes either way. The CLI's verdicts on the same
+    // fixtures: no dictionary, a wrong one, a raw one, and another trained
+    // dictionary's ID all fail "Dictionary mismatch"; the `--no-dictID`
+    // frame fails "Data corruption detected" (the tables it reuses are the
+    // dictionary's, and the mismatch check cannot see that).
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const other = try Dictionary.parse(golden.dict_100);
+    const raw = Dictionary.initRaw(golden.dict_s02);
+    try expectDecodeDictError(error.DictionaryRequired, golden.dict_frame_s00, null, 0);
+    try expectDecodeDictError(error.DictionaryMismatch, golden.dict_frame_s00, &other, 0);
+    try expectDecodeDictError(error.DictionaryMismatch, golden.dict_frame_s00, &raw, 0);
+    // The mismatch lands before any body byte, and the frame's own decode
+    // with the right dictionary still works after the failure (the state is
+    // per-call).
+    try expectDecodeDict(golden.dict_frame_s00, &trained, golden.dict_s00);
+    // A raw dictionary never satisfies a DID frame (DT5): its ID is 0.
+    try expectDecodeDictError(error.DictionaryMismatch, golden.dict_frame_s01_r100, &raw, 0);
+    // The no-ID frame without a dictionary: its first block's sequences
+    // section is Repeat mode, which needs a previous table and finds none —
+    // the entropy layer's name for the same bytes the CLI fails with "Data
+    // corruption detected". No dictionary error fires: the DID is absent.
+    try expectDecodeDictError(
+        error.RepeatModeFirst,
+        golden.dict_frame_s00_noid,
+        null,
+        0,
+    );
+}
+
+test "decompress's §5 boundary: the dictionary expires at Window_Size" {
+    // §5 — "As long as the amount of data decoded from this frame is less
+    // than or equal to Window_Size, sequence commands may specify offsets
+    // longer than the total length of decoded output so far to reference
+    // back to the dictionary, even parts of the dictionary with offsets
+    // larger than Window_Size. After the total output has surpassed
+    // Window_Size, however, this is no longer allowed, and the dictionary is
+    // no longer accessible." The hand-built pair puts one sequence's match
+    // at exactly Window_Size (allowed) and one byte past it (refused); the
+    // pinned CLI decodes both, reading across the boundary in the second
+    // (DT1: no reference enforces the rule as written).
+    const boundary = try Dictionary.parse(&golden.dict_boundary);
+    try expectDecodeDict(&golden.dict_frame_boundary, &boundary, golden.dict_boundary_expected);
+    // A match that straddles the boundary: one dictionary byte, then the
+    // output's own first two (the C's "span extDict &
+    // currentPrefixSegment"). The pinned CLI decodes it to the same bytes.
+    try expectDecodeDict(
+        &golden.dict_frame_boundary_straddle,
+        &boundary,
+        golden.dict_boundary_straddle_expected,
+    );
+    // The two RLE blocks wrote 1025 bytes before the match was refused; the
+    // sentinel past them proves the refused copy wrote nothing.
+    try expectDecodeDictError(
+        error.OffsetTooFar,
+        &golden.dict_frame_boundary_after,
+        &boundary,
+        1025,
+    );
+    // The dictionary is required for the first frame too: without it the
+    // match reaches before the output and fails the same way (the frame
+    // names an ID, so the check fires first).
+    try expectDecodeDictError(error.DictionaryRequired, &golden.dict_frame_boundary, null, 0);
+    // A dictionary with the right ID but too little content: the three-byte
+    // reach is past the content, so the same `OffsetTooFar` (the pinned CLI
+    // decodes this one too, reading a byte in front of the content).
+    const short = try Dictionary.parse(&golden.dict_boundary_short);
+    try expectDecodeDictError(error.OffsetTooFar, &golden.dict_frame_boundary, &short, 1024);
+}
+
+test "decompress seeds the frame state from the dictionary, not per block" {
+    // DD7 — Treeless literals and Repeat sequences are legal from the
+    // frame's first block when the dictionary's tables are loaded
+    // (§3.1.1.3.1.1's "or dictionary, per Section 5"; §3.1.1.3.2.1's
+    // Repeat_Mode). The trained dictionary's frame exercises both in block 0
+    // (the research's §3.5 walk); decoding it with a dictionary whose ID
+    // matches but whose tables differ must not silently succeed through a
+    // re-parse. The dictionary is parsed once: a second decode through the
+    // same value is deterministic.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    try expectDecodeDict(golden.dict_frame_s00, &trained, golden.dict_s00);
+    try expectDecodeDict(golden.dict_frame_s00, &trained, golden.dict_s00);
+    // A raw dictionary with the *right* ID cannot be built (initRaw names
+    // none); a parsed dictionary's tables are what the frame sees.
+    const copy = try Dictionary.parse(golden.dict_trained);
+    try expectDecodeDict(golden.dict_frame_s00, &copy, golden.dict_s00);
 }

@@ -30,7 +30,7 @@ fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
 ```
 
 A dictionary (§5) is parsed once and handed to either direction. The
-`Dictionary` borrows the file bytes — keep them alive — and is about 21 KiB of
+`Dictionary` borrows the file bytes — keep them alive — and is about 16 KiB of
 tables:
 
 ```zig
@@ -85,12 +85,13 @@ const zstd = @import("zcompress").zstd;
 // reads the formatted form (magic 0xEC30A437, the ID, the entropy tables,
 // the 12 repcode bytes, then the content); `initRaw` takes format-free
 // content. The value borrows `source` — no copy, no allocation — and is
-// about 21 KiB of tables.
+// about 16 KiB of tables (the parsed tree, the four built tables, the
+// repcodes, and the content slice).
 zstd.Dictionary
 zstd.Dictionary.parse(source: []const u8) ParseError!Dictionary
 zstd.Dictionary.initRaw(content: []const u8) Dictionary
 zstd.Dictionary.ParseError = error{
-    Truncated,                // the source ends inside a table description
+    Truncated,                // the source ends before the magic, the ID, or the 12 repcode bytes
     BadDictionaryMagic,       // no 0xEC30A437 magic: not the formatted form
     InvalidDictionaryId,      // Dictionary_ID is 0 (§5: "any value, except 0")
     InvalidDictionaryRepcode, // a repeat offset is 0 or above the content size
@@ -264,7 +265,10 @@ state — so `encode` exposes only the names above.
   fails `DictionaryRequired` before any body byte; a frame with no ID decodes
   with or without a dictionary, and a supplied one still seeds it. The
   parse accepts the incomplete statistics some trainers emit (zero weights,
-  tables short of the alphabet), which the C before v1.5.6 rejected.
+  tables short of the alphabet), which the C before v1.5.6 rejected. It is
+  RFC-strict where the C is not: a literals tree deeper than §4.2.1's 11-bit
+  limit is `MalformedHuffmanWeights`, so the C's own
+  `http-dict-missing-symbols` fixture (a 12-bit tree) is rejected here.
   `initRaw` takes content-only dictionaries: no tables, the default repcodes,
   and no ID, so they never satisfy a frame that declares one. The value
   borrows its source bytes and must outlive every call that uses it.
@@ -333,7 +337,10 @@ RFC, encode and decode round trips, and a check on every decode that no byte
 past the output was written.
 `just zstd-oracle` cross-checks both directions against the reference CLI and
 klauspost/compress on non-ASCII and over-512-KiB inputs, including the strict
-Window_Size check the C decoder does not make.
+Window_Size check the C decoder does not make, plus the dictionary rows: a
+CLI-trained dictionary over the corpus shapes, every `-D` frame decoded here
+and by klauspost's `WithDecoderDicts`, the mismatch matrix, and the §5
+boundary pair with the CLI's own verdicts recorded.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and `just check-32`
 runs a large-frame probe on wasm32-wasi under wasmtime. `just corpus` generates
 the hash-checked benchmark corpus, and `just bench` runs the local benchmarks;

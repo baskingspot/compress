@@ -1160,6 +1160,129 @@ pub const skippable_truncated = hex("502a4d180a000000616263");
 /// `Truncated`, and no memory touched — the bytes are skipped by arithmetic, never staged.
 pub const skippable_huge = hex("512a4d18ffffffff616263");
 
+// The dictionary fixtures (RFC 8878 §5). The trained dictionaries are the
+// pinned CLI v1.5.7's `zstd --train -r <dir>` output over 24 seeded
+// corpus-shaped samples (`docs/research/dictionary-notes.md` §1.1: the
+// research's from-scratch byte-level parse and klauspost's InspectDictionary
+// agree on every field, and both dictionaries round-trip through the CLI
+// byte-exact). The two incomplete-statistics dictionaries are the C's own
+// `tests/dict-files/zero-weight-dict` and
+// `tests/golden-dictionaries/http-dict-missing-symbols` (dual BSD-3/GPL-2
+// data fixtures, attributed in THIRD_PARTY.md).
+//
+// Each `dict_frame_*` is the CLI's own `zstd -D <dict> -1 <file> -o <frame>`
+// output, and the CLI's `zstd -D <dict> -d` decodes it to the plaintext
+// beside it (verified at commit time; the mismatch rows record the CLI's
+// verdicts too). `dict_frame_s00_noid` is the `--no-dictID` form: a legal
+// frame that is undecodable without the dictionary and carries no DID, so
+// the mismatch check cannot see the dependency (the CLI fails it with "Data
+// corruption detected", not "Dictionary mismatch").
+
+/// The trained dictionary (14,493 bytes): ID 574546390, a 256-symbol
+/// literals tree, an 18-symbol offsets table, the full 53/36-symbol length
+/// tables, the trainer's default {1,4,8} repcodes, and 14,378 content bytes
+/// from offset 115.
+pub const dict_trained: []const u8 = @embedFile("testdata/dict-trained.bin");
+/// A second trained dictionary (8,192 bytes): ID 100 (the CLI's
+/// `--dictID=100`), 8,042 content bytes from offset 150 — the mismatch
+/// matrix's other seat, and `dict_frame_s01_r100`'s dictionary.
+pub const dict_100: []const u8 = @embedFile("testdata/dict-100.bin");
+/// The C's `zero-weight-dict` (153 bytes): ID 16720127, 120 zero-weight
+/// symbols in its literals tree — an incomplete statistics dictionary the
+/// v1.5.6+ C and ours accept (DD11), 11 content bytes from offset 142.
+pub const dict_zero_weight: []const u8 = @embedFile("testdata/dict-zero-weight.bin");
+/// The C's `http-dict-missing-symbols` (1,000 bytes): ID 1386686301, zero
+/// weights in the literals tree and zero-probability symbols in the offsets
+/// (12 symbols) and match-length (47) tables, 842 content bytes from offset
+/// 158.
+pub const dict_missing_symbols: []const u8 = @embedFile("testdata/dict-missing-symbols.bin");
+
+/// `dict_frame_s00`'s plaintext (735 bytes): a corpus-shaped sample.
+pub const dict_s00: []const u8 = @embedFile("testdata/dict-s00.txt");
+/// `dict_frame_s01_r100`'s and `dict_frame_s01_raw`'s plaintext (1,078
+/// bytes).
+pub const dict_s01: []const u8 = @embedFile("testdata/dict-s01.txt");
+/// The raw dictionary `dict_frame_s01_raw` was compressed against (702
+/// bytes): format-free content, no ID.
+pub const dict_s02: []const u8 = @embedFile("testdata/dict-s02.txt");
+/// `dict_frame_big`'s plaintext (23,640 bytes): the corpus samples
+/// concatenated, a multi-block frame.
+pub const dict_big: []const u8 = @embedFile("testdata/dict-big.txt");
+
+/// The CLI's `-D dict-trained.bin -1` frame for `dict_s00` (229 bytes):
+/// single-segment, the exact Frame_Content_Size, the 4-byte DID form, and
+/// the checksum. The CLI decodes it with `-D`; without one it fails
+/// "Dictionary mismatch".
+pub const dict_frame_s00: []const u8 = @embedFile("testdata/dict-s00.zst");
+/// The same frame with `--no-dictID` (183 bytes): DID flag 0, so it decodes
+/// with or without a supplied dictionary — and fails as corruption without
+/// one, because its first block is Treeless from the dictionary's tree.
+pub const dict_frame_s00_noid: []const u8 = @embedFile("testdata/dict-s00-noid.zst");
+/// The CLI's `-D dict-100.bin -1` frame for `dict_s01` (244 bytes): the
+/// 1-byte DID form (ID 100).
+pub const dict_frame_s01_r100: []const u8 = @embedFile("testdata/dict-s01-r100.zst");
+/// The CLI's raw-dictionary frame for `dict_s01` (300 bytes): `-D
+/// dict_s02.txt`, DID flag 0. The CLI decodes it only with `dict_s02`; any
+/// other dictionary fails as corruption.
+pub const dict_frame_s01_raw: []const u8 = @embedFile("testdata/dict-s01-raw.zst");
+/// The CLI's `-D dict-zero-weight.bin -1` frame for `dict_s00` (357 bytes):
+/// the incomplete-statistics dictionary's own frame, decoded with it.
+pub const dict_frame_zw: []const u8 = @embedFile("testdata/dict-zw.zst");
+/// The CLI's `-D dict-trained.bin -1` frame for `dict_big` (3,783 bytes):
+/// several blocks, so the dictionary's tables seed block 0 and the frame's
+/// own state carries the rest.
+pub const dict_frame_big: []const u8 = @embedFile("testdata/dict-big.zst");
+
+// The §5 expiry fixtures (DT1). Hand-built frames whose single sequence
+// reaches into the dictionary's content: `dict_frame_boundary` at a match
+// position exactly Window_Size (allowed: §5's "less than or equal to
+// Window_Size"), and `dict_frame_boundary_after` one byte past it (refused:
+// the dictionary is gone). Both are a 1 KiB Window_Descriptor (0x00), a
+// 1-byte Dictionary_ID 42, an RLE block of 1024 'A's (the compressed
+// sibling's history), then a Compressed block whose literals section is
+// empty and whose one Predefined-table sequence is LL 0 / ML 3 / offset
+// 1027 — three bytes into the dictionary's `XYZ` content. The `_after`
+// sibling inserts one more RLE byte first, so the match position is 1025.
+//
+// The pinned CLI v1.5.7 decodes *both* (its whole-buffer decoder checks the
+// history it holds, not Window_Size): the first to 1024 'A' + "XYZ", the
+// second to 1025 'A' + "YZA" — it reads the dictionary across the boundary
+// (the T12 class). This decoder fails the second with `OffsetTooFar`: §5's
+// boundary enforced as written (DT1's fail-closed decision).
+
+/// The boundary fixtures' dictionary: a formatted dictionary (ID 42) whose
+/// tables are the RFC's own fixtures (`pair_tree`, `offset_description`,
+/// `literals_length_description`) and whose content is three bytes, "XYZ".
+/// Its repcodes are {1,2,3}, all inside the content.
+pub const dict_boundary = hex("37a430ec2a00000084432010731000e0a0a1d2d1b6d9480d" ++
+    "141f012010b4d0bf00141f012010b4d0bf0001000000020000000300000058595a");
+/// The boundary fixture's expected output: the RLE block's 1024 'A's and the
+/// three dictionary bytes the match reads.
+pub const dict_boundary_expected = [_]u8{'A'} ** 1024 ++ "XYZ";
+/// `dict_frame_boundary` (21 bytes): the match at position 1024, exactly
+/// Window_Size.
+pub const dict_frame_boundary = hex("28b52ffd01002a022000413d000000010006001908");
+/// The boundary dictionary's short sibling: the same tables and ID, but two
+/// content bytes and the repcodes {1,2,2}. The fixture frame's reach (three
+/// bytes) is past its content, which is `OffsetTooFar` here; the pinned CLI
+/// decodes it, reading a byte in front of the content (the DT1 class).
+pub const dict_boundary_short = hex("37a430ec2a00000084432010731000e0a0a1d2d1b6d9480d" ++
+    "141f012010b4d0bf00141f012010b4d0bf000100000002000000020000005859");
+/// `dict_frame_boundary_after` (26 bytes): one RLE byte more, so the match
+/// is at position 1025 and the dictionary is out of reach.
+pub const dict_frame_boundary_after = hex("28b52ffd01002a022000410a0000413d000000010006001908");
+/// `dict_frame_boundary_straddle` (21 bytes): the same frame with the reach
+/// one byte deep (offset 1025), so the match copies the dictionary's last
+/// byte and then the output's first two — the boundary-straddling case
+/// ("span extDict & currentPrefixSegment"). The pinned CLI decodes it to
+/// 1024 'A' + "ZAA".
+pub const dict_frame_boundary_straddle = hex("28b52ffd01002a022000413d000000010004001908");
+/// The straddle fixture's expected output.
+pub const dict_boundary_straddle_expected = [_]u8{'A'} ** 1024 ++ "ZAA";
+/// The pinned CLI's verdict on `dict_frame_boundary_after`: it decodes,
+/// reading "YZA" (the dictionary's last two bytes, then the output's first).
+pub const dict_boundary_after_cli = [_]u8{'A'} ** 1025 ++ "YZA";
+
 // The `encode_*` fixtures are the CLI's own level-1 frames (`zstd -1 -q -k -f`,
 // the pinned v1.5.7) for the corpus shapes at sizes that fit a fixture: the
 // text, html, and rle shapes at the corpus sizes 32 KiB and 64 KiB, the

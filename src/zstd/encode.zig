@@ -247,7 +247,7 @@ fn expectRoundTrip(source: []const u8) !usize {
     const plain = try testing.allocator.alloc(u8, source.len);
     defer testing.allocator.free(plain);
     internal.sentinel.fill(plain);
-    const decoded = try decode.decompress(frame_buffer[0..written], plain);
+    const decoded = try decode.decompress(frame_buffer[0..written], plain, null);
     try testing.expectEqual(source.len, decoded);
     try testing.expectEqualSlices(u8, source, plain[0..decoded]);
     try internal.sentinel.expect(plain, decoded);
@@ -491,7 +491,7 @@ test "our level-1 frame is the CLI's own bytes" {
         const plain = try testing.allocator.alloc(u8, input.len);
         defer testing.allocator.free(plain);
         internal.sentinel.fill(plain);
-        const decoded = try decode.decompress(case.expected, plain);
+        const decoded = try decode.decompress(case.expected, plain, null);
         try testing.expectEqual(input.len, decoded);
         try testing.expectEqualSlices(u8, input, plain[0..decoded]);
         try internal.sentinel.expect(plain, decoded);
@@ -540,7 +540,7 @@ test "the witness inputs reproduce the CLI's frames, guarding three fixes' rever
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // and the frame decodes back through our decoder.
         var plain: [700 * 1024]u8 = undefined;
-        const n = try decode.decompress(case.expected, &plain);
+        const n = try decode.decompress(case.expected, &plain, null);
         try testing.expectEqual(case.source.len, n);
     }
 }

@@ -809,6 +809,8 @@ test "the writer's sections decode back through the landed decoder" {
             literals_source[0..literals_len],
             &decoded,
             0,
+            &.{},
+            0,
             &decode_state,
         );
         // Sequence Execution's own accounting: every literals byte is copied
@@ -982,6 +984,8 @@ test "Repeat_Mode's section carries no table and reuses the previous one" {
         literals_source[0..literals_len],
         &decoded,
         0,
+        &.{},
+        0,
         &decode_state,
     );
     const second_section = try sequences.decode(
@@ -989,6 +993,8 @@ test "Repeat_Mode's section carries no table and reuses the previous one" {
         literals_source[0..literals_len],
         &decoded,
         first_section.bytes_written,
+        &.{},
+        0,
         &decode_state,
     );
     // The second block's output is its own sequences' execution, and the

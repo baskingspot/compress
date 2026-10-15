@@ -33,6 +33,8 @@ const block = @import("block.zig");
 const common = @import("common.zig");
 const readInt = common.readInt;
 const writeInt = common.writeInt;
+/// A parsed dictionary (§5), the value both directions take.
+const Dictionary = @import("Dictionary.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
 const xxh64 = @import("xxh64.zig");
@@ -81,6 +83,7 @@ pub const Error = error{
     BadMagic,
     ReservedBitSet,
     DictionaryRequired,
+    DictionaryMismatch,
     BlockOversize,
     ReservedBlock,
     MalformedLiteralsHeader,
@@ -192,6 +195,11 @@ header: frame.HeaderParser = .{},
 /// the two entropy layers' tables, the frame's decoded length, and the XXH64
 /// fold. Present once the header is parsed.
 frame_state: ?frame.State = null,
+/// The dictionary (`§5`) a frame may start from: its ID is checked against
+/// the frame's Dictionary_ID once the header is parsed, its tables seed the
+/// frame state, and its content is the preset history. `null` is the
+/// no-dictionary reader. Borrowed for the reader's life.
+dict: ?*const Dictionary = null,
 phase: Phase = .start,
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// frame's trailer is verified (`done`) or a failure sticks (`failed`,
@@ -209,9 +217,13 @@ const vtable = VTable(Reader, pump, rebase).vtable;
 /// Read one Zstandard frame from `input`, decoding through `buffer`.
 /// Skippable frames before the frame are skipped. `window_len` is the largest
 /// Window_Size the reader accepts, and `buffer` must be a
-/// `Buffer(window_len)`, which the compiler checks at the call. `input` needs
-/// a buffer of at least four bytes. `init` reads nothing from `input` and
-/// allocates nothing.
+/// `Buffer(window_len)`, which the compiler checks at the call. `dict` seeds
+/// the frame's starting state (`§5`): its entropy tables, its repeat offsets,
+/// and its content as the preset history. `null` is the no-dictionary reader;
+/// a frame that names a nonzero Dictionary_ID then fails `DictionaryRequired`
+/// (or `DictionaryMismatch` when a non-matching dictionary was supplied).
+/// `input` needs a buffer of at least four bytes. `init` reads nothing from
+/// `input` and allocates nothing.
 ///
 /// Read through `&r.reader` (`stream`, the `read` family, the `peek` family).
 /// Once the trailer is verified, reads return `error.EndOfStream`. A
@@ -219,7 +231,12 @@ const vtable = VTable(Reader, pump, rebase).vtable;
 /// does every later read, with the detail in `err`. The reader consumes
 /// `input` exactly through the frame's last byte and leaves any later bytes
 /// unread.
-pub fn init(comptime window_len: usize, input: *Io.Reader, buffer: *Buffer(window_len)) Reader {
+pub fn init(
+    comptime window_len: usize,
+    input: *Io.Reader,
+    buffer: *Buffer(window_len),
+    dict: ?*const Dictionary,
+) Reader {
     // The serving region is the buffer's front `window_len + max_block_size`
     // bytes; the staging room is its tail.
     const serving_len = window_len + block.max_block_size;
@@ -233,13 +250,15 @@ pub fn init(comptime window_len: usize, input: *Io.Reader, buffer: *Buffer(windo
         .staging = buffer[serving_len..],
         .input = input,
         .window_len = window_len,
+        .dict = dict,
     };
 }
 
 /// Decode one frame from `in` into `out` through `buffer`, and return the
 /// number of bytes written. Skippable frames before the frame are skipped
-/// (`§3.1.2`). `in` is consumed exactly through the frame's last byte (the
-/// checksum trailer's, when the frame has one) and later bytes are left
+/// (`§3.1.2`). `dict` seeds the frame's starting state (`§5`), as
+/// `Reader.init`'s. `in` is consumed exactly through the frame's last byte
+/// (the checksum trailer's, when the frame has one) and later bytes are left
 /// unread. An empty `in` is an error, because it holds no frame. `in` needs a
 /// buffer of at least four bytes. Failures are reported as `error.ReadFailed`
 /// (a malformed frame or a failing `in`) or `error.WriteFailed` (a failing
@@ -250,8 +269,9 @@ pub fn streamFrame(
     in: *Io.Reader,
     out: *Io.Writer,
     buffer: *Buffer(window_len),
+    dict: ?*const Dictionary,
 ) Io.Reader.StreamRemainingError!usize {
-    var rr: Reader = .init(window_len, in, buffer);
+    var rr: Reader = .init(window_len, in, buffer, dict);
     return rr.reader.streamRemaining(out);
 }
 
@@ -261,7 +281,8 @@ pub fn streamFrame(
 /// the previous one ended. Skippable frames are skipped, so an input that
 /// holds only skippable frames, or nothing at all, decodes to zero bytes. Any
 /// other bytes where a frame should start are `BadMagic`, reported as
-/// `error.ReadFailed`; they are not skipped. `in` needs a buffer of at least
+/// `error.ReadFailed`; they are not skipped. `dict` seeds every frame's
+/// starting state (`§5`), as `Reader.init`'s. `in` needs a buffer of at least
 /// four bytes. Other failures are reported as in `streamFrame`. Does not
 /// allocate.
 pub fn streamAll(
@@ -269,6 +290,7 @@ pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
     buffer: *Buffer(window_len),
+    dict: ?*const Dictionary,
 ) Io.Reader.StreamRemainingError!usize {
     var rr: Reader = undefined;
     var served: usize = 0;
@@ -279,7 +301,7 @@ pub fn streamAll(
             error.EndOfStream => return served,
             else => |e| return e,
         };
-        rr = .init(window_len, in, buffer);
+        rr = .init(window_len, in, buffer, dict);
         served += try rr.reader.streamRemaining(out);
     }
 }
@@ -299,10 +321,11 @@ pub fn streamFrameAlloc(
     allocator: mem.Allocator,
     in: *Io.Reader,
     out: *Io.Writer,
+    dict: ?*const Dictionary,
 ) StreamAllocError!usize {
     const buffer = try allocator.create(DefaultBuffer);
     defer allocator.destroy(buffer);
-    return streamFrame(default_window_len, in, out, buffer);
+    return streamFrame(default_window_len, in, out, buffer, dict);
 }
 
 /// `streamAll` with the default 8 MiB window. Allocates a `DefaultBuffer`
@@ -313,10 +336,11 @@ pub fn streamAllAlloc(
     allocator: mem.Allocator,
     in: *Io.Reader,
     out: *Io.Writer,
+    dict: ?*const Dictionary,
 ) StreamAllocError!usize {
     const buffer = try allocator.create(DefaultBuffer);
     defer allocator.destroy(buffer);
-    return streamAll(default_window_len, in, out, buffer);
+    return streamAll(default_window_len, in, out, buffer, dict);
 }
 
 /// The vtable's fill. Passes `fillFrame`'s detailed errors through `record`,
@@ -475,6 +499,8 @@ fn readHeader(r: *Reader) Error!void {
         r.input.toss(consumed);
     }
     const header = r.header.header();
+    // §3.1.1.1.3 + §5 — the Dictionary_ID check, before any block byte.
+    try frame.checkDictionary(header, r.dict);
     // §3.1.1.1.2 — "a decoder is allowed to reject a compressed frame that
     // requests a memory size beyond the decoder's authorized range": the
     // caller's buffer is the authorization, checked once, before any block
@@ -483,7 +509,7 @@ fn readHeader(r: *Reader) Error!void {
     // In place through the optional's payload: the layer states' ~10 KiB of
     // table payload stays undefined until a block builds it (frame.State.init).
     r.frame_state = @as(frame.State, undefined);
-    r.frame_state.?.init(header);
+    r.frame_state.?.init(header, r.dict);
     r.phase = .blocks;
 }
 
@@ -540,7 +566,10 @@ fn decodeBlock(r: *Reader) Error!usize {
     const state = &r.frame_state.?;
     // What `decodeContent` can reach back into is what the serving region
     // still holds. That is not the frame's decoded total
-    // (`state.decoded_len`), which keeps growing after the window slides.
+    // (`state.decoded_len`), which keeps growing after the window slides: the
+    // region holds the frame's last `retained_len` bytes, so the block layer
+    // needs both numbers — `retained_len` for its region, `state.decoded_len`
+    // for §5's dictionary boundary.
     const retained_len = r.reader.end;
     // A Raw block's bytes reach the checksum inside the copy
     // (`block.decodeContent`), so it records with `recordRawBlock`.
@@ -551,6 +580,8 @@ fn decodeBlock(r: *Reader) Error!usize {
         r.reader.buffer,
         retained_len,
         state.header.window_size,
+        state.decoded_len,
+        state.dict_content,
         &state.literals,
         &state.sequences,
         checksum,
@@ -860,6 +891,97 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     try testing.expect(!has_buffer_too_small);
 }
 
+test "Reader: the CLI's dictionary frames decode through the streaming layer" {
+    // §5 — the same fixtures as the one-shot's: the dictionary seeds the
+    // frame's state through the streaming path too (the header check, the
+    // tables, the repcodes, and the content), and the reader consumes the
+    // frame exactly. Each expectation is the CLI's own `-D` decode.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const id_100 = try Dictionary.parse(golden.dict_100);
+    const zero_weight = try Dictionary.parse(golden.dict_zero_weight);
+    const raw = Dictionary.initRaw(golden.dict_s02);
+    const rows = [_]struct { source: []const u8, dict: *const Dictionary, expected: []const u8 }{
+        .{ .source = golden.dict_frame_s00, .dict = &trained, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_s00_noid, .dict = &trained, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_s01_r100, .dict = &id_100, .expected = golden.dict_s01 },
+        .{ .source = golden.dict_frame_s01_raw, .dict = &raw, .expected = golden.dict_s01 },
+        .{ .source = golden.dict_frame_zw, .dict = &zero_weight, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_big, .dict = &trained, .expected = golden.dict_big },
+    };
+    var rbuf: Buffer(fixture_buffer_len) = undefined;
+    var target: [300 * 1024]u8 = undefined;
+    for (rows) |row| {
+        var fixed_in: Io.Reader = .fixed(row.source);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, row.dict);
+        const n = try decodeInto(&r, &target);
+        try testing.expectEqual(row.expected.len, n);
+        try testing.expectEqualSlices(u8, row.expected, target[0..n]);
+        try sentinel.expect(&target, n);
+        try testing.expectEqual(row.source.len, fixed_in.seek);
+        try testing.expectEqual(State.done, r.state);
+    }
+    // §5's boundary, through the reader: the match at exactly Window_Size
+    // decodes, one byte past it is `OffsetTooFar` with the RLE output left
+    // behind (a failed reader's bytes are not trusted, but the sentinel
+    // proves the refused copy wrote nothing).
+    const boundary = try Dictionary.parse(&golden.dict_boundary);
+    var ok_in: Io.Reader = .fixed(&golden.dict_frame_boundary);
+    var ok: Reader = .init(fixture_buffer_len, &ok_in, &rbuf, &boundary);
+    const n = try decodeInto(&ok, &target);
+    try testing.expectEqual(golden.dict_boundary_expected.len, n);
+    try testing.expectEqualSlices(u8, golden.dict_boundary_expected, target[0..n]);
+    try sentinel.expect(&target, n);
+    sentinel.fill(&target);
+    var over_in: Io.Reader = .fixed(&golden.dict_frame_boundary_after);
+    var over: Reader = .init(fixture_buffer_len, &over_in, &rbuf, &boundary);
+    var over_out: Io.Writer = .fixed(&target);
+    try testing.expectError(error.ReadFailed, over.reader.streamRemaining(&over_out));
+    try testing.expectEqual(Error.OffsetTooFar, over.err.?);
+    try testing.expectEqual(State.failed, over.state);
+    try sentinel.expect(&target, 1025);
+}
+
+test "Reader: the dictionary matrix fails the stream the same way" {
+    // DD9/DD10 — the header's Dictionary_ID against the reader's dictionary:
+    // none supplied is `DictionaryRequired`, a different one is
+    // `DictionaryMismatch`, both raised once the header is parsed and before
+    // any block byte; the failure is sticky, as every reader failure is. A
+    // frame with no ID field decodes either way.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const other = try Dictionary.parse(golden.dict_100);
+    var rbuf: Buffer(fixture_buffer_len) = undefined;
+    var target: [300 * 1024]u8 = undefined;
+    const cases = [_]struct { dict: ?*const Dictionary, want: Error }{
+        .{ .dict = null, .want = error.DictionaryRequired },
+        .{ .dict = &other, .want = error.DictionaryMismatch },
+    };
+    for (cases) |case| {
+        sentinel.fill(&target);
+        var fixed_in: Io.Reader = .fixed(golden.dict_frame_s00);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, case.dict);
+        var out: Io.Writer = .fixed(&target);
+        try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out));
+        try testing.expectEqual(case.want, r.err.?);
+        try testing.expectEqual(State.failed, r.state);
+        // The failure is sticky: every later read reports it.
+        try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out));
+        // No body byte was read past the header, and nothing was written.
+        try sentinel.expect(&target, 0);
+    }
+    // The no-ID frame without a dictionary fails in the entropy layer (the
+    // CLI's "Data corruption detected"), and a supplied dictionary fixes it.
+    var noid_in: Io.Reader = .fixed(golden.dict_frame_s00_noid);
+    var noid: Reader = .init(fixture_buffer_len, &noid_in, &rbuf, null);
+    var noid_out: Io.Writer = .fixed(&target);
+    try testing.expectError(error.ReadFailed, noid.reader.streamRemaining(&noid_out));
+    try testing.expectEqual(Error.RepeatModeFirst, noid.err.?);
+    var fixed_in: Io.Reader = .fixed(golden.dict_frame_s00_noid);
+    var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, &trained);
+    const n = try decodeInto(&r, &target);
+    try testing.expectEqualSlices(u8, golden.dict_s00, target[0..n]);
+    try sentinel.expect(&target, n);
+}
+
 test "Reader: the golden fixtures decode through the streaming layer" {
     // The one-shot decoder's fixtures, through the streaming interface: each
     // decodes to the golden output and consumes exactly its own bytes
@@ -869,7 +991,7 @@ test "Reader: the golden fixtures decode through the streaming layer" {
     var target: [300 * 1024]u8 = undefined;
     for (stream_cases) |tc| {
         var fixed_in: Io.Reader = .fixed(tc.source);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
         const n = decodeInto(&r, &target) catch |err| {
             print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
@@ -885,7 +1007,7 @@ test "Reader: the golden fixtures decode through the streaming layer" {
     // bytes over two Compressed_Blocks with the XXH64 trailer (`§3.1.1`).
     const expected = golden.frame_checksum_multi_text ** 3000;
     var big_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
-    var big: Reader = .init(fixture_buffer_len, &big_in, &rbuf);
+    var big: Reader = .init(fixture_buffer_len, &big_in, &rbuf, null);
     const n = try decodeInto(&big, &target);
     try testing.expectEqual(expected.len, n);
     try testing.expectEqualSlices(u8, expected, target[0..n]);
@@ -1084,7 +1206,7 @@ test "Reader: the negative corners fail with the detail in err" {
     var target: [1024]u8 = undefined;
     for (cases) |tc| {
         var fixed_in: Io.Reader = .fixed(tc.source);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
         sentinel.fill(&target);
         var w: Io.Writer = .fixed(&target);
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&w));
@@ -1122,7 +1244,7 @@ test "Reader: the frame boundary is exact at the frame's last byte" {
         fastmem.copy(u8, framed[0..tc.source.len], tc.source);
         fastmem.set(u8, framed[tc.source.len..], 0xaa);
         var fixed_in: Io.Reader = .fixed(framed[0 .. tc.source.len + markers]);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
         const n = try decodeInto(&r, &target);
         try testing.expectEqualStrings(tc.expected, target[0..n]);
         try sentinel.expect(&target, n);
@@ -1143,13 +1265,13 @@ test "Reader: a multi-frame file is a caller loop at the boundary" {
     defer second.deinit();
     try testing.expectEqual(
         @as(usize, 8),
-        try streamFrame(fixture_buffer_len, &fixed_in, &first.writer, &rbuf),
+        try streamFrame(fixture_buffer_len, &fixed_in, &first.writer, &rbuf, null),
     );
     try testing.expectEqualStrings("zstd raw", first.written());
     try testing.expectEqual(@as(usize, golden.frame_raw.len), fixed_in.seek);
     try testing.expectEqual(
         @as(usize, 6),
-        try streamFrame(fixture_buffer_len, &fixed_in, &second.writer, &rbuf),
+        try streamFrame(fixture_buffer_len, &fixed_in, &second.writer, &rbuf, null),
     );
     try testing.expectEqualStrings("second", second.written());
     try testing.expectEqual(@as(usize, golden.frame_two_frames.len), fixed_in.seek);
@@ -1165,7 +1287,7 @@ test "Reader: streamAll walks every frame to the input's end" {
     defer out.deinit();
     try testing.expectEqual(
         @as(usize, 14),
-        try streamAll(fixture_buffer_len, &fixed_in, &out.writer, &rbuf),
+        try streamAll(fixture_buffer_len, &fixed_in, &out.writer, &rbuf, null),
     );
     try testing.expectEqualStrings("zstd rawsecond", out.written());
     try testing.expectEqual(@as(usize, golden.frame_two_frames.len), fixed_in.seek);
@@ -1189,7 +1311,7 @@ test "Reader: streamAll walks every frame to the input's end" {
     defer walk_out.deinit();
     try testing.expectEqual(
         @as(usize, 8 + 4 + 8),
-        try streamAll(fixture_buffer_len, &walk_in, &walk_out.writer, &rbuf),
+        try streamAll(fixture_buffer_len, &walk_in, &walk_out.writer, &rbuf, null),
     );
     try testing.expectEqualStrings("zstd rawabcdzstd raw", walk_out.written());
     try testing.expectEqual(@as(usize, framed.len), walk_in.seek);
@@ -1206,7 +1328,7 @@ test "Reader: the allocator conveniences own the default buffer" {
     defer out.deinit();
 
     var walk_in: Io.Reader = .fixed(&golden.frame_two_frames);
-    try testing.expectEqual(@as(usize, 14), try streamAllAlloc(gpa, &walk_in, &out.writer));
+    try testing.expectEqual(@as(usize, 14), try streamAllAlloc(gpa, &walk_in, &out.writer, null));
     try testing.expectEqualStrings("zstd rawsecond", out.written());
     try testing.expectEqual(@as(usize, golden.frame_two_frames.len), walk_in.seek);
 
@@ -1214,7 +1336,7 @@ test "Reader: the allocator conveniences own the default buffer" {
     // the buffer allocated for the call).
     var one_in: Io.Reader = .fixed(&golden.frame_two_frames);
     out.clearRetainingCapacity();
-    try testing.expectEqual(@as(usize, 8), try streamFrameAlloc(gpa, &one_in, &out.writer));
+    try testing.expectEqual(@as(usize, 8), try streamFrameAlloc(gpa, &one_in, &out.writer, null));
     try testing.expectEqualStrings("zstd raw", out.written());
     try testing.expectEqual(@as(usize, golden.frame_raw.len), one_in.seek);
 
@@ -1225,7 +1347,7 @@ test "Reader: the allocator conveniences own the default buffer" {
     out.clearRetainingCapacity();
     try testing.expectEqual(
         @as(usize, 2048 + 3),
-        try streamAllAlloc(gpa, &small_in, &out.writer),
+        try streamAllAlloc(gpa, &small_in, &out.writer, null),
     );
     try testing.expectEqual(golden.frame_window_1k.len, small_in.seek);
 
@@ -1234,11 +1356,11 @@ test "Reader: the allocator conveniences own the default buffer" {
     // zero-byte input is `ReadFailed` (no frame unit began).
     var empty_in: Io.Reader = .fixed("");
     out.clearRetainingCapacity();
-    try testing.expectEqual(@as(usize, 0), try streamAllAlloc(gpa, &empty_in, &out.writer));
+    try testing.expectEqual(@as(usize, 0), try streamAllAlloc(gpa, &empty_in, &out.writer, null));
     var empty_frame_in: Io.Reader = .fixed("");
     try testing.expectError(
         error.ReadFailed,
-        streamFrameAlloc(gpa, &empty_frame_in, &out.writer),
+        streamFrameAlloc(gpa, &empty_frame_in, &out.writer, null),
     );
 
     // The allocation's own failure: a failing allocator surfaces
@@ -1247,7 +1369,7 @@ test "Reader: the allocator conveniences own the default buffer" {
     var oom_in: Io.Reader = .fixed(&golden.frame_raw);
     try testing.expectError(
         error.OutOfMemory,
-        streamAllAlloc(failing.allocator(), &oom_in, &out.writer),
+        streamAllAlloc(failing.allocator(), &oom_in, &out.writer, null),
     );
     try testing.expectEqual(@as(usize, 0), oom_in.seek);
 }
@@ -1267,7 +1389,7 @@ test "Reader: skippable frames are skipped in every layer" {
         defer out.deinit();
         try testing.expectEqual(
             @as(usize, 8),
-            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf),
+            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf, null),
         );
         try testing.expectEqualStrings("zstd raw", out.written());
         try testing.expectEqual(golden.skippable_prefix.len, fixed_in.seek);
@@ -1281,13 +1403,13 @@ test "Reader: skippable frames are skipped in every layer" {
         defer out.deinit();
         try testing.expectEqual(
             @as(usize, 8),
-            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf),
+            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf, null),
         );
         try testing.expectEqualStrings("zstd raw", out.written());
         try testing.expectEqual(@as(usize, 27), fixed_in.seek);
         try testing.expectEqual(
             @as(usize, 0),
-            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf),
+            try streamFrame(fixture_buffer_len, &fixed_in, &out.writer, &rbuf, null),
         );
         try testing.expectEqual(golden.skippable_around.len, fixed_in.seek);
 
@@ -1296,7 +1418,7 @@ test "Reader: skippable frames are skipped in every layer" {
         defer walk_out.deinit();
         try testing.expectEqual(
             @as(usize, 8),
-            try streamAll(fixture_buffer_len, &walk_in, &walk_out.writer, &rbuf),
+            try streamAll(fixture_buffer_len, &walk_in, &walk_out.writer, &rbuf, null),
         );
         try testing.expectEqualStrings("zstd raw", walk_out.written());
         try testing.expectEqual(golden.skippable_around.len, walk_in.seek);
@@ -1310,13 +1432,13 @@ test "Reader: skippable frames are skipped in every layer" {
     defer only_out.deinit();
     try testing.expectEqual(
         @as(usize, 0),
-        try streamAll(fixture_buffer_len, &only_in, &only_out.writer, &rbuf),
+        try streamAll(fixture_buffer_len, &only_in, &only_out.writer, &rbuf, null),
     );
     try testing.expectEqual(@as(usize, 0), only_out.written().len);
     try testing.expectEqual(golden.skippable_sixteen.len, only_in.seek);
 
     var direct_in: Io.Reader = .fixed(&golden.skippable_sixteen);
-    var direct: Reader = .init(fixture_buffer_len, &direct_in, &rbuf);
+    var direct: Reader = .init(fixture_buffer_len, &direct_in, &rbuf, null);
     var direct_out: Io.Writer.Allocating = .init(gpa);
     defer direct_out.deinit();
     try testing.expectEqual(
@@ -1335,7 +1457,7 @@ test "Reader: the cardinality rules for the empty input" {
     const gpa = testing.allocator;
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var fixed_in: Io.Reader = .fixed("");
-    var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -1346,13 +1468,13 @@ test "Reader: the cardinality rules for the empty input" {
     var frame_in: Io.Reader = .fixed("");
     try testing.expectError(
         error.ReadFailed,
-        streamFrame(fixture_buffer_len, &frame_in, &out.writer, &rbuf),
+        streamFrame(fixture_buffer_len, &frame_in, &out.writer, &rbuf, null),
     );
 
     var walk_in: Io.Reader = .fixed("");
     try testing.expectEqual(
         @as(usize, 0),
-        try streamAll(fixture_buffer_len, &walk_in, &out.writer, &rbuf),
+        try streamAll(fixture_buffer_len, &walk_in, &out.writer, &rbuf, null),
     );
     try testing.expectEqual(@as(usize, 0), out.written().len);
 }
@@ -1367,7 +1489,7 @@ test "Reader: trailing garbage fails at the next unit's classify" {
     defer out.deinit();
     try testing.expectError(
         error.ReadFailed,
-        streamAll(fixture_buffer_len, &fixed_in, &out.writer, &rbuf),
+        streamAll(fixture_buffer_len, &fixed_in, &out.writer, &rbuf, null),
     );
     try testing.expectEqualStrings("zstd raw", out.written());
 
@@ -1376,9 +1498,9 @@ test "Reader: trailing garbage fails at the next unit's classify" {
     var loop_in: Io.Reader = .fixed(&golden.frame_trailing_garbage);
     var loop_out: Io.Writer.Allocating = .init(gpa);
     defer loop_out.deinit();
-    _ = try streamFrame(fixture_buffer_len, &loop_in, &loop_out.writer, &rbuf);
+    _ = try streamFrame(fixture_buffer_len, &loop_in, &loop_out.writer, &rbuf, null);
     try testing.expectEqual(@as(usize, golden.frame_raw.len), loop_in.seek);
-    var next: Reader = .init(fixture_buffer_len, &loop_in, &rbuf);
+    var next: Reader = .init(fixture_buffer_len, &loop_in, &rbuf, null);
     try testing.expectError(error.ReadFailed, next.reader.streamRemaining(&loop_out.writer));
     try testing.expectEqual(Error.BadMagic, next.err.?);
 }
@@ -1393,7 +1515,7 @@ test "Reader: a truncated frame is Truncated at every prefix" {
     defer out.deinit();
     for (1..golden.frame_checksum.len) |prefix| {
         var fixed_in: Io.Reader = .fixed(golden.frame_checksum[0..prefix]);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
         out.clearRetainingCapacity();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
         try testing.expectEqual(Error.Truncated, r.err.?);
@@ -1402,7 +1524,7 @@ test "Reader: a truncated frame is Truncated at every prefix" {
     // last byte is the frame's clean end (§3.1.1 — no trailer to read).
     for (1..golden.frame_raw.len) |prefix| {
         var fixed_in: Io.Reader = .fixed(golden.frame_raw[0..prefix]);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
         out.clearRetainingCapacity();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
         try testing.expectEqual(Error.Truncated, r.err.?);
@@ -1421,7 +1543,7 @@ test "Reader: the window cap is the buffer's" {
     {
         var rbuf: Buffer(1024) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_window_1152);
-        var r: Reader = .init(1024, &fixed_in, &rbuf);
+        var r: Reader = .init(1024, &fixed_in, &rbuf, null);
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
         try testing.expectEqual(Error.WindowTooLarge, r.err.?);
         // The cap is checked once the header is parsed and before any block
@@ -1435,7 +1557,7 @@ test "Reader: the window cap is the buffer's" {
         // declaration: the cap is inclusive.
         var rbuf: Buffer(1152) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_window_1152);
-        var r: Reader = .init(1152, &fixed_in, &rbuf);
+        var r: Reader = .init(1152, &fixed_in, &rbuf, null);
         try testing.expectEqual(@as(usize, 0), try r.reader.streamRemaining(&out.writer));
         try testing.expectEqual(@as(?Error, null), r.err);
         try testing.expectEqual(golden.frame_window_1152.len, fixed_in.seek);
@@ -1444,7 +1566,7 @@ test "Reader: the window cap is the buffer's" {
         // The minimum legal window, exactly declared.
         var rbuf: Buffer(1024) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_window_1k);
-        var r: Reader = .init(1024, &fixed_in, &rbuf);
+        var r: Reader = .init(1024, &fixed_in, &rbuf, null);
         try testing.expectEqual(@as(usize, 2048 + 3), try r.reader.streamRemaining(&out.writer));
         try testing.expectEqual(@as(?Error, null), r.err);
         try testing.expectEqual(golden.frame_window_1k.len, fixed_in.seek);
@@ -1457,7 +1579,7 @@ test "Reader: the window cap is the buffer's" {
         out.clearRetainingCapacity();
         var rbuf: Buffer(1024) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_window_1k_span);
-        var r: Reader = .init(1024, &fixed_in, &rbuf);
+        var r: Reader = .init(1024, &fixed_in, &rbuf, null);
         try testing.expectEqual(
             @as(usize, 2048 + 10 + 3),
             try r.reader.streamRemaining(&out.writer),
@@ -1496,7 +1618,7 @@ test "Reader: the window slides to serve a frame larger than the buffer" {
     sentinel.fill(&guarded.before);
     sentinel.fill(&guarded.after);
     var fixed_in: Io.Reader = .fixed(&golden.frame_window_128k);
-    var r: Reader = .init(128 * 1024, &fixed_in, &guarded.buffer);
+    var r: Reader = .init(128 * 1024, &fixed_in, &guarded.buffer, null);
     const n = try decodeInto(&r, served);
     try testing.expectEqual(expected_len, n);
     try testing.expectEqualSlices(u8, reference, served[0..n]);
@@ -1514,7 +1636,7 @@ test "Reader: a contiguous request past the window fails" {
     // `err == .StreamTooLong`, never an assert.
     var rbuf: Buffer(128 * 1024) = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_window_128k);
-    var r: Reader = .init(128 * 1024, &fixed_in, &rbuf);
+    var r: Reader = .init(128 * 1024, &fixed_in, &rbuf, null);
     // The guaranteed floor: a whole Block_Maximum_Size of contiguous output.
     try testing.expectEqual(block.max_block_size, (try r.reader.peek(block.max_block_size)).len);
     // Drain everything the pump buffered, so only the retained history stands
@@ -1571,14 +1693,14 @@ test "Reader: a checksummed raw-block frame folds inside the copy" {
     defer out.deinit();
     try testing.expectEqual(
         total,
-        try streamAll(window_len, &fixed_in, &out.writer, &rbuf),
+        try streamAll(window_len, &fixed_in, &out.writer, &rbuf, null),
     );
     try testing.expectEqualSlices(u8, &data, out.written());
 
     // A flipped byte in the second block's content fails the trailer.
     framed[4 + 2 + 4 + 3 + first_len + 3 + 100] ^= 0x01;
     var bad_in: Io.Reader = .fixed(framed[0..at]);
-    var r: Reader = .init(window_len, &bad_in, &rbuf);
+    var r: Reader = .init(window_len, &bad_in, &rbuf, null);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
     try testing.expectEqual(Error.WrongChecksum, r.err.?);
@@ -1652,7 +1774,7 @@ test "Reader: the frame total runs past 2^32 without wrapping" {
 
     var fixed_in: Io.Reader = .fixed(frame_buf[0..len]);
     var window: Reader.Buffer(128 * 1024) = undefined;
-    var r: Reader = .init(128 * 1024, &fixed_in, &window);
+    var r: Reader = .init(128 * 1024, &fixed_in, &window, null);
     var served: u64 = 0;
     try drainU64(&r, &served);
     try testing.expectEqual(@as(u64, block_count) * block_size, served);
@@ -1679,7 +1801,7 @@ test "Reader: the checksum fold runs past 2^32 without wrapping" {
 
     var fixed_in: Io.Reader = .fixed(frame_buf[0..len]);
     var window: Reader.Buffer(128 * 1024) = undefined;
-    var r: Reader = .init(128 * 1024, &fixed_in, &window);
+    var r: Reader = .init(128 * 1024, &fixed_in, &window, null);
     var served: u64 = 0;
     try drainU64(&r, &served);
     try testing.expectEqual(@as(u64, block_count) * block_size, served);
@@ -1710,7 +1832,7 @@ test "Reader: an over-the-end request still checks the trailer" {
     {
         var rbuf: Buffer(take_len) = undefined;
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
-        var r: Reader = .init(take_len, &fixed_in, &rbuf);
+        var r: Reader = .init(take_len, &fixed_in, &rbuf, null);
         _ = try r.reader.take(take_len);
         try testing.expectError(error.EndOfStream, r.reader.peek(peek_len));
         try testing.expectEqual(golden.frame_checksum_multi.len, fixed_in.seek);
@@ -1726,7 +1848,7 @@ test "Reader: an over-the-end request still checks the trailer" {
         bad[bad.len - frame.checksum_len + at] ^= 0x01;
         var rbuf: Buffer(take_len) = undefined;
         var fixed_in: Io.Reader = .fixed(&bad);
-        var r: Reader = .init(take_len, &fixed_in, &rbuf);
+        var r: Reader = .init(take_len, &fixed_in, &rbuf, null);
         _ = try r.reader.take(take_len);
         try testing.expectError(error.ReadFailed, r.reader.peek(peek_len));
         try testing.expectEqual(Error.WrongChecksum, r.err.?);
@@ -1752,7 +1874,7 @@ test "Reader: a chunked input refills across the header and a block" {
     var inner: Io.Reader = .fixed(framed);
     var chunked: Io.Reader.Limited = .init(&inner, .unlimited, &small);
     var rbuf: Buffer(135000) = undefined;
-    var r: Reader = .init(135000, &chunked.interface, &rbuf);
+    var r: Reader = .init(135000, &chunked.interface, &rbuf, null);
     const out = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(out);
     try testing.expectEqual(135000, out.len);
@@ -1771,7 +1893,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     const gpa = testing.allocator;
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var fixed_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
-    var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
     _ = try r.reader.peek(1);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectEqual(@as(usize, 0), try r.reader.stream(&sink.writer, .limited(0)));
@@ -1795,7 +1917,7 @@ test "Reader: random consumer machinery sequences stay correct" {
     var iter: usize = 0;
     while (iter < 8) : (iter += 1) {
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
-        var r: Reader = .init(135000, &fixed_in, &rbuf);
+        var r: Reader = .init(135000, &fixed_in, &rbuf, null);
         var pos: usize = 0;
         while (pos < input.len) {
             const left = input.len - pos;

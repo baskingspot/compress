@@ -51,7 +51,7 @@ fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
     // `streamAllAlloc` takes the default window (8 MiB + 256 KiB) from the
     // arena for the call, then decodes every frame (RFC 8878 §3.1).
-    _ = try zstd.Reader.streamAllAlloc(arena, in, out);
+    _ = try zstd.Reader.streamAllAlloc(arena, in, out, null);
 }
 
 test "example: streaming round-trip" {
@@ -105,7 +105,7 @@ test "example: the pump stops at the frame's end" {
     const buffer = try arena.create(zstd.Reader.DefaultBuffer);
     try testing.expectEqual(
         @as(usize, 8),
-        try zstd.Reader.streamFrame(zstd.Reader.default_window_len, &z, &plain.writer, buffer),
+        try zstd.Reader.streamFrame(zstd.Reader.default_window_len, &z, &plain.writer, buffer, null),
     );
     try testing.expectEqualStrings("zstd raw", plain.written());
     try testing.expectEqual(frame_raw.len, z.seek);

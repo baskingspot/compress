@@ -416,7 +416,7 @@ fn expectRoundTrip(comptime window_log: usize, source: []const u8, chunk: usize)
     const rbuffer = try makeReaderBuffer(historyLength(window_log));
     defer gpa.destroy(rbuffer);
     var fixed: Io.Reader = .fixed(out.written());
-    var r: Reader = .init(historyLength(window_log), &fixed, rbuffer);
+    var r: Reader = .init(historyLength(window_log), &fixed, rbuffer, null);
     var plain_out: Io.Writer = .fixed(plain);
     const written = try r.reader.streamRemaining(&plain_out);
     try testing.expectEqual(source.len, written);
@@ -502,7 +502,7 @@ test "Writer: the zero-data flush writes the header alone" {
     const plain = try gpa.alloc(u8, phrase.len * 8 + sentinel.len);
     defer gpa.free(plain);
     sentinel.fill(plain);
-    const written = try decode.decompress(out.written(), plain[0 .. phrase.len * 8]);
+    const written = try decode.decompress(out.written(), plain[0 .. phrase.len * 8], null);
     try testing.expectEqual(@as(usize, phrase.len * 8), written);
     try testing.expectEqualSlices(u8, phrase ** 8, plain[0..written]);
     try sentinel.expect(plain, written);
@@ -652,7 +652,7 @@ test "Writer: flush mid-stream ends at a block boundary" {
     const plain = try gpa.alloc(u8, @as(usize, 11) + sentinel.len);
     defer gpa.free(plain);
     sentinel.fill(plain);
-    const written = try decode.decompress(out.written(), plain[0..11]);
+    const written = try decode.decompress(out.written(), plain[0..11], null);
     try testing.expectEqualStrings("hello, zstd", plain[0..written]);
     try sentinel.expect(plain, written);
 }
@@ -782,7 +782,7 @@ test "Writer: the CLI's own streaming frames, byte for byte" {
         const plain = try gpa.alloc(u8, input.len + sentinel.len);
         defer gpa.free(plain);
         sentinel.fill(plain);
-        const written = try decode.decompress(case.expected, plain[0..input.len]);
+        const written = try decode.decompress(case.expected, plain[0..input.len], null);
         try testing.expectEqual(input.len, written);
         try testing.expectEqualSlices(u8, input, plain[0..written]);
         try sentinel.expect(plain, written);
@@ -904,7 +904,7 @@ test "Writer: random write machinery sequences stay correct" {
         const target = try gpa.alloc(u8, expect.items.len + sentinel.len);
         defer gpa.free(target);
         sentinel.fill(target);
-        const n = try decode.decompress(out.written(), target);
+        const n = try decode.decompress(out.written(), target, null);
         try testing.expectEqual(expect.items.len, n);
         try testing.expectEqualSlices(u8, expect.items, target[0..n]);
         try sentinel.expect(target, n);
@@ -935,7 +935,7 @@ test "Writer: the streamAll pumps round-trip a whole input" {
     const plain = try gpa.alloc(u8, source.len + sentinel.len);
     defer gpa.free(plain);
     sentinel.fill(plain);
-    const written = try decode.decompress(out.written(), plain[0..source.len]);
+    const written = try decode.decompress(out.written(), plain[0..source.len], null);
     try testing.expectEqual(source.len, written);
     try testing.expectEqualSlices(u8, source, plain[0..written]);
     try sentinel.expect(plain, written);

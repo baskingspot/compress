@@ -287,8 +287,11 @@ const SeqEntry = struct {
 };
 
 /// A sequences decoding table: the FSE table's `1 << log` cells, each fused
-/// with the alphabet's code.
-const SeqTable = struct {
+/// with the alphabet's code. This is the form the decode loop reads, and the
+/// form a dictionary carries one of per alphabet (`Dictionary`): a
+/// Repeat_Mode points `State.tables` at it, in the frame's own storage or in
+/// the dictionary's.
+pub const SeqTable = struct {
     /// The table's Accuracy_Log (`§4.1`): a state indexes the first
     /// `1 << log` cells.
     log: u5,
@@ -402,12 +405,54 @@ pub fn parseHeader(source: []const u8) Error!Header {
     return header;
 }
 
+/// One of a dictionary's three FSE table descriptions (§5): the table the
+/// parse built, and the bytes its description consumed.
+pub const DictionaryTable = struct {
+    table: SeqTable,
+    bytes_consumed: usize,
+};
+
+/// Read one of a dictionary's FSE table descriptions (§5): "They are stored
+/// in the following order: Huffman table for literals, FSE table for offsets,
+/// FSE table for match lengths, and FSE table for literals lengths." The
+/// description is the compressed-block form (`fse.readDescription`,
+/// `§4.1.1`) read with the alphabet's own symbol and accuracy caps, fused
+/// with the alphabet's codes — the exact table a Repeat_Mode reuses.
+///
+/// `source` is the dictionary from this table's first byte to its end (the
+/// next table, the 12 repcode bytes, or the content). A description that
+/// runs past it is `MalformedFseTable` (the reader's own name), never an
+/// overread.
+pub fn readDictionaryTable(
+    alphabet: Alphabet,
+    source: []const u8,
+) error{MalformedFseTable}!DictionaryTable {
+    const spec = specOf(alphabet);
+    // `readDescription`'s declared set is shared with the bitstream readers;
+    // every failure a *description* can hit is the malformed-table class.
+    const description = fse.readDescription(
+        source,
+        spec.symbol_value_max,
+        spec.accuracy_log_max,
+    ) catch return error.MalformedFseTable;
+    const table = fse.buildTable(
+        description.counts[0..description.symbol_count],
+        description.accuracy_log,
+    );
+    return .{
+        .table = fuseTable(&table, spec.codes),
+        .bytes_consumed = description.bytes_consumed,
+    };
+}
+
 /// The sequences layer's cross-block state (`§3.1.1.3`): the three decoding
 /// tables a Repeat_Mode reuses and the three repeat offsets (`§3.1.1.5`).
 /// One per frame, threaded through the block loop; only a Compressed_Block
 /// with a nonzero sequence count updates it ("blocks that are not
 /// Compressed_Block are skipped; they do not contribute to offset history"),
-/// and a zero-count section leaves it alone.
+/// and a zero-count section leaves it alone. A dictionary (§5) seeds the
+/// state instead of `frame.State.init`'s empty seats: `tables` point at the
+/// dictionary's parsed tables, and `repeat_offsets` are its 12 bytes.
 pub const State = struct {
     /// Storage for the tables a block builds (the FSE_Compressed and RLE
     /// modes), about 12 KB in all. Undefined until a mode writes a cell, so a
@@ -423,8 +468,9 @@ pub const State = struct {
     tables: [alphabet_count]?*const SeqTable = @splat(null),
     /// Repeated_Offset1/2/3 "sorted in recency order, with Repeated_Offset1
     /// meaning 'most recent one'" (`§3.1.1.5`), seeded {1, 4, 8} "for the
-    /// first block ... unless a dictionary is used". Dictionaries are not
-    /// supported, so this is always the seed.
+    /// first block ... unless a dictionary is used". A dictionary's 12
+    /// repcode bytes replace the seed; a raw dictionary has none, so it
+    /// keeps the default.
     repeat_offsets: [3]u32 = repeat_offsets_start,
 };
 
@@ -452,6 +498,17 @@ pub const Section = struct {
 /// `§3.1.1.4`), `target[history_len..]` where this block's output is written.
 /// `state` carries the frame's tables and repeat offsets across blocks.
 ///
+/// `dict` is §5's dictionary content, conceptually in front of `target[0]`,
+/// and `dict_limit` is the region-relative match position up to which it is
+/// addressable — §5's Window_Size boundary, derived by the caller ("as long
+/// as the amount of data decoded from this frame is less than or equal to
+/// Window_Size, sequence commands may specify offsets ... to reference back
+/// to the dictionary ... after the total output has surpassed Window_Size,
+/// ... the dictionary is no longer accessible"). A match reaching into it
+/// past that boundary, or deeper than the content holds, is `OffsetTooFar`.
+/// The empty slice (no dictionary) refuses every reach, exactly as the
+/// history bound did before dictionaries existed.
+///
 /// Every declared size is a bound: the output never exceeds `target`, the
 /// literals read never exceeds `literals_bytes`, and no offset reaches past
 /// the authorized history — the failures are `BufferTooSmall`,
@@ -461,6 +518,8 @@ pub fn decode(
     literals_bytes: []const u8,
     target: []u8,
     history_len: usize,
+    dict: []const u8,
+    dict_limit: u64,
     state: *State,
 ) Error!Section {
     assert(history_len <= target.len);
@@ -480,6 +539,8 @@ pub fn decode(
         literals_bytes,
         target,
         history_len,
+        dict,
+        dict_limit,
     );
     return .{ .bytes_written = written, .bytes_consumed = source.len };
 }
@@ -613,6 +674,8 @@ fn executeSequences(
     literals_bytes: []const u8,
     target: []u8,
     history_len: usize,
+    dict: []const u8,
+    dict_limit: u64,
 ) Error!usize {
     // §3.1.1.3.2.1.2 — "The bitstream starts with initial FSE state values
     // ... It starts with Literals_Length_State, followed by Offset_State, and
@@ -658,6 +721,8 @@ fn executeSequences(
             literals_consumed,
             target,
             written,
+            dict,
+            dict_limit,
         );
         literals_consumed += literals_length;
         // §3.1.1.3.2.1.2 — "If it is not the last sequence in the block, the
@@ -764,8 +829,9 @@ fn useRepeatOffset(repeat_offsets: *[3]u32, selected: u32) u32 {
 
 /// Execute one sequence's copies (`§3.1.1.4`) and return the bytes written:
 /// `literals_length` from the literals, then `match_length` from the history
-/// at `offset`. `written` is the output position the sequence starts at, from
-/// the caller's region's start.
+/// at `offset` — the caller's output region, or the dictionary when the
+/// offset reaches in front of it (`§5`). `written` is the output position the
+/// sequence starts at, from the caller's region's start.
 fn executeSequence(
     literals_length: u32,
     match_length: u32,
@@ -774,6 +840,8 @@ fn executeSequence(
     literals_consumed: usize,
     target: []u8,
     written: usize,
+    dict: []const u8,
+    dict_limit: u64,
 ) Error!usize {
     assert(literals_consumed <= literals_bytes.len);
     assert(written <= target.len);
@@ -790,21 +858,73 @@ fn executeSequence(
     );
     // "The offset is defined as from the current position (after copying the
     // literals)", and "all offsets leading to previously decoded data must
-    // be smaller than Window_Size" — the caller's history is that bound.
+    // be smaller than Window_Size" — the caller's history is that bound. An
+    // offset past the history reads the dictionary instead (§5), when it is
+    // addressable at the match.
     const match_start = written + literals_length;
-    if (offset > match_start) return error.OffsetTooFar;
-    copyMatch(target, match_start, offset, match_length);
+    if (offset <= match_start) {
+        copyMatch(target, match_start, offset, match_length);
+    } else {
+        try copyMatchDict(
+            target,
+            match_start,
+            offset - match_start,
+            match_length,
+            dict,
+            dict_limit,
+        );
+    }
     return sequence_length;
+}
+
+/// `§5` — a match whose source reaches into the dictionary content: the
+/// dictionary's last `reach` bytes, then the output's own start when the
+/// match straddles the boundary (the C's "span extDict &
+/// currentPrefixSegment"). `dict_limit` is the caller's region-relative
+/// match position bound: the reach is refused (`OffsetTooFar`) once the
+/// frame's decoded total has passed Window_Size, and when it is deeper than
+/// the content holds. The caller has checked that
+/// `target[match_start..][0..match_length]` fits.
+fn copyMatchDict(
+    target: []u8,
+    match_start: usize,
+    reach: usize,
+    match_length: u32,
+    dict: []const u8,
+    dict_limit: u64,
+) Error!void {
+    assert(reach > 0);
+    assert(match_start + match_length <= target.len);
+    if (@as(u64, match_start) > dict_limit) return error.OffsetTooFar;
+    if (reach > dict.len) return error.OffsetTooFar;
+    const from_dict = @min(@as(usize, match_length), reach);
+    const dict_start = dict.len - reach;
+    fastmem.copy(
+        u8,
+        target[match_start..][0..from_dict],
+        dict[dict_start..][0..from_dict],
+    );
+    if (from_dict == match_length) return;
+    // The match continues at the output's start; that copy may observe its
+    // own writes (its distance equals its position), which `copyMatch`
+    // handles.
+    const rest = match_length - @as(u32, @intCast(from_dict));
+    copyMatch(target, match_start + from_dict, match_start + from_dict, rest);
 }
 
 /// `§3.1.1.4` — "match_length bytes are copied from previous decoded data.
 /// The offset to copy from is determined by offset_value". An offset below
 /// the match length replicates the offset-byte pattern, so the copy observes
-/// its own writes; the caller has checked every bound.
-fn copyMatch(target: []u8, match_start: usize, offset: u32, match_length: u32) void {
+/// its own writes; the caller has checked every bound. `offset` is a `usize`
+/// because a dictionary-straddling match's continuation offset is a region
+/// position, which a 32-bit offset value does not bound.
+fn copyMatch(target: []u8, match_start: usize, offset: usize, match_length: u32) void {
     assert(offset > 0);
     assert(offset <= match_start);
-    assert(match_length >= 3);
+    // A sequence's match is at least 3 bytes (`§3.1.1.3.2.1.1`); the
+    // dictionary-straddling continuation is the match's tail after its
+    // dictionary part and can be shorter.
+    assert(match_length >= 1);
     assert(match_start + match_length <= target.len);
     const distance: usize = offset;
     const length: usize = match_length;
@@ -943,6 +1063,8 @@ fn expectBlocks(blocks: []const FixtureBlock, expected: []const []const u8) !voi
             literals_section.bytes,
             &target,
             produced,
+            &.{},
+            0,
             &sequences_state,
         );
         // The section runs to the block's end: the bitstream is the tail and
@@ -966,7 +1088,10 @@ fn expectError(
     var target: [512]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
-    try testing.expectError(err, decode(section, literals_bytes, &target, history_len, &state));
+    try testing.expectError(
+        err,
+        decode(section, literals_bytes, &target, history_len, &.{}, 0, &state),
+    );
     try internal.sentinel.expect(&target, history_len);
 }
 
@@ -1423,7 +1548,15 @@ test "decode ends a zero-count section on the literals" {
     var state: State = .{};
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    const section = try decode(&golden.zero_section, &golden.zero_expected, &target, 0, &state);
+    const section = try decode(
+        &golden.zero_section,
+        &golden.zero_expected,
+        &target,
+        0,
+        &.{},
+        0,
+        &state,
+    );
     try testing.expectEqual(golden.zero_expected.len, section.bytes_written);
     try testing.expectEqual(@as(usize, 1), section.bytes_consumed);
     try testing.expect(state.tables[0] == null);
@@ -1461,10 +1594,10 @@ test "decode fails on the sequence bounds" {
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
-    const section = try decode(&far, &.{}, &target, 12, &state);
+    const section = try decode(&far, &.{}, &target, 12, &.{}, 0, &state);
     try testing.expectEqual(@as(usize, 3), section.bytes_written);
     try internal.sentinel.expect(&target, 15);
-    try testing.expectError(error.OffsetTooFar, decode(&far, &.{}, &target, 11, &state));
+    try testing.expectError(error.OffsetTooFar, decode(&far, &.{}, &target, 11, &.{}, 0, &state));
     // literals_length 5 (LL symbol 5) with a 4-byte literals section.
     const five = [_]u8{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x01 };
     try expectError(error.LiteralsTooLarge, &five, &.{ 1, 2, 3, 4 }, 0);
@@ -1475,7 +1608,7 @@ test "decode fails on the sequence bounds" {
     var small_state: State = .{};
     try testing.expectError(
         error.BufferTooSmall,
-        decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x01 }, "abcde", &small, 0, &small_state),
+        decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x01 }, "abcde", &small, 0, &.{}, 0, &small_state),
     );
     try internal.sentinel.expect(&small, 0);
 }
@@ -1492,7 +1625,10 @@ test "a Number_of_Sequences past the block cannot amplify" {
     var target: [72]u8 = undefined;
     internal.sentinel.fill(&target);
     var state: State = .{};
-    try testing.expectError(error.BufferTooSmall, decode(&section, &.{}, &target, 8, &state));
+    try testing.expectError(
+        error.BufferTooSmall,
+        decode(&section, &.{}, &target, 8, &.{}, 0, &state),
+    );
     try internal.sentinel.expect(&target, 71);
 }
 
@@ -1516,7 +1652,7 @@ test "decode fails on the bitstream's ends" {
     var state: State = .{};
     try testing.expectError(
         error.BitstreamNotConsumed,
-        decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x02 }, "abcde", &target, 0, &state),
+        decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x02 }, "abcde", &target, 0, &.{}, 0, &state),
     );
     // offset_value 1 with a nonzero literals length is the seeded
     // Repeated_Offset1, so the match replicates the last literal.

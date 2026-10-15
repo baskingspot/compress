@@ -33,9 +33,11 @@ pub const snappy = @import("snappy/root.zig");
 /// buffers, no heap allocation. API: `src/zlib/README.md`. Format:
 /// docs/research/specs/rfc1950-zlib.txt.
 pub const zlib = @import("zlib/root.zig");
-/// zstd (RFC 8878) decoder: one-shot `decode.decompress` and the streaming
-/// `Reader`, with XXH64 frame checksum verification. There is no encoder.
-/// API: `src/zstd/README.md`. Format: docs/research/specs/rfc8878-zstd.txt.
+/// zstd (RFC 8878): one-shot `encode.compress` and `decode.decompress`, and
+/// the streaming `Reader` and `Writer`, with XXH64 frame checksum
+/// verification and dictionaries (`zstd.Dictionary`, §5). Caller-owned
+/// buffers, no heap allocation. API: `src/zstd/README.md`. Format:
+/// docs/research/specs/rfc8878-zstd.txt.
 pub const zstd = @import("zstd/root.zig");
 
 test {

@@ -199,15 +199,18 @@ fn headerBits(source: []const u8, len: usize) u40 {
 /// Treeless_Literals_Block reuses ("The Huffman tree comes from the previous
 /// Compressed_Literals_Block"). One per frame, threaded through the block
 /// loop; only a Compressed block updates it, and Raw, RLE, and Treeless
-/// blocks leave it alone.
+/// blocks leave it alone. A dictionary (§5) seeds `table` with its own tree
+/// instead, so a Treeless block is legal from the frame's first block.
 pub const State = struct {
-    /// The frame's one decode table; meaningful only once `has_table` —
-    /// undefined until then, so initializing the frame state pays for no
-    /// 4 KB zeroing (a measured per-frame memset).
-    table: huff0.DecodeTable = undefined,
-    /// `false` until the frame's first Compressed_Literals_Block decodes;
-    /// Treeless before that is `TreelessLiteralsFirst`.
-    has_table: bool = false,
+    /// The frame's own decode table, built by its first
+    /// Compressed_Literals_Block; undefined until then, so initializing the
+    /// frame state pays for no 4 KiB zeroing (a measured per-frame memset).
+    built: huff0.DecodeTable = undefined,
+    /// The table a Treeless_Literals_Block reuses: the frame's own `built`
+    /// once a Compressed section decoded, else the dictionary's table when
+    /// one seeded the frame. `null` when neither exists; Treeless before
+    /// that is `TreelessLiteralsFirst`.
+    table: ?*const huff0.DecodeTable = null,
 };
 
 /// One decoded literals section.
@@ -297,8 +300,8 @@ fn decodeCompressed(
     try decodeStreams(header, compressed[tree.bytes_consumed..], target, &table);
     // The state the next block sees is a table whose own block decoded
     // whole; a failed decode leaves the frame failed, never a partial state.
-    state.table = table;
-    state.has_table = true;
+    state.built = table;
+    state.table = &state.built;
     return .{
         .bytes = target[0..header.regenerated_size],
         .bytes_consumed = header.header_len + compressed_size,
@@ -317,10 +320,10 @@ fn decodeTreeless(
 ) Error!Section {
     const compressed_size: usize = header.compressed_size;
     if (compressed_size > content.len) return error.LiteralsTooLarge;
-    // The pointer capture, not a copy: `state.table` is the frame's one
-    // 4-KiB tree, and a Treeless block must read it in place.
-    if (!state.has_table) return error.TreelessLiteralsFirst;
-    try decodeStreams(header, content[0..compressed_size], target, &state.table);
+    // The pointer, not a copy: `state.table` is the frame's one 4-KiB tree
+    // (or the dictionary's), and a Treeless block must read it in place.
+    const table = state.table orelse return error.TreelessLiteralsFirst;
+    try decodeStreams(header, content[0..compressed_size], target, table);
     return .{
         .bytes = target[0..header.regenerated_size],
         .bytes_consumed = header.header_len + compressed_size,
@@ -658,7 +661,7 @@ test "a compressed section's Regenerated_Size beyond the target fails" {
         decode(&golden.pair_literals_section, &small, &state),
     );
     try internal.sentinel.expect(&small, 0);
-    try testing.expect(!state.has_table);
+    try testing.expect(state.table == null);
 }
 
 test "decodeCompressed decodes the hand-built one-stream sections" {
@@ -674,7 +677,7 @@ test "decodeCompressed decodes the hand-built one-stream sections" {
     try testing.expectEqual(golden.pair_literals_section.len, section.bytes_consumed);
     try internal.sentinel.expect(&target, section.bytes.len);
     // The Compressed block's tree is the state the next block sees.
-    try testing.expect(state.has_table);
+    try testing.expect(state.table != null);
 
     var errata_target: [16]u8 = undefined;
     internal.sentinel.fill(&errata_target);

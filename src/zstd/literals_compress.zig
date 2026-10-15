@@ -58,7 +58,7 @@ pub const State = struct {
 /// C's fast-strategy floor, `zstd_compress_literals.c:114-127`: `8 <<
 /// min(9 - strategy, 3)`). The C's 6-literal floor applies only when the
 /// previous tree is `HUF_repeat_valid`, which only dictionary loading sets
-/// (`zstd_compress.c:5079`); no dictionary exists in this package, so the
+/// (`zstd_compress.c:5079`); the encoder takes no dictionary yet, so the
 /// floor is always 64 here, as it is for any dictionary-free frame the C
 /// compresses.
 const min_literals_to_compress = 64;

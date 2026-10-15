@@ -323,7 +323,7 @@ fn decompressOne(bench: *Bench, impl: []const u8, codec: []const u8, blob: []con
         if (mem.eql(u8, codec, "zlib"))
             return zcompress.zlib.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zstd"))
-            return zcompress.zstd.decode.decompress(blob, target);
+            return zcompress.zstd.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "brotli"))
             return zcompress.brotli.decode.decompress(blob, target);
         return zcompress.snappy.decode.decompressBlock(blob, target);

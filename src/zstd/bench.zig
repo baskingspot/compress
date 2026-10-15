@@ -88,7 +88,7 @@ pub fn benchmarkZstdCompress(b: *bench.B) !void {
                     defer bb.allocator.free(back);
                     // The one-shot's frame must round trip to the raw shape.
                     const clen = try zstd.encode.compress(raw, comp, .{});
-                    const verified = try zstd.decode.decompress(comp[0..clen], back);
+                    const verified = try zstd.decode.decompress(comp[0..clen], back, null);
                     if (verified != raw.len or !std.mem.eql(u8, back, raw))
                         return error.CorpusMismatch;
 
@@ -124,12 +124,12 @@ pub fn benchmarkZstdDecompress(b: *bench.B) !void {
                     const back = try bb.allocator.alloc(u8, raw.len);
                     defer bb.allocator.free(back);
                     // The reference blob must decode to the raw shape.
-                    const verified = try zstd.decode.decompress(blob, back);
+                    const verified = try zstd.decode.decompress(blob, back, null);
                     if (verified != raw.len or !std.mem.eql(u8, back, raw))
                         return error.CorpusMismatch;
 
                     while (try bb.loop()) {
-                        const n = try zstd.decode.decompress(blob, back);
+                        const n = try zstd.decode.decompress(blob, back, null);
                         bb.keepAlive(n);
                     }
                     bb.setBytes(@intCast(raw.len));

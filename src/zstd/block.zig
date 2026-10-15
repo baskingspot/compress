@@ -117,15 +117,23 @@ pub const Section = struct {
 /// Decode one block. `source` starts at the block's Block_Header and may hold
 /// more input after the block.
 ///
-/// `target[0..decoded_len]` is the frame's output so far, and the block's
+/// `target[0..decoded_len]` is the output already in `target`, and the block's
 /// output goes to `target[decoded_len..]`. `window_size` is the frame's
 /// Window_Size (`§3.1.1.1.2`); it also sets Block_Maximum_Size, the smaller
 /// of `window_size` and 128 KiB. A match may read the last
-/// `min(decoded_len, window_size)` bytes of the earlier output and whatever
-/// this block has already written. An offset of exactly `window_size` reads
-/// the oldest retained byte, and later in a block an offset can exceed
+/// `min(decoded_len, window_size)` bytes of that output and whatever this
+/// block has already written. An offset of exactly `window_size` reads the
+/// oldest retained byte, and later in a block an offset can exceed
 /// `window_size`, because the block's own output extends the readable span.
 /// An offset that reaches before the retained history is `OffsetTooFar`.
+///
+/// `frame_total` is the frame's decoded total before this block. On the
+/// one-shot's contiguous path it equals `decoded_len`; the streaming reader's
+/// window slides, so its region holds only a suffix of the frame and the two
+/// differ. `dict` is the dictionary content (`§5`), conceptually in front of
+/// `target[0]`; a match may reach into it only while the frame's decoded
+/// total at the match is at most `window_size` (`§5`'s boundary, applied in
+/// `decodeCompressed`).
 ///
 /// `literals_state` and `sequences_state` belong to the frame. A Compressed
 /// block updates them; Raw and RLE blocks leave them alone (`§3.1.1.5`:
@@ -146,6 +154,8 @@ pub fn decode(
     target: []u8,
     decoded_len: usize,
     window_size: u64,
+    frame_total: u64,
+    dict: []const u8,
     literals_state: *literals.State,
     sequences_state: *sequences.State,
     checksum: ?*xxh64.State,
@@ -157,6 +167,8 @@ pub fn decode(
         target,
         decoded_len,
         window_size,
+        frame_total,
+        dict,
         literals_state,
         sequences_state,
         checksum,
@@ -174,7 +186,7 @@ pub fn decode(
 /// `contentLength(header)` bytes, and anything after them is ignored. Returns
 /// the length of the block's output, written to `target[decoded_len..]`.
 /// Everything else is as for `decode`, which is this plus the header parse
-/// and the consumed count.
+/// and the consumed count (`frame_total` included).
 ///
 /// Staging is the caller's job because a Compressed block's two backward
 /// bitstreams are read from the block's end, so all of its content must be in
@@ -192,11 +204,14 @@ pub fn decodeContent(
     target: []u8,
     decoded_len: usize,
     window_size: u64,
+    frame_total: u64,
+    dict: []const u8,
     literals_state: *literals.State,
     sequences_state: *sequences.State,
     checksum: ?*xxh64.State,
 ) Error!usize {
     assert(decoded_len <= target.len);
+    assert(frame_total >= decoded_len);
     // A Reserved block has no Block_Content whose size could be checked:
     // the type alone is the corruption (`§3.1.1.2.2`).
     if (header.block_type == .reserved) return error.ReservedBlock;
@@ -216,6 +231,8 @@ pub fn decodeContent(
             target,
             decoded_len,
             window_size,
+            frame_total,
+            dict,
             block_max_size,
             literals_state,
             sequences_state,
@@ -289,12 +306,15 @@ fn decodeCompressed(
     target: []u8,
     decoded_len: usize,
     window_size: u64,
+    frame_total: u64,
+    dict_content: []const u8,
     block_max_size: usize,
     literals_state: *literals.State,
     sequences_state: *sequences.State,
 ) Error!usize {
     assert(block.len <= block_max_size);
     assert(decoded_len <= target.len);
+    assert(frame_total >= decoded_len);
     assert(block_max_size <= max_block_size);
     // §3.1.1.3 — "All literals are regrouped in the first part of the
     // block": the section is what fixes where the sequences section starts.
@@ -329,6 +349,25 @@ fn decodeCompressed(
     // what this decoder holds, and it lets a frame much larger than its window
     // decode in one call (`frame_window_128k` is 256 KB over a 128 KB window).
     const history: usize = @intCast(@min(decoded_len, window_size));
+    // §5 — "As long as the amount of data decoded from this frame is less
+    // than or equal to Window_Size, sequence commands may specify offsets
+    // longer than the total length of decoded output so far to reference
+    // back to the dictionary, even parts of the dictionary with offsets
+    // larger than Window_Size. After the total output has surpassed
+    // Window_Size, however, this is no longer allowed, and the dictionary is
+    // no longer accessible." The region below starts at the frame's position
+    // `frame_total - history`; a match at region position `p` is at frame
+    // position `frame_total - history + p`, so the dictionary is addressable
+    // while `p <= Window_Size - (frame_total - history)`. A region start
+    // already past the window means the dictionary is gone for the whole
+    // block: the empty slice refuses every reach. (The boundary is checked
+    // per match, not per block: the block's own output can carry the frame
+    // past Window_Size mid-block, and a later match must not still see the
+    // dictionary. No reference enforces the rule exactly — DT1 — so ours
+    // fails closed.)
+    const dict_base = frame_total - history;
+    const dict = if (dict_base <= window_size) dict_content else &.{};
+    const dict_limit: u64 = if (dict_base <= window_size) window_size - dict_base else 0;
     // The sequences layer's region: the retained history in front of this
     // block's output, the output capped at Block_Maximum_Size.
     const region = target[decoded_len - history ..];
@@ -338,6 +377,8 @@ fn decodeCompressed(
         literals_section.bytes,
         region[0 .. history + output_capacity],
         history,
+        dict,
+        dict_limit,
         sequences_state,
     ) catch |err| switch (err) {
         // The region was capped at Block_Maximum_Size when the block maximum
@@ -377,6 +418,8 @@ fn decodeFrame(bytes: []const u8, target: []u8) !usize {
             target,
             decoded_len,
             window_size,
+            @intCast(decoded_len),
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -409,7 +452,17 @@ fn expectBlockError(err: Error, block_bytes: []const u8, target: []u8) !void {
     internal.sentinel.fill(target);
     try testing.expectError(
         err,
-        decode(block_bytes, target, 0, 512 * 1024, &literals_state, &sequences_state, null),
+        decode(
+            block_bytes,
+            target,
+            0,
+            512 * 1024,
+            0,
+            &.{},
+            &literals_state,
+            &sequences_state,
+            null,
+        ),
     );
     try internal.sentinel.expect(target, 0);
 }
@@ -434,6 +487,8 @@ fn expectFrameError(err: Error, bytes: []const u8) !void {
             &target,
             decoded_len,
             window_size,
+            @intCast(decoded_len),
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -509,6 +564,8 @@ test "decode copies a Raw block" {
         &target,
         0,
         512 * 1024,
+        0,
+        &.{},
         &literals_state,
         &sequences_state,
         null,
@@ -534,6 +591,8 @@ test "decode splats an RLE block" {
         &target,
         0,
         512 * 1024,
+        0,
+        &.{},
         &literals_state,
         &sequences_state,
         null,
@@ -563,6 +622,8 @@ test "decode walks a multi-block chain" {
             &target,
             decoded_len,
             512 * 1024,
+            @intCast(decoded_len),
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -593,6 +654,8 @@ test "Raw and RLE blocks leave the frame's cross-block state alone" {
             &target,
             decoded_len,
             512 * 1024,
+            @intCast(decoded_len),
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -601,7 +664,7 @@ test "Raw and RLE blocks leave the frame's cross-block state alone" {
         decoded_len += section.bytes_written;
         if (section.last_block) break;
     }
-    try testing.expect(!literals_state.has_table);
+    try testing.expect(literals_state.table == null);
     try testing.expect(sequences_state.tables[0] == null);
     try testing.expect(sequences_state.tables[1] == null);
     try testing.expect(sequences_state.tables[2] == null);
@@ -640,7 +703,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ [_]u8{0} ** 8;
     try testing.expectError(
         error.BlockOversize,
-        decode(&oversize, &target, 0, 1024, &literals_state, &sequences_state, null),
+        decode(&oversize, &target, 0, 1024, 0, &.{}, &literals_state, &sequences_state, null),
     );
     try internal.sentinel.expect(&target, 0);
     // The legal neighbor: an RLE block at exactly 128 KB in a 512 KB-window
@@ -685,6 +748,8 @@ test "decode fails on a target too small" {
             target[0..7],
             0,
             512 * 1024,
+            0,
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -698,6 +763,8 @@ test "decode fails on a target too small" {
             &target,
             0,
             512 * 1024,
+            0,
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -711,6 +778,8 @@ test "decode fails on a target too small" {
             target[0..2],
             0,
             512 * 1024,
+            0,
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -725,6 +794,8 @@ test "decode fails on a target too small" {
         &fits,
         0,
         512 * 1024,
+        0,
+        &.{},
         &literals_state,
         &sequences_state,
         null,
@@ -852,6 +923,8 @@ test "the history a match may read is the addressable span at the match" {
             &bare,
             0,
             1024,
+            0,
+            &.{},
             &literals_state,
             &sequences_state,
             null,
@@ -922,6 +995,8 @@ test "decodeContent decodes a block whose header is already parsed" {
         &target,
         0,
         512 * 1024,
+        0,
+        &.{},
         &literals_state,
         &sequences_state,
         null,

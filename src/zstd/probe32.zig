@@ -69,7 +69,7 @@ fn drain(r: *Reader, served: *u64) !void {
 fn check(comptime what: []const u8, checksum: bool) !void {
     const bytes = buildFrame(checksum);
     var fixed_in: Io.Reader = .fixed(bytes);
-    var r: Reader = .init(128 * 1024, &fixed_in, &window);
+    var r: Reader = .init(128 * 1024, &fixed_in, &window, null);
     var served: u64 = 0;
     try drain(&r, &served);
     const expected: u64 = @as(u64, block_count) * block_size;

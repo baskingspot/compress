@@ -8,12 +8,17 @@
 //!   zstd-oracle encode-oneshot <input-file> > frame
 //!   zstd-oracle encode-stream <input-file> > frame
 //!   zstd-oracle decode <frame-file> <cap-bytes> > out
+//!   zstd-oracle decode-dict <frame-file> <cap-bytes> <dict-file> > out
+//!   zstd-oracle decode-raw <frame-file> <cap-bytes> <content-file> > out
 //!
 //! `encode-oneshot` writes `zstd.encode.compress`'s frame (the exact
 //! Frame_Content_Size header); `encode-stream` writes
 //! `zstd.Writer.streamAll`'s frame (the FCS-unknown header the CLI writes
 //! over a pipe). `decode` writes the decoded bytes of one frame, capped at
-//! `cap-bytes`. Exit 1 on a codec error, with the error name on stderr.
+//! `cap-bytes`; `decode-dict` is the same with a formatted dictionary (`§5`)
+//! parsed from the third file, `decode-raw` with format-free content handed
+//! to `Dictionary.initRaw`. Exit 1 on a codec error, with the error name on
+//! stderr.
 
 const std = @import("std");
 const Io = std.Io;
@@ -84,18 +89,54 @@ pub fn main(init: std.process.Init) !u8 {
         return 0;
     }
 
-    if (std.mem.eql(u8, args[1], "decode")) {
-        if (args.len != 4) {
-            print("zstd-oracle: decode needs <frame-file> <cap-bytes>\n", .{});
+    if (std.mem.eql(u8, args[1], "decode") or
+        std.mem.eql(u8, args[1], "decode-dict") or
+        std.mem.eql(u8, args[1], "decode-raw"))
+    {
+        const with_dict = !std.mem.eql(u8, args[1], "decode");
+        const wanted: usize = if (with_dict) 5 else 4;
+        if (args.len != wanted) {
+            const suffix: []const u8 = if (with_dict) " <dict-file>" else "";
+            print("zstd-oracle: {s} needs <frame-file> <cap-bytes>{s}\n", .{
+                args[1],
+                suffix,
+            });
             return 1;
         }
         const cap = std.fmt.parseInt(usize, args[3], 10) catch {
             print("zstd-oracle: cap must be a byte count, got '{s}'\n", .{args[3]});
             return 1;
         };
+        // The dictionary's bytes are read whole into the arena and parsed
+        // once; the parse error vocabulary is the codec's own. `decode-raw`
+        // takes format-free content instead (`initRaw`), which never fails.
+        var dict: ?zstd.Dictionary = null;
+        if (with_dict) {
+            const dict_file = try Io.Dir.cwd().openFile(io, args[4], .{
+                .allow_directory = false,
+                .follow_symlinks = true,
+            });
+            var dict_buffer: [64 * 1024]u8 = undefined;
+            var dict_reader: Io.File.Reader = .init(dict_file, io, &dict_buffer);
+            const dict_source = try dict_reader.interface.allocRemaining(
+                arena,
+                .limited(max_input_len),
+            );
+            dict = if (std.mem.eql(u8, args[1], "decode-raw"))
+                zstd.Dictionary.initRaw(dict_source)
+            else
+                zstd.Dictionary.parse(dict_source) catch |err| {
+                    print("zstd-oracle: dictionary parse: {s}\n", .{@errorName(err)});
+                    return 1;
+                };
+        }
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_frame_len));
         const target = try arena.alloc(u8, cap);
-        const decoded_len = zstd.decode.decompress(source, target) catch |err| {
+        const decoded_len = zstd.decode.decompress(
+            source,
+            target,
+            if (dict) |*d| d else null,
+        ) catch |err| {
             print("zstd-oracle: {s}\n", .{@errorName(err)});
             return 1;
         };

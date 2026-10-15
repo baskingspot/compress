@@ -287,7 +287,7 @@ fn writeZstdBlob(
         else => return error.ZstdCliFailed,
     }
     const back = try arena.alloc(u8, raw.len);
-    const n = zcompress.zstd.decode.decompress(result.stdout, back) catch |err| {
+    const n = zcompress.zstd.decode.decompress(result.stdout, back, null) catch |err| {
         std.debug.print("corpus: our zstd decoder rejected the CLI frame for {s}: {s}\n", .{
             base_name, @errorName(err),
         });

@@ -17,6 +17,7 @@
 //!   decode, and the encoder's block emission ladder.
 //! - `frame.zig` and `xxh64.zig`: the frame header, the block chain, skippable
 //!   frames, and the checksum.
+//! - `Dictionary.zig`: the parse-once dictionary (§5) both directions take.
 //! - `encode.zig`, `decode.zig`, `Reader.zig`, and `Writer.zig`: the
 //!   one-shots and the streaming decoder and encoder.
 //!
@@ -59,6 +60,11 @@ pub const Reader = @import("Reader.zig");
 /// `streamAllAlloc` pumps.
 pub const Writer = @import("Writer.zig");
 
+/// A parsed dictionary (RFC 8878 §5): `parse` reads the formatted form,
+/// `initRaw` takes format-free content. The value is handed to either
+/// direction (the decode side today) and borrows the caller's bytes.
+pub const Dictionary = @import("Dictionary.zig");
+
 test {
     _ = bits;
     _ = block;
@@ -79,6 +85,7 @@ test {
     _ = decode;
     _ = Reader;
     _ = Writer;
+    _ = Dictionary;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
     std.testing.refAllDecls(@This());

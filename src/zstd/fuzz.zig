@@ -914,7 +914,7 @@ fn expectReaderIdentity(unit: Unit, framed: []const u8, expected: []const u8) !v
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(framed);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     try pump(&r.reader, &fw, pumpLimit(expected.len));
     try testing.expectEqual(expected.len, fw.end);
     try testing.expectEqualSlices(u8, expected, got[0..fw.end]);
@@ -935,13 +935,13 @@ fn expectWalk(row: WalkRow) !void {
     var fixed_in: Io.Reader = .fixed(row.source);
     switch (row.kind) {
         .all => {
-            const served = try Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf);
+            const served = try Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf, null);
             try testing.expectEqual(expected.len, served);
             try testing.expectEqualSlices(u8, expected, fw.buffered());
             try testing.expectEqual(row.source.len, fixed_in.seek);
         },
         .zero => {
-            const served = try Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf);
+            const served = try Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf, null);
             try testing.expectEqual(@as(usize, 0), served);
             try testing.expectEqual(@as(usize, 0), fw.end);
             try testing.expectEqual(row.source.len, fixed_in.seek);
@@ -949,7 +949,7 @@ fn expectWalk(row: WalkRow) !void {
         .first_then_fail => {
             try testing.expectError(
                 error.ReadFailed,
-                Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf),
+                Reader.streamAll(fixture_window_len, &fixed_in, &fw, &rbuf, null),
             );
             try testing.expectEqualSlices(u8, expected, fw.buffered());
         },
@@ -1001,14 +1001,14 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
 
     // The exact cap: identity, and the sentinel proves nothing past it moved.
     sentinel.fill(&window);
-    const n = try decode.decompress(row.source, window[0..expected.len]);
+    const n = try decode.decompress(row.source, window[0..expected.len], null);
     try testing.expectEqual(expected.len, n);
     try testing.expectEqualSlices(u8, expected, window[0..n]);
     try sentinel.expect(&window, n);
 
     // Slack: the bytes past the decoded length are the caller's.
     sentinel.fill(&window);
-    const m = try decode.decompress(row.source, &window);
+    const m = try decode.decompress(row.source, &window, null);
     try testing.expectEqual(n, m);
     try testing.expectEqualSlices(u8, expected, window[0..m]);
     try sentinel.expect(&window, m);
@@ -1024,14 +1024,14 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
         sentinel.fill(&window);
         try testing.expectError(
             error.BufferTooSmall,
-            decode.decompress(row.source, window[0..cap]),
+            decode.decompress(row.source, window[0..cap], null),
         );
         try sentinel.expect(&window, cap);
     }
 
     // Determinism: a second decode of the same bytes is the same bytes.
     sentinel.fill(&window);
-    const again = try decode.decompress(row.source, window[0..expected.len]);
+    const again = try decode.decompress(row.source, window[0..expected.len], null);
     try testing.expectEqual(n, again);
     try testing.expectEqualSlices(u8, expected, window[0..again]);
 
@@ -1047,6 +1047,7 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
         const f = try decode.decompress(
             framed[0 .. row.source.len + marker_len],
             window[0..expected.len],
+            null,
         );
         try testing.expectEqual(expected.len, f);
         try testing.expectEqualSlices(u8, expected, window[0..f]);
@@ -1055,7 +1056,11 @@ fn fuzzGoldenCorpus(_: void, smith: *Smith) anyerror!void {
         sentinel.fill(&window);
         try testing.expectError(
             error.BadMagic,
-            decode.decompress(framed[0 .. row.source.len + marker_len], window[0..expected.len]),
+            decode.decompress(
+                framed[0 .. row.source.len + marker_len],
+                window[0..expected.len],
+                null,
+            ),
         );
         try sentinel.expect(&window, expected.len);
     }
@@ -1279,8 +1284,19 @@ fn mutate(smith: *Smith, buf: []u8, row: Row) Mutated {
             expected = .fail_reserved_bit;
         },
         .set_dictionary_flag => {
+            // §3.1.1.1.3 — the DID field is read whole and a value of 0
+            // means "no Dictionary_ID", so the flag alone is not enough for
+            // the no-dictionary refusal: the field's first byte (low byte,
+            // little-endian) is forced nonzero. The header is corrupt either
+            // way, and the check fires before any body byte.
+            const descriptor_at = info.start + frame.magic_len;
             const bit: u8 = @as(u8, 1) << @intCast(rangeAtMost(smith, 0, 1));
-            buf[info.start + frame.magic_len] |= bit;
+            buf[descriptor_at] |= bit;
+            const window_len: usize = if (buf[descriptor_at] & frame.descriptor_single_segment == 0)
+                1
+            else
+                0;
+            buf[descriptor_at + 1 + window_len] |= 0x2a;
             expected = .fail_dictionary;
         },
         .flip_unused_bit => {
@@ -1372,7 +1388,7 @@ fn checkOneShot(mutated: []const u8, expected_output: []const u8, meta: Mutated,
     var window: [out_max + guard_len]u8 = undefined;
     sentinel.fill(&window);
     const target = window[0..cap];
-    const result = decode.decompress(mutated, target);
+    const result = decode.decompress(mutated, target, null);
     switch (meta.expected) {
         .exact_source => {
             const n = try result;
@@ -1461,7 +1477,7 @@ fn checkReader(
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(mutated);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(out_max));
     const served = pumped.served;
 
@@ -1577,7 +1593,7 @@ fn fuzzBadRows(smith: *Smith) !void {
     const row = bad_rows[smith.index(bad_rows.len)];
     var window: [out_max + guard_len]u8 = undefined;
     sentinel.fill(&window);
-    try testing.expectError(row.err, decode.decompress(row.source, window[0..out_max]));
+    try testing.expectError(row.err, decode.decompress(row.source, window[0..out_max], null));
     try sentinel.expect(&window, row.written);
 
     // The streaming reader reports the same detail, stickily, before it can
@@ -1586,7 +1602,7 @@ fn fuzzBadRows(smith: *Smith) !void {
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(row.source);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(out_max));
     try testing.expectEqual(Stop.read_failed, pumped.stop);
     try testing.expect(sameErrorName(row.err, r.err.?));
@@ -1651,13 +1667,13 @@ fn checkMutation(smith: *Smith, mutated: []const u8, expected: []const u8, meta:
     // (a second decode of the same bytes is the same bytes).
     var full_window: [out_max + guard_len]u8 = undefined;
     sentinel.fill(&full_window);
-    const full = decode.decompress(mutated, full_window[0..out_max]);
+    const full = decode.decompress(mutated, full_window[0..out_max], null);
     const full_len = full catch out_max;
     try sentinel.expect(&full_window, full_len);
     {
         var window: [out_max + guard_len]u8 = undefined;
         sentinel.fill(&window);
-        const capped = decode.decompress(mutated, window[0..cap]);
+        const capped = decode.decompress(mutated, window[0..cap], null);
         if (capped) |n| {
             if (full) |m| {
                 try testing.expectEqual(n, m);
@@ -1861,7 +1877,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     } else &fixed_in;
 
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-    var r: Reader = .init(fixture_window_len, input_reader, &rbuf);
+    var r: Reader = .init(fixture_window_len, input_reader, &rbuf, null);
 
     var pos: usize = 0;
     var ops: usize = 0;
@@ -2194,7 +2210,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
         try testing.expect(!info.header.checksum);
         var window: [out_max + guard_len]u8 = undefined;
         sentinel.fill(&window);
-        const n = try decode.decompress(row.source, window[0..expected.len]);
+        const n = try decode.decompress(row.source, window[0..expected.len], null);
         try testing.expectEqual(expected.len, n);
         try testing.expectEqualSlices(u8, expected, window[0..n]);
         try sentinel.expect(&window, n);
@@ -2210,7 +2226,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     // The one-shot: identity, the trailer consistent, the sentinel clean.
     var window: [out_max + guard_len]u8 = undefined;
     sentinel.fill(&window);
-    const n = try decode.decompress(row.source, window[0..expected.len]);
+    const n = try decode.decompress(row.source, window[0..expected.len], null);
     try testing.expectEqual(expected.len, n);
     try testing.expectEqualSlices(u8, expected, window[0..n]);
     try sentinel.expect(&window, n);
@@ -2229,7 +2245,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     sentinel.fill(&bad_window);
     try testing.expectError(
         error.WrongChecksum,
-        decode.decompress(bad, bad_window[0..expected.len]),
+        decode.decompress(bad, bad_window[0..expected.len], null),
     );
     try sentinel.expect(&bad_window, expected.len);
 
@@ -2237,7 +2253,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(bad);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(expected.len));
     try testing.expectEqual(Stop.read_failed, pumped.stop);
     try testing.expectEqual(Reader.Error.WrongChecksum, r.err.?);
@@ -2420,11 +2436,11 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
             if (cap < expected.len) {
                 try testing.expectError(
                     error.BufferTooSmall,
-                    decode.decompress(row.source, window[0..cap]),
+                    decode.decompress(row.source, window[0..cap], null),
                 );
                 try sentinel.expect(&window, cap);
             } else {
-                const n = try decode.decompress(row.source, window[0..cap]);
+                const n = try decode.decompress(row.source, window[0..cap], null);
                 try testing.expectEqual(expected.len, n);
                 try testing.expectEqualSlices(u8, expected, window[0..n]);
                 try sentinel.expect(&window, n);
@@ -2442,11 +2458,11 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
             // cap: the cap is the refusal, before any write.
             try testing.expectError(
                 error.BufferTooSmall,
-                decode.decompress(row.source, window[0..cap]),
+                decode.decompress(row.source, window[0..cap], null),
             );
             try sentinel.expect(&window, cap);
         } else {
-            try testing.expectError(fail.err, decode.decompress(row.source, window[0..cap]));
+            try testing.expectError(fail.err, decode.decompress(row.source, window[0..cap], null));
             try sentinel.expect(&window, @min(cap, fail.written));
         }
     }
@@ -2723,12 +2739,12 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
 
     var plain: [encode_out_max]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(compressed[0..written], plain[0..source.len]);
+    const n = try decode.decompress(compressed[0..written], plain[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain[0..n]);
     try sentinel.expect(&plain, n);
     sentinel.fill(&plain);
-    const m = try decode.decompress(compressed[0..written], &plain);
+    const m = try decode.decompress(compressed[0..written], &plain, null);
     try testing.expectEqual(n, m);
     try testing.expectEqualSlices(u8, source, plain[0..m]);
     try sentinel.expect(&plain, m);
@@ -2746,7 +2762,7 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
         try testing.expect(short <= cap);
         try sentinel.expect(&compressed, cap);
         sentinel.fill(&plain);
-        const d = try decode.decompress(compressed[0..short], plain[0..source.len]);
+        const d = try decode.decompress(compressed[0..short], plain[0..source.len], null);
         try testing.expectEqual(source.len, d);
         try testing.expectEqualSlices(u8, source, plain[0..d]);
         try sentinel.expect(&plain, d);
@@ -2773,7 +2789,7 @@ fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !
         try expectTrailerConsistent(empty[0..efw.end], efw.end, "", true);
         var nothing: [guard_len]u8 = undefined;
         sentinel.fill(&nothing);
-        const zero = try decode.decompress(empty[0..efw.end], &nothing);
+        const zero = try decode.decompress(empty[0..efw.end], &nothing, null);
         try testing.expectEqual(@as(usize, 0), zero);
         try sentinel.expect(&nothing, 0);
     }
@@ -2820,7 +2836,7 @@ fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !
 
     var plain: [encode_out_max]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(out[0..written], plain[0..source.len]);
+    const n = try decode.decompress(out[0..written], plain[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -2968,7 +2984,7 @@ fn oneShotByteClass(source: []const u8, out: []u8) !usize {
     fastmem.set(u8, framed[written..][0..marker_len], marker_byte);
     var plain: [class_max + guard_len]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(framed[0 .. written + marker_len], plain[0..source.len]);
+    const n = try decode.decompress(framed[0 .. written + marker_len], plain[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -2997,7 +3013,7 @@ fn writerByteClass(source: []const u8, out: []u8) !usize {
 
     var plain: [class_max + guard_len]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(out[0..written], plain[0..source.len]);
+    const n = try decode.decompress(out[0..written], plain[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -3195,8 +3211,19 @@ fn mutateEncodeFrame(
             expected = .fail_reserved_bit;
         },
         .set_dictionary_flag => {
+            // §3.1.1.1.3 — the DID field is read whole and a value of 0
+            // means "no Dictionary_ID", so the flag alone is not enough for
+            // the no-dictionary refusal: the field's first byte (low byte,
+            // little-endian) is forced nonzero. The header is corrupt either
+            // way, and the check fires before any body byte.
+            const descriptor_at = info.start + frame.magic_len;
             const bit: u8 = @as(u8, 1) << @intCast(rangeAtMost(smith, 0, 1));
-            buf[info.start + frame.magic_len] |= bit;
+            buf[descriptor_at] |= bit;
+            const window_len: usize = if (buf[descriptor_at] & frame.descriptor_single_segment == 0)
+                1
+            else
+                0;
+            buf[descriptor_at + 1 + window_len] |= 0x2a;
             expected = .fail_dictionary;
         },
         .flip_unused_bit => {
@@ -3475,7 +3502,7 @@ fn machineryCase(comptime window_log: usize, smith: *Smith) !void {
     // Identity through the one-shot, with the sentinel.
     var plain: [machinery_max + guard_len]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(out[0..frame_len], plain[0..model_len]);
+    const n = try decode.decompress(out[0..frame_len], plain[0..model_len], null);
     try testing.expectEqual(model_len, n);
     try testing.expectEqualSlices(u8, model[0..model_len], plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -3504,7 +3531,7 @@ fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(framed[0 .. frame_bytes.len + marker_len]);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     try pump(&r.reader, &fw, pumpLimit(expected.len));
     try testing.expectEqual(expected.len, fw.end);
     try testing.expectEqualSlices(u8, expected, got[0..fw.end]);
@@ -3579,7 +3606,7 @@ fn writerPoison(smith: *Smith) !void {
             try testing.expectEqual(complete, fw.end);
             var nothing: [guard_len]u8 = undefined;
             sentinel.fill(&nothing);
-            const n = try decode.decompress(out[0..complete], &nothing);
+            const n = try decode.decompress(out[0..complete], &nothing, null);
             try testing.expectEqual(@as(usize, 0), n);
             try sentinel.expect(&nothing, 0);
         },
@@ -3793,7 +3820,7 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
         try testing.expect(short <= cap);
         try sentinel.expect(&target, cap);
         sentinel.fill(&plain);
-        const n = try decode.decompress(target[0..short], plain[0..size]);
+        const n = try decode.decompress(target[0..short], plain[0..size], null);
         try testing.expectEqual(size, n);
         try testing.expectEqualSlices(u8, source[0..size], plain[0..n]);
         try sentinel.expect(&plain, n);
@@ -3842,12 +3869,12 @@ test "zstd fuzz: the corpus decodes to its models" {
         const expected = materialize(row.output, &expected_buf);
         var window: [out_max + guard_len]u8 = undefined;
         sentinel.fill(&window);
-        const n = try decode.decompress(row.source, window[0..expected.len]);
+        const n = try decode.decompress(row.source, window[0..expected.len], null);
         try testing.expectEqual(expected.len, n);
         try testing.expectEqualSlices(u8, expected, window[0..n]);
         try sentinel.expect(&window, n);
         sentinel.fill(&window);
-        const m = try decode.decompress(row.source, &window);
+        const m = try decode.decompress(row.source, &window, null);
         try testing.expectEqual(n, m);
         try testing.expectEqualSlices(u8, expected, window[0..m]);
         try sentinel.expect(&window, m);
@@ -3862,7 +3889,7 @@ test "zstd fuzz: the bad-frame corpus pins its errors and floors" {
     for (bad_rows) |row| {
         var window: [out_max + guard_len]u8 = undefined;
         sentinel.fill(&window);
-        try testing.expectError(row.err, decode.decompress(row.source, window[0..out_max]));
+        try testing.expectError(row.err, decode.decompress(row.source, window[0..out_max], null));
         try sentinel.expect(&window, row.written);
     }
 }
@@ -3878,7 +3905,7 @@ test "zstd fuzz: the reader's 4-byte input precondition" {
     var got: [out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-    var r: Reader = .init(fixture_window_len, &limited.interface, &rbuf);
+    var r: Reader = .init(fixture_window_len, &limited.interface, &rbuf, null);
     try pump(&r.reader, &fw, pumpLimit(4));
     try testing.expectEqualSlices(u8, "abcd", got[0..fw.end]);
     try testing.expectEqual(@as(?Reader.Error, null), r.err);
@@ -3896,7 +3923,7 @@ test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
     {
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum);
         var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
         const first = try r.reader.take(1);
         try testing.expectEqual(@as(u8, 'a'), first[0]);
         try testing.expectError(error.EndOfStream, r.reader.peek(buffer_len));
@@ -3909,7 +3936,7 @@ test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
         // refuse, not pass the end through.
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum_corrupt);
         var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
         _ = try r.reader.take(1);
         try testing.expectError(error.ReadFailed, r.reader.peek(buffer_len));
         try testing.expectEqual(Reader.Error.WrongChecksum, r.err.?);
@@ -3921,7 +3948,7 @@ test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
         // after the trailer was verified (the frame is checksummed).
         var fixed_in: Io.Reader = .fixed(&golden.frame_checksum);
         var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+        var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
         try testing.expectError(error.EndOfStream, r.reader.peek(windowTailLen() + 1));
         try testing.expectEqual(@as(?Reader.Error, null), r.err);
         try testing.expectEqual(internal.reader.State.done, r.state);
@@ -3989,12 +4016,12 @@ test "zstd fuzz: an oversized RLE block fails the same way on both paths" {
     const source = [_]u8{ 0x28, 0xb5, 0x2f, 0xfd, 0x00, 0x48, 0xfb, 0xff, 0xff };
     var target: [1024]u8 = undefined;
     sentinel.fill(&target);
-    try testing.expectError(error.BlockOversize, decode.decompress(&source, &target));
+    try testing.expectError(error.BlockOversize, decode.decompress(&source, &target, null));
     try sentinel.expect(&target, 0);
 
     var rbuf: Reader.Buffer(fixture_window_len) = undefined;
     var fixed_in: Io.Reader = .fixed(&source);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf);
+    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
     var got: [1024]u8 = undefined;
     var fw: Io.Writer = .fixed(&got);
     const pumped = try pumpCapped(&r.reader, &fw, 64);

@@ -413,6 +413,18 @@ fail the build until both lists and the README's are updated);
 `Dictionary.parse`'s own error vocabulary is **[sketch call 4]**, and
 `maxCompressedLength` gains 4 bytes for the DID field **[sketch call 8]**.
 
+**Landed so far (the decode slice).** `Dictionary.zig` carries the decode
+side's parsed state — the literals `Tree` and `DecodeTable`, the three fused
+`sequences.SeqTable`s (the form the decode loop reads, as the C's DDict
+stores `ZSTD_seqSymbol` tables), the repcodes, and the content slice — and
+`@sizeOf(Dictionary)` is pinned at 16,704 bytes by a test (the README's
+figure). The encode side's tables (three `fse_compress.Table`s and the
+`huff0_compress.Table`, ~13 KiB more) land with the encode slice, whose
+`ZSTD_loadCEntropy` promotion rules build them. The frame state seeds by
+pointer for the sequences tables and by value for the literals table (a
+4 KiB copy per frame with a dictionary); nothing is re-parsed per frame or
+block (DD12).
+
 **The decode load (§2.1; DD1-DD12).** The parse reuses the landed readers in
 the C's order: `huff0.readTree` for the literals tree, `fse.readDescription`
 ×3 with the caps (31/8, 52/9, 35/9), then the 12 repcode bytes checked
@@ -465,11 +477,26 @@ beside each. Decode: our decode of CLI `-D` frames against `zstd -D dict -d`
 and klauspost's `WithDecoderDicts`, byte-exact both directions; the mismatch
 matrix (no dict, wrong dict, raw dict) against the C's
 `tests/cli-tests/dictionaries/dictionary-mismatch.sh` pins; the
-incomplete-statistics fixtures (`zero-weight-dict`,
-`http-dict-missing-symbols`) accepted; the DT1 expiry fixtures (the T12
-methodology). Encode: `zstd -D dict -1` byte-parity on the corpus shapes,
+incomplete-statistics fixture (`zero-weight-dict`) accepted and the C's
+`http-dict-missing-symbols` pinned as a *rejection* (DT9 below); the DT1
+expiry fixtures (the T12 methodology). Encode: `zstd -D dict -1` byte-parity on the corpus shapes,
 with `zstd -t` and our own decoder verifying every frame. The zlib rows are
 `src/zlib/AGENTS.md`'s.
+
+**DT9 — the C's 12-bit Huffman leniency (found landing the decode slice).**
+The C's `HUF_readStats` accepts a literals tree up to its internal
+`HUF_TABLELOG_MAX` 12, and its own
+`tests/golden-dictionaries/http-dict-missing-symbols` fixture carries exactly
+that: its weight series completes to a 12-bit code, which the C reads as
+`tableLog = 12` (verified against the C source with a standalone
+`HUF_readStats_wksp` call, and klauspost rejects the same fixture with
+"tableLog too big"). RFC 8878 §4.2.1 "limits the maximum code length to 11
+bits", and the shared `huff0.readTree` is RFC-strict, so `Dictionary.parse`
+refuses the fixture with `MalformedHuffmanWeights` — the register's earlier
+"both fixtures accepted" line is amended by this row. Accepting the C's
+12-bit trees would need a `1 << 12`-entry `DecodeTable` and a laxer cap in
+the shared reader (the C accepts 12-bit trees in blocks too): a deliberate
+follow-up if interop demands it, never a silent widening.
 
 **The fuzz shapes (`dict-notes §8`).** The C's own targets are the model
 (`tests/fuzz/dictionary_{decompress,loader,round_trip,stream_round_trip}.c`,
