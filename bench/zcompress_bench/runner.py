@@ -9,6 +9,7 @@ round medians with exact rank intervals.
 """
 
 import secrets
+import shutil
 from pathlib import Path
 
 import click
@@ -47,6 +48,16 @@ ARM_TOOLS = {
 @click.option(
     "--no-aa", is_flag=True, help="Disable the baseline duplicate and significance marks."
 )
+@click.option(
+    "--keep-raw",
+    is_flag=True,
+    help=(
+        "Keep the per-target raw rows after the analysis. The default deletes them"
+        " once summary.json and report.md are written — the analytical record is"
+        " summary.json, report.md, and manifest.json; the rows are the raw bulk."
+        " A failed target always keeps its rows (the investigation reads them)."
+    ),
+)
 @click.option("--up", "launch", is_flag=True, help="Launch missing targets first.")
 @click.option("--ttl", default=None, help="Lifetime for --up launches.")
 @click.option("--label", default="run", show_default=True)
@@ -68,6 +79,7 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
     suite: str,
     rounds: int,
     no_aa: bool,
+    keep_raw: bool,
     launch: bool,
     ttl: str | None,
     label: str,
@@ -215,6 +227,14 @@ def run(  # noqa: C901, PLR0915 — orchestration keeps the experiment lifecycle
         name: "failed" if outcome.error else "complete" for name, outcome in results.items()
     }
     write_manifest(path, manifest)
+    if not keep_raw and not any(outcome.error for outcome in results.values()):
+        progress("cleanup")
+        for name in names:
+            shutil.rmtree(path / name / "raw", ignore_errors=True)
+        click.echo(
+            "raw rows deleted (the record: summary.json, report.md, manifest.json);"
+            " re-analysis needs a rerun or --keep-raw"
+        )
     click.echo(str(path))
     if any(outcome.error for outcome in results.values()):
         raise click.ClickException(

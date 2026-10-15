@@ -9,6 +9,7 @@ drivers fail should not be measured.
 
 import json
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -180,6 +181,13 @@ def test_fleet(config: Config, targets: tuple[str, ...], launch: bool, ttl: str 
         manifest.setdefault("status", {})[name] = "failed" if "FAIL" in statuses else "complete"
     Console().print(table)
     write_manifest(path, manifest)
+    if not failed:
+        # A passing gate's raw data is junk: the verdict is the exit code and
+        # the printed table. A failing gate keeps everything (the message
+        # below reads summary.json and the per-arm raw files).
+        shutil.rmtree(path, ignore_errors=True)
+        click.echo("correctness passed; run directory deleted")
+        return
     click.echo(str(path))
     if failed:
         raise click.ClickException("Correctness failed. Read summary.json and per-arm raw files.")
