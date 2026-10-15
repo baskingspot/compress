@@ -3780,12 +3780,13 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
             cursor += block.block_header_len + block.contentLength(bh);
             if (bh.last_block) break;
         }
-        // The frame-header write gates on a 14-byte target
-        // (`encode.zig`'s `frame_header_len_max`) whatever the frame's own
-        // header form is, so a target under it fails even when the frame's
-        // bytes would fit. At or above it the exact raw need succeeds; one
-        // byte under fails with the cap held.
-        const header_gate = frame.magic_len + 1 + 1 + 8;
+        // The frame-header write gates on the 18-byte cap
+        // (`encode.zig`'s `frame_header_len_max`, the dictionary frame's
+        // worst header) whatever the frame's own header form is, so a target
+        // under it fails even when the frame's bytes would fit. At or above
+        // it the exact raw need succeeds; one byte under fails with the cap
+        // held.
+        const header_gate = encode.frame_header_len_max;
         const exact_cap = @max(raw_need, header_gate);
         sentinel.fill(&target);
         if (raw_need >= header_gate) {
@@ -4043,7 +4044,10 @@ test "zstd fuzz: the raw fallback fits maxCompressedLength on every class" {
     // bound. The form needs a size at or above 2^32 - 1, which only a 64-bit
     // `usize` can hold (and only it can encode such a source anyway).
     if (@bitSizeOf(usize) >= 64) {
+        // The dictionary's 4-byte Dictionary_ID field is the bound's only
+        // slack on a no-dictionary frame: the exact-tight no-dictionary case
+        // sits 4 bytes under the bound.
         const tight = 0xffff_ffff;
-        try testing.expectEqual(encode.maxCompressedLength(tight), rawWorstCase(tight));
+        try testing.expectEqual(encode.maxCompressedLength(tight), rawWorstCase(tight) + 4);
     }
 }

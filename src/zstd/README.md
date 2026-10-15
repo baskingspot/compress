@@ -30,8 +30,8 @@ fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
 ```
 
 A dictionary (§5) is parsed once and handed to either direction. The
-`Dictionary` borrows the file bytes — keep them alive — and is about 16 KiB of
-tables:
+`Dictionary` borrows the file bytes — keep them alive — and is about 158 KiB,
+mostly the match table the encoder looks up:
 
 ```zig
 // dict_file: the bytes of a `zstd --train` output, or any formatted
@@ -48,7 +48,7 @@ fn withDictionary(gpa: std.mem.Allocator, dict_file: []const u8, data: []const u
 }
 ```
 
-Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 1.4 MiB and
+Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 1.5 MiB and
 `Reader.Buffer(1 MiB)` 1.25 MiB: keep them in static or heap storage.
 
 ```zig
@@ -83,10 +83,14 @@ const zstd = @import("zcompress").zstd;
 
 // A dictionary (§5): parse once and hand it to either direction. `parse`
 // reads the formatted form (magic 0xEC30A437, the ID, the entropy tables,
-// the 12 repcode bytes, then the content); `initRaw` takes format-free
-// content. The value borrows `source` — no copy, no allocation — and is
-// about 16 KiB of tables (the parsed tree, the four built tables, the
-// repcodes, and the content slice).
+// the 12 repcode bytes, then the content) and builds both directions'
+// tables from that one parse, with `ZSTD_loadCEntropy`'s promotion rules
+// deciding what a frame may reuse; `initRaw` takes format-free content. The
+// value borrows `source` — no copy, no allocation — and is about 158 KiB:
+// the parsed tree, the decode and encode tables (the four built tables
+// twice over), the repcodes, the content slice, and the match table the
+// encoder looks up (the C keeps that one in a `ZSTD_CDict`; here it is the
+// dictionary's, so no frame pays to rebuild it).
 zstd.Dictionary
 zstd.Dictionary.parse(source: []const u8) ParseError!Dictionary
 zstd.Dictionary.initRaw(content: []const u8) Dictionary
@@ -107,7 +111,7 @@ zstd.encode.compress(source: []const u8, target: []u8, options: Options)
 zstd.encode.compressBuffered(source: []const u8, target: []u8, buffer: *Buffer,
     options: Options) error{ BufferTooSmall, Unimplemented }!usize
 zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + hash table 128 KiB; 768 KiB
-zstd.encode.maxCompressedLength(input_len: usize) usize // header cap + 3/block + input_len + 4
+zstd.encode.maxCompressedLength(input_len: usize) usize // 18-byte header cap + 3/block + input_len + 4
 zstd.encode.Options = struct { level: Level = .fast, dict: ?*const Dictionary = null }
 zstd.encode.Level = enum { fast, ratio } // fast: level-1 class (the default); ratio: reserved
 
@@ -136,7 +140,9 @@ zstd.decode.DecompressError = error{
 zstd.Writer.Buffer(comptime window_log: usize) type
     // history (1 << window_log) + block min(128 KiB, 1 << window_log)
     // + literals (the block) + the block's output (the block + 3)
-    // + hash table 4 << min(14, window_log + 1) bytes
+    // + hash table 128 KiB (1 << 15 entries, the widest hashLog a frame
+    //   takes when it attaches a dictionary; the frame's own slice is
+    //   narrower when no dictionary is in play)
     // + sequences 12 * (block / 3 + 1); window_log must be 10 to 31
 zstd.Writer.default_window_log: usize // 19: a 512 KiB window, the largest level 1 declares
 zstd.Writer.DefaultBuffer // Buffer(default_window_log): 1.44 MiB
@@ -200,7 +206,10 @@ state — so `encode` exposes only the names above.
   dictionary never expires mid-frame. Without a dictionary no ID is named.
   The window is the smallest power of two covering the input, from 1 KiB to
   512 KiB; when the input fits it the frame is single-segment, and above
-  512 KiB it declares a 512 KiB window. A `Writer` cannot know the length when
+  512 KiB it declares a 512 KiB window. A frame that attaches a dictionary
+  at or below the 8-KiB source cutoff takes the dictionary's own hash width
+  and match width (the C's `ZSTD_resetCCtx_byAttachingCDict`); a larger one
+  copies the dictionary's match table into the frame's own. A `Writer` cannot know the length when
   its header goes out, so its frames declare no Frame_Content_Size and always
   carry a `window_log`-sized Window_Descriptor.
 - **Emission.** The ladder follows `zstd -1`: a block that does not shrink by
@@ -210,7 +219,13 @@ state — so `encode` exposes only the names above.
   level-1 heuristics. Every frame is valid zstd that the CLI, libzstd, and this
   package's decoder accept, and the whole frame reproduces the pinned CLI
   v1.5.7's `zstd -1` bytes on the corpus shapes, on the tests' fixtures, and
-  on the `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. Three
+  on the `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. With a
+  dictionary the target is the CLI's `zstd -D dict -1`: the same
+  form-matched parity, one-shot against the file form and `Writer` against
+  the pipe form, over CLI-trained dictionaries — including the
+  attach/copy switch at the 8-KiB source cutoff and the frames for
+  incomplete-statistics dictionaries, whose unpromoted tables degrade
+  exactly as the C's do. Three
   deliberate differences can show up outside that set, all of them the C's
   own heuristics: a Huffman tree's equal-count symbols keep natural order
   here, where the C's sort is unstable (a tree description's bytes can differ
@@ -241,7 +256,7 @@ state — so `encode` exposes only the names above.
   write that would pass the end; a declared Frame_Content_Size is checked
   against the output, never used to size anything. `encode.compressBuffered`
   and `Writer` put the encoder's heavy per-block arrays in the `Buffer` you
-  provide (`encode.Buffer`, 768 KiB; `Writer.Buffer(window_log)`, 1.4 MiB at
+  provide (`encode.Buffer`, 768 KiB; `Writer.Buffer(window_log)`, 1.5 MiB at
   the default) instead of on the stack.
 - **Windows.** The decoder's one-shot needs no window: a match can reach back
   into the output already in `target`, and — with a dictionary — into the
@@ -259,7 +274,15 @@ state — so `encode` exposes only the names above.
   the default covers the 8 MiB window `zstd -19` writes on large input.
 - **Dictionaries.** `zstd.Dictionary` is parsed once (§5) and seeds a frame's
   literals and FSE tables, its repeat offsets (the dictionary's 12 bytes in
-  place of {1,4,8}), and its history (the content in front of the output). A
+  place of {1,4,8}), and its history (the content in front of the output).
+  Both directions use the one value: the decoder takes the parsed decode
+  tables, and the encoder takes the encode tables (with
+  `ZSTD_loadCEntropy`'s promotion rules — a table is reused only when it
+  covers what the frame needs, the literals tree only when it spans all 256
+  symbols with no zero weight) and the content as matchable history. A
+  frame that reuses a dictionary's tables carries Treeless literals and
+  Repeat sequences from its first block, which is what a CLI-trained
+  dictionary produces at level 1. A
   frame whose Dictionary_ID does not match the supplied dictionary fails
   `DictionaryMismatch`; a frame that names an ID with no dictionary supplied
   fails `DictionaryRequired` before any body byte; a frame with no ID decodes

@@ -416,14 +416,26 @@ fail the build until both lists and the README's are updated);
 **Landed so far (the decode slice).** `Dictionary.zig` carries the decode
 side's parsed state — the literals `Tree` and `DecodeTable`, the three fused
 `sequences.SeqTable`s (the form the decode loop reads, as the C's DDict
-stores `ZSTD_seqSymbol` tables), the repcodes, and the content slice — and
-`@sizeOf(Dictionary)` is pinned at 16,704 bytes by a test (the README's
-figure). The encode side's tables (three `fse_compress.Table`s and the
-`huff0_compress.Table`, ~13 KiB more) land with the encode slice, whose
-`ZSTD_loadCEntropy` promotion rules build them. The frame state seeds by
-pointer for the sequences tables and by value for the literals table (a
-4 KiB copy per frame with a dictionary); nothing is re-parsed per frame or
-block (DD12).
+stores `ZSTD_seqSymbol` tables), the repcodes, and the content slice. The
+frame state seeds by pointer for the sequences tables and by value for the
+literals table (a ~1.3 KiB copy per frame with a dictionary); nothing is
+re-parsed per frame or block (DD12).
+
+**Landed so far (the encode slice).** `Dictionary.zig` also carries the
+encode side's tables from the same parse: the literals tree in its
+`huff0_compress.Table` form, the three `fse_compress.Table`s, the
+`ZSTD_loadCEntropy` promotions (`literals_repeat_valid`, the per-alphabet
+`sequence_repeat_valid`), the whole file's length (`source_len`, the C's
+`cdict->dictContentSize`, which the parameters are sized from), and the
+CDict match table (`match_compress.DictTable`: `dtlm_full` over the content
+with the short-cache tags, `ZSTD_fillHashTableForCDict`). `@sizeOf(Dictionary)`
+is pinned at 161,384 bytes — the entropy tables are ~13 KiB and the match
+table 128 KiB — and the README's figure says so. The sketch's "about 21 KiB"
+line predated the match-region research and is superseded: the C keeps the
+match table in a `ZSTD_CDict` because a frame that attaches one reuses it;
+this package has one dictionary value, so the table lives there rather than
+in every frame's buffer (the alternative cost every `encode.Buffer` 128 KiB
+and rebuilt the table per frame).
 
 **The decode load (§2.1; DD1-DD12).** The parse reuses the landed readers in
 the C's order: `huff0.readTree` for the literals tree, `fse.readDescription`
@@ -449,31 +461,62 @@ CLI's verdicts recorded. A supplied dictionary whose ID matches decodes
 whatever the ID is: the reserved ranges are not enforced, since a decoder
 cannot know the registry **[sketch call 7]**.
 
-**The encode side (DE1-DE11).** `ZSTD_loadCEntropy`'s promotion rules are
-the contract (`dict-notes §3.1`): the literals tree is `repeat_valid` only on
-256 symbols with no zero weights; each FSE table only on full coverage with
-no zero counts; the offsets table must represent every offset up to
-`dictContentSize + 128 KiB`. A check-state table is never consulted at the
-fast level (facebook/zstd issue #3724), which the landed
-`sequences_compress.State.repeat_valid` seat already models. The repcodes
-seed from the dictionary's 12 bytes; the content is matchable history — the
-natural port is the two-region form (a pre-filled table over dictionary
-positions, candidates verified against the caller's dictionary slice), with
-the fill density the parity variable (`dict-notes §3.2`: the CLI's `-D` path
-is dtlm_full, the first candidate). The window and size class are sized from
-`srcSize + dictContentSize` (`Params.forSource`'s one-line seat), so the
-one-shot never expires the dictionary; the streaming `Writer` must stop
-reaching into it exactly at §5's boundary (DE6). The frame writes the DID in
-the smallest 1/2/4-byte form (DE8); there is no suppression knob — the
-honest form (`dict-notes §3.4`). The level-1 with-dictionary byte class is
-`dict-notes §3.5`: Treeless literals from the 6-literal floor, Repeat while
-valid and nbSeq < 1000, FSE above; the parity target is `zstd -D dict -1`,
-a new target, not an extension of `zstd -1`.
+**The encode side (DE1-DE11), landed.** `ZSTD_loadCEntropy`'s promotion
+rules are the contract (`dict-notes §3.1`): the literals tree is
+`repeat_valid` only on 256 symbols with no zero weights; each FSE table only
+on full coverage with no zero counts; the offsets table must represent every
+offset up to `dictContentSize + 128 KiB`. A check-state table is never
+consulted at the fast level (facebook/zstd issue #3724) — and an FSE build
+demotes its alphabet (`ZSTD_selectEncodingType`'s `FSE_repeat_check`), which
+the encode slice added to `sequences_compress.selectMode`. The repcodes seed
+from the dictionary's 12 bytes; the content is matchable history.
+
+The match region is *both* of the C's shapes, chosen by the source size, not
+one two-region port: at or below the 8-KiB cutoff
+(`ZSTD_USE_CDICT_PARAMS_SRCSIZE_CUTOFF`, `zstd_compress.c:5232`) the
+dictionary is attached as a separate match state
+(`ZSTD_compressBlock_fast_dictMatchState_generic`: the tagged CDict table,
+the repcode pre-check at `ip0 + 1`, the scan's step starting at 1, the
+frame's own table holding source positions), and above it the CDict's table
+is copied into the frame's own with the content as the window's extDict
+(`ZSTD_compressBlock_fast_extDict_generic`). A streaming writer never knows
+its length, so it always attaches (`ZSTD_shouldAttachDict`). The frame
+parameters follow the C's two paths: the attach path takes the *dictionary's*
+hash width and `minMatch` with the frame's window
+(`ZSTD_resetCCtx_byAttachingCDict`), the copy path takes the window from
+`srcSize + dictContentSize`'s class with the dictionary's hash width and
+`minMatch` (`ZSTD_resetCCtx_byCopyingCDict`). Two consequences the tests
+pin: a frame that attaches a dictionary needs a hash table as wide as the
+dictionary's `hashLog` (up to 15 — the `Writer`'s buffer grew to 1<<15
+entries), and the dictionary-table *lookup* hashes with the frame's
+`minMatch` while the table was filled with the dictionary's
+(`zstd_fast.c:22` against `:547`) — for the one-shot's attach path the two
+are the same width by construction, and where they are not, the lookups
+miss exactly as the C's do.
+
+The one-shot never expires the dictionary (its window covers source +
+content); the streaming `Writer` stops reaching into it exactly at §5's
+boundary (DE6) — the per-block `ZSTD_checkDictValidity` /
+`ZSTD_window_enforceMaxDist` arithmetic lives in `block_compress.Dict`.
+The frame writes the DID in the smallest 1/2/4-byte form (DE8); there is no
+suppression knob — the honest form (`dict-notes §3.4`), and
+`maxCompressedLength` gained the 4-byte field (the header cap is 18 bytes).
+The level-1 with-dictionary byte class is `dict-notes §3.5`: Treeless
+literals from the 6-literal floor, Repeat while valid and nbSeq < 1000, FSE
+above; the parity target is `zstd -D dict -1`, a new target, not an
+extension of `zstd -1`.
 
 **The test plan (the oracle rows, `dict-notes §8`).** The CLI trains the
 fixtures (`zstd --train -r <dir>` over the corpus shapes); the dict files and
 the CLI-generated frames land in `golden.zig` with the CLI's verdict recorded
-beside each. Decode: our decode of CLI `-D` frames against `zstd -D dict -d`
+beside each. The encode side's fixtures are the `dict_encode_*` group: the
+pinned CLI's `zstd -D dict-trained.bin -1` frames for the corpus shapes in
+both header forms (the file form and the `-c` pipe form), the 8-KiB pair
+bracketing the attach/copy switch, plus the decode slice's own
+`dict_frame_s00` / `dict_frame_big` / `dict_frame_zw` (all level-1 frames)
+re-emitted byte for byte. The oracle's dictionary rows grew from 24 to 34:
+the encode parity rows (both forms over the trained dictionary), the
+zero-weight dictionary's encode parity, and a raw-content dictionary row. Decode: our decode of CLI `-D` frames against `zstd -D dict -d`
 and klauspost's `WithDecoderDicts`, byte-exact both directions; the mismatch
 matrix (no dict, wrong dict, raw dict) against the C's
 `tests/cli-tests/dictionaries/dictionary-mismatch.sh` pins; the
@@ -497,6 +540,28 @@ refuses the fixture with `MalformedHuffmanWeights` — the register's earlier
 12-bit trees would need a `1 << 12`-entry `DecodeTable` and a laxer cap in
 the shared reader (the C accepts 12-bit trees in blocks too): a deliberate
 follow-up if interop demands it, never a silent widening.
+
+**Errata found landing the encode slice.**
+
+- **Two decode-slice fixtures are `-19` frames, not level-1.** `dict_frame_s01_r100`
+  (244 bytes) and `dict_frame_s01_raw` (300 bytes) were documented as the
+  CLI's level-1 frames; the pinned CLI reproduces them at `-19` (`-1` gives
+  311 and 321 bytes). They are decode fixtures only — the level is now
+  recorded in `golden.zig`'s comments — and the encode parity rows use
+  level-1 frames the oracle generates live.
+- **The `Reader`'s raw-dictionary path is `Dictionary.initRaw`** (already
+  landed); the encoder's oracle mode is `encode-raw-dict`.
+- **Two divergences kept deliberately in the match region.** The frame's own
+  table never takes content position 0 as a candidate (a zeroed slot means
+  "none", and this port's frame positions start at zero, unlike the C's
+  window indices; the landed noDict port made the same choice). And the
+  backward extension of a rep match is skipped when the rep's 4 bytes would
+  straddle the dictionary's end or when a writer has compacted the byte away:
+  the C reads across the boundary (undefined bytes) and this port does not.
+  Neither fires on any fixture or corpus shape the oracle covers.
+- **The `-19` class stays out of scope** (`dict-notes §8`): at `-19` the cost
+  path recomputes and the dictionary's tables lose the race (§3.5's last
+  row), which is the no-dictionary `-19` class again.
 
 **The fuzz shapes (`dict-notes §8`).** The C's own targets are the model
 (`tests/fuzz/dictionary_{decompress,loader,round_trip,stream_round_trip}.c`,

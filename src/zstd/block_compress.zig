@@ -34,6 +34,7 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const block = @import("block.zig");
+const Dictionary = @import("Dictionary.zig");
 /// `§3.1.1.2.4` — Block_Maximum_Size's 128 KiB ceiling: the encoder's block
 /// size, and the bound its scratch sizes from.
 pub const max_block_size = block.max_block_size;
@@ -128,6 +129,150 @@ pub const State = struct {
     }
 };
 
+/// Seed the frame's cross-block state from a dictionary
+/// (`ZSTD_resetCCtx_byAttachingCDict`'s `ZSTD_memcpy(prevCBlock,
+/// &cdict->cBlockState, ...)`, `zstd_compress.c:2378-2381`): the literals
+/// tree and the three sequence tables, each with its `ZSTD_loadCEntropy`
+/// promotion (`repeat_valid`), and the repcodes from the dictionary's 12
+/// bytes in place of the {1,4,8} seed. A raw dictionary has no entropy: only
+/// the repcodes are its own (they are the default anyway).
+pub fn seedFromDict(state: *State, dict: *const Dictionary) void {
+    if (!dict.has_entropy) return;
+    state.literals = .{
+        .table = dict.literals_table_compress,
+        .repeat = if (dict.literals_repeat_valid) .valid else .check,
+    };
+    inline for ([_]sequences.Alphabet{
+        .offsets,
+        .match_lengths,
+        .literals_lengths,
+    }) |alphabet| {
+        const index = @intFromEnum(alphabet);
+        state.sequences.tables.set(alphabet, .{ .fse = &dict.sequence_tables_compress[index] });
+        if (dict.sequence_repeat_valid.contains(alphabet)) {
+            state.sequences.repeat_valid.insert(alphabet);
+        }
+    }
+    state.rep = dict.repeat_offsets;
+}
+
+/// A frame's dictionary, as its blocks see it: the content (virtual past),
+/// the CDict table the attach scan looks up, and the window arithmetic the
+/// copy path updates per block (`ZSTD_checkDictValidity` and
+/// `ZSTD_window_enforceMaxDist`, `zstd_compress.c:4629-4630`). The zero
+/// value is a frame with no dictionary.
+pub const Dict = struct {
+    /// The dictionary content; empty when the frame has none.
+    content: []const u8 = &.{},
+    /// The CDict match table for the attach path; `null` when the frame's own
+    /// table was pre-filled instead (the copy path).
+    table: ?*const match_compress.DictTable = null,
+    /// The frame's declared Window_Size (`§3.1.1.1.2`): past it the content
+    /// stops being addressable (`§5`).
+    window_size: usize = 0,
+    /// The frame position of `source[0]`: 0 for the one-shot, the writer's
+    /// retained-history origin otherwise.
+    frame_start: usize = 0,
+    /// The C's `window.lowLimit` and `window.dictLimit`, in virtual indices
+    /// (the content starts at 0, the frame's output follows it).
+    low_limit: usize = 0,
+    dict_limit: usize = 0,
+    /// The C's `loadedDictEnd != 0`: whether the content is still
+    /// addressable.
+    valid: bool = false,
+
+    /// The C's per-block window arithmetic, run before every block.
+    fn advance(dict: *Dict, block_start: usize, block_end: usize) void {
+        const content_len = dict.content.len;
+        // `ZSTD_checkDictValidity`: "For simplification, if window size is
+        // reached anywhere within next block, the dictionary is invalidated
+        // for the entire block."
+        if (dict.valid and dict.frame_start + block_end > dict.window_size) dict.valid = false;
+        // `ZSTD_window_enforceMaxDist`: the candidate floor rises with the
+        // window, and the dictionary is dropped once it falls out.
+        const loaded = if (dict.valid) content_len else 0;
+        const block_start_index = content_len + dict.frame_start + block_start;
+        if (block_start_index > dict.window_size + loaded) {
+            const new_low_limit = block_start_index - dict.window_size;
+            if (dict.low_limit < new_low_limit) dict.low_limit = new_low_limit;
+            if (dict.dict_limit < dict.low_limit) dict.dict_limit = dict.low_limit;
+            dict.valid = false;
+        }
+    }
+
+    /// The C's `ZSTD_getLowestMatchIndex` for the copy path: the lowest table
+    /// entry that may be a candidate for a block ending at `block_end`.
+    fn candidateFloor(dict: *const Dict, block_end: usize) usize {
+        if (dict.valid) return dict.low_limit;
+        const end_index = dict.content.len + dict.frame_start + block_end;
+        if (end_index - dict.low_limit > dict.window_size) return end_index - dict.window_size;
+        return dict.low_limit;
+    }
+};
+
+/// Scan one block's token stream into `store`: the plain finder, or — with a
+/// dictionary — the attach or copy scan, after the per-block window
+/// arithmetic above.
+fn scanBlock(
+    dict: *Dict,
+    state: *State,
+    params: match_compress.Params,
+    hash_table: []u32,
+    source: []const u8,
+    block_start: usize,
+    block_size: usize,
+    store: *match_compress.Store,
+) void {
+    if (dict.content.len == 0) {
+        match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, store);
+        return;
+    }
+    dict.advance(block_start, block_start + block_size);
+    if (dict.table) |table| {
+        // The attach path; once the content expires, the C's own dispatch
+        // falls back to the plain scan (`ZSTD_matchState_dictMode`).
+        if (dict.valid) {
+            match_compress.findDict(
+                source,
+                block_start,
+                block_size,
+                params,
+                hash_table,
+                .{ .content = dict.content, .table = table },
+                dict.frame_start,
+                &state.rep,
+                store,
+            );
+        } else {
+            match_compress.find(
+                source,
+                block_start,
+                block_size,
+                params,
+                hash_table,
+                &state.rep,
+                store,
+            );
+        }
+        return;
+    }
+    // The copy path: the frame's table already holds the dictionary's
+    // entries, and the scan's floor decides which of them are still
+    // addressable.
+    match_compress.findExtDict(
+        source,
+        block_start,
+        block_size,
+        params,
+        hash_table,
+        dict.content,
+        dict.dict_limit,
+        dict.candidateFloor(block_start + block_size),
+        &state.rep,
+        store,
+    );
+}
+
 /// Write one block — its 3-byte Block_Header and Block_Content — for
 /// `source[block_start..][0..block_size]` into `target`, folding the block's
 /// source bytes into the frame checksum. Returns the bytes written, which
@@ -145,6 +290,7 @@ pub const State = struct {
 /// caller keeps one table across the frame's blocks.
 pub fn writeBlock(
     state: *State,
+    dict: *Dict,
     scratch: *Scratch,
     params: match_compress.Params,
     hash_table: []u32,
@@ -168,6 +314,7 @@ pub fn writeBlock(
     else
         writeCompressible(
             state,
+            dict,
             scratch,
             params,
             hash_table,
@@ -185,6 +332,7 @@ pub fn writeBlock(
 /// sections, and pick the block form the ladder keeps.
 fn writeCompressible(
     state: *State,
+    dict: *Dict,
     scratch: *Scratch,
     params: match_compress.Params,
     hash_table: []u32,
@@ -212,7 +360,7 @@ fn writeCompressible(
     const literals_before = state.literals;
     const sequences_before = state.sequences.header();
     const rep_before = state.rep;
-    match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, &store);
+    scanBlock(dict, state, params, hash_table, source, block_start, block_size, &store);
     const compressed_size = writeEntropy(
         state,
         &store,
@@ -394,8 +542,10 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
     var target: [max_block_size + 64]u8 = undefined;
     internal.sentinel.fill(&target);
     var scratch = rig.scratch();
+    var dict: Dict = .{};
     const written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -438,6 +588,7 @@ test "the reps do not advance across a raw or rle block" {
     // fuzz wave: the next block's repcodes decoded to the wrong distances.
     var rig: Rig = .{ .params = .{ .window_log = 10, .hash_log = 11, .mls = 6 } };
     var scratch = rig.scratch();
+    var dict: Dict = .{};
     var target: [max_block_size + 64]u8 = undefined;
 
     // Block one, compressible: the find advances the reps past their
@@ -447,6 +598,7 @@ test "the reps do not advance across a raw or rle block" {
     for (&block_one, 0..) |*byte, index| byte.* = phrase[index % phrase.len];
     _ = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -472,6 +624,7 @@ test "the reps do not advance across a raw or rle block" {
     var scratch_two = rig.scratch();
     const written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch_two,
         rig.params,
         rig.table(),
@@ -503,8 +656,10 @@ test "the ladder stores tiny and incompressible blocks raw" {
     // The block header's type is Raw.
     var target: [64]u8 = undefined;
     var scratch = rig.scratch();
+    var dict: Dict = .{};
     const written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -535,9 +690,11 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     var rng: std.Random.DefaultPrng = .init(0xBEEF);
     for (source[1024..5120]) |*byte| byte.* = rng.random().int(u8);
     var scratch = rig.scratch();
+    var dict: Dict = .{};
     var target: [max_block_size + 64]u8 = undefined;
     const first_written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -554,6 +711,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     var second: [max_block_size + 64]u8 = undefined;
     const written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -572,6 +730,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     var noise_target: [max_block_size + 64]u8 = undefined;
     const noise_written = try writeBlock(
         &rig.state,
+        &dict,
         &scratch,
         rig.params,
         rig.table(),
@@ -604,8 +763,10 @@ test "a compressible block is Compressed and decodes back" {
     var fresh: Rig = .{ .params = rig.params };
     var target: [max_block_size + 64]u8 = undefined;
     var scratch = fresh.scratch();
+    var dict: Dict = .{};
     const written = try writeBlock(
         &fresh.state,
+        &dict,
         &scratch,
         fresh.params,
         fresh.table(),
@@ -648,11 +809,13 @@ test "the checksum funnel folds every block exactly once" {
     for (source[16384..]) |*byte| byte.* = rng.random().int(u8);
     var target: [max_block_size + 64]u8 = undefined;
     var scratch = rig.scratch();
+    var dict: Dict = .{};
     var offset: usize = 0;
     while (offset < source.len) {
         const size = @min(@as(usize, 8192), source.len - offset);
         _ = try writeBlock(
             &rig.state,
+            &dict,
             &scratch,
             rig.params,
             rig.table(),

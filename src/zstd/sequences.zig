@@ -406,9 +406,12 @@ pub fn parseHeader(source: []const u8) Error!Header {
 }
 
 /// One of a dictionary's three FSE table descriptions (§5): the table the
-/// parse built, and the bytes its description consumed.
+/// parse built, the description's normalized counts (the encode side's table
+/// and its `ZSTD_dictNCountRepeat` promotion are built from the same parse),
+/// and the bytes its description consumed.
 pub const DictionaryTable = struct {
     table: SeqTable,
+    description: fse.Description,
     bytes_consumed: usize,
 };
 
@@ -441,6 +444,7 @@ pub fn readDictionaryTable(
     );
     return .{
         .table = fuseTable(&table, spec.codes),
+        .description = description,
         .bytes_consumed = description.bytes_consumed,
     };
 }

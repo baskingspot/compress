@@ -7,6 +7,9 @@
 //! Usage:
 //!   zstd-oracle encode-oneshot <input-file> > frame
 //!   zstd-oracle encode-stream <input-file> > frame
+//!   zstd-oracle encode-dict <input-file> <dict-file> > frame
+//!   zstd-oracle encode-raw-dict <input-file> <content-file> > frame
+//!   zstd-oracle encode-stream-dict <input-file> <dict-file> > frame
 //!   zstd-oracle decode <frame-file> <cap-bytes> > out
 //!   zstd-oracle decode-dict <frame-file> <cap-bytes> <dict-file> > out
 //!   zstd-oracle decode-raw <frame-file> <cap-bytes> <content-file> > out
@@ -52,6 +55,56 @@ pub fn main(init: std.process.Init) !u8 {
     var write_buffer: [64 * 1024]u8 = undefined;
     var stdout_writer: Io.File.Writer = .init(.stdout(), io, &write_buffer);
     defer stdout_writer.interface.flush() catch {};
+
+    if (std.mem.eql(u8, args[1], "encode-dict") or
+        std.mem.eql(u8, args[1], "encode-raw-dict") or
+        std.mem.eql(u8, args[1], "encode-stream-dict"))
+    {
+        if (args.len != 4) {
+            print("zstd-oracle: {s} needs <input-file> <dict-file>\n", .{args[1]});
+            return 1;
+        }
+        const dict_file = try Io.Dir.cwd().openFile(io, args[3], .{
+            .allow_directory = false,
+            .follow_symlinks = true,
+        });
+        var dict_buffer: [64 * 1024]u8 = undefined;
+        var dict_reader: Io.File.Reader = .init(dict_file, io, &dict_buffer);
+        const dict_source = try dict_reader.interface.allocRemaining(
+            arena,
+            .limited(max_input_len),
+        );
+        const dict = if (std.mem.eql(u8, args[1], "encode-raw-dict"))
+            zstd.Dictionary.initRaw(dict_source)
+        else
+            zstd.Dictionary.parse(dict_source) catch |err| {
+                print("zstd-oracle: dictionary parse: {s}\n", .{@errorName(err)});
+                return 1;
+            };
+        const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
+        if (!std.mem.eql(u8, args[1], "encode-stream-dict")) {
+            const target = try arena.alloc(u8, zstd.encode.maxCompressedLength(source.len));
+            const frame_len = zstd.encode.compress(source, target, .{ .dict = &dict }) catch |err| {
+                print("zstd-oracle: {s}\n", .{@errorName(err)});
+                return 1;
+            };
+            try stdout_writer.interface.writeAll(target[0..frame_len]);
+            return 0;
+        }
+        const buffer = try arena.create(zstd.Writer.DefaultBuffer);
+        var in: Io.Reader = .fixed(source);
+        _ = zstd.Writer.streamAll(
+            zstd.Writer.default_window_log,
+            &in,
+            &stdout_writer.interface,
+            buffer,
+            .{ .dict = &dict },
+        ) catch |err| {
+            print("zstd-oracle: {s}\n", .{@errorName(err)});
+            return 1;
+        };
+        return 0;
+    }
 
     if (std.mem.eql(u8, args[1], "encode-oneshot")) {
         if (args.len != 3) {

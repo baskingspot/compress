@@ -1218,11 +1218,14 @@ pub const dict_frame_s00: []const u8 = @embedFile("testdata/dict-s00.zst");
 /// with or without a supplied dictionary — and fails as corruption without
 /// one, because its first block is Treeless from the dictionary's tree.
 pub const dict_frame_s00_noid: []const u8 = @embedFile("testdata/dict-s00-noid.zst");
-/// The CLI's `-D dict-100.bin -1` frame for `dict_s01` (244 bytes): the
-/// 1-byte DID form (ID 100).
+/// The CLI's `-D dict-100.bin -19` frame for `dict_s01` (244 bytes): the
+/// 1-byte DID form (ID 100). The level is `-19`, not the level-1 class the
+/// encoder targets (verified at commit time: `-1` gives 311 bytes); it is a
+/// decode fixture only.
 pub const dict_frame_s01_r100: []const u8 = @embedFile("testdata/dict-s01-r100.zst");
 /// The CLI's raw-dictionary frame for `dict_s01` (300 bytes): `-D
-/// dict_s02.txt`, DID flag 0. The CLI decodes it only with `dict_s02`; any
+/// dict_s02.txt -19`, DID flag 0 (the level is `-19`; `-1` gives 321
+/// bytes). A decode fixture only. The CLI decodes it only with `dict_s02`; any
 /// other dictionary fails as corruption.
 pub const dict_frame_s01_raw: []const u8 = @embedFile("testdata/dict-s01-raw.zst");
 /// The CLI's `-D dict-zero-weight.bin -1` frame for `dict_s00` (357 bytes):
@@ -1232,6 +1235,188 @@ pub const dict_frame_zw: []const u8 = @embedFile("testdata/dict-zw.zst");
 /// several blocks, so the dictionary's tables seed block 0 and the frame's
 /// own state carries the rest.
 pub const dict_frame_big: []const u8 = @embedFile("testdata/dict-big.zst");
+
+// ---------------------------------------------------------------------------
+// The encoder's with-dictionary parity fixtures (RFC 8878 §5): the pinned CLI
+// v1.5.7's own frames for the corpus shapes over `dict_trained`, both header
+// forms — the file form (`zstd -D dict -1 FILE -o OUT`) and the pipe form
+// (`zstd -D dict -1 -c`), which is the streaming `Writer`'s class. Each was
+// generated from the same `fillShape` bytes the tests regenerate, verified
+// with `zstd -t -D dict` and `zstd -D dict -d` at generation time, and the
+// encoder's tests compare our frames against them byte for byte. The 8-KiB
+// pair brackets the C's attach/copy switch (`ZSTD_USE_CDICT_PARAMS_SRCSIZE_
+// CUTOFF`, `zstd_compress.c:5232`): at or below it the dictionary is a
+// separate match state, above it its table is copied into the frame's.
+// ---------------------------------------------------------------------------
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the text-100 shape (100
+/// bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID. `zstd -t
+/// -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it byte-exact, and the
+/// encoder's tests pin our own frame against it.
+pub const dict_encode_text_100 = hex("28b52ffd27d6e13e2264a50100240274686520717569636b206272" ++
+    "6f776e20666f78206a756d7073206f7a7920646f672e04fc808101087fc9ab50f9582e1fe2070b55f94a");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the text-8192 shape (8,192
+/// bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID. `zstd -t
+/// -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it byte-exact, and the
+/// encoder's tests pin our own frame against it.
+pub const dict_encode_text_8192 = hex("28b52ffd67d6e13e22001fad0100240274686520717569636b206" ++
+    "2726f776e20666f78206a756d7073206f7a7920646f672e04fccc0f430110fe9257a1f2b15c3ec40f4d200679");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the text-8193 shape (8,193
+/// bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID. `zstd -t
+/// -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it byte-exact, and the
+/// encoder's tests pin our own frame against it.
+pub const dict_encode_text_8193 = hex("28b52ffd67d6e13e22011fad0100240274686520717569636b206" ++
+    "2726f776e20666f78206a756d7073206f7a7920646f672e04fccd0f430110fe9257a1f2b15c3ec40f43820b37");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the text-65536 shape
+/// (65,536 bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID.
+/// `zstd -t -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it
+/// byte-exact, and the encoder's tests pin our own frame against it.
+pub const dict_encode_text_65536 = hex("28b52ffd67d6e13e2200ffad0100240274686520717569636b20" ++
+    "62726f776e20666f78206a756d7073206f7a7920646f672e04fccc7f180480f097bc0a958fe5f2217e2864d40c");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the text-265000 shape
+/// (265,000 bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID.
+/// `zstd -t -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it
+/// byte-exact, and the encoder's tests pin our own frame against it.
+pub const dict_encode_text_265000 = hex("28b52ffda7d6e13e22280b0400ac01002402746865207175696" ++
+    "36b2062726f776e20666f78206a756d7073206f7a7920646f672e04fcccff300400e12f79152a1fcbe543fc4c0" ++
+    "00008680100fcff3910024500000820010024f38110210426c2");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the html-65536 shape
+/// (65,536 bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID.
+/// `zstd -t -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it
+/// byte-exact, and the encoder's tests pin our own frame against it.
+pub const dict_encode_html_65536 = hex("28b52ffd67d6e13e2200ffcd010084023c64697620636c617373" ++
+    "3d22726f77223e3c7370616e3e68656c6c6f3c2f666c6174652f6469763e04fcc27f1f502f6879f5a447950e3f" ++
+    "4a9164a6");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the rle-133005 shape
+/// (133,005 bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID.
+/// `zstd -t -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it
+/// byte-exact, and the encoder's tests pin our own frame against it.
+pub const dict_encode_rle_133005 = hex("28b52ffda7d6e13e228d0702004c000008410100fcff3910026b" ++
+    "3c004198c2cfaa");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1` frame for the random-4096 shape
+/// (4,096 bytes): the file form, the exact Frame_Content_Size and the Dictionary_ID.
+/// `zstd -t -D dict-trained.bin` and `zstd -D dict-trained.bin -d` verify it
+/// byte-exact, and the encoder's tests pin our own frame against it.
+pub const dict_encode_random_4096 = hex("28b52ffd67d6e13e22000f018000e569ec69960ea6361312e40" ++
+    "90c584e9c7040e6414c568d1cab9d6400fd0a19e394fa579e52e13d19fb42bff1ea0e1d994e4404c186ba1b6cc" ++
+    "22e07762b6b7be888aa2a6676e0907b5a3c71f30c00c54815db31cc1a600de2ed269d855c85c823d1a59a856d8" ++
+    "01082d863de91274d26b06f0c3e999ebf8bc2c01f3c783b522deb04e2587530e18d5ec6ca797e14f648d9fb728" ++
+    "f4a4ae778bb89546e31eee4baef6bed644ed89dc705820ed10c9bcea31becd0cdda4f8851b3feb391f568e8c90" ++
+    "b3a298a8874f7862289a1f58fe0db12e8be229b030366267ceef511408d4ec520b273e923c30dd1b29fff9ec67" ++
+    "e18bb3497e8e7a4221e9693ddbb0e062ea3934b11c896d04ff41475f20d46a74d740df360e53f44848b236739b" ++
+    "f48220cce9a16c2fd212338b8ce98b7ae718abc17c0e7d4592a77c7447803ab122331e6676049812831600192c" ++
+    "244bd9839ed8d4c3153cb26a33d229848f4c4fc0a0b4ac3e315d03c07f811dbee90b5c19b221c4743e0b310036" ++
+    "538f3460819df337fe9d8aa4d99b0645fcce89f9f21940ba05133e120344b150436f0afc7bf23011f5217d27da" ++
+    "54e4ada286908216c0d4af5b22e73c9d79627e7045f8074056d4e47641ebddc011b7f4af3d3b02e886813c5ac8" ++
+    "d50b10bc9a575767dd44d6560029f7395d2e715e1bd299bba63fbbda0e297f735d6f8a5cae4105fad81db66177" ++
+    "6979654d8030f831e729c06cb6935ea925a01f34302debc2d72a1eecb2492fe606793b66ccc240738e844a405b" ++
+    "187cb3cd4c054e2e2de0ea8a95df28b53b225b9b5d4b3f3df2831545f3cb20f9930c53bcddb7fd30dddae97d07" ++
+    "ba2c5907db787d3491400012d5c15e8aa763d53a0e9dd0cf8ffb4d5de9e6234dafd92f1da7f3e66a2335d9af97" ++
+    "d8bab6ba50c18f1cbd23fa6a411df492294d3a1e44d148eb130741d92896073185539c30f30cadf8c98d694589" ++
+    "03a49726442abdb45366384ed42910d8e83368a2c95aed3db5d958f4018fb9127ab596d8901ae9c30f8e12e9bd" ++
+    "1d055559fe7c509be8034a8c0007c7e16ffeaae38bcfe53b611d3a252c4a06451cec02e959b8556bede44ce6b5" ++
+    "513afbefdd7633e85b460b6bd64274483203e340e54d5e6f19e5f4e9db799919043d04c461f887bbf344dd4880" ++
+    "7b7c09d8da86628c2e236de961ae1a05af49b292491c01196ea9eb1451e84279f71dac2d29d4db4ee25144f25a" ++
+    "f683744d61a09f1e5d8adf07a76956e3f1530ce9a30925bc0188e537491fa4d7549036bbfd1ac4c41d4ca7aee3" ++
+    "fb76a0d4cb28a9f56633ded0d0240a376806b0ea9a7034098e896c80dd2dc83e058ea478a6c7699ca421cf5d8c" ++
+    "b61a1da516e1d79400b4eb7f562c17d519de5a84f2325118c5034b0eb1a568378e1266048d01f2a78d325879fe" ++
+    "407f44d1fe15251469287dbf40aba4a7cc33eda07995823f886846a6acd5f7968b83fbe2a8332401a5c68aaee0" ++
+    "4172a675967c0443319f7f2a41105cb0fe1281c749a609d73391ddeea0c2e1d14a28e5d1d560bdfd1695279a8f" ++
+    "c8cf277187298fc5db251e7d992f594e3de9cd82bc89709765992a2dcf2538bcfb11525a968d0f0d22b93ee98b" ++
+    "9b6801900db450ff629f5c6ac922acf0e0a42219e25da3aa569a595d07e747f2c926840ccdcfa1f55685876124" ++
+    "23d94928bc22c73a06c234afdcfad0fe2d951f2b2daa189be0287c85e9a9d50f519dd55b3242ce920098b4be91" ++
+    "101fa51b9fd47157ff36dfbd964c95e30c035fdc0c48f08b1fee9d56c8def8f6704c6555d76e08d9e4d6d3dab7" ++
+    "19c4b6ebf2d1cdcb9bca2dcbd91f761d4fac68c9d3857bfe8c7a9db211cfbba1936d283f8881103253ac11e6c4" ++
+    "8f1db0a31c527cb0d01ad1c8efb4dd45cfe9f4018301020f4a6745e1ef49817981b5752eef2bfe06afa713853c" ++
+    "e8cd2c608da583dc1c80d42da645546bbf9337f7b11e63134d766819843719f336da42f28e16aabc2f7cf69df5" ++
+    "a9af692ddbcf6df5c474ac6dbc0f66dc6215ff6bef0dfe975cf18d3e1a629f44673a19f2f554c637981e5d3c73" ++
+    "19b000d11506a31155149633188e94f59813a8a5cae6cd7c56cca349010578a26afeba1b276adb9a367cc5247e" ++
+    "f14f4554de05a114defa8007f97231c76b5d62e91859bdcf32433f551264233431f5603e804220984c57167871" ++
+    "f8964f9134c309efd00f6be202e183caa492d95b22b51f0eda6de169bf8cd3c7e5dcf260c3503f4e43607dd724" ++
+    "85b4bc54b833a6a6ab80d60c0cbea59ef4656a66bdd29babb18ceb340b5e563ee78bc8afa388d09786334a2de4" ++
+    "8daebdfc2f874d3e87cb9837c3ad7f85be130525ae8a3b748b15e42e52d7033c665c732204d93e3b32f4d0a15b" ++
+    "da9cad8c2c88f588c76ed32bf9cbabc2ac03ab0c7c9d715380f29b37c15baf14d714339bab8fdf6e797b2b5e64" ++
+    "ac6dddd0262422c14558a12d3afe736f5c2b688765eb4dda9523522d3121bcdf766aa28bd4b4da29c28cb54b43" ++
+    "b9b09fc529529b1a7c2b48103ae71db4f650d15f85085f40e813b82756b36dfcbb43ff5732c1c1acb03b2a5f8b" ++
+    "62988cebabcc77a55c50e9ebbba91bb69c55a5700244bff29373a2b7e65c7306d9528d1346d47ac872ed5ce18d" ++
+    "9d59c5157e24faec8f0a1cf8e30a6b0e90912b4945650f38ee5a9debe3c25893fbb8f6356ab64409a62d4d6a49" ++
+    "2c7f5ef140ce4f49793b430bda1b81f58f0c0d13f88165dd87a45c5a23d4af38aba4ab7f8405feedcfe2fdb1f0" ++
+    "1d614f46e6bab6249c39edface67f3de12fadcaef27e7cca7af6e2ca0f338aaf5a90ee668c6fcf1ae96b69054c" ++
+    "f1cc7d09263e12b1d693df2d8c1c79234d0139ede0d17c764a7a3a2832668fe51df987bddb3c0d6570357107ce" ++
+    "ce86f90df4545cd8f809005be642e5cc2407458fca8059c2c58c054934322fcff54e45e9f245a6722def3bf36b" ++
+    "e7dc520060d8a596d438f0cca98fab9267b40a7a0974090769e0ea86d89635717205b821c447c6d411592e9b7e" ++
+    "b64d9d39bb77e23068012e33e9e00d131a640b2abff0207dcf70de0ab4eabc29215dc41db268c7fdb9c74e3c17" ++
+    "54595a7ccf1095e225d98445fad0ecb181006d7ce8ea653312cb32745b0f82437151af68b14ac48e8b9dfad99a" ++
+    "3ce794597a9b0ba3a57f47118607d68305479b4fc837329155dd76aa392b845f8fdc42fd3b340b7124296cbace" ++
+    "68fc808017aeb92128a9e0a5659c79bc5f4cfa01222eabdac4866e2d32eccc8e5f1bd28e6a54977b729d15f532" ++
+    "dd469e1db200acb60afaecb67cacad1b050c29645240ba2d6c4a18e886dff3256ab5dc55718b8d0be8f094595e" ++
+    "0131d952a0c920728abfbab9325f8bc23d634162cfe0c2095502f75e595a572b5b1e4c2fad4c2eb9552e261276" ++
+    "fc1ecb3f0ffa9360ae060aad66a188586463eee270cd6f2bfe25cf2d825165d575add90b77f4a43c76c4fdb182" ++
+    "d20fc67f7958ecec8f715ccb8712c806019e61d8c2cfda07ebb5f1ecb77be97f8cd4c24e0e6ac54ba358fe9324" ++
+    "5d87397e52de4e746edf0d82c51c752cebc2fc9b015de105ecd67c8acaaea15f8b4361a90a2729427903d11ae8" ++
+    "f46bfe53745934c0b6cf2de0ac54af6f4de3620037022a241f16a23f6c066386db3d3c4654a970b732b0eb31a7" ++
+    "43ef14004c6c374dfc54a541b140646dca106eca69754a4be0c1d3207ee2488c607cedc0ca784f7c0447754929" ++
+    "5b3c9efec1a8da69a1c1e909eb06bac80d1a513f540335f750b621e85fac15e0a5080c00e366d7096be970239c" ++
+    "26f06e36b9260dac4725a9577a33fc8b7f35a91c73824e439157e289584c2f09d45941367cdcc59b4e75cdec40" ++
+    "1e0212f8cb40584aa43e0b355107aae750b7a3082758200fb87e95b9e524698cdf14cb3cd58a75be35e5eb6e8a" ++
+    "dc966fafdc01a907336fd3418aa67faae9d7e848d04b7d56d73417638af327b800768185799b3fa270014b3794" ++
+    "152d64205a2f815095bdff99e423ace1a38455e035e0abd65f19f89338ad109ad5f15769187046895f66227216" ++
+    "e7ac271e80c6468a82f2c6a7161d5e25cba5ad9fe55f9d4937c0d4b10995408a899667fd193f1e01d0ed251797" ++
+    "189600d34cb8e903bdae2f3c9b3d9ec8af710ee750070b05eb683ddda8120aa1adad47ffe05130c2710403c7fe" ++
+    "583d5b1430ed2f7c693262879df4816cc418446082e00c98577761c1d4173e720d18f891aff4949133efed7839" ++
+    "0b33c431055f20dadb33c834d2f57ef507d62506d84d29980a5c84758114dd1777e4986a0b31e73a37e219dd19" ++
+    "97ae3cdb46e0fa1b51f1c0ce05429593d6c25e5c6ea844ea4ce622d456d30630ddb0cf17ad59c3e262bd01fe4c" ++
+    "7cb11ec3c91238890e5e14135e6dbecca49cb8229690530ea4317d9fb8ea6b5be6e363e3e9dd84cb98976e085c" ++
+    "bf893780e720b34f8d464c710804fa723b501cc3e062601613bbe895b6f188a8345aef88fd5600cf4a98832a1a" ++
+    "2adc87c440c11f7db24a2e750600a39237c577a803946b0ee4d76a5d964988a4978a77fee63f27623a114f56ea" ++
+    "95bbc9562c809dbd7dc86f93084a3d5f75b6dc0db699e16ec345a0cd2a54ad53014769b5361fa346c1452bcca9" ++
+    "83543ec986ac79f70d2d390fc57cd5adf58d47a77eccb197b7f008aba7bb2fb5ba17c02818ebc63080d00d0d0f" ++
+    "2ce2b4631d668f0d2ac9e1a862f865964f1cb54cf588bbe95170b07c109b9eecb024416cfe8f207a4ed4e22752" ++
+    "42827c6ba77dfc92b99326a73975681e2e274fd7f4493eb414ca0cf7165c823c069599cf86f67fe241dfcf2b04" ++
+    "32468aa613479e92474078e492d8f4061f43919c78efdcfcfc205914c4ec4c9327427ae4d12930928a21255970" ++
+    "eb29f6374b7b37312af81adf490c069b208042e6fb406f1e7066aed2a4edcab465ae0ad447acffb0fb45025e1f" ++
+    "78e6c41971ba653a3d50b08296a01be116836f280a093c11bc0e9946ea00c3bb492c42b44647e79ad2d4ae3bca" ++
+    "ba41d9c5b936b6d74c50ac2a678329bf12f009cc58431c0eeaa826e9eaf7d614365e00d32487a5c3fe6f57f33b" ++
+    "1ed2cc2381dbae6c52724dc6cf401327ba6c70e9e037af28ec0d3fead501e5e55f18a6f784df53edbd6c56b557" ++
+    "2f865a975953a5a0ddcd7e7c63fce0d77b494cf8c2df50c4e6ee38fbed3059460def7c5a435c6454afbda6e942" ++
+    "3597f968d3f6b64882a362a13439e547e1a39ee4d853f1b937038e8dc3b349daa674d8c7a3e4c6ba6db9790178" ++
+    "7601c9ba661eb0c37eb1f7a06eb33265b0f313268403c942fc704b17349875a7316563569a938bc30babaa9825" ++
+    "d9bc7847538c751339973a12d8ba2558be168ee3475d967d2f54ecb34fd357a26a160a912482938d3320f2ae80" ++
+    "f914823b5b5b8dc1ba69d5892e98d2975659a7a691e7227d9097cc61c363d1a3520326f6c3b121f85225795244" ++
+    "940b4021ec1e7abc8259b9dd276f59d4d9cf2633a8b3660642bdb4ac735045bfbd7e85e60fcb67d3c9207cabe9" ++
+    "21f70840a45971645882ba3fbca87ac68719416259d1c568da9dde8e6e43d1f60ea752f9791032b8035f986953" ++
+    "7aa1f576eea35c7f9bade83efd15d5a78259632b4a38c88f5a3c1b1daf53642a48d6bb4e68d1de9579fe5ee99c" ++
+    "a758d9a59b4fb6bf34eee5df2d28c3ea283b48ce805114e3bd79b9933750d0df1c685de2cb0e0fd06bd1f8e14d" ++
+    "b586a8dee9e0fd0b24fb09396bc921a7270fa0ae383cd31ddb425179bf41f047a3e7b2c1992a57b6b28c72f0bd" ++
+    "38e60d96da9d90f3793e5f78feb60535fa7199baa86c407287797300d927fd894787941e43fc2");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1 -c` frame for the text-8193 shape: the
+/// pipe form (no Frame_Content_Size, the streaming window), our `Writer`'s
+/// with-dictionary parity target.
+pub const dict_encode_stream_text_8193 = hex("28b52ffd0748d6e13e22ad010024027468652071756963" ++
+    "6b2062726f776e20666f78206a756d7073206f7a7920646f672e04fccd0f430110fe9257a1f2b15c3ec40f4382" ++
+    "0b37");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1 -c` frame for the text-265000 shape:
+/// the pipe form (no Frame_Content_Size, the streaming window), our `Writer`'s
+/// with-dictionary parity target.
+pub const dict_encode_stream_text_265000 = hex("28b52ffd0748d6e13e22ac0100240274686520717569" ++
+    "636b2062726f776e20666f78206a756d7073206f7a7920646f672e04fcccff300400e12f79152a1fcbe543fc4c" ++
+    "000008680100fcff3910024500000820010024f38110210426c2");
+
+/// The CLI v1.5.7's `zstd -D dict-trained.bin -1 -c` frame for the html-65536 shape:
+/// the pipe form (no Frame_Content_Size, the streaming window), our `Writer`'s
+/// with-dictionary parity target.
+pub const dict_encode_stream_html_65536 = hex("28b52ffd0748d6e13e22cd010084023c64697620636c6" ++
+    "173733d22726f77223e3c7370616e3e68656c6c6f3c2f666c6174652f6469763e04fcc27f1f502f6879f5a4479" ++
+    "50e3f4a9164a6");
 
 // The §5 expiry fixtures (DT1). Hand-built frames whose single sequence
 // reaches into the dictionary's content: `dict_frame_boundary` at a match

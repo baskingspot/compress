@@ -34,6 +34,7 @@ const sentinel = internal.sentinel;
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
 const decode = @import("decode.zig");
+const Dictionary = @import("Dictionary.zig");
 const encode = @import("encode.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
@@ -57,12 +58,19 @@ fn blockLength(comptime window_log: usize) usize {
     return @min(block.max_block_size, historyLength(window_log));
 }
 
-/// The finder's table width: `1 << min(14, window_log + 1)`. 14 is the C's
-/// level-1 `hashLog` for an unknown source size (`ZSTD_getCParams(1,
+/// The finder's table capacity: `1 << 15`, the widest `hashLog` a frame's
+/// own table can take. Without a dictionary that is 14 — the C's level-1
+/// `hashLog` for an unknown source size (`ZSTD_getCParams(1,
 /// ZSTD_CONTENTSIZE_UNKNOWN, 0)`, `clevels.h`'s default row), clamped to
-/// `windowLog + 1` (`zstd_compress.c:1564`).
+/// `windowLog + 1` (`zstd_compress.c:1564`) — but a frame that attaches a
+/// dictionary uses the *dictionary's* width (`ZSTD_resetCCtx_byAttachingCDict`
+/// adjusts the CDict's parameters, and an unknown source size clamps
+/// nothing), which is 15 for every dictionary up to 16 KiB and can be 15 at
+/// any window. The scans slice the table to the frame's own width; the
+/// capacity is the dictionary's.
 fn tableEntries(comptime window_log: usize) usize {
-    return @as(usize, 1) << @min(14, window_log + 1);
+    _ = window_log;
+    return @as(usize, 1) << 15;
 }
 
 /// The sequence list's capacity: every sequence carries a match of at least
@@ -96,7 +104,9 @@ pub fn Buffer(comptime window_log: usize) type {
         /// no block can outgrow it.
         target: [blockLength(window_log) + block.block_header_len]u8,
         /// The finder's position table, one `u32` per hash, zeroed at
-        /// `init`; a zeroed slot means "no candidate".
+        /// `init`; a zeroed slot means "no candidate". A frame that attaches
+        /// a dictionary uses the dictionary's own `hashLog` (up to 15), so
+        /// the capacity covers that width at every window.
         hash_table: [tableEntries(window_log)]u32,
         /// The block's sequence list.
         sequences: [sequenceCapacity(window_log)]sequences_compress.Sequence,
@@ -141,6 +151,16 @@ params: match_compress.Params,
 /// The frame's cross-block encoding state (`block_compress.State`): the
 /// entropy layers' tables, the repeat offsets, and the XXH64 fold.
 state: block_compress.State = .{},
+/// The dictionary this frame compresses against, `null` for none: the
+/// entropy seed, the match region, and the ID the header names.
+dictionary: ?*const Dictionary = null,
+/// The dictionary's match state as the blocks see it (`block_compress.Dict`).
+dict: block_compress.Dict = .{},
+/// The frame position of `window[0]`: 0 until `compact` slides the window.
+/// It bounds the dictionary's validity (`§5`: the content stops being
+/// addressable once the output passes Window_Size) and is the base the
+/// attach scan's offsets count from.
+frame_start: usize = 0,
 /// The frame header goes out with the first emission, never at `init`.
 header_written: bool = false,
 /// Set by `finish`: the next block emitted carries Last_Block
@@ -200,6 +220,36 @@ pub fn init(
     // slot is "no candidate" (the finder's `candidate_floor`), as the C
     // zeroes its table at reset.
     fastmem.set(u32, w.hash_table, 0);
+    // The dictionary, when one is given: its entropy tables seed the frame's
+    // state, its CDict table is filled for the attach scan, and its ID goes
+    // into the header. A dictionary with no content attaches nothing but
+    // still seeds the state and names the ID (the C's `cdictLen == 0`
+    // carve-out).
+    w.dictionary = options.dict;
+    if (options.dict) |d| {
+        block_compress.seedFromDict(&w.state, d);
+        if (d.content.len > 0) {
+            const dict_params = d.matchParams();
+            w.dict = .{
+                .content = d.content,
+                .table = &d.match,
+                .window_size = window_len,
+                .low_limit = d.content.len,
+                .dict_limit = d.content.len,
+                .valid = true,
+            };
+            // The C's attach path takes the dictionary's own hash width and
+            // `minMatch` for the frame (`ZSTD_resetCCtx_byAttachingCDict`
+            // adjusts the CDict's parameters; with an unknown source size
+            // nothing clamps them), keeping only the caller's window.
+            w.params.hash_log = dict_params.hash_log;
+            w.params.mls = dict_params.mls;
+        }
+    }
+    // The scans take the table as the frame's own width, whatever the
+    // buffer's capacity covers.
+    assert(w.params.hash_log <= 15);
+    w.hash_table = buffer.hash_table[0 .. @as(usize, 1) << @intCast(w.params.hash_log)];
     // `.ratio` is reserved and not implemented, and must not silently alias
     // `.fast`: poisoning the interface makes every write and `finish` return
     // `error.WriteFailed`, before a byte of output.
@@ -289,8 +339,10 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
         .literals = w.literals,
         .sequences = w.sequences,
     };
+    w.dict.frame_start = w.frame_start;
     const written = block_compress.writeBlock(
         &w.state,
+        &w.dict,
         &scratch,
         w.params,
         w.hash_table,
@@ -321,11 +373,31 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
 /// same six bytes for `zstd -1` over a pipe.
 fn writeHeader(w: *Writer) Io.Writer.Error!void {
     if (w.header_written) return;
-    var header: [stream_header_len]u8 = undefined;
+    var header: [stream_header_len_max]u8 = undefined;
     writeInt(u32, header[0..frame.magic_len], frame.magic);
-    header[frame.magic_len] = frame.descriptor_checksum;
+    const dict_id: u32 = if (w.dictionary) |d| d.id else 0;
+    const dict_id_code: u2 = @intFromBool(dict_id > 0) +
+        @as(u2, @intFromBool(dict_id >= 256)) +
+        @as(u2, @intFromBool(dict_id >= 65536));
+    header[frame.magic_len] = frame.descriptor_checksum | @as(u8, dict_id_code);
     header[frame.magic_len + 1] = frame.window.descriptor(w.params.window_log);
-    try w.output.writeAll(&header);
+    var cursor: usize = frame.magic_len + 2;
+    switch (dict_id_code) {
+        0 => {},
+        1 => {
+            header[cursor] = @truncate(dict_id);
+            cursor += 1;
+        },
+        2 => {
+            writeInt(u16, header[cursor..][0..2], @truncate(dict_id));
+            cursor += 2;
+        },
+        else => {
+            writeInt(u32, header[cursor..][0..4], dict_id);
+            cursor += 4;
+        },
+    }
+    try w.output.writeAll(header[0..cursor]);
     w.header_written = true;
 }
 
@@ -349,7 +421,9 @@ fn writeTrailer(w: *Writer) Io.Writer.Error!void {
 
 /// The frame header's length: the magic, the descriptor, and the
 /// Window_Descriptor, with no Frame_Content_Size field.
-const stream_header_len = frame.magic_len + 1 + 1;
+/// The streaming frame header's cap: the magic, the descriptor, the window
+/// descriptor, and the widest 4-byte Dictionary_ID field.
+const stream_header_len_max = frame.magic_len + 1 + 1 + 4;
 
 /// Slide the history and the buffered block to the front of the window,
 /// trimming the history to `window_len` — the farthest a match may reach
@@ -367,6 +441,7 @@ fn compact(w: *Writer) void {
             w.window[w.block_start..][0..w.writer.end],
         );
         block_compress.rebaseTable(w.hash_table, slide);
+        w.frame_start += slide;
     }
     w.block_start = keep;
 }
@@ -789,6 +864,88 @@ test "Writer: the CLI's own streaming frames, byte for byte" {
     }
 }
 
+test "Writer: a small window still compresses against a dictionary" {
+    // RFC 8878 §5 — the dictionary's own `hashLog` (15 for a small
+    // dictionary) decides the frame's table width even under a 1-KiB
+    // window: `ZSTD_resetCCtx_byAttachingCDict` adjusts the CDict's
+    // parameters and an unknown source size clamps nothing, so the buffer's
+    // table capacity must cover the dictionary's width, not the window's.
+    const gpa = testing.allocator;
+    const trained = try Dictionary.parse(golden.dict_trained);
+    var source: [8 * 1024]u8 = undefined;
+    golden.fillShape(.text, &source);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    const buffer = try gpa.create(Buffer(10));
+    defer gpa.destroy(buffer);
+    var w: Writer = .init(10, &out.writer, buffer, .{ .dict = &trained });
+    try w.writer.writeAll(&source);
+    try w.finish();
+    const plain = try gpa.alloc(u8, source.len + sentinel.len);
+    defer gpa.free(plain);
+    sentinel.fill(plain);
+    const written = try decode.decompress(out.written(), plain[0..source.len], &trained);
+    try testing.expectEqual(source.len, written);
+    try testing.expectEqualSlices(u8, &source, plain[0..written]);
+    try sentinel.expect(plain, written);
+}
+
+test "Writer: the with-dictionary frames are the CLI's pipe-form bytes" {
+    // RFC 8878 §5 — the streaming form's parity class with a dictionary: the
+    // CLI never knows a pipe's length, so it always attaches the dictionary
+    // (`ZSTD_shouldAttachDict`), and our `Writer`'s frame reproduces
+    // `zstd -D dict-trained.bin -1 -c` byte for byte on every recorded
+    // fixture. Each decodes back through our decoder with the dictionary.
+    const gpa = testing.allocator;
+    const trained = try Dictionary.parse(golden.dict_trained);
+    var source: [300 * 1024]u8 = undefined;
+    const cases = [_]struct {
+        name: []const u8,
+        shape: golden.Shape,
+        size: usize,
+        expected: []const u8,
+    }{
+        .{
+            .name = "text-8193",
+            .shape = .text,
+            .size = 8193,
+            .expected = &golden.dict_encode_stream_text_8193,
+        },
+        .{
+            .name = "html-65536",
+            .shape = .html,
+            .size = 65536,
+            .expected = &golden.dict_encode_stream_html_65536,
+        },
+        .{
+            .name = "text-265000",
+            .shape = .text,
+            .size = 265000,
+            .expected = &golden.dict_encode_stream_text_265000,
+        },
+    };
+    for (cases) |case| {
+        const input = source[0..case.size];
+        golden.fillShape(case.shape, input);
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        const buffer = try makeBuffer(default_window_log);
+        defer gpa.destroy(buffer);
+        var w: Writer = .init(default_window_log, &out.writer, buffer, .{ .dict = &trained });
+        try w.writer.writeAll(input);
+        try w.finish();
+        try testing.expectEqual(case.expected.len, out.written().len);
+        try testing.expectEqualSlices(u8, case.expected, out.written());
+        const plain = try gpa.alloc(u8, input.len + sentinel.len);
+        defer gpa.free(plain);
+        sentinel.fill(plain);
+        const written = try decode.decompress(out.written(), plain[0..input.len], &trained);
+        try testing.expectEqual(input.len, written);
+        try testing.expectEqualSlices(u8, input, plain[0..written]);
+        try sentinel.expect(plain, written);
+    }
+}
+
 test "Writer: a finished or failed writer never reports a false success" {
     // `finish` after a failed write, after `finish`, and writes after
     // `finish` must all report `error.WriteFailed` — a truncated frame must
@@ -949,18 +1106,21 @@ test "Writer: the buffer sizes are the documented ones" {
     try testing.expectEqual(@as(usize, 1024), historyLength(10));
     try testing.expectEqual(@as(usize, 1024), blockLength(10));
     try testing.expectEqual(@as(usize, 128 * 1024), blockLength(19));
-    try testing.expectEqual(@as(usize, 1) << 14, tableEntries(19));
-    try testing.expectEqual(@as(usize, 1) << 11, tableEntries(10));
+    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(19));
+    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(10));
     try testing.expectEqual(@as(usize, 131072 / 3 + 1), sequenceCapacity(19));
     // The default buffer, field by field, plus whatever alignment pads.
     const expected = 1024 * 1024 / 2 + 128 * 1024 + // history | block
         128 * 1024 + // literals
         128 * 1024 + 3 + // target
-        (1 << 14) * 4 + // hash table
+        (1 << 15) * 4 + // hash table (the dictionary's widest hashLog)
         (131072 / 3 + 1) * @sizeOf(sequences_compress.Sequence); // sequences
-    // The sum, plus one byte of alignment padding before the u32 table.
+    // The sum, plus the alignment padding before the u32 table.
     try testing.expectEqual(expected + 1, @sizeOf(DefaultBuffer));
-    try testing.expectEqual(@as(usize, 1507336), @sizeOf(DefaultBuffer));
+    try testing.expectEqual(@as(usize, 1_572_872), @sizeOf(DefaultBuffer));
+    // A small window keeps the same table capacity: the dictionary's width
+    // does not follow the window.
+    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(10));
 }
 
 /// The frame header's length, from the parsed descriptor: the magic, the

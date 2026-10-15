@@ -23,12 +23,15 @@ const fastmem = @import("fastmem");
 const internal = @import("../internal/root.zig");
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
+const Dictionary = @import("Dictionary.zig");
 const common = @import("common.zig");
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
+const literals = @import("literals.zig");
 const match_compress = @import("match_compress.zig");
+const sequences = @import("sequences.zig");
 const sequences_compress = @import("sequences_compress.zig");
 
 /// The compression level. `.fast` is the CLI's level-1 byte class; `.ratio`
@@ -39,7 +42,20 @@ pub const Level = enum { fast, ratio };
 /// `compress`'s options.
 pub const Options = struct {
     level: Level = .fast,
+    /// The dictionary the frame is compressed against (`§5`): its tables seed
+    /// the frame's entropy state (with `ZSTD_loadCEntropy`'s promotions) and
+    /// its content is the match region's virtual past. The frame names the
+    /// dictionary's ID in its header (`§3.1.1.1.1.6`). `null` is a
+    /// no-dictionary frame.
+    dict: ?*const Dictionary = null,
 };
+
+/// `ZSTD_USE_CDICT_PARAMS_SRCSIZE_CUTOFF` (`zstd_compress.c:5232`): at or
+/// below this source size the C attaches the dictionary as a separate match
+/// state; above it, the dictionary's table is copied into the frame's own.
+/// The CLI's `-D` path is the C's, so the parity fixtures depend on the same
+/// switch.
+pub const dict_attach_cutoff = 8 * 1024;
 
 /// Everything `compress` reports.
 pub const Error = error{
@@ -61,10 +77,12 @@ pub const Buffer = struct {
 };
 
 /// The largest frame `compress` can write for a `source_len`-byte source:
-/// the 14-byte header cap, 3 bytes per block, the source itself, and the
-/// 4-byte checksum. Always inside the C's `ZSTD_COMPRESSBOUND` (`zstd.h`).
+/// the 18-byte header cap (the 14 no-dictionary bytes plus the 4-byte
+/// Dictionary_ID field, `§3.1.1.1.1.6`), 3 bytes per block, the source
+/// itself, and the 4-byte checksum. Always inside the C's
+/// `ZSTD_COMPRESSBOUND` (`zstd.h`).
 pub fn maxCompressedLength(source_len: usize) usize {
-    return source_len + 3 * (source_len / block_compress.max_block_size + 1) + 18;
+    return source_len + 3 * (source_len / block_compress.max_block_size + 1) + 22;
 }
 
 /// Compress `source` into `target` as one Zstandard frame and return the
@@ -105,14 +123,54 @@ pub fn compressBuffered(
     options: Options,
 ) Error!usize {
     if (options.level != .fast) return error.Unimplemented;
-    const params: match_compress.Params = .forSource(source.len);
-    var cursor = try writeFrameHeader(source.len, params, target);
+    // The dictionary's shape: which scan the frame runs and how its
+    // parameters are sized (the C's `ZSTD_shouldAttachDict` switch,
+    // `zstd_compress.c:2309-2323`). An empty content attaches nothing and
+    // matches nothing, but the frame still names the dictionary and seeds
+    // its entropy state — the C's `cdictLen == 0` carve-out.
+    var dict: block_compress.Dict = .{};
+    const params: match_compress.Params = if (options.dict) |d| p: {
+        if (d.content.len == 0) break :p .forSource(source.len);
+        const dict_params = d.matchParams();
+        if (source.len <= dict_attach_cutoff) {
+            dict = .{
+                .content = d.content,
+                .table = &d.match,
+                .low_limit = d.content.len,
+                .dict_limit = d.content.len,
+                .valid = true,
+            };
+            break :p match_compress.forSourceAttached(source.len, dict_params);
+        }
+        // The copy path: the frame's own table starts as the dictionary's
+        // (`copyDictTable` below), and the content runs as the window's
+        // extDict, whose addressable span the block loop's arithmetic
+        // narrows as the output grows.
+        dict = .{
+            .content = d.content,
+            .table = null,
+            .low_limit = 0,
+            .dict_limit = d.content.len,
+            .valid = true,
+        };
+        break :p match_compress.forSourceCopied(source.len, d.source_len, dict_params);
+    } else .forSource(source.len);
+    const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
+    dict.window_size = window_size;
+    var cursor = try writeFrameHeader(source.len, params, options.dict, target);
     var state: block_compress.State = .{};
+    if (options.dict) |d| block_compress.seedFromDict(&state, d);
     // The finder's table holds frame offsets and starts zeroed; only the
     // ladder's chosen width is touched, as the C zeroes its allocated table
-    // width at reset.
+    // width at reset. The copy path instead starts from the dictionary's own
+    // table, tags stripped (`ZSTD_copyCDictTableIntoCCtx`): its entries are
+    // the content's positions, and the scan writes the frame's over them.
     const hash_table = buffer.hash_table[0 .. @as(usize, 1) << @intCast(params.hash_log)];
-    fastmem.set(u32, hash_table, 0);
+    if (dict.content.len > 0 and dict.table == null) {
+        match_compress.copyDictTable(hash_table, &options.dict.?.match);
+    } else {
+        fastmem.set(u32, hash_table, 0);
+    }
     if (source.len == 0) {
         // `§3.1.1.2` — "Each frame must have at least 1 block": the empty
         // input is one raw 0-size Last_Block, the CLI's 13-byte empty frame.
@@ -126,7 +184,6 @@ pub fn compressBuffered(
         };
         const block_size = block_compress.blockSize(params);
         assert(block_size <= block_compress.max_block_size);
-        const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
         // The finder's table holds positions relative to `base`, and `find`
         // sees `source[base..]`. The base slides when the block start drifts
         // a whole window past it — the Writer's `compact` condition — so no
@@ -146,6 +203,7 @@ pub fn compressBuffered(
             }
             cursor += try block_compress.writeBlock(
                 &state,
+                &dict,
                 &blocks,
                 params,
                 hash_table,
@@ -168,14 +226,25 @@ pub fn compressBuffered(
 
 /// `ZSTD_writeFrameHeader` (`zstd_compress.c:4695-4749`): the Magic_Number,
 /// the descriptor, the Window_Descriptor (only when the frame is not
-/// single-segment), and the exact Frame_Content_Size in its smallest form.
-/// The checksum flag is always set and the dictionary flag never is.
-fn writeFrameHeader(source_len: usize, params: match_compress.Params, target: []u8) Error!usize {
+/// single-segment), the Dictionary_ID in its smallest 1/2/4-byte form
+/// (`§3.1.1.1.1.6`; nothing when the dictionary has no ID), and the exact
+/// Frame_Content_Size in its smallest form. The checksum flag is always set.
+fn writeFrameHeader(
+    source_len: usize,
+    params: match_compress.Params,
+    dict: ?*const Dictionary,
+    target: []u8,
+) Error!usize {
     if (target.len < frame_header_len_max) return error.BufferTooSmall;
     const window_size: u64 = @as(u64, 1) << params.window_log;
     // `§3.1.1.1.1.2` — "Single_Segment_Flag ... In this case, Window_Size is
     // Frame_Content_Size": set exactly when the source fits the window.
     const single_segment = window_size >= source_len;
+    const dict_id: u32 = if (dict) |d| d.id else 0;
+    // `dictIDSizeCodeLength = (dictID>0) + (dictID>=256) + (dictID>=65536)`.
+    const dict_id_code: u2 = @intFromBool(dict_id > 0) +
+        @as(u2, @intFromBool(dict_id >= 256)) +
+        @as(u2, @intFromBool(dict_id >= 65536));
     var fcs_code: u2 = 0;
     if (source_len >= 256) fcs_code += 1;
     if (source_len >= 65536 + 256) fcs_code += 1;
@@ -185,6 +254,7 @@ fn writeFrameHeader(source_len: usize, params: match_compress.Params, target: []
     cursor += frame.magic_len;
     const descriptor: u8 = (@as(u8, fcs_code) << 6) |
         (@as(u8, @intFromBool(single_segment)) << 5) |
+        (@as(u8, dict_id_code)) |
         frame.descriptor_checksum;
     target[cursor] = descriptor;
     cursor += 1;
@@ -193,6 +263,21 @@ fn writeFrameHeader(source_len: usize, params: match_compress.Params, target: []
         // five bits, mantissa 0 (`zstd_compress.c:4705,4722`).
         target[cursor] = frame.window.descriptor(params.window_log);
         cursor += 1;
+    }
+    switch (dict_id_code) {
+        0 => {},
+        1 => {
+            target[cursor] = @truncate(dict_id);
+            cursor += 1;
+        },
+        2 => {
+            writeInt(u16, target[cursor..][0..2], @truncate(dict_id));
+            cursor += 2;
+        },
+        else => {
+            writeInt(u32, target[cursor..][0..4], dict_id);
+            cursor += 4;
+        },
     }
     switch (fcs_code) {
         // `§3.1.1.1.1.1` — "When Frame_Content_Size_Flag is 0,
@@ -224,9 +309,10 @@ fn writeFrameHeader(source_len: usize, params: match_compress.Params, target: []
 }
 
 /// `ZSTD_FRAMEHEADERSIZE_MAX` (`zstd_compress.c:4695`): the magic, the
-/// descriptor, the Window_Descriptor, and the 8-byte Frame_Content_Size
-/// form.
-const frame_header_len_max = frame.magic_len + 1 + 1 + 8;
+/// descriptor, the Window_Descriptor, the 4-byte Dictionary_ID form, and the
+/// 8-byte Frame_Content_Size form. `writeFrameHeader` gates on it, as the C
+/// does on `ZSTD_FRAMEHEADERSIZE_MAX`.
+pub const frame_header_len_max = frame.magic_len + 1 + 1 + 4 + 8;
 
 // ---------------------------------------------------------------------------
 // Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1 (the frame and
@@ -235,6 +321,62 @@ const frame_header_len_max = frame.magic_len + 1 + 1 + 8;
 // the landed one-shot decoder and its bytes past the decoded length checked;
 // the CLI v1.5.7 verdicts on the recorded fixtures are in `golden.zig`.
 // ---------------------------------------------------------------------------
+
+/// Compress `source` against `dict` and decode it back through the landed
+/// one-shot with the same dictionary, sentinel-checked (`§5`'s tables seed
+/// the decoder, so a frame our own decoder rejects is malformed whatever the
+/// CLI says). Returns the frame's length.
+fn expectDictRoundTrip(dict: *const Dictionary, source: []const u8) !usize {
+    const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
+    defer testing.allocator.free(frame_buffer);
+    const written = try compress(source, frame_buffer, .{ .dict = dict });
+    try testing.expect(written <= frame_buffer.len);
+    const plain = try testing.allocator.alloc(u8, source.len);
+    defer testing.allocator.free(plain);
+    internal.sentinel.fill(plain);
+    const decoded = try decode.decompress(frame_buffer[0..written], plain, dict);
+    try testing.expectEqual(source.len, decoded);
+    try testing.expectEqualSlices(u8, source, plain[0..decoded]);
+    try internal.sentinel.expect(plain, decoded);
+    return written;
+}
+
+/// The first Compressed_Block's sections of a frame (`§3.1.1.2`): the
+/// literals block type and the three sequence modes, for the byte-class pins.
+const FirstBlock = struct {
+    literals_type: literals.BlockType,
+    modes: sequences.Modes,
+};
+
+/// Walk to the frame's first Compressed_Block and read its section headers.
+fn firstBlock(frame_bytes: []const u8, frame_len: usize) !FirstBlock {
+    const header = try frame.parseHeader(frame_bytes[frame.magic_len..frame_len]);
+    var cursor = frame.magic_len + header.bytes_consumed;
+    while (true) {
+        const block_header = try block.parseHeader(frame_bytes[cursor..frame_len]);
+        cursor += block.block_header_len;
+        const content = frame_bytes[cursor..][0..block.contentLength(block_header)];
+        if (block_header.block_type == .compressed) {
+            const literals_header = try literals.parseHeader(content);
+            // The sequences section follows the literals section's own
+            // content (`§3.1.1.3.1.1`): the regenerated size for Raw, the
+            // one content byte for RLE, the Compressed_Size for the
+            // compressed family.
+            const literals_len = switch (literals_header.block_type) {
+                .raw => literals_header.header_len + literals_header.regenerated_size,
+                .rle => literals_header.header_len + 1,
+                .compressed, .treeless => literals_header.header_len +
+                    literals_header.compressed_size,
+            };
+            const sequences_header = try sequences.parseHeader(content[literals_len..]);
+            return .{
+                .literals_type = literals_header.block_type,
+                .modes = sequences_header.modes.?,
+            };
+        }
+        cursor += content.len;
+    }
+}
 
 /// Compress `source` into a fresh bound-sized target and decode it back
 /// through the landed one-shot, with the sentinel overrun check. Returns the
@@ -358,11 +500,12 @@ test "the empty frame is the CLI's 13 bytes" {
 }
 
 test "maxCompressedLength bounds every emission" {
-    // The bound is the raw worst case: the header cap, 3 bytes per 128-KiB
-    // block, the source, and the trailer. Incompressible data reaches it;
-    // compressible data stays under it.
-    try testing.expectEqual(@as(usize, 21), maxCompressedLength(0));
-    try testing.expectEqual(@as(usize, 22), maxCompressedLength(1));
+    // The bound is the raw worst case: the header cap (the 18 bytes a
+    // dictionary frame's header can take), 3 bytes per 128-KiB block, the
+    // source, and the trailer. Incompressible data reaches it; compressible
+    // data stays under it.
+    try testing.expectEqual(@as(usize, 25), maxCompressedLength(0));
+    try testing.expectEqual(@as(usize, 26), maxCompressedLength(1));
     var source: [300 * 1024]u8 = undefined;
     golden.fillShape(.random, &source);
     const bound = maxCompressedLength(source.len);
@@ -670,6 +813,188 @@ test "the one-shot encodes a source over 4 GiB" {
 fn headerLenFor(frame_bytes: []const u8, frame_len: usize) usize {
     const header = frame.parseHeader(frame_bytes[frame.magic_len..frame_len]) catch unreachable;
     return frame.magic_len + header.bytes_consumed;
+}
+
+test "compress round-trips with a dictionary, both match-region shapes" {
+    // RFC 8878 §5 — the dictionary is virtual past: every emitted offset
+    // counts from the frame's start with the content behind it, and the
+    // decoder's seeded tables decode the frame. Both of the C's match-region
+    // shapes are exercised: the attach path (a source at or below the 8-KiB
+    // cutoff, the dictionary a separate match state) and the copy path (a
+    // larger source, its table copied into the frame's own).
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const raw = Dictionary.initRaw(golden.dict_trained[115..]);
+    var source: [600 * 1024]u8 = undefined;
+    const sizes = [_]usize{
+        0,      1,      6,          7,    8,    31,    100,   255,
+        256,    1024,   4096,       8192, 8193, 16384, 65536, 131072,
+        300000, 524289, 600 * 1024,
+    };
+    for ([_]golden.Shape{ .text, .rle, .random, .skewlit }) |shape| {
+        for (sizes) |size| {
+            golden.fillShape(shape, source[0..size]);
+            _ = try expectDictRoundTrip(&trained, source[0..size]);
+        }
+    }
+    // The remaining shapes at the region boundaries.
+    for ([_]golden.Shape{ .html, .mixed, .words, .zeros }) |shape| {
+        for ([_]usize{ 100, 8192, 8193, 65536 }) |size| {
+            golden.fillShape(shape, source[0..size]);
+            _ = try expectDictRoundTrip(&trained, source[0..size]);
+        }
+    }
+    // A raw dictionary: content only, no entropy tables, the default
+    // repcodes, no ID — the frame carries no Dictionary_ID field.
+    for ([_]usize{ 0, 100, 8192, 8193, 300000 }) |size| {
+        golden.fillShape(.text, source[0..size]);
+        const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(size));
+        defer testing.allocator.free(frame_buffer);
+        const written = try compress(source[0..size], frame_buffer, .{ .dict = &raw });
+        const header = try frame.parseHeader(frame_buffer[frame.magic_len..written]);
+        // A raw dictionary names no ID, so the header carries no DID field.
+        try testing.expectEqual(@as(?u32, null), header.dictionary_id);
+        _ = try expectDictRoundTrip(&raw, source[0..size]);
+    }
+}
+
+test "the with-dictionary frames are the CLI's own bytes" {
+    // RFC 8878 §3.1 + §5 — the whole emission, header through trailer, with a
+    // dictionary: our level-1 frame reproduces the pinned CLI v1.5.7's
+    // `zstd -D dict-trained.bin -1` bytes exactly on every corpus shape, and
+    // each CLI frame decodes back through our decoder with the dictionary.
+    // The fixtures and their CLI verdicts are `golden.zig`'s `dict_encode_*`
+    // group; the 8-KiB pair brackets the C's attach/copy switch.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    var source: [600 * 1024]u8 = undefined;
+    const cases = [_]struct {
+        name: []const u8,
+        shape: golden.Shape,
+        size: usize,
+        expected: []const u8,
+    }{
+        .{
+            .name = "text-100",
+            .shape = .text,
+            .size = 100,
+            .expected = &golden.dict_encode_text_100,
+        },
+        .{
+            .name = "text-8192",
+            .shape = .text,
+            .size = 8192,
+            .expected = &golden.dict_encode_text_8192,
+        },
+        .{
+            .name = "text-8193",
+            .shape = .text,
+            .size = 8193,
+            .expected = &golden.dict_encode_text_8193,
+        },
+        .{
+            .name = "text-65536",
+            .shape = .text,
+            .size = 65536,
+            .expected = &golden.dict_encode_text_65536,
+        },
+        .{
+            .name = "text-265000",
+            .shape = .text,
+            .size = 265000,
+            .expected = &golden.dict_encode_text_265000,
+        },
+        .{
+            .name = "html-65536",
+            .shape = .html,
+            .size = 65536,
+            .expected = &golden.dict_encode_html_65536,
+        },
+        .{
+            .name = "rle-133005",
+            .shape = .rle,
+            .size = 133005,
+            .expected = &golden.dict_encode_rle_133005,
+        },
+        .{
+            .name = "random-4096",
+            .shape = .random,
+            .size = 4096,
+            .expected = &golden.dict_encode_random_4096,
+        },
+    };
+    for (cases) |case| {
+        const input = source[0..case.size];
+        golden.fillShape(case.shape, input);
+        const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
+        defer testing.allocator.free(target);
+        const written = try compress(input, target, .{ .dict = &trained });
+        try testing.expectEqual(case.expected.len, written);
+        try testing.expectEqualSlices(u8, case.expected, target[0..written]);
+        // The CLI's frame decodes through our decoder with the dictionary.
+        const plain = try testing.allocator.alloc(u8, input.len);
+        defer testing.allocator.free(plain);
+        internal.sentinel.fill(plain);
+        const decoded = try decode.decompress(case.expected, plain, &trained);
+        try testing.expectEqual(input.len, decoded);
+        try testing.expectEqualSlices(u8, input, plain[0..decoded]);
+        try internal.sentinel.expect(plain, decoded);
+    }
+}
+
+test "the with-dictionary fixtures the decode slice committed re-emit exactly" {
+    // RFC 8878 §5 — the committed CLI frames for the corpus-shaped samples
+    // (`dict_s00`, `dict_s01`, `dict_big`) over the trained dictionary and
+    // the C's `zero-weight-dict`: our encoder reproduces each byte for byte.
+    // The zero-weight dictionary is the promotion pin: its literals tree has
+    // zero weights and its offsets table stops short of its alphabet, so
+    // `ZSTD_loadCEntropy` promotes neither — and the frame still matches the
+    // CLI's, which is what "degrade honestly" means (DE2, DD11).
+    const cases = [_]struct {
+        dict: []const u8,
+        plain: []const u8,
+        frame: []const u8,
+    }{
+        .{ .dict = golden.dict_trained, .plain = golden.dict_s00, .frame = golden.dict_frame_s00 },
+
+        .{
+            .dict = golden.dict_zero_weight,
+            .plain = golden.dict_s00,
+            .frame = golden.dict_frame_zw,
+        },
+        .{ .dict = golden.dict_trained, .plain = golden.dict_big, .frame = golden.dict_frame_big },
+    };
+    for (cases) |case| {
+        const dict = try Dictionary.parse(case.dict);
+        const target = try testing.allocator.alloc(u8, maxCompressedLength(case.plain.len));
+        defer testing.allocator.free(target);
+        const written = try compress(case.plain, target, .{ .dict = &dict });
+        try testing.expectEqualSlices(u8, case.frame, target[0..written]);
+    }
+}
+
+test "the byte class at level 1 is Treeless literals and Repeat sequences" {
+    // RFC 8878 §3.1.1.3.1.1 + §3.1.1.3.2.1 (DE9, the walked-live record in
+    // docs/research/dictionary-notes.md §3.5): a small source over a
+    // CLI-trained dictionary emits Treeless literals (the dictionary's tree,
+    // reused from block 0) and Repeat_Mode on all three alphabets while
+    // nbSeq < 1000; a source past 1,000 sequences recomputes (FSE ×3), the
+    // ladder's own gate.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const target = try testing.allocator.alloc(u8, maxCompressedLength(golden.dict_big.len));
+    defer testing.allocator.free(target);
+
+    const small = try compress(golden.dict_s00, target, .{ .dict = &trained });
+    const small_block = try firstBlock(target, small);
+    try testing.expectEqual(literals.BlockType.treeless, small_block.literals_type);
+    try testing.expectEqual(sequences.Mode.repeat, small_block.modes.literals_lengths);
+    try testing.expectEqual(sequences.Mode.repeat, small_block.modes.offsets);
+    try testing.expectEqual(sequences.Mode.repeat, small_block.modes.match_lengths);
+
+    const big = try compress(golden.dict_big, target, .{ .dict = &trained });
+    const big_block = try firstBlock(target, big);
+    try testing.expectEqual(literals.BlockType.treeless, big_block.literals_type);
+    try testing.expectEqual(sequences.Mode.fse, big_block.modes.literals_lengths);
+    try testing.expectEqual(sequences.Mode.fse, big_block.modes.offsets);
+    try testing.expectEqual(sequences.Mode.fse, big_block.modes.match_lengths);
 }
 
 test "the Fibonacci histogram's deep literals tree round-trips" {

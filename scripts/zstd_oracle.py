@@ -183,6 +183,36 @@ def klauspost_decode(frame: bytes, expected: bytes) -> None:
             raise AssertionError(f"klauspost rejected the frame: {result.stderr.decode().strip()}")
 
 
+def our_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
+    """Our with-dictionary frame: the one-shot (the file class) or the Writer
+    (the pipe class the CLI writes for `zstd -D dict -1 -c`)."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dict_path = Path(tmp) / "dict.bin"
+        dict_path.write_bytes(dict)
+        mode = "encode-stream-dict" if pipe else "encode-dict"
+        return common.harness_output(harness, mode, data, str(dict_path))
+
+
+def our_raw_dict_frame(data: bytes, content: bytes) -> bytes:
+    """Our one-shot frame with a raw (format-free) dictionary."""
+    with tempfile.TemporaryDirectory() as tmp:
+        dict_path = Path(tmp) / "dict.bin"
+        dict_path.write_bytes(content)
+        return common.harness_output(harness, "encode-raw-dict", data, str(dict_path))
+
+
+def cli_test_dict(frame: bytes, dict: bytes) -> None:
+    """The CLI's `zstd -t -D dict` on one frame."""
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = Path(tmp) / "frame.zst"
+        dict_path = Path(tmp) / "dict.bin"
+        frame_path.write_bytes(frame)
+        dict_path.write_bytes(dict)
+        result = run(["zstd", "-t", "-q", "-D", str(dict_path), str(frame_path)])
+        if result.returncode != 0:
+            raise AssertionError(f"zstd -t -D failed: {result.stderr.decode().strip()}")
+
+
 def our_decode_dict(frame: bytes, cap: int, dict: bytes) -> subprocess.CompletedProcess:
     """Our one-shot decode of `frame` with `dict` (the harness's `decode-dict`)."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -359,8 +389,49 @@ def check_dictionary_rows() -> int:
         assert raw.returncode != 0 and b"DictionaryMismatch" in raw.stderr, raw.stderr
         checked += 3
 
+    # The encode rows: the parity target is `zstd -D dict -1`, form-matched —
+    # the one-shot against the CLI's file form (the exact
+    # Frame_Content_Size), the Writer against its pipe form (`-c`, the
+    # FCS-unknown header). The CLI's own frame is the reference, byte for
+    # byte; `zstd -t -D` and our own decoder verify every frame. The 8-KiB
+    # boundary is the C's attach/copy switch, so the rows bracket it.
+    for desc, data, _ in rows:
+        if not data:
+            continue
+        for pipe in (False, True):
+            frame = cli_dict_frame(data, dictionary, pipe=pipe)
+            ours = our_dict_frame(data, dictionary, pipe=pipe)
+            assert ours == frame, (
+                f"with-dictionary parity ({desc}, pipe={pipe}): "
+                f"{len(ours)} bytes against the CLI's {len(frame)}"
+            )
+            cli_test_dict(frame, dictionary)
+            decoded = our_decode_dict(frame, len(data), dictionary)
+            if decoded.returncode != 0 or decoded.stdout != data:
+                raise AssertionError(
+                    f"our decode of the parity frame ({desc}, pipe={pipe}): "
+                    f"{decoded.stderr.decode().strip()}"
+                )
+            checked += 1
+
+    # A raw dictionary (`§5`'s format-free form): the CLI takes any file with
+    # `-D`, and the frame names no ID. The parity target is the same switch.
+    raw_content = common.SHAPES["text"][:4096]
+    raw_data = common.SHAPES["long text (multi-block)"]
+    raw_frame = cli_dict_frame(raw_data, raw_content)
+    raw_ours = our_raw_dict_frame(raw_data, raw_content)
+    assert raw_ours == raw_frame, "raw-dictionary parity"
+    cli_test_dict(raw_frame, raw_content)
+    decoded = our_decode_raw_dict(raw_frame, len(raw_data), raw_content)
+    if decoded.returncode != 0 or decoded.stdout != raw_data:
+        raise AssertionError(f"our raw-dictionary decode: {decoded.stderr.decode().strip()}")
+    checked += 1
+
     # The C's incomplete-statistics fixture (`zero-weight-dict`, committed in
-    # src/zstd/testdata): the CLI compresses with it and we decode the frame.
+    # src/zstd/testdata): the CLI compresses with it and we decode the frame —
+    # and our encoder re-emits the CLI's own frame byte for byte, the
+    # promotion rules degrading exactly as the C's do (its literals tree has
+    # zero weights, so nothing is reused blindly).
     zero_weight = (root / "src/zstd/testdata/dict-zero-weight.bin").read_bytes()
     data = common.SHAPES["text"]
     frame = cli_dict_frame(data, zero_weight)
@@ -368,7 +439,9 @@ def check_dictionary_rows() -> int:
     if ours.returncode != 0:
         raise AssertionError(f"zero-weight decode failed: {ours.stderr.decode().strip()}")
     assert ours.stdout == data, "zero-weight decode bytes"
-    checked += 1
+    encoded = our_dict_frame(data, zero_weight)
+    assert encoded == frame, "zero-weight encode parity"
+    checked += 2
 
     # The §5 boundary pair (the hand-built fixtures in golden.zig, same
     # bytes): the pinned CLI decodes both — the second reads the dictionary

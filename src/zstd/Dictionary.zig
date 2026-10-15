@@ -1,14 +1,18 @@
 //! `zstd.Dictionary` (RFC 8878 §5): a parse-once, zero-copy value holding a
 //! dictionary's entropy tables, repeat offsets, and content, handed to the
-//! decoder to seed a frame's starting state.
+//! decoder to seed a frame's starting state and to the encoder to seed its
+//! tables and match region.
 //!
 //! `parse` reads the formatted form — the `0xEC30A437` magic, the
 //! Dictionary_ID, the four entropy-table descriptions in §5's order, the 12
 //! repcode bytes, then the content — with the same readers the decoder uses
 //! for a compressed block's tables, so the wire forms are shared and tested
-//! once. `initRaw` is §5's raw-content form: content only, the default
-//! {1,4,8} repeat offsets, and no ID. The value borrows `source` (no copy,
-//! no allocation) and must outlive every call that uses it.
+//! once, and builds both directions' tables from that one parse: the
+//! decoder's fused tables and the encoder's (`ZSTD_loadCEntropy`), with its
+//! promotion rules deciding which tables a frame may reuse (`repeat_valid`).
+//! `initRaw` is §5's raw-content form: content only, the default {1,4,8}
+//! repeat offsets, and no ID. The value borrows `source` (no copy, no
+//! allocation) and must outlive every call that uses it.
 //!
 //! Format: docs/research/specs/rfc8878-zstd.txt §5
 
@@ -19,8 +23,12 @@ const testing = std.testing;
 const fastmem = @import("fastmem");
 
 const common = @import("common.zig");
+const fse = @import("fse.zig");
+const fse_compress = @import("fse_compress.zig");
 const golden = @import("golden.zig");
 const huff0 = @import("huff0.zig");
+const huff0_compress = @import("huff0_compress.zig");
+const match_compress = @import("match_compress.zig");
 const sequences = @import("sequences.zig");
 
 const Dictionary = @This();
@@ -87,6 +95,33 @@ sequence_tables: [sequences.alphabet_count]sequences.SeqTable,
 /// `§5`'s 12 repcode bytes: Repeated_Offset1/2/3 in place of the {1,4,8}
 /// seed. {1,4,8} for a raw dictionary.
 repeat_offsets: [3]u32,
+/// The encode side's literals table (`HUF_readCTable`): the same tree in the
+/// form a Treeless_Literals_Block encodes with. Meaningful only when
+/// `has_entropy`.
+literals_table_compress: huff0_compress.Table,
+/// `ZSTD_loadCEntropy`'s `HUF_repeat_valid` promotion (`zstd_compress.c:5071-5079`):
+/// the tree covers all 256 symbols with no zero weight, so the encoder may
+/// reuse it blindly — the 6-literal floor and the unmeasured reuse a
+/// Treeless block takes. False for a raw dictionary.
+literals_repeat_valid: bool,
+/// The encode side's three sequence tables (`FSE_buildCTable_wksp`), from
+/// the same descriptions as `sequence_tables`. Meaningful only when
+/// `has_entropy`.
+sequence_tables_compress: [sequences.alphabet_count]fse_compress.Table,
+/// `ZSTD_dictNCountRepeat`'s promotion per alphabet (`zstd_compress.c:5047-5059`):
+/// the loaded table covers the whole alphabet the encoder may need, with no
+/// zero-probability symbol, so the fast ladder's Repeat_Mode may reuse it.
+/// Empty for a raw dictionary.
+sequence_repeat_valid: std.EnumSet(sequences.Alphabet),
+/// The whole dictionary file's length — the C's `cdict->dictContentSize`,
+/// which the level's parameters are sized from. `content.len` for a raw
+/// dictionary, which has no file around it.
+source_len: usize,
+/// The C's CDict match table (`match_compress.DictTable`): the content's
+/// positions, filled once here the way `ZSTD_fillHashTableForCDict` fills a
+/// `ZSTD_CDict`'s — so a frame that compresses against this dictionary never
+/// re-hashes it. Empty (no entries) for a dictionary with no content.
+match: match_compress.DictTable,
 /// `§5` — "The rest of the dictionary is its content. The content acts as a
 /// 'past' in front of data to be compressed or decompressed, so it can be
 /// referenced in sequence commands." Borrowed from the caller's bytes.
@@ -128,10 +163,21 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
         .has_entropy = true,
         .literals_tree = tree,
         .literals_table = huff0.buildTable(&tree),
+        .literals_table_compress = huff0_compress.tableOfTree(&tree),
+        .literals_repeat_valid = literalsPromoted(&tree),
         .sequence_tables = undefined,
+        .sequence_tables_compress = undefined,
+        .sequence_repeat_valid = .empty,
         .repeat_offsets = undefined,
         .content = undefined,
+        .source_len = source.len,
+        .match = undefined,
     };
+    // The three FSE descriptions, in §5's order. Their normalized counts
+    // build both directions' tables; the promotion needs the content size
+    // for the offsets rule, so it waits until the repcode bytes have named
+    // the content's start.
+    var descriptions: [sequences.alphabet_count]fse.Description = undefined;
     inline for (.{
         sequences.Alphabet.offsets,
         sequences.Alphabet.match_lengths,
@@ -139,7 +185,12 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
     }) |alphabet| {
         const parsed = try sequences.readDictionaryTable(alphabet, source[cursor..]);
         cursor += parsed.bytes_consumed;
-        dictionary.sequence_tables[@intFromEnum(alphabet)] = parsed.table;
+        const index = @intFromEnum(alphabet);
+        dictionary.sequence_tables[index] = parsed.table;
+        dictionary.sequence_tables_compress[index] = fse_compress.buildTable(
+            encodeNorm(alphabet, &parsed.description),
+        );
+        descriptions[index] = parsed.description;
     }
 
     // §5 — "It is finally followed by 3 offset values, populating repeat
@@ -155,7 +206,83 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
         dictionary.repeat_offsets[index] = rep;
     }
     dictionary.content = content;
+    for ([_]sequences.Alphabet{
+        .offsets,
+        .match_lengths,
+        .literals_lengths,
+    }) |alphabet| {
+        const index = @intFromEnum(alphabet);
+        if (repeatPromoted(alphabet, &descriptions[index], content.len)) {
+            dictionary.sequence_repeat_valid.insert(alphabet);
+        }
+    }
+    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams());
     return dictionary;
+}
+
+/// The dictionary's own level-1 parameters (the C's CDict cParams), which a
+/// frame's window, hash width, and match width are drawn from
+/// (`ZSTD_resetCCtx_byAttachingCDict` / `..._byCopyingCDict`).
+pub fn matchParams(self: *const Dictionary) match_compress.DictParams {
+    return match_compress.dictParams(self.source_len);
+}
+
+/// `ZSTD_loadCEntropy`'s literals promotion (`zstd_compress.c:5071-5079`):
+/// "We only set the loaded table as valid if it contains all non-zero
+/// weights. Otherwise, we set it to check" — and the tree must reach the
+/// full alphabet (`maxSymbolValue == 255`, the issue #3724 fix).
+fn literalsPromoted(tree: *const huff0.Tree) bool {
+    if (tree.symbol_count != huff0.symbol_count_max) return false;
+    for (tree.weights[0..tree.symbol_count]) |weight| {
+        if (weight == 0) return false;
+    }
+    return true;
+}
+
+/// The encode-side table's normalized counts (`FSE_buildCTable_wksp`): the
+/// C builds the offsets table over `MaxOff` — "fill all offset symbols to
+/// avoid garbage at the end of table" — and the other two over the
+/// description's own last symbol. Symbols past the description carry the
+/// zero `readDescription` wrote.
+fn encodeNorm(alphabet: sequences.Alphabet, description: *const fse.Description) fse_compress.Norm {
+    return .{
+        .counts = description.counts,
+        .symbol_count = if (alphabet == .offsets)
+            @as(u16, sequences.offset_code_max) + 1
+        else
+            description.symbol_count,
+        .accuracy_log = description.accuracy_log,
+    };
+}
+
+/// `ZSTD_dictNCountRepeat` (`zstd_compress.c:5047-5059`): "Mark dictionaries
+/// with zero probability symbols as FSE_repeat_check and only dictionaries
+/// with 100% valid symbols can be assumed valid." The offsets table's
+/// requirement is representability, not the full alphabet: every offset up
+/// to `dictContentSize + 128 KiB` — the farthest a match into the dictionary
+/// can reach — must have a code.
+fn repeatPromoted(
+    alphabet: sequences.Alphabet,
+    description: *const fse.Description,
+    content_len: usize,
+) bool {
+    const needed: u16 = switch (alphabet) {
+        .literals_lengths => sequences.literals_length_code_max,
+        .match_lengths => sequences.match_length_code_max,
+        .offsets => @intCast(@min(offcodeMax(content_len), sequences.offset_code_max)),
+    };
+    if (description.symbol_count - 1 < needed) return false;
+    for (description.counts[0 .. @as(usize, needed) + 1]) |count| {
+        if (count == 0) return false;
+    }
+    return true;
+}
+
+/// `ZSTD_highbit32(dictContentSize + 128 KB)` (`zstd_compress.c:5134-5136`):
+/// the largest offset code a match into the dictionary can need.
+fn offcodeMax(content_len: usize) u16 {
+    const max_offset = content_len + 128 * 1024;
+    return @intCast(@bitSizeOf(usize) - 1 - @clz(max_offset));
 }
 
 /// A raw-content dictionary (`§5`): "Zstandard is compatible with 'raw
@@ -171,15 +298,23 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
 /// enforced (the references accept shorter content too). The value borrows
 /// `content`.
 pub fn initRaw(content: []const u8) Dictionary {
-    return .{
+    var dictionary: Dictionary = .{
         .id = 0,
         .has_entropy = false,
         .literals_tree = undefined,
         .literals_table = undefined,
+        .literals_table_compress = undefined,
+        .literals_repeat_valid = false,
         .sequence_tables = undefined,
+        .sequence_tables_compress = undefined,
+        .sequence_repeat_valid = .empty,
         .repeat_offsets = sequences.repeat_offsets_start,
         .content = content,
+        .source_len = content.len,
+        .match = undefined,
     };
+    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams());
+    return dictionary;
 }
 
 // ---------------------------------------------------------------------------
@@ -280,6 +415,45 @@ test "parse rejects each malformed piece with its own name" {
     }
 }
 
+test "the trained dictionary promotes all four tables, the incomplete ones degrade" {
+    // `ZSTD_loadCEntropy`'s promotion rules (`zstd_compress.c:5047-5079`):
+    // the literals tree is `repeat_valid` only on 256 symbols with no zero
+    // weight, each FSE table only on full coverage with no zero count (the
+    // offsets table over the alphabet a match into the content can need).
+    // The trainer writes complete statistics by design, so all four promote;
+    // an incomplete-statistics dictionary is legal and promotes only what
+    // covers, which is what "degrade honestly" means (DD11, DE2).
+    const trained = try parse(golden.dict_trained);
+    try testing.expect(trained.literals_repeat_valid);
+    try testing.expect(trained.sequence_repeat_valid.contains(.offsets));
+    try testing.expect(trained.sequence_repeat_valid.contains(.match_lengths));
+    try testing.expect(trained.sequence_repeat_valid.contains(.literals_lengths));
+    // The offsets promotion is representability, not the full alphabet: the
+    // trained dictionary's content (14,378 bytes) needs codes up to
+    // `highbit(14378 + 128 KiB)` = 17, and its 18-symbol table covers them.
+    try testing.expectEqual(@as(u16, 17), offcodeMax(trained.content.len));
+    try testing.expect(trained.sequence_tables_compress[1].norm.counts[17] != 0);
+
+    // The C's `zero-weight-dict`: 120 zero weights in the tree, so the
+    // literals table is `check`, never reused blindly — the promotion that
+    // matters most, since the 6-literal floor and the unmeasured reuse hang
+    // on it. Its FSE tables still promote: an 11-byte content needs offset
+    // codes only up to `highbit(11 + 128 KiB)` = 17, which its tables cover,
+    // and the length alphabets are fully covered. The CLI's own `-1` frame
+    // for this dictionary is `golden.dict_frame_zw`, which the encoder's
+    // tests re-emit byte for byte — the honest degradation.
+    const zero_weight = try parse(golden.dict_zero_weight);
+    try testing.expect(!zero_weight.literals_repeat_valid);
+    try testing.expect(zero_weight.sequence_repeat_valid.contains(.offsets));
+    try testing.expect(zero_weight.sequence_repeat_valid.contains(.match_lengths));
+    try testing.expect(zero_weight.sequence_repeat_valid.contains(.literals_lengths));
+    // A raw dictionary has no tables to promote and keeps the defaults.
+    const raw = initRaw("raw content, not a formatted dictionary");
+    try testing.expect(!raw.literals_repeat_valid);
+    try testing.expectEqual(@as(usize, 0), raw.sequence_repeat_valid.count());
+    try testing.expectEqual([3]u32{ 1, 4, 8 }, raw.repeat_offsets);
+}
+
 test "initRaw is infallible, format-free, and seeds the defaults" {
     // §5 — "raw content dictionaries, free of any format restriction, except
     // that they must be at least 8 bytes. These dictionaries function as if
@@ -300,11 +474,14 @@ test "initRaw is infallible, format-free, and seeds the defaults" {
 }
 
 test "the value's size is the documented tables, no heap" {
-    // The README documents the value's size ("about 16 KiB of tables"): the
-    // literals tree and decode table, the three fused sequences tables, the
-    // repcodes, and the content slice. This pins the figure the README
+    // The README documents the value's size ("about 158 KiB"): the literals
+    // tree and decode table, the three fused sequences tables, the repcodes,
+    // the content slice, the encode side's entropy tables
+    // (`ZSTD_loadCEntropy`), and the CDict match table the encoder looks up
+    // (`ZSTD_fillHashTableForCDict`) — the one table the C keeps in a
+    // `ZSTD_CDict` rather than a frame. This pins the figure the README
     // quotes, so a table type that grows fails here.
-    try testing.expectEqual(@as(usize, 16_704), @sizeOf(Dictionary));
+    try testing.expectEqual(@as(usize, 161_384), @sizeOf(Dictionary));
 }
 
 test "parse reads a dictionary the decoder's own parsers built" {

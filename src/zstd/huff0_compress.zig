@@ -605,9 +605,12 @@ fn highBit(value: u32) u5 {
 // §3.1.1.3.1.6 (the section's headers and the Jump_Table).
 // ---------------------------------------------------------------------------
 
-/// The encoder's table for a tree the decoder read: the weights are the
-/// tree's, and the codes are `§4.2.1.3`'s assignment.
-fn tableOfTree(tree: *const huff0.Tree) Table {
+/// The encoder's table for a tree the decoder read (`HUF_readCTable`,
+/// `huf_compress.c:119-165`): the weights are the tree's, and the codes are
+/// `§4.2.1.3`'s assignment. A dictionary's literals tree enters the encoder
+/// this way — the tree is trusted as parsed, and the reuse rules decide
+/// whether a block may use it.
+pub fn tableOfTree(tree: *const huff0.Tree) Table {
     var table: Table = .{
         .weights = @splat(0),
         .symbol_count = tree.symbol_count,

@@ -50,18 +50,29 @@ pub const Error = error{
 /// loop; only a Compressed block updates it, and Raw, RLE, and Treeless
 /// blocks leave it alone.
 pub const State = struct {
-    /// The frame's one tree; `null` until its first Compressed block.
+    /// The frame's one tree; `null` until its first Compressed block or a
+    /// dictionary load.
     table: ?huff0_compress.Table = null,
+    /// The C's `HUF_repeat` state. `valid` only a dictionary sets, when its
+    /// tree covers all 256 symbols with no zero weight (`ZSTD_loadCEntropy`,
+    /// `zstd_compress.c:5071-5079`); `check` is a tree this frame wrote,
+    /// which a later block may reuse only while it still covers that block's
+    /// literals; `none` is no tree to reuse. The C keeps the state across
+    /// Raw and RLE literals blocks ("nextHuf" is restored from "prevHuf" on
+    /// every bail).
+    repeat: Repeat = .none,
 };
 
-/// `§3.1.1.3.1.1` — "Raw literals below 64 bytes are not compressed" (the
-/// C's fast-strategy floor, `zstd_compress_literals.c:114-127`: `8 <<
-/// min(9 - strategy, 3)`). The C's 6-literal floor applies only when the
-/// previous tree is `HUF_repeat_valid`, which only dictionary loading sets
-/// (`zstd_compress.c:5079`); the encoder takes no dictionary yet, so the
-/// floor is always 64 here, as it is for any dictionary-free frame the C
-/// compresses.
-const min_literals_to_compress = 64;
+/// `HUF_repeat` (`huf_compress.h:19`): whether a previous tree may be reused,
+/// and how much the encoder trusts it.
+pub const Repeat = enum { none, check, valid };
+
+/// `ZSTD_minLiteralsToCompress` (`zstd_compress_literals.c:114-127`): the
+/// fast strategy's floor is `8 << min(9 - strategy, 3)` = 64, and 6 when the
+/// previous tree is `HUF_repeat_valid` — which only dictionary loading sets.
+fn minLiteralsToCompress(repeat: Repeat) usize {
+    return if (repeat == .valid) 6 else 64;
+}
 
 /// `ZSTD_minGain` (`zstd_compress_internal.h:677-683`) at the fast levels:
 /// `(srcSize >> 6) + 2`. Huffman is kept only when it beats this margin,
@@ -113,7 +124,18 @@ pub fn write(
     state: *State,
     suspect_uncompressible: bool,
 ) Error!usize {
-    if (source.len < min_literals_to_compress) return writeRaw(source, target);
+    if (source.len < minLiteralsToCompress(state.repeat)) return writeRaw(source, target);
+
+    // `HUF_flags_preferRepeat` (`zstd_compress_literals.c:167`): at the fast
+    // level with at most 1 KiB of literals, a `valid` tree is reused before
+    // the histogram, the tree build, or the streams — the C's
+    // `HUF_compress_internal`'s first early return
+    // (`huf_compress.c:1341-1345`). This is the dictionary's path: Treeless
+    // literals from the 6-literal floor.
+    const prefer_repeat = source.len <= 1024;
+    if (prefer_repeat and state.repeat == .valid) {
+        return writeTreeless(&state.table.?, source, target);
+    }
 
     // `HUF_compress_internal`'s suspect fast path (`huf_compress.c:1366-1380`):
     // sample the first and last 4 KiB; a flat enough pair means Raw without
@@ -137,6 +159,16 @@ pub fn write(
     // tree to pay, whatever the streams would have said.
     if (histogram.largest <= (source.len >> 7) + 4) return writeRaw(source, target);
 
+    // "Check validity of previous table" (`huf_compress.c:1371-1376`): a
+    // `check`-state tree the block outgrew is dropped for this block — the
+    // drop is this block's alone, since every bail below restores the state.
+    var repeat = state.repeat;
+    if (repeat == .check and !covers(&state.table.?, &histogram)) repeat = .none;
+    // "Heuristic : use existing table for small inputs" (`:1378-1381`).
+    if (prefer_repeat and repeat != .none) {
+        return writeTreeless(&state.table.?, source, target);
+    }
+
     const table = huff0_compress.buildTable(&histogram, @intCast(source.len)) catch
         return writeRaw(source, target);
     const header_len = compressedHeaderLength(source.len);
@@ -151,20 +183,20 @@ pub fn write(
     ) catch return writeRaw(source, target);
 
     // "Check if using previous huffman table is beneficial": the previous
-    // tree, when it still validates, wins if it saves the description's bytes
-    // or if the description is nearly the whole input (the C's
-    // `oldSize <= hSize + newSize || hSize + 12 >= srcSize`,
-    // `huf_compress.c:1387-1395`).
+    // tree wins if it saves the description's bytes or if the description is
+    // nearly the whole input (the C's `oldSize <= hSize + newSize ||
+    // hSize + 12 >= srcSize`, `huf_compress.c:1387-1395`). A `valid` tree
+    // covers the whole alphabet by construction, so the estimate alone
+    // decides; a `check` tree already had to validate.
     var reused: ?*const huff0_compress.Table = null;
-    if (state.table) |*previous| {
-        if (covers(previous, &histogram)) {
-            const previous_size = estimateSize(previous, &histogram);
-            const new_size = estimateSize(&table, &histogram);
-            if (previous_size <= description_len + new_size or
-                description_len + 12 >= source.len)
-            {
-                reused = previous;
-            }
+    if (repeat != .none) {
+        const previous = &state.table.?;
+        const previous_size = estimateSize(previous, &histogram);
+        const new_size = estimateSize(&table, &histogram);
+        if (previous_size <= description_len + new_size or
+            description_len + 12 >= source.len)
+        {
+            reused = previous;
         }
     }
     const encode_table = reused orelse &table;
@@ -181,10 +213,46 @@ pub fn write(
     if (body_len >= source.len - minGain(source.len)) return writeRaw(source, target);
 
     const block_type: literals.BlockType = if (reused == null) .compressed else .treeless;
-    writeCompressedHeader(target[0..header_len], block_type, source.len, body_len);
-    // The state a later Treeless block sees is the tree this block wrote;
-    // a Treeless block leaves the previous one in place.
-    if (reused == null) state.table = table;
+    // `if (repeat == HUF_repeat_valid && lhSize == 3) singleStream = 1`
+    // (`zstd_compress_literals.c:168`): a valid table forces one stream below
+    // 1 KiB even past 256 literals.
+    const single_stream = source.len < 256 or
+        (state.repeat == .valid and source.len < 1024);
+    writeCompressedHeader(target[0..header_len], block_type, source.len, body_len, single_stream);
+    // The state a later Treeless block sees is the tree this block wrote
+    // (`HUF_repeat_check`); a Treeless block leaves the previous one in
+    // place.
+    if (reused == null) {
+        state.table = table;
+        state.repeat = .check;
+    }
+    return header_len + body_len;
+}
+
+/// A Treeless_Literals_Block (`§3.1.1.3.1.1`): the previous tree's streams
+/// with no description — the C's `HUF_compressCTable_internal` over the old
+/// table. `state` is untouched: the C's `nextHuf` keeps the reused tree and
+/// its repeat mode.
+fn writeTreeless(
+    table: *const huff0_compress.Table,
+    source: []const u8,
+    target: []u8,
+) Error!usize {
+    const header_len = compressedHeaderLength(source.len);
+    if (target.len < header_len) return error.BufferTooSmall;
+    const single_stream = source.len < 256 or
+        (source.len < 1024 and table.symbol_count == huff0_compress.symbol_count_max);
+    const streams_len = writeStreams2(table, source, target[header_len..], single_stream) catch
+        return writeRaw(source, target);
+    const body_len = streams_len;
+    if (body_len >= source.len - minGain(source.len)) return writeRaw(source, target);
+    writeCompressedHeader(
+        target[0..header_len],
+        .treeless,
+        source.len,
+        body_len,
+        single_stream,
+    );
     return header_len + body_len;
 }
 
@@ -255,8 +323,8 @@ fn writeCompressedHeader(
     block_type: literals.BlockType,
     source_len: usize,
     body_len: usize,
+    single_stream: bool,
 ) void {
-    const single_stream = source_len < 256;
     const size_format: u2 = switch (target.len) {
         3 => @intFromBool(!single_stream),
         4 => 2,
@@ -283,6 +351,19 @@ fn writeStreams(
     target: []u8,
 ) huff0_compress.Error!usize {
     if (source.len < 256) return huff0_compress.writeStream(target, source, table);
+    return huff0_compress.writeFourStreams(target, source, table);
+}
+
+/// `writeStreams` with the stream count decided by the caller: a valid
+/// dictionary tree forces one stream below 1 KiB
+/// (`zstd_compress_literals.c:168`).
+fn writeStreams2(
+    table: *const huff0_compress.Table,
+    source: []const u8,
+    target: []u8,
+    single_stream: bool,
+) huff0_compress.Error!usize {
+    if (single_stream) return huff0_compress.writeStream(target, source, table);
     return huff0_compress.writeFourStreams(target, source, table);
 }
 
@@ -518,7 +599,13 @@ test "the pair fixture's literals section is regenerated byte for byte" {
     const tree_len = try huff0_compress.writeTree(target[3..], &table);
     const stream_len = try writeStreams(&table, &golden.pair_literals, target[3 + tree_len ..]);
     const body_len = tree_len + stream_len;
-    writeCompressedHeader(target[0..3], .compressed, golden.pair_literals.len, body_len);
+    writeCompressedHeader(
+        target[0..3],
+        .compressed,
+        golden.pair_literals.len,
+        body_len,
+        golden.pair_literals.len < 256,
+    );
     try testing.expectEqualSlices(
         u8,
         &golden.pair_literals_section,

@@ -508,6 +508,10 @@ fn writeTable(
             return 0;
         },
         .fse => {
+            // The C's `*repeatMode = FSE_repeat_check`: a table this block
+            // built is not reusable, even when a dictionary promoted the one
+            // it replaces (`zstd_compress_sequences.c:227-230`).
+            state.repeat_valid.remove(alphabet);
             const accuracy_log = fse_compress.optimalAccuracyLog(
                 spec.accuracy_log_max,
                 sequence_count,
