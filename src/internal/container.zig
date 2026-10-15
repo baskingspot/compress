@@ -33,23 +33,31 @@
 //! - `InnerReader`, `InnerWriter`: the inner codec's streaming types. The
 //!   driver uses `inner.reader` (the embedded `Io.Reader`), `inner.writer`,
 //!   `inner.err`, and `inner.checksum`.
-//! - `header_len`, `trailer_len`, `writer_region_len`: the framing lengths and
-//!   the writer's serving region (the inner codec's `max_block_size`).
-//! - `initReader(input, buffer)`, `initWriter(output, buffer, options)`: the
-//!   inner codec's streaming constructors.
-//! - `headerDone(header)`, `readHeader(header, input)`: the header parse.
-//!   `readHeader` runs only while `headerDone` is false and consumes at least
-//!   one byte per call.
+//! - `initWriter(output, buffer, options)`: the inner codec's streaming
+//!   writer constructor. It owns the block region's placement inside `buffer`
+//!   (a preset dictionary starts it after the dictionary), and the driver
+//!   takes the interface's serving region from `inner.writer.buffer`.
+//! - `initReader(input, buffer, dict)`, `readHeader(header, input, dict)`:
+//!   the inner codec's streaming constructor and the header parse. `dict` is
+//!   the container's preset dictionary or null; a framing without a
+//!   dictionary concept (gzip) ignores it. `readHeader` runs only while
+//!   `headerDone` is false and consumes at least one byte per call.
 //! - `checkTrailer(trailer, checksum)`: the trailer verification.
-//! - `writeHeader(target, level)`, `writeTrailer(target, checksum)`: write
-//!   the deterministic header and trailer bytes.
+//! - `header_len`, `dict_id_len`, `trailer_len`: the fixed header's length,
+//!   the preset dictionary's identifier field (0 for a framing with no
+//!   dictionary concept), and the trailer's length.
+//! - `writeHeader(target, options)`, `writeTrailer(target, checksum)`: write
+//!   the deterministic header for `options` (returning its length, at most
+//!   `header_len + dict_id_len` bytes) and the trailer bytes.
 //! - `bodyCompress(source, target, options)`,
 //!   `bodyMaxCompressedLength(input_len)`: the inner codec's one-shot
 //!   compress and its length bound.
 //!
 //! Fields the driver names on `Host`. Reader: `reader`, `inner`, `input`,
-//! `header`, `checksum`, `state`, `err`. Writer: `writer`, `output`, `inner`,
-//! `options`, `checksum`, `header`.
+//! `header`, `checksum`, `state`, `err`, `dict` (the container's preset
+//! dictionary or null; a framing without a dictionary concept declares it and
+//! leaves it null). Writer: `writer`, `output`, `inner`, `options`, `checksum`,
+//! `header`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -62,6 +70,14 @@ const lifecycle = @import("reader.zig");
 /// flush, a rebase, or `finish`. A container's `Writer` keeps one in its
 /// `header` field (the reader's header parse state is `F.Header`).
 pub const Header = enum { pending, written };
+
+/// The framing's largest header: its fixed part plus the preset dictionary's
+/// identifier field (`dict_id_len` is 0 for a framing with no dictionary
+/// concept). The driver sizes its header buffer and its one-shot bound from
+/// this.
+fn maxHeaderLen(comptime F: type) usize {
+    return F.header_len + F.dict_id_len;
+}
 
 /// Reads exactly `target.len` bytes from `input` into `target`, consuming
 /// them. Works with an input that delivers one byte per refill. Returns
@@ -91,13 +107,23 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
         const vtable: Io.Reader.VTable = lifecycle.VTable(Host, pump, rebase).vtable;
 
         /// Returns a `Host` that decodes one container from `input`, with
-        /// `buffer` as the decoded window. `buffer` must outlive the `Host`.
-        pub fn init(input: *Io.Reader, buffer: *F.ReaderBuffer) Host {
-            return .{
+        /// `buffer` as the decoded window. `dict` is the container's preset
+        /// dictionary or `null`; a framing without a dictionary concept
+        /// ignores it. `buffer` must outlive the `Host`.
+        pub fn init(input: *Io.Reader, buffer: *F.ReaderBuffer, dict: ?[]const u8) Host {
+            var host: Host = .{
                 .reader = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &vtable },
-                .inner = F.initReader(input, buffer),
+                .inner = F.initReader(input, buffer, dict),
                 .input = input,
+                .dict = dict,
             };
+            // A framing that pre-seeds the window (a preset dictionary) starts
+            // the interface's positions where the inner reader's are: one
+            // window, one position, so the first fill does not overwrite the
+            // pre-seeded bytes.
+            host.reader.seek = host.inner.reader.seek;
+            host.reader.end = host.inner.reader.end;
+            return host;
         }
 
         /// The fill the generated entries call. Failures go through `record`,
@@ -127,7 +153,7 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
         /// then the trailer at the body's clean end.
         fn fill(r: *Host) F.Error!usize {
             if (!F.headerDone(&r.header)) {
-                try F.readHeader(&r.header, r.input);
+                try F.readHeader(&r.header, r.input, r.dict);
                 // The checksum hook is armed before the first body byte is
                 // decoded: every decoded byte folds into the container's
                 // checksum exactly once, in stream order.
@@ -203,9 +229,13 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
         /// (the detail is not reported); a failing `out` returns
         /// `error.WriteFailed`. The window is a stack local of
         /// `@sizeOf(F.ReaderBuffer)` bytes; nothing is allocated.
-        pub fn streamOne(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
+        pub fn streamOne(
+            in: *Io.Reader,
+            out: *Io.Writer,
+            dict: ?[]const u8,
+        ) Io.Reader.StreamRemainingError!usize {
             var buffer: F.ReaderBuffer = undefined;
-            var rr: Host = init(in, &buffer);
+            var rr: Host = init(in, &buffer, dict);
             return rr.reader.streamRemaining(out);
         }
     };
@@ -235,24 +265,25 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
         /// `finish` returns `error.WriteFailed`, matching `streamOne`, which
         /// rejects it before reading.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
-            if (options.level == .ratio) {
-                return .{
-                    .writer = .failing,
-                    .output = output,
-                    .inner = F.initWriter(output, buffer, options),
-                    .options = options,
-                };
-            }
-            return .{
-                .writer = .{
-                    .buffer = buffer[0..F.writer_region_len],
-                    .end = 0,
-                    .vtable = &vtable,
-                },
+            var host: Host = .{
+                .writer = .failing,
                 .output = output,
                 .inner = F.initWriter(output, buffer, options),
                 .options = options,
             };
+            // The interface's serving region is the inner codec's block
+            // region: the same bytes, which the generated entries hand out and
+            // the encoder fills. A framing with a preset dictionary starts
+            // that region after the dictionary (the inner writer knows where),
+            // so it is taken from there, never recomputed here.
+            if (options.level != .ratio) {
+                host.writer = .{
+                    .buffer = host.inner.writer.buffer,
+                    .end = 0,
+                    .vtable = &vtable,
+                };
+            }
+            return host;
         }
 
         /// Completes the container: writes the header if it is still pending,
@@ -279,9 +310,9 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
         /// header precedes any compressed byte.
         fn emitHeader(w: *Host) Io.Writer.Error!void {
             if (w.header == .written) return;
-            var header: [F.header_len]u8 = undefined;
-            F.writeHeader(&header, w.options.level);
-            try w.output.writeAll(&header);
+            var header: [maxHeaderLen(F)]u8 = undefined;
+            const n = F.writeHeader(&header, w.options);
+            try w.output.writeAll(header[0..n]);
             w.header = .written;
         }
 
@@ -388,10 +419,10 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 pub fn EncodeHooks(comptime F: type) type {
     return struct {
         /// The worst-case container length for `input_len` source bytes: the
-        /// fixed header, the inner codec's worst-case body, and the fixed
+        /// largest header, the inner codec's worst-case body, and the fixed
         /// trailer.
         pub fn maxCompressedLength(input_len: usize) usize {
-            return F.header_len + F.bodyMaxCompressedLength(input_len) + F.trailer_len;
+            return maxHeaderLen(F) + F.bodyMaxCompressedLength(input_len) + F.trailer_len;
         }
 
         /// Compresses `source` into `target` as one complete container and
@@ -410,11 +441,11 @@ pub fn EncodeHooks(comptime F: type) type {
             // The header is written before the body is attempted, so the
             // check must come first: a target that cannot hold even the
             // framing is too small.
-            if (target.len < F.header_len + F.trailer_len) return error.BufferTooSmall;
-            F.writeHeader(target[0..F.header_len], options.level);
+            if (target.len < maxHeaderLen(F) + F.trailer_len) return error.BufferTooSmall;
+            const header_len = F.writeHeader(target[0..maxHeaderLen(F)], options);
 
-            const body_len = try F.bodyCompress(source, target[F.header_len..], options);
-            const trailer_at = F.header_len + body_len;
+            const body_len = try F.bodyCompress(source, target[header_len..], options);
+            const trailer_at = header_len + body_len;
             // A body that compressed under the bound can still leave no room
             // for the trailer: report that before the overflowing write,
             // never after.
@@ -431,23 +462,32 @@ pub fn EncodeHooks(comptime F: type) type {
 /// whole container through the streaming reader over
 /// `Io.Reader.fixed(source)` and maps the interface's coarse errors back to
 /// the framing's detail set. No heap allocation: the reader's window is a
-/// stack local. `Host` must have the `init(input, buffer)` that `ReaderHooks`
-/// provides.
+/// stack local. The `Host` is built through `ReaderHooks`'s own `init`, so a
+/// container's public `init` (with its own parameter list) need not match the
+/// driver's.
 pub fn DecodeHooks(comptime F: type, comptime Host: type) type {
+    const hooks = ReaderHooks(F, Host);
+
     return struct {
         /// Decodes one complete container from `source` into `target` and
         /// returns the decoded length. `target` is a cap, not an exact size.
-        /// The trailer is verified against the bytes the decode produced.
-        /// Bytes after the trailer are ignored: the call does not report how
-        /// much of `source` it consumed, so a caller that needs the container
-        /// boundary uses the streaming reader. Returns `error.BufferTooSmall`
-        /// before writing past `target`; a corrupt or truncated container
-        /// returns the framing's own error.
-        pub fn decompress(source: []const u8, target: []u8) F.DecompressError!usize {
+        /// `dict` is the container's preset dictionary or `null`; a framing
+        /// without a dictionary concept ignores it. The trailer is verified
+        /// against the bytes the decode produced. Bytes after the trailer are
+        /// ignored: the call does not report how much of `source` it consumed,
+        /// so a caller that needs the container boundary uses the streaming
+        /// reader. Returns `error.BufferTooSmall` before writing past
+        /// `target`; a corrupt or truncated container returns the framing's
+        /// own error.
+        pub fn decompress(
+            source: []const u8,
+            target: []u8,
+            dict: ?[]const u8,
+        ) F.DecompressError!usize {
             var input: Io.Reader = .fixed(source);
             var output: Io.Writer = .fixed(target);
             var buffer: F.ReaderBuffer = undefined;
-            var reader: Host = .init(&input, &buffer);
+            var reader: Host = hooks.init(&input, &buffer, dict);
             _ = reader.reader.streamRemaining(&output) catch |err| switch (err) {
                 // The output cap: `Io.Writer.fixed` reports `WriteFailed`
                 // before writing past `target`, and the one-shot's name for

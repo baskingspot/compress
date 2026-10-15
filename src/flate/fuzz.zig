@@ -198,7 +198,7 @@ fn reencodeRoundTrip(bytes: []const u8, smith: *Smith) !void {
 
     var plain: [decode_window_len + guard_len]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try decode.decompress(compressed[0..c_len], plain[0..bytes.len]);
+    const n = try decode.decompress(compressed[0..c_len], plain[0..bytes.len], null);
     try testing.expectEqual(bytes.len, n);
     try testing.expectEqualSlices(u8, bytes, plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -223,7 +223,7 @@ fn fuzzBlockDecode(_: void, smith: *Smith) anyerror!void {
     sentinel.fill(window[0 .. window_len + guard_len]);
 
     const target = window[0..window_len];
-    if (decode.decompress(source, target)) |n| {
+    if (decode.decompress(source, target, null)) |n| {
         // The declared length is the decoded length: no partial success.
         try testing.expect(n <= window_len);
         try reencodeRoundTrip(target[0..n], smith);
@@ -425,14 +425,14 @@ fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
     // the guard region, not past the array (the sentinel check is what proves
     // it did not write there).
     sentinel.fill(&plain_buf);
-    const n = try decode.decompress(compressed, plain_buf[0..source.len]);
+    const n = try decode.decompress(compressed, plain_buf[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain_buf[0..n]);
     try sentinel.expect(&plain_buf, n);
 
     // Then with slack, so the bytes past the decoded length are checked too.
     sentinel.fill(&plain_buf);
-    const m = try decode.decompress(compressed, &plain_buf);
+    const m = try decode.decompress(compressed, &plain_buf, null);
     try testing.expectEqual(n, m);
     try testing.expectEqualSlices(u8, source, plain_buf[0..m]);
     try sentinel.expect(&plain_buf, m);
@@ -502,7 +502,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var framed_in: Io.Reader = .fixed(&framed);
     var plain: Io.Writer.Allocating = .init(gpa);
     defer plain.deinit();
-    const served = try Reader.streamAll(&framed_in, &plain.writer);
+    const served = try Reader.streamAll(&framed_in, &plain.writer, null);
     try testing.expectEqual(input.len, served);
     try testing.expectEqualSlices(u8, input, plain.written());
     try testing.expectEqual(stream.len, framed_in.seek);
@@ -531,7 +531,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
 
     var rbuf: Reader.Buffer = undefined;
     var in2: Io.Reader = .fixed(stream2);
-    var r: Reader = .init(&in2, &rbuf);
+    var r: Reader = .init(&in2, &rbuf, null);
     var out2: Io.Writer.Allocating = .init(gpa);
     defer out2.deinit();
     try pump(&r.reader, &out2.writer, pumpLimit(input.len));
@@ -667,7 +667,7 @@ fn fuzzStreamMachinery(_: void, smith: *Smith) anyerror!void {
     var plain: Io.Writer.Allocating = .init(gpa);
     defer plain.deinit();
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    const served = try Reader.streamAll(&fixed_in, &plain.writer);
+    const served = try Reader.streamAll(&fixed_in, &plain.writer, null);
     try testing.expectEqual(expect.items.len, served);
     try testing.expectEqualSlices(u8, expect.items, plain.written());
 }
@@ -958,7 +958,7 @@ const walk_check_max: usize = 8 * 1024;
 fn checkWalkAgrees(source: []const u8, reference: []const u8, walked: Walk) !void {
     if (walked.produced > walk_check_max - 258) return;
     var target: [walk_check_max]u8 = undefined;
-    const result = decode.decompress(source, &target);
+    const result = decode.decompress(source, &target, null);
     if (walked.err) |want| {
         const got = result catch |err| {
             try testing.expectEqual(want, err);
@@ -1046,7 +1046,7 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
     var fw: Io.Writer = .fixed(&got);
     var rbuf: Reader.Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(mutated);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(corrupt_out_max));
     const served = pumped.served;
 
@@ -1173,21 +1173,24 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
         const caps = [_]usize{ source.len - 1, rangeAtMost(smith, 0, source.len - 1) };
         for (caps) |cap| {
             sentinel.fill(&window);
-            try testing.expectError(error.BufferTooSmall, decode.decompress(bomb, window[0..cap]));
+            try testing.expectError(
+                error.BufferTooSmall,
+                decode.decompress(bomb, window[0..cap], null),
+            );
             try sentinel.expect(&window, cap);
         }
     }
 
     // At the decoded length: exact, and the guard region is the caller's.
     sentinel.fill(&window);
-    const n = try decode.decompress(bomb, window[0..source.len]);
+    const n = try decode.decompress(bomb, window[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, window[0..n]);
     try sentinel.expect(&window, n);
 
     // Above it: the same, with the whole window as the cap.
     sentinel.fill(&window);
-    const m = try decode.decompress(bomb, &window);
+    const m = try decode.decompress(bomb, &window, null);
     try testing.expectEqual(source.len, m);
     try testing.expectEqualSlices(u8, source, window[0..m]);
     try sentinel.expect(&window, m);
@@ -1273,7 +1276,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     } else &fixed_in;
 
     var rbuf: Reader.Buffer = undefined;
-    var r: Reader = .init(input_reader, &rbuf);
+    var r: Reader = .init(input_reader, &rbuf, null);
 
     var pos: usize = 0;
     var ops: usize = 0;

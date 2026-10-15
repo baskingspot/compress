@@ -24,8 +24,11 @@ and dependency with a license that is not ours.
 - `src/flate/golden.zig` golden fixtures: ported from golang/go
   (BSD-3-Clause) `src/compress/flate/flate_test.go` (`TestStreams`,
   `TestTruncatedStreams`), `inflate_test.go` (`TestReaderTruncated`), and
-  `deflate_test.go` (`deflateTests`, as decode goldens). Attribution:
-  Copyright the Go Authors, https://github.com/golang/go.
+  `deflate_test.go` (`deflateTests`, as decode goldens), plus two
+  preset-dictionary streams generated with python3's `zlib` (the C
+  reference, `compressobj(..., zdict=...)`) and the dictionaries they were
+  built against. Attribution: Copyright the Go Authors,
+  https://github.com/golang/go; Jean-loup Gailly and Mark Adler (zlib).
 - `src/flate/testdata/huffman-*`: the nine `.in`/`.golden` pairs vendored
   verbatim from golang/go (BSD-3-Clause)
   `src/compress/flate/testdata/`. Attribution: Copyright the Go Authors,
@@ -50,7 +53,9 @@ and dependency with a license that is not ours.
   divergence pins (the fixed and dynamic members are std's gzip bodies with
   zlib's framing), and the C-reference emissions verified through python3's
   `zlib` in `docs/research/containers-notes.md §5.5`. Attribution: Copyright
-  the Go Authors, https://github.com/golang/go; Zig std contributors.
+  the Go Authors, https://github.com/golang/go; Zig std contributors; Jean-loup
+  Gailly and Mark Adler (zlib, the `78 3f` corner emission and the dictionary
+  vector's DICTID check).
 - `src/brotli/huffman.zig`: the two-level decode table's proven size ceiling
   (`max_table_size_by_block`) and the code-length prefix tables
   (`cl_prefix_length`/`cl_prefix_value`) are transcribed from google/brotli

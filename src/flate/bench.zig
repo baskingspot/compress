@@ -143,7 +143,7 @@ pub fn benchmarkDecompress(b: *bench.B) !void {
                     defer bb.allocator.free(back);
 
                     while (try bb.loop()) {
-                        const n = try flate.decode.decompress(comp[0..clen], back);
+                        const n = try flate.decode.decompress(comp[0..clen], back, null);
                         bb.keepAlive(n);
                     }
                     bb.setBytes(@intCast(input.len));

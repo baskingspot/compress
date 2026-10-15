@@ -68,6 +68,9 @@ pub const Case = struct {
     desc: []const u8,
     source: []const u8,
     expect: Expect,
+    /// The dictionary the caller supplies to the decode, when the vector is a
+    /// dictionary case: `null` is the no-dictionary call.
+    dict: ?[]const u8 = null,
     /// What a fresh reader at the stream boundary finds in the trailing
     /// bytes, when the vector carries any: `null` when the stream is the
     /// whole source. This is the boundary policy's pin (`§2.2`: "Any data
@@ -77,10 +80,20 @@ pub const Case = struct {
     trailing: ?Expect = null,
 };
 
+/// Go `zlibTests`' dictionary vector's dictionary: the 12 bytes
+/// `"Hello World\n"`, whose Adler-32 is the stream's DICTID `1c 32 04 27`.
+pub const dictionary = hex("48656c6c6f20576f726c640a");
+
+/// Go `zlibTests`' "wrong dictionary" vector's dictionary: the 4 bytes
+/// `"Hell"`, whose Adler-32 is not the stream's DICTID. Go reports
+/// `ErrDictionary`; ours is the specific `DictionaryMismatch`.
+pub const wrong_dictionary = hex("48656c6c");
+
 /// The Go `zlibTests` dictionary vector: the FDICT header `78 bb`, the
-/// DICTID `1c 32 04 27` (the Adler-32 of the 12-byte dictionary), and a
-/// dict-compressed body. Go decodes it against the caller's dictionary; ours
-/// refuses the stream before any body byte (`DictionaryRequired`).
+/// DICTID `1c 32 04 27` (the Adler-32 of `dictionary`), and a
+/// dict-compressed body. Go decodes it against the caller's dictionary and
+/// fails `ErrDictionary` without one; ours is `DictionaryRequired` without
+/// one and decodes to `"Hello, World!\n"` with it.
 pub const dictionary_stream = hex("78bb1c320427f300b175201c452e0024120474");
 
 /// Go's `zlibTests` (14 vectors, ported verbatim as hex) plus one case of
@@ -152,19 +165,23 @@ pub const zlib_cases: []const Case = &.{
         .trailing = .{ .fail_with = error.InvalidBlockType },
     },
     // 11. "dictionary": Go decodes against the caller's dictionary; the
-    // FDICT flag is refused here (§2.3).
+    // positive pin here supplies the same bytes and decodes the same output.
     .{
         .desc = "dictionary",
         .source = &dictionary_stream,
-        .expect = .{ .fail_with = error.DictionaryRequired },
+        .dict = &dictionary,
+        .expect = .{ .ok = "Hello, World!\n" },
     },
     // 12. "wrong dictionary": Go's second dictionary vector — the same bytes
-    // with a different caller-supplied dictionary. One error name covers "no
-    // dictionary" and "wrong dictionary" here, as Go's ErrDictionary does.
+    // with a different caller-supplied dictionary. Go's one `ErrDictionary`
+    // covers "no dictionary" and "wrong dictionary"; here the two are
+    // distinct names, and this is the mismatch (`§2.2`: DICTID is the
+    // dictionary's Adler-32).
     .{
         .desc = "wrong dictionary",
         .source = &dictionary_stream,
-        .expect = .{ .fail_with = error.DictionaryRequired },
+        .dict = &wrong_dictionary,
+        .expect = .{ .fail_with = error.DictionaryMismatch },
     },
     // 13. "truncated zlib stream amid raw-block": a stored block whose LEN
     // declares 12 bytes with 6 present.
@@ -247,9 +264,8 @@ pub const std_cases: []const Case = &.{
 /// zlib: `zlib.compressobj(0, DEFLATED, 15, 9, Z_DEFAULT_STRATEGY, dict)` over
 /// a 225-byte payload. The header is `78 3f`: FCHECK = 31, which is 0 mod 31
 /// and fits the five-bit field, so it is conformant and must pass the FCHECK
-/// check; the FDICT flag then lands on `DictionaryRequired`, never
-/// `BadHeader`. DICTID `fa 2c 0d 48` is the Adler-32 of the dictionary
-/// ("she sells seashells by the seashore\n"); the body is a stored block of
+/// check; FDICT is set, so the decode needs `fcheck31_dict`. DICTID
+/// `fa 2c 0d 48` is that dictionary's Adler-32; the body is a stored block of
 /// the payload; the trailer `d2 8c 50 c4` is the payload's Adler-32.
 pub const fcheck31_dict_stream = hex(
     "783ffa2c0d4801e1001eff54686520717569636b2062726f776e20666f78206a" ++
@@ -262,27 +278,46 @@ pub const fcheck31_dict_stream = hex(
         "65206c617a7920646f672e20d28c50c4",
 );
 
+/// `fcheck31_dict_stream`'s dictionary: the 27 bytes
+/// `"she sells seashells by the seashore\n"`, whose Adler-32 is that stream's
+/// DICTID `fa 2c 0d 48`.
+pub const fcheck31_dict = "she sells seashells by the seashore\n";
+
+/// `fcheck31_dict_stream`'s payload: the 225 bytes the C reference compressed
+/// against `fcheck31_dict` (a stored block, so the dictionary's only role is
+/// the header's DICTID and the window it pre-seeds).
+pub const fcheck31_plain = "The quick brown fox jumps over the lazy dog. " ** 5;
+
 /// Decode `source` with the one-shot decoder, checking `expect` and the
 /// sentinel overrun rule: `target` is `window[0..cap]`, and the bytes at and
 /// past the cap must hold their sentinels — a decode never writes past its
-/// cap, on success or failure.
-pub fn checkOneShot(window: []u8, cap: usize, source: []const u8, expect: Expect) !void {
+/// cap, on success or failure. `dict` is the preset dictionary to supply
+/// (`null` for a stream that names none).
+pub fn checkOneShot(
+    window: []u8,
+    cap: usize,
+    source: []const u8,
+    dict: ?[]const u8,
+    expect: Expect,
+) !void {
     try testing.expect(cap <= window.len);
     sentinel.fill(window);
     const target = window[0..cap];
     switch (expect) {
         .ok => |want| {
-            const n = try decode.decompress(source, target);
+            const n = try decode.decompress(source, target, dict);
             try testing.expectEqual(want.len, n);
             try testing.expectEqualSlices(u8, want, target[0..n]);
             try sentinel.expect(window, n);
         },
         .fail => {
-            if (decode.decompress(source, target)) |_| return error.TestExpectedFailure else |_| {}
+            if (decode.decompress(source, target, dict)) |_| {
+                return error.TestExpectedFailure;
+            } else |_| {}
             try sentinel.expect(window, cap);
         },
         .fail_with => |want| {
-            const got = decode.decompress(source, target) catch |err| err;
+            const got = decode.decompress(source, target, dict) catch |err| err;
             try testing.expectEqual(want, got);
             try sentinel.expect(window, cap);
         },
@@ -295,13 +330,32 @@ pub fn checkOneShot(window: []u8, cap: usize, source: []const u8, expect: Expect
 pub fn expectHeader(stream: []const u8, level: encode.Level) !void {
     try testing.expect(stream.len >= encode.header_len + encode.trailer_len);
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
-    try testing.expectEqual(encode.flgFor(level), stream[1]);
+    try testing.expectEqual(encode.flgFor(level, false), stream[1]);
     try testing.expectEqual(
         @as(u16, 0),
         (@as(u16, stream[0]) * 256 + @as(u16, stream[1])) % 31,
     );
-    // The encoder never sets FDICT.
-    try testing.expectEqual(@as(u8, 0), stream[1] & 0x20);
+    // No dictionary: FDICT is clear.
+    try testing.expectEqual(@as(u8, 0), stream[1] & decode.flg_fdict);
+}
+
+/// Assert the FDICT header on an emitted stream: CMF = 0x78, FLG = the
+/// level's FLEVEL band plus FDICT plus the minimal FCHECK (§2.2), then the
+/// 4-byte DICTID — the Adler-32 of the *whole* `dict`, most-significant byte
+/// first (§2.1).
+pub fn expectDictHeader(stream: []const u8, level: encode.Level, dict: []const u8) !void {
+    try testing.expect(stream.len >= encode.header_len + encode.dict_id_len);
+    try testing.expectEqual(@as(u8, 0x78), stream[0]);
+    try testing.expectEqual(encode.flgFor(level, true), stream[1]);
+    try testing.expect(stream[1] & decode.flg_fdict != 0);
+    try testing.expectEqual(
+        @as(u16, 0),
+        (@as(u16, stream[0]) * 256 + @as(u16, stream[1])) % 31,
+    );
+    try testing.expectEqual(
+        adler32.adler32(1, dict),
+        readInt(u32, stream[encode.header_len..][0..encode.dict_id_len]),
+    );
 }
 
 /// Assert the trailer on an emitted stream: the Adler-32 of `source`,
@@ -341,7 +395,7 @@ test "golden decode: golang/go zlibTests" {
             .ok => |want| want.len,
             else => window.len,
         };
-        checkOneShot(window, cap, tc.source, tc.expect) catch |err| {
+        checkOneShot(window, cap, tc.source, tc.dict, tc.expect) catch |err| {
             print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
@@ -359,7 +413,7 @@ test "golden decode: the std in-tree streams" {
             .ok => |want| want.len,
             else => window.len,
         };
-        checkOneShot(window, cap, tc.source, tc.expect) catch |err| {
+        checkOneShot(window, cap, tc.source, tc.dict, tc.expect) catch |err| {
             print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
@@ -370,18 +424,20 @@ test "golden decode: the FCHECK = 31 corner passes the check and lands on the di
     // RFC 1950 §2.2 requires only that (CMF*256 + FLG) be a multiple of 31;
     // the C reference's naive emission writes FCHECK = 31 in the FDICT +
     // FLEVEL-0 corner (`78 3f`), which a validator that recomputes FCHECK
-    // rejects. The header check must accept it. The stream is FDICT, so the
-    // expected answer is `DictionaryRequired`.
+    // rejects. The header check must accept it, and the FDICT flag must send
+    // the decode to the dictionary check: without one it is
+    // `DictionaryRequired`, and with the C reference's own dictionary the
+    // stream decodes.
     try testing.expectEqual(@as(u16, 0), 0x783f % 31);
-    try testing.expectError(
-        error.DictionaryRequired,
-        decode.checkHeader(fcheck31_dict_stream[0], fcheck31_dict_stream[1]),
-    );
+    try decode.checkHeader(fcheck31_dict_stream[0], fcheck31_dict_stream[1]);
     const gpa = testing.allocator;
     const window = try gpa.alloc(u8, 256 + @as(usize, sentinel.len));
     defer gpa.free(window);
-    try checkOneShot(window, window.len, &fcheck31_dict_stream, .{
+    try checkOneShot(window, window.len, &fcheck31_dict_stream, null, .{
         .fail_with = error.DictionaryRequired,
+    });
+    try checkOneShot(window, fcheck31_plain.len, &fcheck31_dict_stream, fcheck31_dict, .{
+        .ok = fcheck31_plain,
     });
 }
 
@@ -392,21 +448,20 @@ test "golden decode: the oracle-verified emissions" {
     const data = "The quick brown fox jumps over the lazy dog. " ** 5;
     // Level bands: {0,1} -> FLEVEL 0 (`78 01`), {2-5} -> 1 (`78 5e`),
     // {6,-1} -> 2 (`78 9c`), {7-9} -> 3 (`78 da`).
-    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"0"));
-    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"1"));
-    try testing.expectEqual(@as(u8, 0x5e), encode.flgFor(.@"3"));
-    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.fast));
-    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.@"6"));
-    try testing.expectEqual(@as(u8, 0xda), encode.flgFor(.@"9"));
+    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"0", false));
+    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"1", false));
+    try testing.expectEqual(@as(u8, 0x5e), encode.flgFor(.@"3", false));
+    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.fast, false));
+    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.@"6", false));
+    try testing.expectEqual(@as(u8, 0xda), encode.flgFor(.@"9", false));
 
     // The dictionary stream: DICTID is the dictionary's Adler-32, and the
     // trailer is the payload's — both stored most-significant-byte first.
-    const dictionary = "she sells seashells by the seashore\n";
     try testing.expectEqual(
         @as(u32, 0xFA2C0D48),
         readInt(u32, fcheck31_dict_stream[2..6]),
     );
-    try testing.expectEqual(@as(u32, 0xFA2C0D48), adler32.adler32(1, dictionary));
+    try testing.expectEqual(@as(u32, 0xFA2C0D48), adler32.adler32(1, fcheck31_dict));
     try testing.expectEqual(
         std.hash.Adler32.hash(data),
         readInt(u32, fcheck31_dict_stream[fcheck31_dict_stream.len - 4 ..]),
@@ -427,10 +482,13 @@ test "golden decode: the std divergence pins" {
     var buf: [64]u8 = undefined;
     const bad_fcheck = "\x78\x9f\x03\x00\x00\x00\x00\x01";
     try testing.expectEqual(@as(usize, 0), try stdDecode(bad_fcheck, &buf));
-    try testing.expectError(error.BadHeader, decode.decompress(bad_fcheck, &buf));
+    try testing.expectError(error.BadHeader, decode.decompress(bad_fcheck, &buf, null));
 
     try testing.expectError(error.ReadFailed, stdDecode(&dictionary_stream, &buf));
-    try testing.expectError(error.DictionaryRequired, decode.decompress(&dictionary_stream, &buf));
+    try testing.expectError(
+        error.DictionaryRequired,
+        decode.decompress(&dictionary_stream, &buf, null),
+    );
 }
 
 /// std's in-tree zlib decoder over `source` (the divergence pins run it to

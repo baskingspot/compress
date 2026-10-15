@@ -29,14 +29,31 @@ def our_compress(data: bytes, level: str = "fast") -> bytes:
     return common.harness_output(harness, "encode", data, level)
 
 
+def our_compress_dict(data: bytes, zdict: bytes, level: str = "fast") -> bytes:
+    """Our encoder with a preset dictionary (`§2.2` FDICT + DICTID)."""
+    return common.harness_output_dict(harness, "encode", data, zdict, level)
+
+
 def our_decompress(stream: bytes, cap: int) -> bytes:
     """Our one-shot decoder, through the oracle harness."""
     return common.harness_output(harness, "decode", stream, str(cap))
 
 
+def our_decompress_dict(stream: bytes, cap: int, zdict: bytes) -> bytes:
+    """Our one-shot decoder with a preset dictionary."""
+    return common.harness_output_dict(harness, "decode", stream, zdict, str(cap))
+
+
 def our_decompress_error(stream: bytes, cap: int) -> str:
     """Our one-shot decoder's error name, through the oracle harness."""
     result = common.run_harness(harness, "decode", stream, str(cap))
+    assert result.returncode != 0, "expected a decoder failure"
+    return result.stderr.decode().strip().removeprefix("zlib-oracle: ")
+
+
+def our_decompress_dict_error(stream: bytes, cap: int, zdict: bytes) -> str:
+    """Our one-shot decoder's error name with a dictionary supplied."""
+    result = common.run_harness_dict(harness, "decode", stream, zdict, str(cap))
     assert result.returncode != 0, "expected a decoder failure"
     return result.stderr.decode().strip().removeprefix("zlib-oracle: ")
 
@@ -99,8 +116,8 @@ assert our_decompress(two, len(text) + 1) == text, "our one-shot decodes the fir
 rows += 1
 
 # 4. FDICT: the C reference emits a dictionary stream with header 78 bb plus
-#    the dictionary's big-endian Adler-32. Ours refuses it before any body
-#    byte, since the API has no way to supply a dictionary. The dictionary +
+#    the dictionary's big-endian Adler-32, and our decode refuses it before
+#    any body byte when no dictionary is supplied. The dictionary +
 #    FLEVEL-0 case emits 78 3f (FCHECK = 31), a conformant header that must
 #    not be rejected as bad.
 dictionary = b"she sells seashells by the seashore\n"
@@ -120,6 +137,72 @@ for level, expected_flg in ((6, 0xBB), (0, 0x3F)):
     rows += 1
 assert dict_stream is not None
 rows += 1  # the dict_stream reuse below
+
+# 4b. The dictionary supplied, both directions (`§2.2`): our encode against a
+#     dictionary is FDICT + the whole dictionary's Adler-32 as DICTID, and the
+#     reference decodes it with the same zdict (and needs it: without one its
+#     inflate reports "need dictionary"). The reference's zdict streams decode
+#     here, and the four mismatch cases are the error-name pins.
+#
+#     The large dictionary pins the tail rule: only its last 32 KiB is the
+#     window while DICTID names the whole, so the tail alone is a mismatch.
+dict_rows = 0
+large_dictionary = bytes(range(256)) * 160  # 40 KiB
+dict_sources = {
+    "dictionary text": b"she sells seashells she sells seashells by the seashore\n",
+    "large-dictionary tail": large_dictionary[-64:],
+}
+for ddesc, zdict in (("text dictionary", dictionary), ("large dictionary", large_dictionary)):
+    for desc, data in dict_sources.items():
+        ours = our_compress_dict(data, zdict)
+        # FDICT is set, DICTID is the whole dictionary's Adler-32, and the
+        # trailer still covers the payload only.
+        assert ours[0] == 0x78 and ours[1] & 0x20, f"FDICT ({desc}, {ddesc})"
+        assert (ours[0] << 8 | ours[1]) % 31 == 0, "FCHECK holds with FDICT"
+        assert int.from_bytes(ours[2:6], "big") == zlib.adler32(zdict), f"DICTID ({desc}, {ddesc})"
+        check_trailer(ours, data)
+        assert zlib.decompressobj(15, zdict).decompress(ours) == data, (
+            f"our zdict encode -> zlib decode ({desc}, {ddesc})"
+        )
+        assert our_decompress_dict(ours, len(data) + 1, zdict) == data, (
+            f"our zdict round trip ({desc}, {ddesc})"
+        )
+        # The reference needs the dictionary: its inflate says "need
+        # dictionary" (error 2) without one.
+        try:
+            zlib.decompress(ours)
+            raise AssertionError(f"the reference decoded without a zdict ({desc}, {ddesc})")
+        except zlib.error as err:
+            # The reference's message is "Error 2 while decompressing data"
+            # (Z_NEED_DICT); the code is the contract, not the text.
+            assert "Error 2" in str(err), str(err)
+
+        # The reference's zdict encode -> our decode, and the mismatch matrix.
+        co = zlib.compressobj(6, zlib.DEFLATED, 15, 9, zlib.Z_DEFAULT_STRATEGY, zdict)
+        ref = co.compress(data) + co.flush()
+        assert our_decompress_dict(ref, len(data) + 1, zdict) == data, (
+            f"zlib zdict encode -> our decode ({desc}, {ddesc})"
+        )
+        assert our_decompress_error(ref, len(data) + 1) == "DictionaryRequired", (
+            f"FDICT without a dictionary ({desc}, {ddesc})"
+        )
+        assert our_decompress_dict_error(ref, len(data) + 1, b"wrong dictionary") == (
+            "DictionaryMismatch"
+        ), f"FDICT with a wrong dictionary ({desc}, {ddesc})"
+        if ddesc == "large dictionary":
+            # The DICTID names the whole 40 KiB: only the tail is matchable,
+            # but the identifier check still needs every byte.
+            assert our_decompress_dict_error(ref, len(data) + 1, zdict[-32768:]) == (
+                "DictionaryMismatch"
+            ), "the tail alone must fail the DICTID compare"
+        dict_rows += 1
+
+# 4c. FDICT clear with a dictionary supplied: the stream names none, so the
+#     parameter is unused and the stream decodes (one reader can walk mixed
+#     streams).
+plain_stream = our_compress(text)
+assert our_decompress_dict(plain_stream, len(text) + 1, dictionary) == text
+rows += 1
 
 # The FDICT refusal through the streaming CLI: the input is a real dictionary
 # stream, and the decode fails instead of misreading the DICTID as deflate
@@ -169,5 +252,6 @@ print(
     "zlib-oracle: "
     f"{rows} container rows (our encode -> zlib decode, zlib/compressobj -> our decode), "
     "both directions, + the FDICT refusal + the FCHECK=31 corner + the FLEVEL/FCHECK emissions + the boundary "
-    "pins + 6 streaming rows through the CLI: OK"
+    f"pins + {dict_rows} dictionary rows x 2 dictionaries (our zdict encode -> zlib zdict decode, zlib zdict "
+    "encode -> our zdict decode, the four mismatch cases) + 6 streaming rows through the CLI: OK"
 )

@@ -92,16 +92,22 @@ pub const InnerWriter = flate.Writer;
 /// RFC 1952 §2.3 — the fixed header's length.
 pub const header_len = 10;
 
+/// gzip has no dictionary concept (RFC 1952 has no FDICT-equivalent field),
+/// so there is no dictionary identifier field. The shared driver still hands
+/// the container's preset dictionary to `initReader` and `readHeader`; both
+/// ignore it, and gzip's reader carries the driver's `dict` field as null.
+pub const dict_id_len = 0;
+
 /// RFC 1952 §2.3.1 — the trailer's length.
 pub const trailer_len = 8;
 
-/// The writer's serving region: flate's block size (the front region of the
-/// caller's `Writer.Buffer`).
-pub const writer_region_len = flate.encode.max_block_size;
-
 /// Wrap `input` with `buffer` as the inner flate reader's window.
-pub fn initReader(input: *Io.Reader, buffer: *ReaderBuffer) InnerReader {
-    return flate.Reader.init(input, buffer);
+pub fn initReader(
+    input: *Io.Reader,
+    buffer: *ReaderBuffer,
+    dict: ?[]const u8,
+) InnerReader {
+    return flate.Reader.init(input, buffer, dict);
 }
 
 /// Wrap `output` with `buffer` as the inner flate writer's window and
@@ -119,7 +125,8 @@ pub fn headerDone(header: *const Header) bool {
 /// the input's buffered bytes and consuming them as it goes. The optional
 /// fields are skipped as they stream past, never stored. A header cut short
 /// by the end of the input is `Truncated`.
-pub fn readHeader(header: *Header, input: *Io.Reader) HeaderError!void {
+pub fn readHeader(header: *Header, input: *Io.Reader, dict: ?[]const u8) HeaderError!void {
+    _ = dict; // gzip has no dictionary concept (RFC 1952 §2.3.1)
     while (!header.done()) {
         input.fill(1) catch |err| switch (err) {
             error.EndOfStream => return error.Truncated,
@@ -142,9 +149,13 @@ pub fn checkTrailer(trailer: *const [trailer_len]u8, checksum: *const Checksum) 
     return decode.checkTrailer(trailer, checksum.final(), checksum.len);
 }
 
-/// Write the fixed 10-byte header (`encode.writeHeader`) into `target`.
-pub fn writeHeader(target: *[header_len]u8, level: Level) void {
-    encode.writeHeader(target, level);
+/// Write the fixed 10-byte header (`encode.writeHeader`) into `target` and
+/// return its length. The shared driver sizes `target` to `header_len +
+/// dict_id_len`; gzip has no dictionary, so it is always 10 bytes.
+pub fn writeHeader(target: []u8, options: Options) usize {
+    assert(target.len >= header_len);
+    encode.writeHeader(target[0..header_len], options.level);
+    return header_len;
 }
 
 /// Write the 8-byte trailer (CRC-32, then ISIZE; both u32 little-endian,

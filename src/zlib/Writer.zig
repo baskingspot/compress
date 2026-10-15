@@ -40,6 +40,7 @@ const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const framing = @import("framing.zig");
 const golden = @import("golden.zig");
+const zlib_reader = @import("Reader.zig");
 
 const Writer = @This();
 
@@ -61,6 +62,12 @@ const Hooks = container.WriterHooks(framing, Writer);
 /// compression buffer and `options` fixed for the stream's lifetime. Write
 /// through `&w.writer` and complete the stream with `finish`. Nothing reaches
 /// `output` until a write fills the buffer or `flush` or `finish` is called.
+///
+/// `options.dict` is the stream's preset dictionary or `null` (`§2.2`): the
+/// header then carries FDICT and the dictionary's Adler-32 as DICTID, and the
+/// compressor matches into the dictionary's last 32 KiB. A dictionary longer
+/// than 32 KiB contributes only its tail to the window while DICTID names the
+/// whole.
 ///
 /// `options.level == .ratio` is not implemented: the returned writer has
 /// already failed, so every write and `finish` returns `error.WriteFailed`.
@@ -105,10 +112,15 @@ pub fn streamAll(
 
 /// Decode `stream` with the one-shot decoder and expect `want`.
 fn decodeStream(stream: []const u8, want: []const u8) !void {
+    return decodeStreamDict(stream, want, null);
+}
+
+/// `decodeStream` with a preset dictionary supplied to the decode.
+fn decodeStreamDict(stream: []const u8, want: []const u8, dict: ?[]const u8) !void {
     const target = try testing.allocator.alloc(u8, want.len + sentinel.len);
     defer testing.allocator.free(target);
     sentinel.fill(target);
-    const n = try decode.decompress(stream, target[0..want.len]);
+    const n = try decode.decompress(stream, target[0..want.len], dict);
     try testing.expectEqual(want.len, n);
     try testing.expectEqualSlices(u8, want, target[0..n]);
     try sentinel.expect(target, n);
@@ -173,7 +185,7 @@ test "Writer: the header is lazy and written before the first byte" {
 
     try w.writer.flush();
     var header: [encode.header_len]u8 = undefined;
-    encode.writeHeader(&header, .fast);
+    encode.writeHeader(&header, .fast, false);
     try testing.expectEqualSlices(u8, &header, out.written());
 
     // A write alone does not emit: it lands in the block region.
@@ -427,4 +439,92 @@ test "Writer: streamAll consumes its input exactly and writes one stream" {
     try golden.expectHeader(out.written(), .fast);
     try golden.expectTrailer(out.written(), source);
     try decodeStream(out.written(), source);
+}
+
+test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
+    // RFC 1950 §2.2 — with a dictionary the header is six bytes (CMF, FLG
+    // with FDICT, the 4-byte DICTID) and the trailer still covers the payload
+    // only. The header stays lazy: `init` writes nothing, the first flush
+    // writes all six bytes before any compressed byte.
+    const gpa = testing.allocator;
+    const dict = "she sells seashells by the seashore\n";
+    const source = "she sells seashells " ** 4;
+
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var buf: Buffer = undefined;
+    var w: Writer = .init(&out.writer, &buf, .{ .dict = dict });
+    try testing.expectEqual(@as(usize, 0), out.written().len);
+    try w.writer.flush();
+    try testing.expectEqual(
+        @as(usize, encode.header_len + encode.dict_id_len),
+        out.written().len,
+    );
+    try golden.expectDictHeader(out.written(), .fast, dict);
+
+    try w.writer.writeAll(source);
+    try w.finish();
+    try golden.expectDictHeader(out.written(), .fast, dict);
+    try golden.expectTrailer(out.written(), source);
+    try decodeStreamDict(out.written(), source, dict);
+
+    // The dictionary carried the stream: the same source without one is
+    // larger, and the stream decodes only against the dictionary's bytes.
+    var plain_out: Io.Writer.Allocating = .init(gpa);
+    defer plain_out.deinit();
+    var plain_buf: Buffer = undefined;
+    var plain_w: Writer = .init(&plain_out.writer, &plain_buf, .{});
+    try plain_w.writer.writeAll(source);
+    try plain_w.finish();
+    try testing.expect(out.written().len < plain_out.written().len);
+    try testing.expectError(
+        error.DictionaryRequired,
+        decode.decompress(out.written(), buf[0..source.len], null),
+    );
+    try testing.expectError(
+        error.DictionaryMismatch,
+        decode.decompress(out.written(), buf[0..source.len], "another dictionary"),
+    );
+
+    // An empty dictionary is no dictionary: FDICT stays clear.
+    var empty_out: Io.Writer.Allocating = .init(gpa);
+    defer empty_out.deinit();
+    var empty_buf: Buffer = undefined;
+    var empty_w: Writer = .init(&empty_out.writer, &empty_buf, .{ .dict = "" });
+    try empty_w.writer.writeAll(source);
+    try empty_w.finish();
+    try testing.expectEqualSlices(u8, plain_out.written(), empty_out.written());
+    try golden.expectHeader(empty_out.written(), .fast);
+}
+
+test "Writer: a dictionary round-trips through the streaming layer" {
+    // The writer's dictionary becomes the reader's pre-seeded window: the
+    // stream's distances reach into it, and the decoder reproduces the source
+    // with the same bytes supplied.
+    const gpa = testing.allocator;
+    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
+    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var buf: Buffer = undefined;
+    var w: Writer = .init(&out.writer, &buf, .{ .dict = dict });
+    try w.writer.writeAll(source);
+    try w.finish();
+
+    var in: Io.Reader = .fixed(out.written());
+    var target: Io.Writer.Allocating = .init(gpa);
+    defer target.deinit();
+    try testing.expectEqual(source.len, try zlib_reader.streamAll(&in, &target.writer, dict));
+    try testing.expectEqualStrings(source, target.written());
+    try testing.expectEqual(out.written().len, in.seek);
+
+    // The same stream without the dictionary: the reader cannot serve the
+    // reach.
+    var in2: Io.Reader = .fixed(out.written());
+    var sink: Io.Writer.Discarding = .init(&.{});
+    try testing.expectError(
+        error.ReadFailed,
+        zlib_reader.streamAll(&in2, &sink.writer, null),
+    );
 }

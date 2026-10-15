@@ -3,10 +3,14 @@
 //! error for every malformed stream.
 //!
 //! Matches are decoded in place into `target`, which is also the history, so a
-//! distance before the start of the output is `error.InvalidMatch` (`§3.2.3`).
-//! The streaming `Reader` shares the rest of this file: the canonical Huffman
-//! tables (`HuffmanDecoder`, the fixed tables), the dynamic-header parser, the
-//! length and distance code tables, and `copyMatch`.
+//! distance before the start of the history is `error.InvalidMatch`
+//! (`§3.2.3`): with a preset dictionary the history starts at the dictionary's
+//! first byte, and `history` is the caller's slice of it (`§3.2.3`'s "a
+//! distance can refer to that part of the output stream anyway" — the
+//! dictionary is that part, fed in before the stream). The streaming `Reader`
+//! shares the rest of this file: the canonical Huffman tables
+//! (`HuffmanDecoder`, the fixed tables), the dynamic-header parser, the length
+//! and distance code tables, and `copyMatch`.
 //!
 //! Bit order is the format's main trap (`§3.1.1`). Huffman codes are read
 //! MSB-of-code first (a code's wire bits are the low bits of its table index);
@@ -54,7 +58,8 @@ pub const DecompressError = error{
     /// tree, or a reserved symbol (length symbols 286-287, distance codes
     /// 30-31).
     InvalidCode,
-    /// A distance before the start of the output (`§3.2.3`).
+    /// A distance before the start of the history (`§3.2.3`): past the
+    /// dictionary's first byte (when one is supplied), then past the output's.
     InvalidMatch,
 };
 
@@ -77,6 +82,12 @@ const codegen_order = [19]u5{ 16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13
 /// is 258). The streaming `Reader` keeps this much room free in its window
 /// before decoding a symbol, and the encoder splits longer matches at it.
 pub const max_match_len: usize = 258;
+
+/// `§3.2.5` — the format's maximum backward match reach: distance code 29's
+/// 32768. The encoder's window is this much history followed by the block, so
+/// the cap is structural there; here it is the window a preset dictionary is
+/// cut to (a longer one contributes only its last 32 KiB).
+pub const history_len: usize = 32768;
 
 /// `§3.2.5` — length code 257-285 bases (index = code - 257). The encoder reads
 /// this and the other three code tables (encode.zig aliases them), so both
@@ -438,20 +449,37 @@ pub const fixed_distance: DistDecoder = blk: {
     break :blk decoder;
 };
 
+/// The history a preset dictionary contributes: its last `history_len` bytes.
+/// The window is 32 KiB, so a longer dictionary is cut to its tail for
+/// matching (`§3.2.3`; zlib's `deflateSetDictionary` uses the tail the same
+/// way) while its identifier still names the whole. `null` and an empty slice
+/// are both no dictionary.
+pub fn dictHistory(dict: ?[]const u8) []const u8 {
+    const bytes = dict orelse return &.{};
+    return bytes[bytes.len - @min(bytes.len, history_len) ..];
+}
+
 /// Decompress one raw deflate stream from `source` into `target` and return
 /// the decoded length. `target` is a cap, not a size hint: the stream does not
 /// record its decoded length, so size `target` from what you know about the
 /// data, or stream with `Reader`. If the output does not fit, returns
 /// `error.BufferTooSmall` before writing past `target`.
 ///
+/// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): the history
+/// in front of the output, which a distance may reach into. Raw deflate names
+/// no dictionary, so the caller vouches for the bytes; zlib's FDICT/DICTID is
+/// the checked form (RFC 1950 §2.2). A dictionary longer than 32 KiB
+/// contributes only its last 32 KiB.
+///
 /// Decoding stops at the first block with BFINAL set; bytes after it in
 /// `source` are ignored (`§3.2.3`). A malformed or truncated stream returns the
 /// matching `DecompressError`, and after any error `target` may hold a partial
 /// prefix of the output that must not be used. Allocates nothing and uses a few
 /// KiB of stack for the dynamic block's Huffman tables.
-pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
+pub fn decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize {
     var br: BitReader = .init(source);
     var out_pos: usize = 0;
+    const history = dictHistory(dict);
 
     while (true) {
         const final = (try br.take(1)) != 0;
@@ -465,12 +493,13 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
                 &out_pos,
                 &fixed_literal,
                 &fixed_distance,
+                history,
             ),
             .dynamic => {
                 var literal: LitDecoder = .{};
                 var distance: DistDecoder = .{};
                 try readDynamicHeader(BitReader, &br, &literal, &distance);
-                try decodeCompressedBlock(&br, target, &out_pos, &literal, &distance);
+                try decodeCompressedBlock(&br, target, &out_pos, &literal, &distance, history);
             },
             .reserved => return error.InvalidBlockType,
         }
@@ -518,6 +547,7 @@ fn decodeCompressedBlock(
     out_pos: *usize,
     literal: *const LitDecoder,
     distance: *const DistDecoder,
+    history: []const u8,
 ) DecompressError!void {
     while (true) {
         const symbol = try literal.decode(BitReader, br);
@@ -537,11 +567,12 @@ fn decodeCompressedBlock(
         if (dist_symbol > 29) return error.InvalidCode;
         const match_distance = try decodeDistance(BitReader, br, dist_symbol);
         // §3.2.3: "a distance cannot refer past the beginning of the output
-        // stream" — in the one-shot path `target` is the whole output.
-        if (match_distance > out_pos.*) return error.InvalidMatch;
+        // stream" — in the one-shot path the history is the dictionary
+        // followed by `target`, which is the whole output.
+        if (match_distance > out_pos.* + history.len) return error.InvalidMatch;
         if (target.len - out_pos.* < length) return error.BufferTooSmall;
 
-        copyMatch(target, out_pos.*, match_distance, length);
+        copyMatchHistory(target, out_pos.*, match_distance, length, history);
         out_pos.* += length;
     }
 }
@@ -641,7 +672,40 @@ pub fn copyMatch(target: []u8, out_pos: usize, match_distance: usize, length: us
     assert(match_distance > 0);
     assert(match_distance <= out_pos);
     assert(out_pos + length <= target.len);
+    copyMatchInner(target, out_pos, match_distance, length);
+}
 
+/// Copy `length` bytes from `match_distance` back in `target` (`§3.2.3`),
+/// where the history before `target` is `history` (the preset dictionary's
+/// last `history_len` bytes; empty when the stream has none). A match deeper
+/// than the output starts in `history` and continues at the output's start:
+/// the dictionary is conceptually in front of the output, so the byte after
+/// its last is `target[0]` (`§3.2.3`). `match_distance <= out_pos +
+/// history.len` and `out_pos + length <= target.len` are the caller's
+/// guarantees.
+pub fn copyMatchHistory(
+    target: []u8,
+    out_pos: usize,
+    match_distance: usize,
+    length: usize,
+    history: []const u8,
+) void {
+    if (match_distance <= out_pos) {
+        copyMatchInner(target, out_pos, match_distance, length);
+        return;
+    }
+    // The match's first bytes are the dictionary's last
+    // `match_distance - out_pos`, and its tail continues at the output's
+    // start, where the distance is the position reached.
+    const from_history = @min(length, match_distance - out_pos);
+    const start = history.len - (match_distance - out_pos);
+    fastmem.copy(u8, target[out_pos..][0..from_history], history[start..][0..from_history]);
+    if (from_history == length) return;
+    copyMatchInner(target, out_pos + from_history, out_pos + from_history, length - from_history);
+}
+
+/// The copy both entry points share: `match_distance <= out_pos`.
+fn copyMatchInner(target: []u8, out_pos: usize, match_distance: usize, length: usize) void {
     if (match_distance >= length) {
         const source = target[out_pos - match_distance ..][0..length];
         fastmem.copy(u8, target[out_pos..][0..length], source);
@@ -716,7 +780,7 @@ test "decompress: stored block" {
     // (u16 LE, NLEN the one's complement) and LEN raw bytes.
     const source = [_]u8{ 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
     var target: [8]u8 = undefined;
-    const n = try decompress(&source, &target);
+    const n = try decompress(&source, &target, null);
     try testing.expectEqual(@as(usize, 3), n);
     try testing.expectEqualSlices(u8, "abc", target[0..n]);
 }
@@ -726,7 +790,7 @@ test "decompress: stored block LEN 0 is legal" {
     // legal; §3.2.3's BFINAL still ends the stream.
     const source = [_]u8{ 0x01, 0x00, 0x00, 0xFF, 0xFF };
     var target: [1]u8 = undefined;
-    try testing.expectEqual(@as(usize, 0), try decompress(&source, &target));
+    try testing.expectEqual(@as(usize, 0), try decompress(&source, &target, null));
 }
 
 test "decompress: wrong stored NLEN" {
@@ -734,21 +798,21 @@ test "decompress: wrong stored NLEN" {
     // LEN". 0xFC is ~3, 0xFD is not.
     const source = [_]u8{ 0x01, 0x03, 0x00, 0xFD, 0xFF, 'a', 'b', 'c' };
     var target: [8]u8 = undefined;
-    try testing.expectError(error.WrongStoredBlockNlen, decompress(&source, &target));
+    try testing.expectError(error.WrongStoredBlockNlen, decompress(&source, &target, null));
 }
 
 test "decompress: reserved block type" {
     // Spec: rfc1951-deflate.txt §3.2.3 — BTYPE 11 is "reserved (error)".
     const source = [_]u8{0b0000_0111};
     var target: [1]u8 = undefined;
-    try testing.expectError(error.InvalidBlockType, decompress(&source, &target));
+    try testing.expectError(error.InvalidBlockType, decompress(&source, &target, null));
 }
 
 test "decompress: empty input is truncated" {
     // Spec: rfc1951-deflate.txt §3.2.3 — a stream is a sequence of blocks and
     // the last one has BFINAL=1; no input means no final block.
     var target: [1]u8 = undefined;
-    try testing.expectError(error.Truncated, decompress("", &target));
+    try testing.expectError(error.Truncated, decompress("", &target, null));
 }
 
 test "decompress: target too small for a stored block" {
@@ -756,7 +820,7 @@ test "decompress: target too small for a stored block" {
     // reported before the overflowing write.
     const source = [_]u8{ 0x01, 0x03, 0x00, 0xFC, 0xFF, 'a', 'b', 'c' };
     var target: [2]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, decompress(&source, &target));
+    try testing.expectError(error.BufferTooSmall, decompress(&source, &target, null));
 }
 
 test "decompress: truncated stored payload writes its available prefix" {
@@ -766,7 +830,7 @@ test "decompress: truncated stored payload writes its available prefix" {
     const source = [_]u8{ 0x00, 0x0C, 0x00, 0xF3, 0xFF, 'h', 'e', 'l', 'l', 'o' };
     var target: [16]u8 = undefined;
     fastmem.set(u8, &target, 0xAA);
-    try testing.expectError(error.Truncated, decompress(&source, &target));
+    try testing.expectError(error.Truncated, decompress(&source, &target, null));
     try testing.expectEqualSlices(u8, "hello", target[0..5]);
     try testing.expectEqual(@as(u8, 0xAA), target[5]);
 }
@@ -805,6 +869,53 @@ test "copyMatch: every distance and length combination" {
             try testing.expectEqualSlices(u8, want[0..end], buf[0..end]);
         }
     }
+}
+
+test "copyMatchHistory: a match deeper than the output starts in the dictionary" {
+    // `§3.2.3` — "a distance can refer to that part of the output stream
+    // anyway": with a preset dictionary the history starts at the
+    // dictionary's first byte, and the byte after its last is the output's
+    // first. The window here is ["abcd"] ["x"], and a match at distance 5
+    // from output position 1 reads the dictionary's four bytes and then the
+    // output's own start.
+    var buf: [16]u8 = undefined;
+    fastmem.set(u8, &buf, 0xAA);
+    buf[0] = 'x';
+    copyMatchHistory(&buf, 1, 5, 6, "abcd");
+    try testing.expectEqualSlices(u8, "xabcdxa", buf[0..7]);
+    try testing.expectEqual(@as(u8, 0xAA), buf[7]);
+
+    // A match that ends inside the dictionary copies only its part: distance
+    // 5 from position 1 covers the whole dictionary and one output byte.
+    var short: [8]u8 = undefined;
+    fastmem.set(u8, &short, 0xAA);
+    short[0] = 'x';
+    copyMatchHistory(&short, 1, 5, 2, "abcd");
+    try testing.expectEqualSlices(u8, "xab", short[0..3]);
+    try testing.expectEqual(@as(u8, 0xAA), short[3]);
+
+    // A match wholly inside the output is the plain copy: the history is not
+    // consulted (the sweep above pins the overlap rule).
+    var in_output: [8]u8 = undefined;
+    fastmem.set(u8, &in_output, 0xAA);
+    fastmem.copy(u8, in_output[0..2], "xy");
+    copyMatchHistory(&in_output, 2, 2, 4, "abcd");
+    try testing.expectEqualSlices(u8, "xyxyxy", in_output[0..6]);
+}
+
+test "dictHistory: the dictionary's last 32 KiB" {
+    // `§3.2.3`'s window is 32 KiB, so a longer dictionary contributes only its
+    // tail — while its identifier still names the whole (zlib's DICTID;
+    // RFC 1950 §2.2). `null` and an empty slice are both no dictionary.
+    try testing.expectEqual(@as(usize, 0), dictHistory(null).len);
+    try testing.expectEqual(@as(usize, 0), dictHistory("").len);
+    try testing.expectEqual(@as(usize, 4), dictHistory("abcd").len);
+
+    var big: [history_len + 64]u8 = undefined;
+    for (&big, 0..) |*b, i| b.* = @truncate(i);
+    const tail = dictHistory(&big);
+    try testing.expectEqual(@as(usize, history_len), tail.len);
+    try testing.expectEqualSlices(u8, big[big.len - history_len ..], tail);
 }
 
 test "checkLengths: oversubscribed and incomplete sets" {

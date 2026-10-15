@@ -360,7 +360,7 @@ fn reencodeRoundTrip(bytes: []const u8) !void {
 
     var plain: [corrupt_out_max + guard_len]u8 = undefined;
     sentinel.fill(&plain);
-    const n = try zlib.decode.decompress(stream[0..s_len], plain[0..bytes.len]);
+    const n = try zlib.decode.decompress(stream[0..s_len], plain[0..bytes.len], null);
     try testing.expectEqual(bytes.len, n);
     try testing.expectEqualSlices(u8, bytes, plain[0..n]);
     try sentinel.expect(&plain, n);
@@ -440,14 +440,14 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     // Exact cap first: a decoder that writes past the decoded length lands in
     // the guard region (the sentinel check is what proves it did not).
     sentinel.fill(&plain_buf);
-    const n = try zlib.decode.decompress(stream, plain_buf[0..source.len]);
+    const n = try zlib.decode.decompress(stream, plain_buf[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain_buf[0..n]);
     try sentinel.expect(&plain_buf, n);
 
     // Then with slack, so the bytes past the decoded length are checked too.
     sentinel.fill(&plain_buf);
-    const m = try zlib.decode.decompress(stream, &plain_buf);
+    const m = try zlib.decode.decompress(stream, &plain_buf, null);
     try testing.expectEqual(n, m);
     try testing.expectEqualSlices(u8, source, plain_buf[0..m]);
     try sentinel.expect(&plain_buf, m);
@@ -459,7 +459,7 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     fastmem.set(u8, stream_buf[s_len..][0..marker_len], marker_byte);
     const framed = stream_buf[0 .. s_len + marker_len];
     sentinel.fill(&plain_buf);
-    const f = try zlib.decode.decompress(framed, plain_buf[0..source.len]);
+    const f = try zlib.decode.decompress(framed, plain_buf[0..source.len], null);
     try testing.expectEqual(source.len, f);
     try testing.expectEqualSlices(u8, source, plain_buf[0..f]);
     try sentinel.expect(&plain_buf, f);
@@ -633,7 +633,7 @@ fn checkOneShot(mutated: []const u8, source: []const u8, meta: Mutated, cap: usi
     var window: [corrupt_out_max + guard_len]u8 = undefined;
     sentinel.fill(&window);
     const target = window[0..cap];
-    const result = zlib.decode.decompress(mutated, target);
+    const result = zlib.decode.decompress(mutated, target, null);
     switch (meta.expected) {
         .exact_source => {
             const n = try result;
@@ -682,7 +682,7 @@ fn checkReader(mutated: []const u8, source: []const u8, meta: Mutated) !void {
     var fw: Io.Writer = .fixed(&got);
     var rbuf: zlib.Reader.Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(mutated);
-    var r: zlib.Reader = .init(&fixed_in, &rbuf);
+    var r: zlib.Reader = .init(&fixed_in, &rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(corrupt_out_max));
     const served = pumped.served;
 
@@ -829,7 +829,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var framed_in: Io.Reader = .fixed(&framed);
     var plain: Io.Writer.Allocating = .init(gpa);
     defer plain.deinit();
-    const served = try zlib.Reader.streamAll(&framed_in, &plain.writer);
+    const served = try zlib.Reader.streamAll(&framed_in, &plain.writer, null);
     try testing.expectEqual(input.len, served);
     try testing.expectEqualSlices(u8, input, plain.written());
     try testing.expectEqual(stream.len, framed_in.seek);
@@ -841,7 +841,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     fastmem.set(u8, &garbage, marker_byte);
     var rbuf: zlib.Reader.Buffer = undefined;
     var garbage_in: Io.Reader = .fixed(&garbage);
-    var garbage_reader: zlib.Reader = .init(&garbage_in, &rbuf);
+    var garbage_reader: zlib.Reader = .init(&garbage_in, &rbuf, null);
     try testing.expectError(
         error.ReadFailed,
         pump(&garbage_reader.reader, &sink.writer, pumpLimit(marker_len)),
@@ -858,13 +858,13 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var two_in: Io.Reader = .fixed(two);
     var first: Io.Writer.Allocating = .init(gpa);
     defer first.deinit();
-    const first_served = try zlib.Reader.streamAll(&two_in, &first.writer);
+    const first_served = try zlib.Reader.streamAll(&two_in, &first.writer, null);
     try testing.expectEqual(input.len, first_served);
     try testing.expectEqualSlices(u8, input, first.written());
     try testing.expectEqual(stream.len, two_in.seek);
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
-    const second_served = try zlib.Reader.streamAll(&two_in, &second.writer);
+    const second_served = try zlib.Reader.streamAll(&two_in, &second.writer, null);
     try testing.expectEqual(input.len, second_served);
     try testing.expectEqualSlices(u8, input, second.written());
     try testing.expectEqual(2 * stream.len, two_in.seek);
@@ -894,7 +894,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     fastmem.copy(u8, framed[0..stream2_bytes.len], stream2_bytes);
     fastmem.set(u8, framed[stream2_bytes.len..][0..marker_len], marker_byte);
     var in2: Io.Reader = .fixed(framed[0 .. stream2_bytes.len + marker_len]);
-    var r2: zlib.Reader = .init(&in2, &rbuf);
+    var r2: zlib.Reader = .init(&in2, &rbuf, null);
     var out2: Io.Writer.Allocating = .init(gpa);
     defer out2.deinit();
     try pump(&r2.reader, &out2.writer, pumpLimit(input.len));
@@ -1017,7 +1017,7 @@ fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
     var plain: Io.Writer.Allocating = .init(gpa);
     defer plain.deinit();
     var fixed_in: Io.Reader = .fixed(stream.written());
-    const served = try zlib.Reader.streamAll(&fixed_in, &plain.writer);
+    const served = try zlib.Reader.streamAll(&fixed_in, &plain.writer, null);
     try testing.expectEqual(expect.items.len, served);
     try testing.expectEqualSlices(u8, expect.items, plain.written());
     try testing.expectEqual(stream.written().len, fixed_in.seek);
@@ -1110,7 +1110,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     } else &fixed_in;
 
     var rbuf: zlib.Reader.Buffer = undefined;
-    var r: zlib.Reader = .init(input_reader, &rbuf);
+    var r: zlib.Reader = .init(input_reader, &rbuf, null);
 
     var pos: usize = 0;
     var ops: usize = 0;
@@ -1356,7 +1356,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     var plain: Io.Writer.Allocating = .init(gpa);
     defer plain.deinit();
     var fixed_in: Io.Reader = .fixed(s);
-    const served = try zlib.Reader.streamAll(&fixed_in, &plain.writer);
+    const served = try zlib.Reader.streamAll(&fixed_in, &plain.writer, null);
     try testing.expectEqual(input.len, served);
     try testing.expectEqualSlices(u8, input, plain.written());
     try testing.expectEqual(s.len, fixed_in.seek);
@@ -1371,7 +1371,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     const bad = corrupted[0..s.len];
     var plain_buf: [checksum_max + guard_len]u8 = undefined;
     sentinel.fill(&plain_buf);
-    const result = zlib.decode.decompress(bad, plain_buf[0..input.len]);
+    const result = zlib.decode.decompress(bad, plain_buf[0..input.len], null);
     const err = if (result) |_| return error.ExpectedFailure else |e| e;
     try testing.expectEqual(error.WrongChecksum, err);
     try sentinel.expect(&plain_buf, input.len);
@@ -1379,7 +1379,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     // The reader reports the same detail, sticky.
     var rbuf: zlib.Reader.Buffer = undefined;
     var bad_in: Io.Reader = .fixed(bad);
-    var r: zlib.Reader = .init(&bad_in, &rbuf);
+    var r: zlib.Reader = .init(&bad_in, &rbuf, null);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectError(error.ReadFailed, pump(&r.reader, &sink.writer, pumpLimit(input.len)));
     try testing.expectEqual(zlib.Reader.Error.WrongChecksum, r.err.?);
@@ -1469,7 +1469,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
         limited = .init(&fixed_in, .unlimited, chunk_buf[0..rangeAtMost(smith, 3, chunk_buf.len)]);
         break :blk &limited.interface;
     } else &fixed_in;
-    var r: flate.Reader = .init(input_reader, &rbuf);
+    var r: flate.Reader = .init(input_reader, &rbuf, null);
     var decode_fold: Fold = .{};
     r.checksum = decode_fold.hook();
     try pump(&r.reader, &plain.writer, pumpLimit(input.len));
@@ -1552,7 +1552,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
             sentinel.fill(&window);
             try testing.expectError(
                 error.BufferTooSmall,
-                zlib.decode.decompress(stream, window[0..cap]),
+                zlib.decode.decompress(stream, window[0..cap], null),
             );
             try sentinel.expect(&window, cap);
         }
@@ -1560,14 +1560,14 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
 
     // At the decoded length: exact, and the guard region is the caller's.
     sentinel.fill(&window);
-    const n = try zlib.decode.decompress(stream, window[0..source.len]);
+    const n = try zlib.decode.decompress(stream, window[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, window[0..n]);
     try sentinel.expect(&window, n);
 
     // Above it: the same, with the whole window as the cap.
     sentinel.fill(&window);
-    const m = try zlib.decode.decompress(stream, &window);
+    const m = try zlib.decode.decompress(stream, &window, null);
     try testing.expectEqual(source.len, m);
     try testing.expectEqualSlices(u8, source, window[0..m]);
     try sentinel.expect(&window, m);
@@ -1589,14 +1589,14 @@ test "zlib fuzz: hostile-header pins" {
     const empty_stream = "\x78\x9c\x03\x00\x00\x00\x00\x01";
 
     // A zero-byte input is error.Truncated: no stream began.
-    try testing.expectError(error.Truncated, zlib.decode.decompress("", &.{}));
+    try testing.expectError(error.Truncated, zlib.decode.decompress("", &.{}, null));
 
     // Every truncation (header, body, trailer) is error.Truncated.
     var i: usize = 0;
     while (i < empty_stream.len) : (i += 1) {
         try testing.expectError(
             error.Truncated,
-            zlib.decode.decompress(empty_stream[0..i], &.{}),
+            zlib.decode.decompress(empty_stream[0..i], &.{}, null),
         );
     }
 
@@ -1605,43 +1605,196 @@ test "zlib fuzz: hostile-header pins" {
     // Bad FCHECK (Go's golden 78 9f): BadHeader (§2.3).
     fastmem.copy(u8, &buf, empty_stream);
     buf[1] = 0x9f;
-    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}, null));
 
     // Bad CINFO (Go's golden 88 98: CM=8, CINFO=8): BadHeader (§2.2).
     buf[0] = 0x88;
     buf[1] = 0x98;
-    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}, null));
 
     // A CM other than 8 with a conformant FCHECK (09 15): BadHeader (§2.3).
     buf[0] = 0x09;
     buf[1] = 0x15;
-    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}, null));
 
     // FDICT set with a conformant FCHECK (78 bb): DictionaryRequired, before
     // any body byte, never a silent DICTID skip (§2.3).
     buf[0] = 0x78;
     buf[1] = 0xbb;
-    try testing.expectError(error.DictionaryRequired, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.DictionaryRequired, zlib.decode.decompress(&buf, &.{}, null));
 
     // The FCHECK = 31 corner: 0x78 0x3f (C zlib's and Go's FDICT + FLEVEL-0
     // emission) is conformant (31 == 0 mod 31) and must land on
     // DictionaryRequired, never BadHeader.
     buf[1] = 0x3f;
-    try testing.expectError(error.DictionaryRequired, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.DictionaryRequired, zlib.decode.decompress(&buf, &.{}, null));
 
     // A conformant FLEVEL band with a matching FCHECK (78 5e, FLEVEL 1) and a
     // CINFO-0 header (08 1d): both decode the empty body. FLEVEL is
     // informational and CINFO <= 7 is legal (§2.2, §2.3).
     buf[0] = 0x78;
     buf[1] = 0x5e;
-    try testing.expectEqual(@as(usize, 0), try zlib.decode.decompress(&buf, &.{}));
+    try testing.expectEqual(@as(usize, 0), try zlib.decode.decompress(&buf, &.{}, null));
     buf[0] = 0x08;
     buf[1] = 0x1d;
-    try testing.expectEqual(@as(usize, 0), try zlib.decode.decompress(&buf, &.{}));
+    try testing.expectEqual(@as(usize, 0), try zlib.decode.decompress(&buf, &.{}, null));
 
     // FLEVEL is ignored but FCHECK still guards the pair: a lone FCHECK flip
     // (0x9c -> 0x9e) breaks the arithmetic and is BadHeader.
     buf[0] = 0x78;
     buf[1] = 0x9e;
-    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}));
+    try testing.expectError(error.BadHeader, zlib.decode.decompress(&buf, &.{}, null));
+}
+
+// ---------------------------------------------------------------------------
+// Target: the preset dictionary (RFC 1950 §2.2 FDICT + DICTID)
+// ---------------------------------------------------------------------------
+
+/// The dictionary target's source cap: small enough that every iteration
+/// builds and decodes a stream, large enough that the dictionary's tail is
+/// matchable and a truncation is a real slice.
+const dict_source_max: usize = 4096;
+
+/// Seeds for the dictionary target: text whose prefix is its own dictionary
+/// (so the encoder's matches reach into it), plus the empty and one-byte
+/// sources, whose streams carry no dictionary at all.
+const dict_corpus: []const []const u8 = &.{
+    "",
+    "a",
+    "she sells seashells by the seashore\n",
+    "the quick brown fox jumps over the lazy dog. " ** 40,
+};
+
+test "zlib fuzz: dictionary matrix" {
+    try testing.fuzz({}, fuzzDictionaryMatrix, .{ .corpus = dict_corpus });
+}
+
+/// One iteration of the dictionary target. The stream is built against the
+/// source's own prefix (a dictionary whose tail the source repeats), then one
+/// Smith-chosen case runs. Every class is computed from the bytes — the FDICT
+/// flag, DICTID, and the supplied dictionary's Adler-32 — never assumed: a
+/// mutation can land on a conformant header, on a matching DICTID, or on a
+/// decodable body.
+///
+/// `§2.2`: FDICT set means the dictionary must be supplied and its Adler-32
+/// must be the header's DICTID (the check is before any body byte); FDICT
+/// clear means a supplied dictionary is unused. A dictionary whose Adler-32
+/// matches but whose bytes differ still decodes — the format cannot tell —
+/// and the substituted bytes reach the output, which the trailer check
+/// rejects unless they are the source's own.
+fn fuzzDictionaryMatrix(_: void, smith: *Smith) anyerror!void {
+    var source_buf: [dict_source_max]u8 = undefined;
+    smith.bytes(&source_buf);
+    const source = source_buf[0..rangeAtMost(smith, 0, dict_source_max)];
+    const dict = source[0..rangeAtMost(smith, 0, source.len)];
+
+    var stream: [zlib.encode.maxCompressedLength(dict_source_max)]u8 = undefined;
+    const len = try zlib.encode.compress(source, &stream, .{ .dict = dict });
+    // FDICT is set exactly when the dictionary is non-empty (`§2.2`; the C's
+    // PRESET_DICT gate).
+    try testing.expectEqual(dict.len > 0, stream[1] & 0x20 != 0);
+
+    switch (smith.value(DictOp)) {
+        .right => try expectDictCase(stream[0..len], source, dict),
+        .none => try expectDictCase(stream[0..len], source, null),
+        .truncated => {
+            const cut = rangeAtMost(smith, 0, dict.len);
+            try expectDictCase(stream[0..len], source, dict[0..cut]);
+        },
+        .flipped => {
+            if (dict.len == 0) {
+                try expectDictCase(stream[0..len], source, null);
+                return;
+            }
+            const at = rangeAtMost(smith, 0, dict.len - 1);
+            var supplied: [dict_source_max]u8 = undefined;
+            fastmem.copy(u8, supplied[0..dict.len], dict);
+            supplied[at] ^= flipValue(smith);
+            try expectDictCase(stream[0..len], source, supplied[0..dict.len]);
+        },
+        .poke_dict_id => {
+            // A Smith-chosen DICTID, so the right dictionary becomes the wrong
+            // one (and `expectDictCase` still computes the class, in case the
+            // value happens to be the dictionary's Adler-32).
+            if (dict.len == 0) {
+                try expectDictCase(stream[0..len], source, null);
+                return;
+            }
+            var mutated: [zlib.encode.maxCompressedLength(dict_source_max)]u8 = undefined;
+            fastmem.copy(u8, mutated[0..len], stream[0..len]);
+            const id = smith.value(u32);
+            mutated[header_len] = @truncate(id >> 24);
+            mutated[header_len + 1] = @truncate(id >> 16);
+            mutated[header_len + 2] = @truncate(id >> 8);
+            mutated[header_len + 3] = @truncate(id);
+            try expectDictCase(mutated[0..len], source, dict);
+        },
+        .flip_body => {
+            if (len <= header_len + trailer_len) return;
+            var mutated: [zlib.encode.maxCompressedLength(dict_source_max)]u8 = undefined;
+            fastmem.copy(u8, mutated[0..len], stream[0..len]);
+            const at = rangeAtMost(smith, header_len, len - trailer_len - 1);
+            mutated[at] ^= flipValue(smith);
+            try expectDictCase(mutated[0..len], source, dict);
+        },
+    }
+}
+
+/// The dictionary target's cases. Each is a legal call shape, not a mutation
+/// class: `right`, `none`, and `truncated` are the matrix's rows, `flipped`
+/// and `poke_dict_id` attack the DICTID compare, and `flip_body` attacks the
+/// body under a supplied dictionary.
+const DictOp = enum(u8) {
+    right,
+    none,
+    truncated,
+    flipped,
+    poke_dict_id,
+    flip_body,
+};
+
+/// One dictionary decode, with the outcome computed from the stream and the
+/// supplied bytes. `source` is what a decode with the encoder's own dictionary
+/// must produce. Every decode is sentinel-checked; the header-class failures
+/// write nothing (the check precedes the body).
+fn expectDictCase(stream: []const u8, source: []const u8, supplied: ?[]const u8) !void {
+    assert(stream.len >= header_len + trailer_len);
+    const fdict = stream[1] & 0x20 != 0;
+    const dict_id = if (fdict) readInt(u32, stream[header_len..][0..4]) else 0;
+
+    var window: [dict_source_max + guard_len]u8 = undefined;
+    sentinel.fill(&window);
+    const target = window[0..source.len];
+    const result = zlib.decode.decompress(stream, target, supplied);
+
+    if (fdict) {
+        const dict = supplied orelse {
+            try testing.expectError(error.DictionaryRequired, result);
+            try sentinel.expect(&window, 0);
+            return;
+        };
+        if (dictionaryAdler32(dict) != dict_id) {
+            try testing.expectError(error.DictionaryMismatch, result);
+            try sentinel.expect(&window, 0);
+            return;
+        }
+    }
+    const n = result catch |err| switch (err) {
+        // The header check is settled above: past it, a failure is the
+        // body's or the trailer's, and the mutation's business.
+        error.DictionaryRequired,
+        error.DictionaryMismatch,
+        => return error.UnexpectedDictionaryError,
+        else => return,
+    };
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, target[0..n]);
+    try sentinel.expect(&window, n);
+}
+
+/// The dictionary's Adler-32, through the module's own kernel.
+const adler32 = @import("adler32.zig").adler32;
+
+fn dictionaryAdler32(bytes: []const u8) u32 {
+    return adler32(1, bytes);
 }

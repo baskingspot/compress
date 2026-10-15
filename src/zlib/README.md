@@ -106,19 +106,22 @@ zlib.Reader.streamAll(in: *Io.Reader, out: *Io.Writer, dict: ?[]const u8)
 ```
 
 The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
-`writeTrailer`, and the `header_len` and `trailer_len` constants, and
-`decode.checkHeader`, `checkTrailer`, `flg_fdict`, and `readExact`.
+`writeDictId`, `writeTrailer`, and the `header_len`, `dict_id_len`, and
+`trailer_len` constants, and `decode.checkHeader`, `checkDictionary`,
+`checkTrailer`, `flg_fdict`, and `readExact`.
 
 ## Behavior
 
 - **Buffers.** The caller owns every buffer. Nothing is allocated, freed, or
   retained, and no function takes an allocator. Do not move or copy a `Reader`
   or `Writer` after its first read or write.
-- **Sizing.** `maxCompressedLength(n)` is `n + 5 * ceil(n / 65535) + 8`. A
-  smaller target can still be enough for data that compresses well; if it is too
-  small, `compress` returns `error.BufferTooSmall` and the target's contents are
-  unspecified. `decompress` treats `target` as a cap: a stream that decodes to
-  more returns `error.BufferTooSmall`. Neither writes past `target`.
+- **Sizing.** `maxCompressedLength(n)` is `n + 5 * ceil(n / 65535) + 12`: the
+  2-byte header, the 4-byte DICTID (reserved whether or not a dictionary is
+  used), the 4-byte trailer, and flate's body bound. A smaller target can still
+  be enough for data that compresses well; if it is too small, `compress`
+  returns `error.BufferTooSmall` and the target's contents are unspecified.
+  `decompress` treats `target` as a cap: a stream that decodes to more returns
+  `error.BufferTooSmall`. Neither writes past `target`.
 - **Dictionaries.** The preset dictionary is raw caller bytes, both
   directions (§2.2). On encode it is fed to the compressor before any output
   (the window's oldest bytes) and named by the header's DICTID; on decode it
@@ -130,7 +133,9 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   clear the stream names no dictionary and a supplied `dict` is unused; with
   FDICT set and `dict` null the decode fails `DictionaryRequired` before any
   body byte, and a dictionary whose Adler-32 is not DICTID fails
-  `DictionaryMismatch`.
+  `DictionaryMismatch`. An empty slice is no dictionary on encode — the header
+  carries no DICTID and FDICT stays clear — so `null` and `""` encode alike;
+  on decode an empty dictionary is simply one whose Adler-32 cannot match.
 - **Corrupt input.** Decoding returns an error at the first invalid byte:
   `Truncated` (the input ends early, empty input included), `BadHeader` (CM is
   not 8, CINFO is above 7, or `CMF*256 + FLG` is not a multiple of 31),
@@ -161,9 +166,12 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   `Reader.Buffer` 64 KiB; heap-allocate them on a small stack.
 - **Output.** The encoder is deterministic: CMF is always `0x78` (deflate,
   32 KiB window), FLEVEL follows the level (`encode.flgFor`), and FDICT is set
-  exactly when `options.dict` is, with DICTID the Adler-32 of the whole
-  dictionary (most-significant byte first); otherwise FDICT is never set. The
-  default header is `78 9c`; the empty stream is `78 9c 03 00 00 00 00 01`.
+  exactly when a non-empty `options.dict` is, with DICTID the Adler-32 of the
+  whole dictionary (most-significant byte first); otherwise FDICT is never set.
+  The default header is `78 9c`; with a dictionary it is `78 bb` plus the
+  4-byte DICTID at the default level (FLEVEL 0 gives `78 20`, the minimal
+  FCHECK; C zlib's naive arithmetic writes `78 3f` there, and both are
+  conformant). The empty stream is `78 9c 03 00 00 00 00 01`.
 
 ## Limitations
 

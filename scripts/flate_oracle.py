@@ -42,6 +42,11 @@ def our_decompress(raw: bytes, cap: int) -> bytes:
     return common.harness_output(harness, "decode", raw, str(cap))
 
 
+def our_decompress_dict(raw: bytes, cap: int, zdict: bytes) -> bytes:
+    """Our decoder with a preset dictionary (`§3.2.3`)."""
+    return common.harness_output_dict(harness, "decode", raw, zdict, str(cap))
+
+
 def our_decompress_fails(raw: bytes, cap: int) -> bool:
     return common.run_harness(harness, "decode", raw, str(cap)).returncode != 0
 
@@ -52,9 +57,26 @@ def our_compress(data: bytes) -> bytes:
     return common.harness_output(harness, "encode", data)
 
 
+def our_compress_dict(data: bytes, zdict: bytes) -> bytes:
+    """Our encoder against a preset dictionary."""
+    return common.harness_output_dict(harness, "encode", data, zdict)
+
+
 def python_decompress(raw: bytes) -> bytes:
     do = zlib.decompressobj(-15)
     return do.decompress(raw) + do.flush()
+
+
+def python_decompress_dict(raw: bytes, zdict: bytes) -> bytes:
+    do = zlib.decompressobj(-15, zdict)
+    return do.decompress(raw) + do.flush()
+
+
+def python_compress_dict(data: bytes, zdict: bytes, level: int = 6) -> bytes:
+    co = zlib.compressobj(
+        level, zlib.DEFLATED, -15, zlib.DEF_MEM_LEVEL, zlib.Z_DEFAULT_STRATEGY, zdict
+    )
+    return co.compress(data) + co.flush()
 
 
 def check(desc: str, data: bytes, cap: int) -> None:
@@ -136,8 +158,49 @@ for desc, data in streaming:
     assert back == data, f"example round trip ({desc}): {len(back)} bytes, want {len(data)}"
 
 fixture_inputs = len(list(testdata.glob("*.in"))) + len(shapes)
+
+# 5. The preset dictionary (`§3.2.3`): raw deflate names no dictionary, so the
+#    caller vouches for the bytes on both sides — this lane is round-trip
+#    conformance, not byte parity. Our streams against a dictionary decode in
+#    the oracle with the same zdict; the oracle's dictionary-compressed
+#    streams decode here. A stream whose match reaches into the dictionary is
+#    `InvalidMatch` without it.
+#
+#    The large dictionary pins the 32-KiB window rule: only its tail is
+#    matchable, and a source that repeats that tail is one long match.
+dict_shapes = {
+    "text dictionary": (b"the quick brown fox jumps over the lazy dog. " * 8)[:300],
+    "large dictionary (40 KiB)": bytes(range(256)) * 160,
+}
+dict_rows = 0
+for ddesc, zdict in dict_shapes.items():
+    sources = dict(shapes)
+    sources["dictionary tail"] = zdict[-64:]
+    for desc, data in sources.items():
+        ours = our_compress_dict(data, zdict)
+        assert python_decompress_dict(ours, zdict) == data, (
+            f"our encode -> zdict decode ({desc}, {ddesc})"
+        )
+        ref = python_compress_dict(data, zdict)
+        assert python_decompress_dict(ref, zdict) == data, (
+            f"oracle zdict round trip ({desc}, {ddesc})"
+        )
+        got = our_decompress_dict(ref, len(data) + 1, zdict)
+        assert got == data, f"oracle zdict encode -> our decode ({desc}, {ddesc})"
+        if desc == "dictionary tail":
+            # The match reaches into the dictionary: without it the distance
+            # is past the history.
+            assert our_decompress_fails(ref, len(data) + 1), (
+                f"{ddesc}: decode without the dictionary"
+            )
+            assert our_decompress_fails(ours, len(data) + 1), (
+                f"{ddesc}: our stream without the dictionary"
+            )
+        dict_rows += 1
+
 print(
     "flate-oracle: "
     f"{pairs} fixture pairs + {fixture_inputs} inputs x {len(raw_shapes)} raw-deflate shapes, "
-    f"both directions, + {len(streaming)} streaming rows through the CLI: OK"
+    f"both directions, + {len(streaming)} streaming rows through the CLI "
+    f"+ {dict_rows} dictionary rows x {len(dict_shapes)} dictionaries, both directions: OK"
 )

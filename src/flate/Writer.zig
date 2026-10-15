@@ -68,7 +68,8 @@ options: encode.Options,
 /// emitted block and nothing per byte. This module writes no trailer.
 checksum: ?Checksum = null,
 /// The caller's buffer in full: `buffer[0..block_start]` is the retained
-/// history, `buffer[block_start..]` the accumulating block. The embedded
+/// history (a preset dictionary's tail first, then earlier blocks' bytes),
+/// `buffer[block_start..]` the accumulating block. The embedded
 /// `Io.Writer`'s own `buffer`/`end` are the block region alone.
 buffer: *Buffer,
 /// The match-finder table, persistent across the stream's blocks
@@ -79,7 +80,8 @@ buffer: *Buffer,
 table: ?encode.FinderTable = null,
 /// The absolute stream position of `buffer[0]` (wrapping u32, matching the
 /// table entries): `compact` advances it by the bytes it drops from the
-/// window's front.
+/// window's front. A preset dictionary's first byte is position 0, so the
+/// first output byte is at its length.
 window_base: u32 = 0,
 /// Where the buffered block begins — the history length, since the history
 /// is exactly the bytes before the block.
@@ -100,6 +102,12 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// afterwards is not supported. Write through `&w.writer`, then call
 /// `finish`.
 ///
+/// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`): its
+/// last 32 KiB are copied into `buffer`'s front as the window's oldest bytes,
+/// so the finder may match into them and a distance may reach them. Raw
+/// deflate names no dictionary, so the caller vouches for the bytes; zlib's
+/// FDICT/DICTID is the checked form (RFC 1950 §2.2).
+///
 /// `options.level == .ratio` is not implemented: the returned writer is
 /// poisoned, so every write and `finish` returns `error.WriteFailed`.
 ///
@@ -118,15 +126,21 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
             .options = options,
         };
     }
+    // A preset dictionary is the window's oldest bytes: its tail fills the
+    // history region in front of the block region, exactly where earlier
+    // blocks' bytes sit once the stream has written them (`§3.2.3`).
+    const history = decode.dictHistory(options.dict);
+    fastmem.copy(u8, buffer[0..history.len], history);
     return .{
         .writer = .{
-            .buffer = buffer[0..max_block_size],
+            .buffer = buffer[history.len..][0..max_block_size],
             .end = 0,
             .vtable = &Hooks.vtable,
         },
         .output = output,
         .buffer = buffer,
         .options = options,
+        .block_start = history.len,
     };
 }
 
@@ -382,7 +396,7 @@ test "Writer: flush mid-stream emits the partial block and stays usable" {
     const target = try gpa.alloc(u8, 64);
     defer gpa.free(target);
     sentinel.fill(target);
-    const n = try decode.decompress(out.written(), target);
+    const n = try decode.decompress(out.written(), target, null);
     try testing.expectEqualStrings("hello, flate", target[0..n]);
     try sentinel.expect(target, n);
 }
@@ -413,7 +427,7 @@ test "Writer: writableSliceGreedy on a full block emits, never drops" {
     const target = try gpa.alloc(u8, 2 * max_block_size + 1000 + sentinel.len);
     defer gpa.free(target);
     sentinel.fill(target);
-    const n = try decode.decompress(out.written(), target);
+    const n = try decode.decompress(out.written(), target, null);
     try testing.expectEqual(2 * max_block_size + 1000, n);
     try testing.expectEqual(@as(u8, 'a'), target[0]);
     try testing.expectEqual(@as(u8, 'b'), target[max_block_size]);
@@ -469,7 +483,7 @@ test "Writer: a stream crossing the 4-GiB window-base wrap round-trips" {
 
         var rbuf: flate_reader.Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(out.written());
-        var r = flate_reader.init(&fixed_in, &rbuf);
+        var r = flate_reader.init(&fixed_in, &rbuf, null);
         const got = try r.reader.allocRemaining(gpa, .unlimited);
         defer gpa.free(got);
         try testing.expect(got.len > 0);
@@ -501,7 +515,7 @@ test "Writer: the stored-only level emits stored blocks through the stream" {
 
     var d_buf: [input_len + 1]u8 = undefined;
     sentinel.fill(&d_buf);
-    const n = try decode.decompress(out.written(), d_buf[0..input_len]);
+    const n = try decode.decompress(out.written(), d_buf[0..input_len], null);
     try testing.expectEqualSlices(u8, input, d_buf[0..n]);
     try sentinel.expect(&d_buf, n);
 }
@@ -618,7 +632,7 @@ test "Writer: random write machinery sequences stay correct" {
         const target = try gpa.alloc(u8, expect.items.len + sentinel.len);
         defer gpa.free(target);
         sentinel.fill(target);
-        const n = try decode.decompress(out.written(), target);
+        const n = try decode.decompress(out.written(), target, null);
         try testing.expectEqual(expect.items.len, n);
         try testing.expectEqualSlices(u8, expect.items, target[0..n]);
         try sentinel.expect(target, n);
@@ -744,7 +758,7 @@ test "Writer: the checksum hook folds every emitted byte exactly once, in order"
         const target = try gpa.alloc(u8, expect.items.len + sentinel.len);
         defer gpa.free(target);
         sentinel.fill(target);
-        const n = try decode.decompress(out.written(), target);
+        const n = try decode.decompress(out.written(), target, null);
         try testing.expectEqual(expect.items.len, n);
         try testing.expectEqualSlices(u8, expect.items, target[0..n]);
         try sentinel.expect(target, n);
@@ -848,4 +862,64 @@ pub fn streamAll(
     // block and the closing empty block.
     try ww.finish();
     return n;
+}
+
+test "Writer: a preset dictionary is the window's oldest bytes" {
+    // `§3.2.3` — the writer copies the dictionary's tail into the buffer's
+    // front and starts the block region after it, so the finder matches into
+    // the dictionary exactly as it matches into an earlier block. The
+    // interface's serving region is the block region, after the dictionary.
+    const gpa = testing.allocator;
+    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
+    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var buf: Buffer = undefined;
+    var w: Writer = .init(&out.writer, &buf, .{ .dict = dict });
+    try testing.expectEqual(@as(usize, max_block_size), w.writer.buffer.len);
+    try testing.expectEqual(@intFromPtr(&buf[dict.len]), @intFromPtr(w.writer.buffer.ptr));
+    try testing.expectEqual(@as(usize, dict.len), w.block_start);
+
+    try w.writer.writeAll(source);
+    try w.finish();
+
+    const target = try gpa.alloc(u8, source.len + sentinel.len);
+    defer gpa.free(target);
+    try golden.checkDecodeDict(target, out.written(), dict, source);
+    try golden.expectFinalEmptyBlock(out.written());
+
+    // The stream references the dictionary: without it the reach is past the
+    // history.
+    sentinel.fill(target);
+    try testing.expectError(
+        error.InvalidMatch,
+        decode.decompress(out.written(), target, null),
+    );
+
+    // The one-shot encoder emits the same bytes for the same input: the
+    // dictionary is the window's oldest bytes either way.
+    const comp = try gpa.alloc(u8, encode.maxCompressedLength(source.len));
+    defer gpa.free(comp);
+    const clen = try encode.compress(source, comp, .{ .dict = dict });
+    try testing.expectEqualSlices(u8, comp[0..clen], out.written());
+
+    // An empty dictionary is no dictionary: the same bytes as `.{}`, and the
+    // block region starts at the buffer's front.
+    var plain: Io.Writer.Allocating = .init(gpa);
+    defer plain.deinit();
+    var buf2: Buffer = undefined;
+    var w2: Writer = .init(&plain.writer, &buf2, .{ .dict = "" });
+    try testing.expectEqual(@as(usize, 0), w2.block_start);
+    try testing.expectEqual(@intFromPtr(&buf2[0]), @intFromPtr(w2.writer.buffer.ptr));
+    try w2.writer.writeAll(source);
+    try w2.finish();
+
+    var plainest: Io.Writer.Allocating = .init(gpa);
+    defer plainest.deinit();
+    var buf3: Buffer = undefined;
+    var w3: Writer = .init(&plainest.writer, &buf3, .{});
+    try w3.writer.writeAll(source);
+    try w3.finish();
+    try testing.expectEqualSlices(u8, plainest.written(), plain.written());
 }

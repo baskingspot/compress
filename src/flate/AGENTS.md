@@ -33,12 +33,20 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   gives up history, which is the full 32 KiB once that much has been emitted.
   `rebase` emits all buffered input except the last `preserve` bytes and never
   discards any.
-- Preset dictionaries are designed in the M7 sketch (OQ6 retired): the decode's
-  history region gains a caller-owned prefix (`dict: ?[]const u8` on
-  `decode.decompress`, `Reader.init`, and `Reader.streamAll`), and the encoder
-  pre-fills its table from the dictionary (`encode.Options.dict`; the density
-  is the measured choice — the C inserts every position at every level, Go's
-  level-1 skips the pre-hash — `dictionary-notes.md §4`, DQ6/DT7). The caller
+- Preset dictionaries (OQ6 retired): the decode's history gains a caller-owned
+  prefix (`dict: ?[]const u8` on `decode.decompress`, `Reader.init`, and
+  `Reader.streamAll`), and the encoder primes its table from the dictionary
+  (`encode.Options.dict`; the density is the measured choice — the C inserts
+  every position at every level, Go's level-1 skips the pre-hash — landed as
+  the C's stride-1 shape, `dictionary-notes.md §4`, DQ6/DT7). The two window
+  shapes follow the buffer's owner: the streaming `Reader` copies the
+  dictionary's tail into its window's front (`total_out` starts at its
+  length, so the reach check counts it) and the streaming `Writer` copies it
+  into its buffer's front (`block_start` starts there), while the one-shot
+  paths keep it as a second region — `encode.Window(preset)` for the finder
+  and `decode.copyMatchHistory` for the match copy. Both shapes treat the
+  dictionary as conceptually in front of the output, so a match that starts
+  in it and crosses its end continues at the output's start. The caller
   vouches for the bytes on both sides: raw flate carries no identifier; zlib's
   FDICT/DICTID is the checked form and drives this seam through
   `framing.initReader`.
@@ -60,9 +68,10 @@ touching one.
 - A contiguous read the window cannot hold is `error.ReadFailed` with
   `err == .StreamTooLong`, never an assert.
 - The preset-history parameter. `decode.decompress`, `Reader.init`, and
-  `Reader.streamAll` take `dict: ?[]const u8`; zlib's `framing.zig` threads
-  its own through, and gzip has no dictionary concept. Run the flate and zlib
-  oracles after touching the two-region history.
+  `Reader.streamAll` take `dict: ?[]const u8`, and `encode.Options` carries it
+  for both encoders; zlib's `framing.zig` threads its own through, and gzip
+  has no dictionary concept. Run the flate and zlib oracles after touching
+  either history shape (the pre-seeded window and the two-region one).
 
 ### Checksum hook
 
@@ -125,11 +134,15 @@ suites.
 python3's `zlib` (raw, `wbits=-15`) as the independent implementation. Both
 directions run over the committed fixtures and generated shapes: our encoder
 into zlib's decoder, and zlib's streams (stored, `Z_HUFFMAN_ONLY`, levels 1, 6,
-9) into our decoder. The streaming rows pump `examples/flate.zig`: zlib decodes
-the streaming Writer's output and the streaming Reader round-trips it. Run it
-after any change to bit packing, block emission, or the streaming layer: a bug
-both sides share passes `just test` and fails here (T1). The incantations are
-flate-notes §4.3. `just gzip-oracle` and `just zlib-oracle` cover the
+9) into our decoder. The preset-dictionary rows are the same both-directions
+rule against a `zdict=` reference (`compressobj(..., -15, ..., zdict=)` and
+`decompressobj(-15, zdict)`), with a text dictionary and a 40-KiB one whose
+tail is the matchable window; the harness takes an optional dictionary file
+after its own arguments. The streaming rows pump `examples/flate.zig`: zlib
+decodes the streaming Writer's output and the streaming Reader round-trips it.
+Run it after any change to bit packing, block emission, or the streaming layer:
+a bug both sides share passes `just test` and fails here (T1). The incantations
+are flate-notes §4.3. `just gzip-oracle` and `just zlib-oracle` cover the
 containers.
 
 ## Performance notes

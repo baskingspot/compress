@@ -296,7 +296,9 @@ const Hooks = container.DecodeHooks(framing, Reader);
 /// Allocates nothing. The stack holds the decoder's 64 KiB window and about
 /// 4 KiB of reader state.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
-    return Hooks.decompress(source, target);
+    // gzip has no dictionary concept (RFC 1952 §2.3.1): the driver's
+    // dictionary seat is always null here.
+    return Hooks.decompress(source, target, null);
 }
 
 // ---------------------------------------------------------------------------

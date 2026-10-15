@@ -13,7 +13,9 @@
 //! The window keeps the last 32 KiB of output as match history (`§3.2.3`), so
 //! a contiguous request (`peek`, `take`) is guaranteed only up to 32 KiB. A
 //! larger one that does not fit at the consumer's position returns
-//! `error.ReadFailed` with `err == .StreamTooLong`.
+//! `error.ReadFailed` with `err == .StreamTooLong`. A preset dictionary
+//! (`init`'s `dict`) is copied into the window in front of the output and
+//! counts as history until the output slides it out.
 //!
 //! Format: docs/research/specs/rfc1951-deflate.txt
 
@@ -56,7 +58,9 @@ const max_peek_bits: u6 = 16;
 
 /// The caller-provided decode window, 2 * `history_len` = 64 KiB. The last
 /// `history_len` bytes are the match history (`§3.2.3`) and the rest is fresh
-/// output. The reader keeps no other buffer of decoded or compressed bytes.
+/// output; a preset dictionary is copied into the window's front before the
+/// first read, so it is history too. The reader keeps no other buffer of
+/// decoded or compressed bytes.
 pub const Buffer = [2 * history_len]u8;
 
 /// The cause recorded in `Reader.err` beside the interface's coarse
@@ -197,11 +201,12 @@ reader: Io.Reader,
 bits: Bits,
 /// Optional checksum hook, handed the decoded bytes as they enter the window
 /// (literal stores, match copies, stored-block copies), each exactly once and
-/// in stream order. A container sets it before the first read: a hook set
-/// mid-stream sees only the bytes decoded after it. The container reads its
-/// own state after `error.EndOfStream`; after `error.ReadFailed` the digest
-/// is incomplete. Null costs one check per window fill and nothing per byte.
-/// This module writes no trailer.
+/// in stream order. A preset dictionary's bytes are not decoded output and
+/// are never handed to it. A container sets it before the first read: a hook
+/// set mid-stream sees only the bytes decoded after it. The container reads
+/// its own state after `error.EndOfStream`; after `error.ReadFailed` the
+/// digest is incomplete. Null costs one check per window fill and nothing per
+/// byte. This module writes no trailer.
 checksum: ?Checksum = null,
 phase: Phase = .block_header,
 /// `§3.2.3` — "a distance cannot refer past the beginning of the output
@@ -231,6 +236,13 @@ const vtable = VTable(Reader, fill, rebase).vtable;
 /// decode window. Read the decoded bytes through `&r.reader` (`stream`, the
 /// `read` and `peek` families).
 ///
+/// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): its last
+/// 32 KiB are copied into the window in front of the output, so a distance may
+/// reach into them until the output pushes them out of the 32-KiB window. Raw
+/// deflate names no dictionary, so the caller vouches for the bytes; zlib's
+/// FDICT/DICTID is the checked form (RFC 1950 §2.2). A dictionary longer than
+/// 32 KiB contributes only its last 32 KiB.
+///
 /// The stream ends with `error.EndOfStream` once the final block's output has
 /// been consumed. A malformed stream or a failing `input` returns
 /// `error.ReadFailed`, with the cause in `err`. Both outcomes are sticky: later
@@ -240,15 +252,21 @@ const vtable = VTable(Reader, fill, rebase).vtable;
 /// block's LEN or NLEN) can start up to 7 bits into a byte, so it spans 3
 /// bytes. An `Io.Reader.fixed` over a shorter slice is fine, since it already
 /// holds the whole stream.
-pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
+pub fn init(input: *Io.Reader, buffer: *Buffer, dict: ?[]const u8) Reader {
+    const history = decode.dictHistory(dict);
+    fastmem.copy(u8, buffer[0..history.len], history);
     return .{
         .reader = .{
             .buffer = buffer,
-            .seek = 0,
-            .end = 0,
+            .seek = history.len,
+            .end = history.len,
             .vtable = &vtable,
         },
         .bits = .{ .input = input },
+        // The dictionary is decoded history for the reach check (`§3.2.3`):
+        // a distance may reach into it before the output has produced
+        // anything, and the window slides it out naturally.
+        .total_out = history.len,
     };
 }
 
@@ -522,7 +540,7 @@ fn roundTrip(source: []const u8) !void {
     sentinel.fill(target);
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     const n = try decodeInto(&r.reader, target);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, target[0..n]);
@@ -550,7 +568,7 @@ fn roundTripWithChecksum(source: []const u8) !void {
     sentinel.fill(target);
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     var digest: golden.TestChecksum = .{};
     r.checksum = digest.hook();
     const n = try decodeInto(&r.reader, target);
@@ -677,7 +695,7 @@ test "Reader: golden golang/go vectors through the streaming reader" {
                 sentinel.fill(target);
                 var rbuf: Buffer = undefined;
                 var fixed_in: Io.Reader = .fixed(tc.source);
-                var r: Reader = .init(&fixed_in, &rbuf);
+                var r: Reader = .init(&fixed_in, &rbuf, null);
                 const n = decodeInto(&r.reader, target) catch |err| {
                     print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
                     return err;
@@ -695,7 +713,7 @@ test "Reader: golden golang/go vectors through the streaming reader" {
             else => {
                 var rbuf: Buffer = undefined;
                 var fixed_in: Io.Reader = .fixed(tc.source);
-                var r: Reader = .init(&fixed_in, &rbuf);
+                var r: Reader = .init(&fixed_in, &rbuf, null);
                 var out: Io.Writer.Allocating = .init(gpa);
                 defer out.deinit();
                 try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -728,7 +746,7 @@ test "Reader: truncated streams fail and stay failed" {
     for (golden.truncated_cases) |tc| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(tc.source);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -743,7 +761,7 @@ test "Reader: truncated streams fail and stay failed" {
     while (len < full.len) : (len += 1) {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(full[0..len]);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -759,7 +777,7 @@ test "Reader: golang/go huffman-* fixtures decode through the stream" {
     for (golden.huffman_fixtures) |fixture| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(fixture.golden);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -775,7 +793,7 @@ test "Reader: golang/go huffman-* fixtures decode through the stream" {
         sentinel.fill(target);
         var rbuf2: Buffer = undefined;
         var fixed_in2: Io.Reader = .fixed(completed);
-        var r2: Reader = .init(&fixed_in2, &rbuf2);
+        var r2: Reader = .init(&fixed_in2, &rbuf2, null);
         const n = decodeInto(&r2.reader, target) catch |err| {
             print("\nFAIL: {s}: {s}\n", .{ fixture.name, @errorName(err) });
             return err;
@@ -810,7 +828,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
 
         var fixed_in: Io.Reader = .fixed(buffer);
         var rbuf: Buffer = undefined;
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         const out = try r.reader.allocRemaining(gpa, .unlimited);
         defer gpa.free(out);
         try testing.expectEqualStrings(source, out);
@@ -840,7 +858,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
     var inner: Io.Reader = .fixed(buffer);
     var chunked: Io.Reader.Limited = .init(&inner, .unlimited, &small);
     var rbuf: Buffer = undefined;
-    var r: Reader = .init(&chunked.interface, &rbuf);
+    var r: Reader = .init(&chunked.interface, &rbuf, null);
     const out = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(out);
     try testing.expectEqualSlices(u8, source, out);
@@ -862,7 +880,7 @@ test "Reader: a 32-KiB peek is served at any position" {
 
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     // At the start: the request needs the whole window behind it.
     try testing.expectEqualSlices(u8, source[0..history_len], try r.reader.peek(history_len));
     try r.reader.discardAll(60_000);
@@ -898,7 +916,7 @@ test "Reader: a request past the window fails with StreamTooLong" {
 
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     _ = try r.reader.peek(history_len);
     try r.reader.discardAll(60_000);
     try testing.expectError(error.ReadFailed, r.reader.peek(40_000));
@@ -932,7 +950,7 @@ test "Reader: a consumer scanning for a delimiter past the window fails" {
 
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     // `takeDelimiterExclusive` leaves the delimiter buffered; the consumer
     // steps over it.
     try testing.expectEqualStrings("a" ** 99, try r.reader.takeDelimiterExclusive('\n'));
@@ -956,7 +974,7 @@ test "Reader: a zero-length stream poll does not fail the stream" {
 
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(out.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     _ = try r.reader.peek(1);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectEqual(@as(usize, 0), try r.reader.stream(&sink.writer, .limited(0)));
@@ -980,7 +998,7 @@ test "Reader: a stream ends cleanly and stickily" {
 
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     const out = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(out);
     try testing.expectEqualStrings(source, out);
@@ -1020,7 +1038,7 @@ test "Reader: random consumer machinery sequences stay correct" {
 
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(out.written());
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var pos: usize = 0;
         while (pos < input.len) {
             const left = input.len - pos;
@@ -1099,7 +1117,7 @@ test "Reader: a corrupt stream fails and stays failed" {
     for (cases) |tc| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(tc.source);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -1112,13 +1130,127 @@ test "Reader: a corrupt stream fails and stays failed" {
 /// Decode the raw deflate stream in `in` into `out` and return the number of
 /// bytes written. `in` is consumed exactly through the stream's last byte (the
 /// final partial byte included); bytes after the stream are left unread.
+/// `dict` is the stream's preset dictionary or `null` (`§3.2.3`); see
+/// `Reader.init`.
 ///
 /// Returns `error.ReadFailed` for a malformed stream or a failing `in`, and
 /// `error.WriteFailed` when `out` fails. The cause of a decode failure is not
 /// reported; use `Reader` directly to read `err`. Allocates nothing: the
 /// `Reader` and its 64-KiB window are locals on the caller's stack.
-pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
+pub fn streamAll(
+    in: *Io.Reader,
+    out: *Io.Writer,
+    dict: ?[]const u8,
+) Io.Reader.StreamRemainingError!usize {
     var buf: Buffer = undefined;
-    var rr: Reader = .init(in, &buf);
+    var rr: Reader = .init(in, &buf, dict);
     return rr.reader.streamRemaining(out);
+}
+
+test "Reader: a preset dictionary pre-seeds the window" {
+    // `§3.2.3` — the dictionary's tail is the window's front, so a match may
+    // reach into it until the output pushes it out of the 32-KiB window. The
+    // dictionary's bytes are not decoded output: the checksum hook never sees
+    // them.
+    const gpa = testing.allocator;
+    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
+    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var wbuf: Writer.Buffer = undefined;
+    var w: Writer = .init(&out.writer, &wbuf, .{ .dict = dict });
+    try w.writer.writeAll(source);
+    try w.finish();
+
+    const target = try gpa.alloc(u8, source.len + sentinel.len);
+    defer gpa.free(target);
+    sentinel.fill(target);
+    var rbuf: Buffer = undefined;
+    var fixed_in: Io.Reader = .fixed(out.written());
+    var r: Reader = .init(&fixed_in, &rbuf, dict);
+    var digest: golden.TestChecksum = .{};
+    r.checksum = digest.hook();
+    const n = try decodeInto(&r.reader, target);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, target[0..n]);
+    try sentinel.expect(target, n);
+    try testing.expectEqual(out.written().len, fixed_in.seek);
+    try testing.expectEqual(golden.TestChecksum.fold(source), digest.value);
+    try testing.expectEqual(@as(?Error, null), r.err);
+
+    // The serving guarantee survives the pre-seeded window: a 32-KiB
+    // contiguous request is served at any position, the dictionary's bytes
+    // included in the retained history. The source is long enough to slide
+    // the window past the dictionary.
+    const long = try gpa.alloc(u8, 100_000);
+    defer gpa.free(long);
+    for (long, 0..) |*b, i| b.* = @truncate(i / 7);
+    var long_out: Io.Writer.Allocating = .init(gpa);
+    defer long_out.deinit();
+    var long_wbuf: Writer.Buffer = undefined;
+    var long_w: Writer = .init(&long_out.writer, &long_wbuf, .{ .dict = dict });
+    try long_w.writer.writeAll(long);
+    try long_w.finish();
+    var long_rbuf: Buffer = undefined;
+    var long_in: Io.Reader = .fixed(long_out.written());
+    var long_r: Reader = .init(&long_in, &long_rbuf, dict);
+    try testing.expectEqualSlices(u8, long[0..history_len], try long_r.reader.peek(history_len));
+    try long_r.reader.discardAll(60_000);
+    try testing.expectEqualSlices(
+        u8,
+        long[60_000..][0..history_len],
+        try long_r.reader.peek(history_len),
+    );
+    try testing.expectEqual(@as(?Error, null), long_r.err);
+}
+
+test "Reader: a dictionary stream without its dictionary is InvalidMatch" {
+    // The golden fixtures are python3's zlib streams against a preset
+    // dictionary. A reader with no dictionary (or a shorter one) cannot serve
+    // the distance: the failure is flate's `InvalidMatch`, the window's own
+    // name for a reach past the history.
+    const gpa = testing.allocator;
+    const target = try gpa.alloc(u8, golden.dict_straddle_plain.len + sentinel.len);
+    defer gpa.free(target);
+
+    const cases = [_]struct { stream: []const u8, dict: ?[]const u8 }{
+        .{ .stream = &golden.dict_stream, .dict = null },
+        .{ .stream = &golden.dict_stream, .dict = "abc" },
+        .{ .stream = &golden.dict_straddle_stream, .dict = null },
+        .{ .stream = &golden.dict_straddle_stream, .dict = "abc" },
+    };
+    for (cases) |tc| {
+        var rbuf: Buffer = undefined;
+        var fixed_in: Io.Reader = .fixed(tc.stream);
+        var r: Reader = .init(&fixed_in, &rbuf, tc.dict);
+        var sink: Io.Writer.Discarding = .init(&.{});
+        try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
+        try testing.expectEqual(Error.InvalidMatch, r.err.?);
+    }
+
+    // With the right dictionary the same streams decode, one byte at a time:
+    // the pre-seeded window is contiguous with the output, so the straddling
+    // match's continuation reads the output's own start.
+    for ([_]struct { stream: []const u8, dict: []const u8, want: []const u8 }{
+        .{
+            .stream = &golden.dict_stream,
+            .dict = golden.dict_stream_dict,
+            .want = golden.dict_stream_plain,
+        },
+        .{
+            .stream = &golden.dict_straddle_stream,
+            .dict = golden.dict_straddle_dict,
+            .want = golden.dict_straddle_plain,
+        },
+    }) |tc| {
+        var rbuf: Buffer = undefined;
+        var fixed_in: Io.Reader = .fixed(tc.stream);
+        var r: Reader = .init(&fixed_in, &rbuf, tc.dict);
+        sentinel.fill(target);
+        const n = try decodeInto(&r.reader, target);
+        try testing.expectEqual(tc.want.len, n);
+        try testing.expectEqualSlices(u8, tc.want, target[0..n]);
+        try sentinel.expect(target, n);
+    }
 }

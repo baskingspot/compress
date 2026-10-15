@@ -9,7 +9,10 @@
 //! confirm, an accelerating skip, backward extension into the preceding
 //! literals, minimum match 4, and a 32768-byte distance cap (`§3.2.5`). Its
 //! window is a block's 32 KiB of history followed by the block, so matches
-//! cross block boundaries as the format allows (`§3.2.3`).
+//! cross block boundaries as the format allows (`§3.2.3`). A preset
+//! dictionary (`Options.dict`) is history in front of that window: the finder
+//! is primed from the dictionary's tail and may emit distances that reach
+//! into it.
 //!
 //! The streaming `Writer` is built on `BitWriter`, `compressBlockStream`,
 //! `emitStoredBlock`, and `writeFinalEmptyBlock`, which are public for it.
@@ -39,10 +42,10 @@ const golden = @import("golden.zig");
 /// `Writer` emits blocks at it.
 pub const max_block_size: usize = 65535;
 
-/// The format's maximum backward match reach: 32768 (`§3.2.5`). The finder's
-/// window is this much history followed by the block, so the cap is
-/// structural.
-pub const history_len: usize = 32768;
+/// The format's maximum backward match reach: 32768 (`§3.2.5`, the canonical
+/// constant in decode.zig with the distance tables). The finder's window is
+/// this much history followed by the block, so the cap is structural.
+pub const history_len = decode.history_len;
 
 /// Worst-case compressed size for `input_len` bytes:
 /// `input_len + 5 * ceil(input_len / max_block_size) + 2`. Every block costs at
@@ -89,6 +92,150 @@ inline fn load64(source: []const u8, pos: usize) u64 {
 /// 4 bytes of `source` at `pos`, little-endian — the match confirm.
 inline fn load32(source: []const u8, pos: usize) u32 {
     return readInt(u32, source[pos..][0..4]);
+}
+
+/// The finder's window (`§3.2.3`): the preset dictionary's tail followed by
+/// the stream's own bytes, one conceptual region — the byte after the
+/// dictionary's last is `source[0]`, so a match may start in the dictionary
+/// and continue at the output's start. Positions are window positions: the
+/// dictionary occupies `[0, dict.len)` and `source[i]` sits at `dict.len + i`.
+///
+/// `preset` is comptime because a stream without a dictionary is the common
+/// case: `Window(false)` is `source` alone, and its accessors compile to the
+/// same loads as a bare `source` (no branch on `dict.len` in the finder's hot
+/// loops).
+fn Window(comptime preset: bool) type {
+    return struct {
+        const Self = @This();
+
+        /// The dictionary's last `history_len` bytes (`dictHistory`); empty
+        /// when the stream has no preset dictionary.
+        dict: []const u8,
+        /// The stream's own bytes, the window's tail.
+        source: []const u8,
+
+        /// The window position of `source[index]`.
+        inline fn at(self: Self, index: usize) usize {
+            return if (preset) self.dict.len + index else index;
+        }
+
+        /// The byte at window position `pos`.
+        inline fn byte(self: Self, pos: usize) u8 {
+            if (preset and pos < self.dict.len) return self.dict[pos];
+            return self.source[if (preset) pos - self.dict.len else pos];
+        }
+
+        /// The 4 bytes at window position `pos` (`§3.2.5`'s match confirm).
+        /// Only a dictionary position can straddle the two regions, and then
+        /// by at most 3 bytes.
+        inline fn load32At(self: Self, pos: usize) u32 {
+            if (preset and pos < self.dict.len) {
+                if (pos + 4 <= self.dict.len) return load32(self.dict, pos);
+                var bytes: [4]u8 = undefined;
+                for (&bytes, 0..) |*byte_at, i| byte_at.* = self.byte(pos + i);
+                return readInt(u32, &bytes);
+            }
+            return load32(self.source, if (preset) pos - self.dict.len else pos);
+        }
+
+        /// The 8 bytes at window position `pos`, little-endian: the match
+        /// length's compare unit. `pos + 8` is inside the window (the
+        /// callers' bounds hold), so the straddle is at most 7 bytes.
+        inline fn load64At(self: Self, pos: usize) u64 {
+            if (preset and pos < self.dict.len) {
+                if (pos + 8 <= self.dict.len) return load64(self.dict, pos);
+                var bytes: [8]u8 = undefined;
+                for (&bytes, 0..) |*byte_at, i| byte_at.* = self.byte(pos + i);
+                return readInt(u64, &bytes);
+            }
+            return load64(self.source, if (preset) pos - self.dict.len else pos);
+        }
+
+        /// The number of bytes `a..` and `b..` match, up to `limit` — all
+        /// window positions. `b` is always in `source` (the scan runs there);
+        /// `a` may start in the dictionary and cross into the source, where
+        /// the dictionary's continuation is the source's start (the
+        /// dictionary is conceptually in front of the output). Compares 8
+        /// bytes at a time and uses `@ctz` on the first differing u64 to find
+        /// the exact mismatch byte. The caller guarantees `a < b` and that
+        /// `b < limit <= dict.len + source.len` (the 8-byte loop bounds `b`,
+        /// and `a` trails it).
+        fn matchLength(self: Self, a: usize, b: usize, limit: usize) usize {
+            assert(a < b);
+            var p = a;
+            var q = b;
+            while (q + 8 <= limit) {
+                const diff = self.load64At(p) ^
+                    load64(self.source, if (preset) q - self.dict.len else q);
+                if (diff != 0) return p - a + (@ctz(diff) >> 3);
+                p += 8;
+                q += 8;
+            }
+            while (q < limit) : ({
+                p += 1;
+                q += 1;
+            }) {
+                if (self.byte(p) != self.source[if (preset) q - self.dict.len else q]) {
+                    return p - a;
+                }
+            }
+            return p - a;
+        }
+
+        /// The candidate's window position when the table entry names a legal
+        /// match source with the 4 bytes at `s_at`, or null. Entries are
+        /// absolute stream positions (wrapping u32, `base`-relative to the
+        /// window's first byte; the caller passes `s_absolute = base +% s_at`).
+        /// A legal source sits before `s` (a distance of at least 1), within
+        /// `history_len` (`§3.2.5`), and not before the window's front. The
+        /// wrapping subtraction makes a stale entry — one the window slid
+        /// past, or a zero-initialized slot — fail the distance cap; a
+        /// wrapped-around entry (a stream past 4 GiB) still lands in-window,
+        /// where the 4-byte confirm decides. Either way no candidate outside
+        /// the window is ever emitted.
+        inline fn matchCandidate(
+            self: Self,
+            s_at: usize,
+            s_absolute: u32,
+            entry: u32,
+            expect: u32,
+            comptime windowed: bool,
+        ) ?usize {
+            const distance = s_absolute -% entry;
+            // One unsigned check rejects both 0 (wrapping to max) and every
+            // distance past the cap (`§3.2.5`).
+            if (distance -% 1 >= history_len) return null;
+            // A windowed caller (the streaming Writer) drops bytes from the
+            // front, so an entry can name a position no longer in `source`;
+            // the one-shot paths never drop, and every entry is a position
+            // the scan already passed.
+            if (windowed and distance > s_at) return null;
+            const candidate = s_at - distance;
+            if (self.load32At(candidate) != expect) return null; // the confirm
+            return candidate;
+        }
+
+        /// Hash the window's `[window_start, block_start)` into `table`, every
+        /// `stride` positions, so a match may reach across the block boundary
+        /// (`§3.2.3`). Entries are absolute stream positions (`base` is the
+        /// absolute position of the window's first byte), matching the scan's
+        /// stores. The 8-byte load reads a few bytes past the hashed 5, so the
+        /// loop stops where that load would leave the window.
+        fn primeTable(
+            self: Self,
+            window_start: usize,
+            block_start: usize,
+            table: *FinderTable,
+            base: u32,
+            comptime stride: usize,
+        ) void {
+            var pos = window_start;
+            const len = if (preset) self.dict.len + self.source.len else self.source.len;
+            while (pos < block_start and pos + 8 <= len) : (pos += stride) {
+                table[hash5(self.load64At(pos))] = base +% @as(u32, @truncate(pos));
+            }
+        }
+    };
 }
 
 /// Minimum match length the finder emits: a 3-byte match costs a length symbol
@@ -301,59 +448,6 @@ pub const BitWriter = struct {
     }
 };
 
-/// The candidate's index in `source` when the table entry is a legal match
-/// source with the 4 bytes at `s_index`, or null. Entries are absolute
-/// stream positions (wrapping u32, `base`-relative to `source[0]`; the
-/// caller passes `s_absolute = base +% s_index`). A legal source sits before
-/// `s` (a distance of at least 1), within `history_len` (`§3.2.5`), and not
-/// before the window's front. The wrapping subtraction makes a stale entry
-/// — one the window slid past, or a zero-initialized slot — fail the
-/// distance cap; a wrapped-around entry (a stream past 4 GiB) still lands
-/// in-window, where the 4-byte confirm decides. Either way no candidate
-/// outside the window is ever emitted.
-inline fn matchCandidate(
-    source: []const u8,
-    s_index: usize,
-    s_absolute: u32,
-    entry: u32,
-    expect: u32,
-    comptime windowed: bool,
-) ?usize {
-    const distance = s_absolute -% entry;
-    // One unsigned check rejects both 0 (wrapping to max) and every distance
-    // past the cap (`§3.2.5`).
-    if (distance -% 1 >= history_len) return null;
-    // A windowed caller (the streaming Writer) drops bytes from the front, so
-    // an entry can name a position no longer in `source`; the one-shot paths
-    // never drop, and every entry is a position the scan already passed.
-    if (windowed and distance > s_index) return null;
-    const candidate = s_index - distance;
-    if (load32(source, candidate) != expect) return null; // the 4-byte confirm
-    return candidate;
-}
-
-/// Number of bytes of `source[a..]` and `source[b..]` that match, up to
-/// `limit`. Compares 8 bytes at a time and uses `@ctz` on the first differing
-/// u64 to find the exact mismatch byte. The caller guarantees `a < b` and that
-/// neither read runs past `limit` (the 8-byte loop bounds `b`).
-fn matchLength(source: []const u8, a: usize, b: usize, limit: usize) usize {
-    var p = a;
-    var q = b;
-    while (q + 8 <= limit) {
-        const diff = load64(source, p) ^ load64(source, q);
-        if (diff != 0) return p - a + (@ctz(diff) >> 3);
-        p += 8;
-        q += 8;
-    }
-    while (q < limit) : ({
-        p += 1;
-        q += 1;
-    }) {
-        if (source[p] != source[q]) return p - a;
-    }
-    return p - a;
-}
-
 /// Emit `literal` as fixed-Huffman literal codes. Returns false when the
 /// payload would reach the stored form's payload (`§3.2.4`'s 32 + 8 x len
 /// bits), at which point the caller stores the block instead.
@@ -437,25 +531,6 @@ pub fn emitStoredBlock(w: *BitWriter, block: []const u8) error{BufferTooSmall}!v
     w.pos += block.len;
 }
 
-/// Hash the block's history into the table, every `stride` positions, so a
-/// match may reach across the block boundary (`§3.2.3`). Entries are
-/// absolute stream positions (`base` is the stream position of `source[0]`),
-/// matching the scan's stores. The 8-byte load reads a few bytes past the
-/// hashed 5, so the loop stops where that load would leave `source`.
-fn primeTable(
-    source: []const u8,
-    window_start: usize,
-    block_start: usize,
-    table: *FinderTable,
-    base: u32,
-    comptime stride: usize,
-) void {
-    var pos = window_start;
-    while (pos < block_start and pos + 8 <= source.len) : (pos += stride) {
-        table[hash5(load64(source, pos))] = base +% @as(u32, @truncate(pos));
-    }
-}
-
 /// Encode one block's payload as fixed-Huffman symbols, greedily. Returns
 /// false when the payload reached the stored form's payload (`§3.2.4`'s
 /// 32 + 8 x len bits); the caller rewinds and stores the block.
@@ -465,12 +540,18 @@ fn primeTable(
 /// scanned and forwards to the block's end, and accelerate the skip as the
 /// distance since the last emit grows.
 ///
-/// `table` is the caller's (see `FinderTable`): the streaming `Writer` and the
-/// one-shot `compress` persist one table across the stream's blocks, so the
-/// per-block cost is the history prime alone, never a 128-KiB re-zero. `base`
-/// is the absolute stream position of `source[0]`.
+/// `window` is the finder's window (`Window`): this block's history followed
+/// by the block itself, so matches cross block boundaries exactly as the
+/// format allows (`§3.2.3`) — and, with a preset dictionary, reach into the
+/// dictionary in front of it. `block_start` and `block_end` are `source`
+/// indices; the scan converts to window positions. `table` is the caller's
+/// (see `FinderTable`): the streaming `Writer` and the one-shot `compress`
+/// persist one table across the stream's blocks, so the per-block cost is the
+/// history prime alone, never a 128-KiB re-zero. `base` is the absolute
+/// stream position of the window's first byte.
 fn encodeFixedBlock(
-    source: []const u8,
+    comptime preset: bool,
+    window: Window(preset),
     block_start: usize,
     block_end: usize,
     w: *BitWriter,
@@ -487,29 +568,29 @@ fn encodeFixedBlock(
     const payload_limit: u64 = @as(u64, block_len) * 8 + 32;
     var payload: u64 = fixed_literal_codes[256].len;
 
-    // The finder's window: this block's history followed by the block itself,
-    // so matches cross block boundaries exactly as the format allows
-    // (`§3.2.3`). A block too small to scan needs no priming either: its
-    // bytes are all literals, and its own history range is primed afresh by
-    // the next scanning block.
-    const window_start = block_start - @min(block_start, history_len);
+    // The finder's window: the block's history followed by the block itself.
+    // A block too small to scan needs no priming either: its bytes are all
+    // literals, and its own history range is primed afresh by the next
+    // scanning block.
+    const window_start = window.at(block_start) - @min(window.at(block_start), history_len);
 
     var next_emit = block_start;
     var s = block_start;
     if (block_len >= min_match_block_size) {
         if (prime_stride != 0) {
-            primeTable(source, window_start, block_start, table, base, prime_stride);
+            window.primeTable(window_start, window.at(block_start), table, base, prime_stride);
         }
         // Stop scanning this far from the end so the 8-byte loads and the
         // 3-position cascade stay in bounds; the tail becomes literals.
         const s_limit = block_end - input_margin;
-        var cv = load64(source, s);
+        var cv = load64(window.source, s);
 
         scan: while (true) {
             var candidate: usize = 0;
             // Inner scan: three hash slots per step until a 4-byte confirm.
             inner: while (true) {
-                const s_absolute = base +% @as(u32, @truncate(s));
+                const s_at = window.at(s);
+                const s_absolute = base +% @as(u32, @truncate(s_at));
                 const h0 = hash5(cv);
                 const h1 = hash5(cv >> 8);
                 const h2 = hash5(cv >> 16);
@@ -520,13 +601,12 @@ fn encodeFixedBlock(
                 const e2 = table[h2];
                 table[h2] = s_absolute +% 2;
 
-                if (matchCandidate(source, s, s_absolute, e0, @truncate(cv), windowed)) |c| {
+                if (window.matchCandidate(s_at, s_absolute, e0, @truncate(cv), windowed)) |c| {
                     candidate = c;
                     break :inner;
                 }
-                const hit1 = matchCandidate(
-                    source,
-                    s + 1,
+                const hit1 = window.matchCandidate(
+                    window.at(s + 1),
                     s_absolute +% 1,
                     e1,
                     @truncate(cv >> 8),
@@ -537,9 +617,8 @@ fn encodeFixedBlock(
                     s += 1;
                     break :inner;
                 }
-                const hit2 = matchCandidate(
-                    source,
-                    s + 2,
+                const hit2 = window.matchCandidate(
+                    window.at(s + 2),
                     s_absolute +% 2,
                     e2,
                     @truncate(cv >> 16),
@@ -555,38 +634,56 @@ fn encodeFixedBlock(
                 // the last emit, so incompressible regions are crossed fast.
                 const next_s = s + 3 + ((s - next_emit) >> 5);
                 if (next_s > s_limit) break :scan;
-                cv = load64(source, next_s);
+                cv = load64(window.source, next_s);
                 s = next_s;
             }
 
             // Backward extension: the match may start before the hash hit,
             // over the literals already scanned, shrinking the literal run.
+            // The candidate may sit in the dictionary, where the byte before
+            // it is the dictionary's.
             while (s > next_emit and candidate > window_start and
-                source[candidate - 1] == source[s - 1])
+                window.byte(candidate - 1) == window.source[s - 1])
             {
                 s -= 1;
                 candidate -= 1;
             }
 
-            if (!try emitLiterals(source[next_emit..s], w, &payload, payload_limit)) return false;
+            if (!try emitLiterals(window.source[next_emit..s], w, &payload, payload_limit)) {
+                return false;
+            }
 
             // The match, extended greedily to the block's end: a match may
             // never run past it, or the next block would emit the same bytes
-            // again.
+            // again. A candidate in the dictionary extends through its tail
+            // and then at the output's start, exactly as the decoder's copy
+            // does.
             const length = min_match_len +
-                matchLength(source, candidate + min_match_len, s + min_match_len, block_end);
-            if (!try emitMatch(w, s - candidate, length, &payload, payload_limit)) return false;
+                window.matchLength(
+                    candidate + min_match_len,
+                    window.at(s) + min_match_len,
+                    window.at(block_end),
+                );
+            if (!try emitMatch(
+                w,
+                window.at(s) - candidate,
+                length,
+                &payload,
+                payload_limit,
+            )) return false;
             s += length;
             next_emit = s;
 
             if (s > s_limit) break :scan;
-            cv = load64(source, s);
+            cv = load64(window.source, s);
         }
     }
 
     // The trailing bytes (and, for a block below the match-finding threshold,
     // the whole block) are literals.
-    if (!try emitLiterals(source[next_emit..block_end], w, &payload, payload_limit)) return false;
+    if (!try emitLiterals(window.source[next_emit..block_end], w, &payload, payload_limit)) {
+        return false;
+    }
 
     // §3.2.7 — every block is terminated by the end-of-block symbol 256.
     try w.writeCode(fixed_literal_codes[256]);
@@ -618,7 +715,8 @@ pub fn compressBlockStream(
     base: u32,
 ) error{BufferTooSmall}!void {
     try compressBlockStateful(
-        source,
+        false,
+        .{ .dict = &.{}, .source = source },
         block_start,
         block_end,
         w,
@@ -631,11 +729,13 @@ pub fn compressBlockStream(
 
 /// The block-at-a-time encode over a caller-managed finder table: the shared
 /// entry behind the one-shot `compress` and the streaming `Writer`
-/// (`compressBlockStream`). `base` is the absolute stream position of
-/// `source[0]`; entries older than the window fail the distance cap, so the
-/// table needs no clearing between blocks.
+/// (`compressBlockStream`). `window` is the finder's window (`Window`), with
+/// the block at `source[block_start..block_end]`; `base` is the absolute
+/// stream position of the window's first byte; entries older than the window
+/// fail the distance cap, so the table needs no clearing between blocks.
 fn compressBlockStateful(
-    source: []const u8,
+    comptime preset: bool,
+    window: Window(preset),
     block_start: usize,
     block_end: usize,
     w: *BitWriter,
@@ -653,7 +753,8 @@ fn compressBlockStateful(
     try w.writeBits(1, 2);
 
     if (!try encodeFixedBlock(
-        source,
+        preset,
+        window,
         block_start,
         block_end,
         w,
@@ -666,7 +767,7 @@ fn compressBlockStateful(
         // bits and store it. Storing fits wherever the fixed attempt did —
         // `maxCompressedLength` reserves 5 bytes per block plus the ending.
         w.restore(start);
-        try emitStoredBlock(w, source[block_start..block_end]);
+        try emitStoredBlock(w, window.source[block_start..block_end]);
     }
 }
 
@@ -698,12 +799,22 @@ pub const Level = enum {
 /// Encoder configuration. `.{}` is the default: the fast level.
 pub const Options = struct {
     level: Level = .fast,
+    /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
+    /// of the stream, which the finder's table is primed from and a match may
+    /// reach into. Raw deflate names no dictionary, so the caller vouches for
+    /// the bytes on both sides; zlib's FDICT/DICTID is the checked form
+    /// (RFC 1950 §2.2). A dictionary longer than 32 KiB contributes only its
+    /// last 32 KiB.
+    dict: ?[]const u8 = null,
 };
 
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
 /// always suffices; a smaller one may return `error.BufferTooSmall`, leaving
 /// `target` partly written. `error.Unimplemented` for `.ratio`.
+///
+/// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`); see
+/// `Options`.
 ///
 /// The stream ends with an empty final block (BFINAL, `§3.2.3`), and every data
 /// block is fixed Huffman or stored. The same input and options always produce
@@ -715,14 +826,39 @@ pub fn compress(
     options: Options,
 ) error{ BufferTooSmall, Unimplemented }!usize {
     if (options.level == .ratio) return error.Unimplemented;
-    const stored_only = options.level == .@"0";
+    // A preset dictionary is a second region in front of `source` (the caller
+    // owns the source bytes, so they cannot be prepended to). The streaming
+    // `Writer` owns a buffer and puts its dictionary inside it instead; both
+    // reach the same finder through `Window`.
+    if (options.dict != null) {
+        const window: Window(true) = .{
+            .dict = decode.dictHistory(options.dict),
+            .source = source,
+        };
+        return compressBlocks(true, window, source, target, options);
+    }
+    const window: Window(false) = .{ .dict = &.{}, .source = source };
+    return compressBlocks(false, window, source, target, options);
+}
 
+/// The one-shot block loop, shared by both window shapes: split `source` at
+/// `max_block_size` (`§3.2.4`'s stored LEN cap, so any block can fall back to
+/// stored), emit each block, and end the stream with the final empty block.
+fn compressBlocks(
+    comptime preset: bool,
+    window: Window(preset),
+    source: []const u8,
+    target: []u8,
+    options: Options,
+) error{ BufferTooSmall, Unimplemented }!usize {
+    const stored_only = options.level == .@"0";
     var w: BitWriter = .{ .target = target };
 
     // One finder table for the whole stream, zeroed once (`FinderTable`):
-    // entries are absolute source positions, so the per-block cost is the
-    // strided history prime alone. `fastmem.set` rather than `@splat`: a splat
-    // lowers to the scalar compiler-rt memset on aarch64.
+    // entries are absolute stream positions (the dictionary's bytes are the
+    // window's first ones), so the per-block cost is the strided history
+    // prime alone. `fastmem.set` rather than `@splat`: a splat lowers to the
+    // scalar compiler-rt memset on aarch64.
     var table: FinderTable = undefined;
     fastmem.set(u32, &table, 0);
 
@@ -733,7 +869,8 @@ pub fn compress(
             try emitStoredBlock(&w, source[block_start..block_end]);
         } else {
             try compressBlockStateful(
-                source,
+                preset,
+                window,
                 block_start,
                 block_end,
                 &w,
@@ -788,7 +925,7 @@ test "compress: options — every implemented level round-trips" {
 
     for ([_]Level{ .fast, .@"0", .@"1", .@"5", .@"9" }) |level| {
         const n = try compress(input, &comp, .{ .level = level });
-        const dn = try decode.decompress(comp[0..n], &decoded);
+        const dn = try decode.decompress(comp[0..n], &decoded, null);
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
     }
 
@@ -807,7 +944,7 @@ test "compress: the stored-only level emits stored blocks" {
     // shares one ending with every level.
     try testing.expectEqual(@as(usize, 20), n);
     var decoded: [16]u8 = undefined;
-    const dn = try decode.decompress(comp[0..n], &decoded);
+    const dn = try decode.decompress(comp[0..n], &decoded, null);
     try testing.expectEqualSlices(u8, "hello, flate!", decoded[0..dn]);
 }
 
@@ -823,10 +960,10 @@ test "matchCandidate: the position edge cases of the absolute-entry arithmetic" 
     const s_index: usize = 40_000;
     const s_absolute: u32 = 40_000;
     const e = load32(src, s_index);
+    const window: Window(false) = .{ .dict = &.{}, .source = src };
 
     // Distance 0 (entry == s): rejected.
-    try testing.expectEqual(@as(?usize, null), matchCandidate(
-        src,
+    try testing.expectEqual(@as(?usize, null), window.matchCandidate(
         s_index,
         s_absolute,
         s_absolute,
@@ -836,11 +973,10 @@ test "matchCandidate: the position edge cases of the absolute-entry arithmetic" 
     // Exactly history_len: accepted.
     try testing.expectEqual(
         @as(?usize, s_index - history_len),
-        matchCandidate(src, s_index, s_absolute, s_absolute - history_len, e, false),
+        window.matchCandidate(s_index, s_absolute, s_absolute - history_len, e, false),
     );
     // history_len + 1: rejected.
-    try testing.expectEqual(@as(?usize, null), matchCandidate(
-        src,
+    try testing.expectEqual(@as(?usize, null), window.matchCandidate(
         s_index,
         s_absolute,
         s_absolute - history_len - 1,
@@ -850,22 +986,22 @@ test "matchCandidate: the position edge cases of the absolute-entry arithmetic" 
     // A wrapped-around entry: distance 16 lands in-window.
     try testing.expectEqual(
         @as(?usize, s_index - 16),
-        matchCandidate(src, s_index, 5, math.maxInt(u32) - 10, e, false),
+        window.matchCandidate(s_index, 5, math.maxInt(u32) - 10, e, false),
     );
     // An entry ahead of `s` (wraps to a huge distance): rejected.
     try testing.expectEqual(
         @as(?usize, null),
-        matchCandidate(src, s_index, 100, 101, e, false),
+        window.matchCandidate(s_index, 100, 101, e, false),
     );
     // Windowed: a distance past the source front (into dropped history) is
     // rejected; equal to the front names position 0.
     try testing.expectEqual(
         @as(?usize, null),
-        matchCandidate(src, 10, 50_010, 100, e, true),
+        window.matchCandidate(10, 50_010, 100, e, true),
     );
     try testing.expectEqual(
         @as(?usize, 0),
-        matchCandidate(src, 10, 50_010, 50_000, e, true),
+        window.matchCandidate(10, 50_010, 50_000, e, true),
     );
 }
 
@@ -876,12 +1012,13 @@ test "matchCandidate: a garbage-filled table stays exact on the windowed path" {
     var src_buf: [70_000]u8 = undefined;
     fastmem.set(u8, &src_buf, 'a');
     const src: []const u8 = &src_buf;
+    const window: Window(false) = .{ .dict = &.{}, .source = src };
     var rng: DefaultPrng = .init(0xDEADBEEF);
     for (0..64) |i| {
         const s_index: usize = 1 + (i * 1000) % 60_000;
         const s_absolute: u32 = @truncate(500_000 + s_index);
         const entry = rng.random().int(u32);
-        const candidate = matchCandidate(src, s_index, s_absolute, entry, 0, true);
+        const candidate = window.matchCandidate(s_index, s_absolute, entry, 0, true);
         if (candidate) |c| {
             // Whatever the entry, an accepted candidate names a real
             // in-window position with four equal bytes.
@@ -904,7 +1041,7 @@ test "compress: empty input is the final empty block" {
     try testing.expectEqual(@as(usize, 2), maxCompressedLength(0));
 
     var decoded: [1]u8 = undefined;
-    try testing.expectEqual(@as(usize, 0), try decode.decompress(target[0..n], &decoded));
+    try testing.expectEqual(@as(usize, 0), try decode.decompress(target[0..n], &decoded, null));
 }
 
 test "compress: maxCompressedLength formula" {
@@ -1184,7 +1321,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
     // And the notes' own stream decodes to the same bytes through our decoder,
     // with BFINAL on its single block (golden.zig pins it too).
     var decoded: [32]u8 = undefined;
-    const n = try decode.decompress(&[_]u8{ 0x73, 0xc4, 0x06, 0x00 }, &decoded);
+    const n = try decode.decompress(&[_]u8{ 0x73, 0xc4, 0x06, 0x00 }, &decoded, null);
     try testing.expectEqualSlices(u8, &input, decoded[0..n]);
 }
 
@@ -1224,10 +1361,124 @@ test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-f
     // match from distance 67); so must ours.
     var decoded: [80]u8 = undefined;
     sentinel.fill(&decoded);
-    const n = try decode.decompress(target[0..w.pos], &decoded);
+    const n = try decode.decompress(target[0..w.pos], &decoded, null);
     try testing.expectEqual(@as(usize, 73), n);
     for (decoded[0..n]) |byte| try testing.expectEqual(@as(u8, 'A'), byte);
     try sentinel.expect(&decoded, n);
+}
+
+test "emit: a dictionary match reaches in front of the output" {
+    // Spec: rfc1951-deflate.txt §3.2.3 — with a preset dictionary the history
+    // starts at the dictionary's first byte. Hand-built tokens: BFINAL=1,
+    // BTYPE=01, the literal 'x', then a match of length 6 at distance 5,
+    // EOB. The window is ["abcd"]["x"], so the match reads 'a','b','c','d'
+    // and then continues at the output's start ('x', 'a').
+    var target: [64]u8 = undefined;
+    var w: BitWriter = .{ .target = &target };
+    try w.writeBits(1, 1); // BFINAL, matching the hand-built form
+    try w.writeBits(1, 2); // BTYPE = 01, fixed
+    var payload: u64 = 0;
+    const limit: u64 = math.maxInt(u64);
+    try testing.expect(try emitLiterals("x", &w, &payload, limit));
+    try testing.expect(try emitMatch(&w, 5, 6, &payload, limit));
+    try w.writeCode(fixed_literal_codes[256]);
+    try w.finish();
+
+    var decoded: [16]u8 = undefined;
+    sentinel.fill(&decoded);
+    const n = try decode.decompress(target[0..w.pos], &decoded, "abcd");
+    try testing.expectEqual(@as(usize, 7), n);
+    try testing.expectEqualSlices(u8, "xabcdxa", decoded[0..n]);
+    try sentinel.expect(&decoded, n);
+
+    // Without the dictionary (or with one too short for the reach) the
+    // distance is past the history.
+    try testing.expectError(
+        error.InvalidMatch,
+        decode.decompress(target[0..w.pos], &decoded, null),
+    );
+    try testing.expectError(
+        error.InvalidMatch,
+        decode.decompress(target[0..w.pos], &decoded, "ab"),
+    );
+}
+
+test "compress: a preset dictionary is matchable history" {
+    // §3.2.3 — the dictionary is history in front of the stream, so the finder
+    // matches into its tail and the emitted distance reaches back before the
+    // output's first byte. The source repeats the dictionary and continues
+    // past it, so the match straddles the dictionary's end and the output's
+    // start.
+    const allocator = testing.allocator;
+    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
+    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const comp = try allocator.alloc(u8, maxCompressedLength(source.len));
+    defer allocator.free(comp);
+    const plain = try allocator.alloc(u8, source.len + sentinel.len);
+    defer allocator.free(plain);
+
+    const with_dict = try compress(source, comp, .{ .dict = dict });
+    sentinel.fill(plain);
+    const n = try decode.decompress(comp[0..with_dict], plain[0..source.len], dict);
+    try testing.expectEqual(source.len, n);
+    try testing.expectEqualSlices(u8, source, plain[0..n]);
+    try sentinel.expect(plain, n);
+
+    // The dictionary carried the stream: without it the same source is a few
+    // literals per repetition, with it the repetitions are matches.
+    var plain_comp: [maxCompressedLength(source.len)]u8 = undefined;
+    const without_dict = try compress(source, &plain_comp, .{});
+    try testing.expect(with_dict < without_dict / 2);
+
+    // The stream depends on the dictionary's bytes: without it (or with a
+    // different one) the reach is past the supplied history.
+    try testing.expectError(
+        error.InvalidMatch,
+        decode.decompress(comp[0..with_dict], plain, null),
+    );
+    try testing.expectError(
+        error.InvalidMatch,
+        decode.decompress(comp[0..with_dict], plain, "something else entirely"),
+    );
+
+    // An empty dictionary is no dictionary: byte-identical to `.{}`.
+    var empty_comp: [maxCompressedLength(source.len)]u8 = undefined;
+    const empty_dict = try compress(source, &empty_comp, .{ .dict = "" });
+    try testing.expectEqualSlices(u8, plain_comp[0..without_dict], empty_comp[0..empty_dict]);
+}
+
+test "compress: a dictionary longer than 32 KiB contributes only its tail" {
+    // §3.2.3's window is 32 KiB, so a longer dictionary's front is not
+    // matchable while its tail is. The two sources below are the same length
+    // and equally incompressible on their own; only the tail one can be
+    // matched.
+    const allocator = testing.allocator;
+    const dict = try allocator.alloc(u8, history_len + 64);
+    defer allocator.free(dict);
+    var rng: DefaultPrng = .init(0xC0FFEE);
+    for (dict) |*b| b.* = rng.random().int(u8);
+
+    const comp = try allocator.alloc(u8, maxCompressedLength(64));
+    defer allocator.free(comp);
+    const plain = try allocator.alloc(u8, 64 + sentinel.len);
+    defer allocator.free(plain);
+
+    // The dictionary's last 64 bytes: one match at distance 64.
+    const tail = dict[history_len..];
+    const tail_len = try compress(tail, comp, .{ .dict = dict });
+    sentinel.fill(plain);
+    const n = try decode.decompress(comp[0..tail_len], plain[0..64], dict);
+    try testing.expectEqual(@as(usize, 64), n);
+    try testing.expectEqualSlices(u8, tail, plain[0..n]);
+    try sentinel.expect(plain, n);
+
+    // The dictionary's first 64 bytes are outside the window: nothing to
+    // match, so the stream is the stored form.
+    const front = dict[0..64];
+    const front_len = try compress(front, comp, .{ .dict = dict });
+    const front_plain = try compress(front, comp, .{});
+    try testing.expectEqual(front_plain, front_len);
+    try testing.expect(tail_len < front_len / 2);
 }
 
 test "emit: long matches split at 258 with a legal tail" {
@@ -1285,7 +1536,7 @@ test "compress: every length and distance code round trips" {
     const back = try allocator.alloc(u8, input.len + sentinel.len);
     defer allocator.free(back);
     sentinel.fill(back);
-    const n = try decode.decompress(comp[0..clen], back);
+    const n = try decode.decompress(comp[0..clen], back, null);
     try testing.expectEqual(input.len, n);
     try testing.expectEqualSlices(u8, input[0..n], back[0..n]);
     try sentinel.expect(back, n);

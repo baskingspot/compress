@@ -101,22 +101,34 @@ pub const HuffmanFixture = struct {
 /// must still hold their sentinels. Public so every layer's round-trip test
 /// checks its decode the same way.
 pub fn checkDecode(target: []u8, source: []const u8, want: []const u8) !void {
+    return checkDecodeDict(target, source, null, want);
+}
+
+/// `checkDecode` with a preset dictionary supplied (`§3.2.3`): the stream must
+/// decode to `want` against `dict`, at the exact cap and with slack, both
+/// sentinel-checked.
+pub fn checkDecodeDict(
+    target: []u8,
+    source: []const u8,
+    dict: ?[]const u8,
+    want: []const u8,
+) !void {
     try testing.expect(want.len <= target.len);
 
     sentinel.fill(target);
-    const exact = try decompress(source, target[0..want.len]);
+    const exact = try decompress(source, target[0..want.len], dict);
     try testing.expectEqual(want.len, exact);
     try testing.expectEqualSlices(u8, want, target[0..exact]);
 
     sentinel.fill(target);
-    const n = try decompress(source, target);
+    const n = try decompress(source, target, dict);
     try testing.expectEqualSlices(u8, want, target[0..n]);
     try sentinel.expect(target, n);
 }
 
 fn checkStreamCase(target: []u8, tc: StreamCase) !void {
     sentinel.fill(target);
-    const result = decompress(tc.source, target);
+    const result = decompress(tc.source, target, null);
     switch (tc.expect) {
         .ok => |want| {
             const n = result catch |err| {
@@ -502,6 +514,23 @@ pub const micro_cases: [9]MicroCase = .{
 /// return `error.Truncated` after producing exactly `.in`, and with BFINAL set
 /// on that one block it is a complete stream that must decode to `.in`. Both
 /// agree with python3's zlib (`wbits=-15`).
+/// A raw deflate stream python3's zlib wrote against a preset dictionary
+/// (`zlib.compressobj(6, DEFLATED, -15, 9, Z_DEFAULT_STRATEGY, dict)`), the
+/// dictionary, and the plaintext. The stream's one match reaches into the
+/// dictionary's tail, so it is `InvalidMatch` without the dictionary.
+pub const dict_stream = hex("2bc6a2069b18ba3e00");
+pub const dict_stream_dict = "she sells seashells by the seashore\n";
+pub const dict_stream_plain = "she sells seashells she sells seashells by the seashore\n";
+
+/// The straddling match: python3's stream for `"abcdefgh" ** 3` against the
+/// 8-byte dictionary `"abcdefgh"` is one match at distance 8 from position 0.
+/// Its first 8 bytes come from the dictionary and its tail continues at the
+/// output's start — the dictionary is conceptually in front of the output
+/// (`§3.2.3`), so the byte after its last is the output's first.
+pub const dict_straddle_stream = hex("4bc4410300");
+pub const dict_straddle_dict = "abcdefgh";
+pub const dict_straddle_plain = "abcdefgh" ** 3;
+
 pub const huffman_fixtures: [9]HuffmanFixture = .{
     .{
         .name = "huffman-null-max",
@@ -633,7 +662,7 @@ test "golden decode: golang/go TestStreams, exact-cap decodes" {
         switch (tc.expect) {
             .ok => |want| {
                 if (want.len > target.len) continue;
-                const n = try decompress(tc.source, target[0..want.len]);
+                const n = try decompress(tc.source, target[0..want.len], null);
                 try testing.expectEqualSlices(u8, want, target[0..n]);
             },
             else => {},
@@ -649,7 +678,7 @@ test "golden decode: golang/go TestTruncatedStreams, every prefix" {
     var target: [64]u8 = undefined;
     for (0..data.len) |prefix_len| {
         sentinel.fill(&target);
-        const result = decompress(data[0..prefix_len], &target);
+        const result = decompress(data[0..prefix_len], &target, null);
         if (result) |n| {
             print("\nFAIL: prefix {d} decoded {d} bytes, want Truncated\n", .{ prefix_len, n });
             return error.TestUnexpectedResult;
@@ -672,7 +701,7 @@ test "golden decode: golang/go TestReaderTruncated" {
     var target: [64]u8 = undefined;
     for (truncated_cases) |tc| {
         sentinel.fill(&target);
-        const result = decompress(tc.source, &target);
+        const result = decompress(tc.source, &target, null);
         if (result) |n| {
             print("\nFAIL: decoded {d} bytes, want Truncated\n", .{n});
             return error.TestUnexpectedResult;
@@ -721,7 +750,7 @@ test "golden decode: golang/go testdata huffman-* pairs" {
 
         // Verbatim: truncated, with the full input already decoded.
         sentinel.fill(target);
-        const result = decompress(fixture.golden, target);
+        const result = decompress(fixture.golden, target, null);
         if (result) |n| {
             print("\nFAIL ({s}): decoded {d} bytes, want Truncated\n", .{ fixture.name, n });
             return error.TestUnexpectedResult;
@@ -752,6 +781,33 @@ test "golden decode: empty stream and empty non-final block" {
     try checkDecode(&target, &hex("000000ffff010000ffff"), ""); // empty stored, non-final
 }
 
+test "golden decode: the dictionary fixtures (python3's zlib with a zdict)" {
+    // python3's zlib (the C reference) wrote both streams against a preset
+    // dictionary. Without the dictionary the reach is past the history
+    // (`InvalidMatch`, `§3.2.3`); with it the stream decodes, including the
+    // straddling match whose tail continues at the output's start.
+    const gpa = testing.allocator;
+    const target = try gpa.alloc(u8, dict_straddle_plain.len + sentinel.len);
+    defer gpa.free(target);
+
+    try checkDecodeDict(target, &dict_stream, dict_stream_dict, dict_stream_plain);
+    try checkDecodeDict(
+        target,
+        &dict_straddle_stream,
+        dict_straddle_dict,
+        dict_straddle_plain,
+    );
+
+    for ([_][]const u8{ &dict_stream, &dict_straddle_stream }) |stream| {
+        // A failed decode may leave a partial prefix in the target; only the
+        // error is contractual.
+        try testing.expectError(error.InvalidMatch, decompress(stream, target, null));
+        // A dictionary too short for the stream's reach is the same error: the
+        // distance is past the supplied history.
+        try testing.expectError(error.InvalidMatch, decompress(stream, target, "abc"));
+    }
+}
+
 test "golden decode: BufferTooSmall leaves the cap untouched" {
     // `target` is a cap: a stream that does not fit is `error.BufferTooSmall`,
     // reported before the overflowing write, and the bytes at and past the cap
@@ -759,7 +815,7 @@ test "golden decode: BufferTooSmall leaves the cap untouched" {
     const source = &hex("000800f7ff11111111111111110300"); // 8 bytes of 0x11
     var target: [4]u8 = undefined;
     sentinel.fill(&target);
-    try testing.expectError(error.BufferTooSmall, decompress(source, &target));
+    try testing.expectError(error.BufferTooSmall, decompress(source, &target, null));
     try sentinel.expect(&target, 0);
 }
 

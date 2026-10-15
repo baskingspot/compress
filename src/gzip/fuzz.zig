@@ -1483,7 +1483,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
         limited = .init(&fixed_in, .unlimited, chunk_buf[0..rangeAtMost(smith, 3, chunk_buf.len)]);
         break :blk &limited.interface;
     } else &fixed_in;
-    var r: flate.Reader = .init(input_reader, &rbuf);
+    var r: flate.Reader = .init(input_reader, &rbuf, null);
     var decode_fold: Fold = .{};
     r.checksum = decode_fold.hook();
     try pump(&r.reader, &plain.writer, pumpLimit(input.len));

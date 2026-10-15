@@ -32,7 +32,7 @@ fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
     _ = arena;
-    _ = try flate.Reader.streamAll(in, out);
+    _ = try flate.Reader.streamAll(in, out, null);
 }
 
 test "example: streaming round-trip" {

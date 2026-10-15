@@ -65,6 +65,10 @@ state: State = .streaming,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
 err: ?Error = null,
+/// The driver's preset-dictionary seat: gzip has no dictionary concept
+/// (RFC 1952 §2.3.1 has no FDICT-equivalent field), so this is always null
+/// and `framing.readHeader` ignores it.
+dict: ?[]const u8 = null,
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`).
@@ -86,7 +90,7 @@ const Hooks = internal.container.ReaderHooks(framing, Reader);
 /// with `error.ReadFailed` and `err == .StreamTooLong`, because the window
 /// cannot hold that much contiguously.
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
-    return Hooks.init(input, buffer);
+    return Hooks.init(input, buffer, null);
 }
 
 /// Decode one member from `in` into `out` and return the number of decoded
@@ -98,7 +102,7 @@ pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
 /// not available here; drive a `Reader` to get it. Allocates nothing; the
 /// 64 KiB window and the reader's state are on the stack.
 pub fn streamMember(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
-    return Hooks.streamOne(in, out);
+    return Hooks.streamOne(in, out, null);
 }
 
 /// Decode every member in `in` into `out` and return the total number of
@@ -122,7 +126,7 @@ pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError
             error.EndOfStream => return served,
             else => |e| return e,
         };
-        served += try Hooks.streamOne(in, out);
+        served += try Hooks.streamOne(in, out, null);
     }
 }
 

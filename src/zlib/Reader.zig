@@ -37,10 +37,10 @@ const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const framing = @import("framing.zig");
 /// The failure detail recorded in `err` when the interface returns
-/// `error.ReadFailed`: `BadHeader`, `DictionaryRequired`, and `WrongChecksum`
-/// from this module; `Truncated` and flate's other decode errors;
-/// `StreamTooLong` for a contiguous request the window cannot hold; and
-/// `ReadFailed` when the input reader itself failed.
+/// `error.ReadFailed`: `BadHeader`, `DictionaryRequired`, `DictionaryMismatch`,
+/// and `WrongChecksum` from this module; `Truncated` and flate's other decode
+/// errors; `StreamTooLong` for a contiguous request the window cannot hold;
+/// and `ReadFailed` when the input reader itself failed.
 pub const Error = framing.Error;
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
@@ -65,6 +65,10 @@ state: State = .streaming,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
 err: ?Error = null,
+/// The stream's preset dictionary or null (`§2.2`), checked against the
+/// header's DICTID when FDICT is set. The driver hands it to the header check;
+/// the inner flate reader gets it too, as its window's preset history.
+dict: ?[]const u8 = null,
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`): the lifecycle, the window hand-off, the
@@ -79,6 +83,15 @@ const Hooks = internal.container.ReaderHooks(framing, Reader);
 /// malformed header, body, or trailer, or a failing `input`, makes the
 /// interface return `error.ReadFailed` from then on; the cause is in `r.err`.
 ///
+/// `dict` is the stream's preset dictionary or `null` (`§2.2`). With FDICT
+/// set the dictionary must be supplied: its Adler-32 is checked against the
+/// header's DICTID before any body byte (`error.DictionaryRequired` when it
+/// is null, `error.DictionaryMismatch` when it is wrong), and it pre-seeds the
+/// decode window as history. With FDICT clear the stream names no dictionary
+/// and `dict` is unused, so one reader can walk a mixed sequence of streams.
+/// A dictionary longer than 32 KiB contributes only its last 32 KiB to the
+/// window, while DICTID names the whole — supply the full slice.
+///
 /// The reader consumes `input` exactly through ADLER32's last byte and leaves
 /// the bytes after it unread (`§2.2`: they "are not part of the zlib
 /// stream"). The trailer is checked only when the reader is asked for bytes
@@ -90,19 +103,24 @@ const Hooks = internal.container.ReaderHooks(framing, Reader);
 /// larger one can fail with `error.ReadFailed` and
 /// `err == error.StreamTooLong`. Do not move the `Reader` after its first
 /// read.
-pub fn init(input: *Io.Reader, buffer: *Buffer) Reader {
-    return Hooks.init(input, buffer);
+pub fn init(input: *Io.Reader, buffer: *Buffer, dict: ?[]const u8) Reader {
+    return Hooks.init(input, buffer, dict);
 }
 
 /// Decode one zlib stream from `in` into `out` and return the number of
 /// decoded bytes written. `in` is consumed exactly through the stream's last
-/// trailer byte; anything after it is left unread. Returns
+/// trailer byte; anything after it is left unread. `dict` is the stream's
+/// preset dictionary or `null` (`§2.2`); see `init`. Returns
 /// `error.ReadFailed` for a malformed stream or a failing `in` (the cause is
 /// not reported; use a `Reader` to see `err`) and `error.WriteFailed` if `out`
 /// fails. Uses about 68 KiB of stack (the 64 KiB window plus 4 KiB of reader
 /// state). Allocates nothing.
-pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError!usize {
-    return Hooks.streamOne(in, out);
+pub fn streamAll(
+    in: *Io.Reader,
+    out: *Io.Writer,
+    dict: ?[]const u8,
+) Io.Reader.StreamRemainingError!usize {
+    return Hooks.streamOne(in, out, dict);
 }
 
 // ---------------------------------------------------------------------------
@@ -144,7 +162,7 @@ fn roundTrip(source: []const u8) !void {
     sentinel.fill(target);
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(framed);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     const n = try decodeInto(&r.reader, target);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, target[0..n]);
@@ -230,7 +248,7 @@ test "Reader: the golden table decodes through the streaming layer" {
     for (golden.zlib_cases) |tc| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(tc.source);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, tc.dict);
         switch (tc.expect) {
             .ok => |want| {
                 sentinel.fill(target);
@@ -275,7 +293,7 @@ fn checkAtBoundary(gpa: mem.Allocator, source: []const u8, expect: golden.Expect
     sentinel.fill(target);
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(source);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     switch (expect) {
         .ok => |want| {
             const n = try decodeInto(&r.reader, target);
@@ -310,10 +328,10 @@ test "Reader: a doubled stream is a caller loop at the boundary" {
     defer first.deinit();
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
-    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &first.writer));
+    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &first.writer, null));
     try testing.expectEqualStrings(source, first.written());
     try testing.expectEqual(len, fixed_in.seek);
-    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &second.writer));
+    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &second.writer, null));
     try testing.expectEqualStrings(source, second.written());
     try testing.expectEqual(2 * len, fixed_in.seek);
 }
@@ -325,7 +343,7 @@ test "Reader: garbage in a stream's place fails" {
     const garbage = "not a zlib stream at all!";
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(garbage);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
     try testing.expectEqual(Error.BadHeader, r.err.?);
@@ -335,14 +353,14 @@ test "Reader: garbage in a stream's place fails" {
 }
 
 test "Reader: the dictionary refusal is sticky and before any body byte" {
-    // RFC 1950 §2.3 — rejecting an FDICT stream is conformant when the
-    // embedding format has no dictionary registry; the four DICTID bytes are
-    // never read, never decoded as deflate data. The refusal arrives at the
-    // header, so a valid-looking body behind it is never touched.
-    const source = &golden.dictionary_stream; // the Go "dictionary" vector
+    // RFC 1950 §2.3 — an FDICT stream with no dictionary supplied is
+    // `DictionaryRequired` at the header: the four DICTID bytes are never
+    // read, never decoded as deflate data. The refusal arrives at the header,
+    // so a valid-looking body behind it is never touched.
+    const source: []const u8 = &golden.dictionary_stream;
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(source);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
     try testing.expectEqual(Error.DictionaryRequired, r.err.?);
@@ -352,6 +370,65 @@ test "Reader: the dictionary refusal is sticky and before any body byte" {
     // reports it again.
     try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&sink.writer));
     try testing.expectEqual(Error.DictionaryRequired, r.err.?);
+}
+
+test "Reader: the dictionary mismatch matrix, stickily" {
+    // The four cases through the streaming layer, with the exact input
+    // positions: `DictionaryRequired` costs the two header bytes (the DICTID
+    // is never read), `DictionaryMismatch` the header and the four DICTID
+    // bytes, and the right dictionary decodes. `§2.2` — DICTID is the whole
+    // dictionary's Adler-32, so a truncation of it is a mismatch too.
+    const gpa = testing.allocator;
+    const source: []const u8 = &golden.dictionary_stream;
+    const want_plain = "Hello, World!\n";
+
+    const cases = [_]struct {
+        dict: ?[]const u8,
+        want: ?Error,
+        consumed: usize,
+    }{
+        .{ .dict = null, .want = Error.DictionaryRequired, .consumed = decode.header_len },
+        .{
+            .dict = "not the dictionary",
+            .want = Error.DictionaryMismatch,
+            .consumed = decode.header_len + decode.dict_id_len,
+        },
+        .{
+            .dict = &golden.wrong_dictionary,
+            .want = Error.DictionaryMismatch,
+            .consumed = decode.header_len + decode.dict_id_len,
+        },
+        .{
+            .dict = &golden.dictionary,
+            .want = null,
+            .consumed = source.len,
+        },
+    };
+    for (cases) |tc| {
+        var rbuf: Buffer = undefined;
+        var fixed_in: Io.Reader = .fixed(source);
+        var r: Reader = .init(&fixed_in, &rbuf, tc.dict);
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        if (tc.want) |want| {
+            try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
+            try testing.expectEqual(want, r.err.?);
+            // Nothing decoded: the check is before any body byte.
+            try testing.expectEqual(@as(usize, 0), out.written().len);
+            // The failure is sticky.
+            var sink: Io.Writer.Discarding = .init(&.{});
+            try testing.expectError(error.ReadFailed, r.reader.stream(&sink.writer, .unlimited));
+            try testing.expectEqual(want, r.err.?);
+        } else {
+            try testing.expectEqual(
+                @as(usize, want_plain.len),
+                try r.reader.streamRemaining(&out.writer),
+            );
+            try testing.expectEqualStrings(want_plain, out.written());
+            try testing.expectEqual(@as(?Error, null), r.err);
+        }
+        try testing.expectEqual(tc.consumed, fixed_in.seek);
+    }
 }
 
 test "Reader: a corrupt trailer fails at the clean end, stickily" {
@@ -368,7 +445,7 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
         bad[len - decode.trailer_len + at] ^= 0x01;
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(bad[0..len]);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -400,7 +477,7 @@ test "Reader: an over-the-end request still checks the trailer" {
     {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(stream[0..len]);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         _ = try r.reader.take(39 * 1024);
         try testing.expectError(error.EndOfStream, r.reader.peek(30 * 1024));
         try testing.expectEqual(@as(usize, len), fixed_in.seek);
@@ -415,7 +492,7 @@ test "Reader: an over-the-end request still checks the trailer" {
         bad[len - decode.trailer_len + at] ^= 0x01;
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(bad[0..len]);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         _ = try r.reader.take(39 * 1024);
         try testing.expectError(error.ReadFailed, r.reader.peek(30 * 1024));
         try testing.expectEqual(Error.WrongChecksum, r.err.?);
@@ -433,7 +510,7 @@ test "Reader: a truncated stream is Truncated at every prefix" {
     for (1..len) |prefix| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(stream[0..prefix]);
-        var r: Reader = .init(&fixed_in, &rbuf);
+        var r: Reader = .init(&fixed_in, &rbuf, null);
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         try testing.expectError(error.ReadFailed, r.reader.streamRemaining(&out.writer));
@@ -459,7 +536,7 @@ test "Reader: a contiguous request past the window fails" {
     const history_len = flate.encode.history_len;
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(stream.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     // A full history is always servable (any contiguous request of at most
     // 32 KiB is served).
     try testing.expectEqualSlices(u8, source[0..history_len], try r.reader.peek(history_len));
@@ -495,7 +572,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     const len = try encode.compress(source, &stream, .{});
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(stream[0..len]);
-    var r: Reader = .init(&fixed_in, &rbuf);
+    var r: Reader = .init(&fixed_in, &rbuf, null);
     _ = try r.reader.peek(1);
     var sink: Io.Writer.Discarding = .init(&.{});
     try testing.expectEqual(@as(usize, 0), try r.reader.stream(&sink.writer, .limited(0)));
@@ -522,7 +599,7 @@ test "Reader: a chunked input refills across the header and the body" {
     var inner: Io.Reader = .fixed(framed[0..len]);
     var chunked: Io.Reader.Limited = .init(&inner, .unlimited, &small);
     var rbuf: Buffer = undefined;
-    var r: Reader = .init(&chunked.interface, &rbuf);
+    var r: Reader = .init(&chunked.interface, &rbuf, null);
     const got = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(got);
     try testing.expectEqualStrings(source, got);
@@ -543,7 +620,7 @@ test "Reader: streamAll consumes one stream and leaves the rest" {
     var fixed_in: Io.Reader = .fixed(framed[0 .. len + 8]);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &out.writer));
+    try testing.expectEqual(source.len, try Reader.streamAll(&fixed_in, &out.writer, null));
     try testing.expectEqualStrings(source, out.written());
     try testing.expectEqual(len, fixed_in.seek);
 }

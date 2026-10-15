@@ -57,6 +57,43 @@ def run_harness(
         os.unlink(path)
 
 
+def run_harness_dict(
+    harness: Path, command: str, data: bytes, dict_data: bytes, *args: str
+) -> subprocess.CompletedProcess:
+    """`run_harness` with a dictionary file as the harness's last argument.
+
+    The harnesses that take a preset dictionary (`flate-oracle`, `zlib-oracle`)
+    read it whole from a path appended after the codec's own arguments.
+    """
+    fd, path = tempfile.mkstemp()
+    dict_fd, dict_path = tempfile.mkstemp()
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        with os.fdopen(dict_fd, "wb") as f:
+            f.write(dict_data)
+        return subprocess.run(
+            [str(harness), command, path, *args, dict_path],
+            capture_output=True,
+            check=False,
+        )
+    finally:
+        os.unlink(path)
+        os.unlink(dict_path)
+
+
+def harness_output_dict(
+    harness: Path, command: str, data: bytes, dict_data: bytes, *args: str
+) -> bytes:
+    """`run_harness_dict` for the commands that must succeed."""
+    result = run_harness_dict(harness, command, data, dict_data, *args)
+    if result.returncode != 0:
+        raise AssertionError(
+            f"our {command} failed ({result.returncode}): {result.stderr.decode().strip()}"
+        )
+    return result.stdout
+
+
 def harness_output(harness: Path, command: str, data: bytes, *args: str) -> bytes:
     """`run_harness` for the commands that must succeed.
 
