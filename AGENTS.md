@@ -38,7 +38,7 @@ it before you change a kernel or make a performance claim.
   CRC-32 kernel behind the container's checksum state; `golden.zig` shares
   the Go gzip fixtures across every layer's tests; `bench.zig` is the local
   benchmark; `oracle.zig` is the external-oracle harness behind `just
-  gzip-oracle`; `common.zig` is the little-endian integer helper. Fuzz
+gzip-oracle`; `common.zig` is the little-endian integer helper. Fuzz
   targets land in `fuzz.zig` (fuzz-engineer lane).
 - `src/zlib/`: zlib streams (RFC 1950) over flate. `encode.zig` writes the
   one-shot stream — the CMF/FLG header, the Adler-32 trailer; `decode.zig`
@@ -48,7 +48,7 @@ it before you change a kernel or make a performance claim.
   Adler-32 kernel behind the container's checksum state; `golden.zig` shares
   the Go zlib fixtures across every layer's tests; `bench.zig` is the local
   benchmark; `oracle.zig` is the external-oracle harness behind `just
-  zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
+zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   land in `fuzz.zig` (fuzz-engineer lane).
 - `src/zstd/`: zstd frames (RFC 8878). `decode.zig` carries the one-shot
   decode and the shared decode state; `frame.zig` the magic, the frame
@@ -138,7 +138,7 @@ onto a nearly-full disk):
   portable target (freestanding targets excluded — the ztest runner needs an
   OS).
 - `just flate-oracle`: external-oracle conformance for flate — `python3
-  zlib` raw, both directions (catches bit-packing bugs invisible to a
+zlib` raw, both directions (catches bit-packing bugs invisible to a
   self-round-trip; the layer is `scripts/flate_oracle.py`).
 - `just gzip-oracle`: external-oracle conformance for gzip — `python3 zlib`
   (the wbits 31 wrapper), the CPython `gzip` module, and the gzip/gunzip
@@ -156,8 +156,8 @@ onto a nearly-full disk):
 - `just bench [ARGS]`: local benchmarks (zig-benchmark). Local numbers are
   never quoted as claims.
 - `just example <codec> ...`: run a codec's example CLI (e.g. `just example
-  snappy encode README.md > /tmp/out` runs `zig build example-snappy --
-  encode README.md`).
+snappy encode README.md > /tmp/out` runs `zig build example-snappy --
+encode README.md`).
 - `just clean`: drop `zig-out/`, `.zig-cache/`, `zig-pkg/`.
 
 ## Dependencies
@@ -166,7 +166,7 @@ onto a nearly-full disk):
   write `@memcpy`, `@memmove`, or `@memset` in this repo's source — not on
   codec hot paths, not in tests, not in bench corpus builders. Use
   `fastmem.copy`, `fastmem.move`, `fastmem.set` (all `(comptime T, dest,
-  ...)`). `copy` and `set` are non-overlapping only; `move` handles overlap.
+...)`). `copy` and `set` are non-overlapping only; `move` handles overlap.
   A stray `@memcpy` in a diff is a review blocker.
 - benchmark, ztest (lazy): bench and test steps only, never imported by
   codecs. In `build.zig`, lazy deps must go through `b.lazyImport` /

@@ -9,13 +9,13 @@ and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and needs Zig 0.16.
 
 ## Codecs
 
-| Namespace | Format | Support |
-|---|---|---|
-| [`snappy`](src/snappy/README.md) | Snappy blocks | encode, decode, streaming |
-| [`flate`](src/flate/README.md) | raw DEFLATE, RFC 1951 | encode, decode, streaming |
-| [`gzip`](src/gzip/README.md) | gzip, RFC 1952, over `flate` | encode, decode, streaming |
-| [`zlib`](src/zlib/README.md) | zlib, RFC 1950, over `flate` | encode, decode, streaming |
-| [`zstd`](src/zstd/README.md) | Zstandard, RFC 8878 | encode, decode, streaming |
+| Namespace                        | Format                       | Support                   |
+| -------------------------------- | ---------------------------- | ------------------------- |
+| [`snappy`](src/snappy/README.md) | Snappy blocks                | encode, decode, streaming |
+| [`flate`](src/flate/README.md)   | raw DEFLATE, RFC 1951        | encode, decode, streaming |
+| [`gzip`](src/gzip/README.md)     | gzip, RFC 1952, over `flate` | encode, decode, streaming |
+| [`zlib`](src/zlib/README.md)     | zlib, RFC 1950, over `flate` | encode, decode, streaming |
+| [`zstd`](src/zstd/README.md)     | Zstandard, RFC 8878          | encode, decode, streaming |
 
 Each codec README documents its API, error sets, and buffer sizes. The specs
 are vendored in [`docs/research/specs/`](docs/research/specs/README.md). The
