@@ -25,7 +25,7 @@
   here it is `DecompressionFailed`, as in Snappy) and blocks up to 4 MiB. The
   encoder ports only the Snappy-compatible `encodeBlockSnappyGo64K`, which emits
   explicit offsets (its `repeat` variable is a match-finder shortcut). S2 is a
-  deferred decision (`docs/zcompress-plan.md`, non-goals), not a missing
+  deferred decision (`docs/compress-plan.md`, non-goals), not a missing
   feature.
 
 ## Format notes

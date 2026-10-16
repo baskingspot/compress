@@ -1,6 +1,6 @@
 # Third-party notices
 
-zcompress is MIT (`LICENSE`). This file lists every port, vendored artifact,
+compress is MIT (`LICENSE`). This file lists every port, vendored artifact,
 and dependency with a license that is not ours.
 
 ## Ports

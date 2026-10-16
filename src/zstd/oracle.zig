@@ -27,7 +27,7 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 
 /// Cap on the frame the harness will read into memory.
 const max_frame_len = 1 << 30;

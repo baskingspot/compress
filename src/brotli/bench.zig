@@ -17,7 +17,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const bench = @import("benchmark");
-const brotli = @import("zcompress").brotli;
+const brotli = @import("compress").brotli;
 
 /// The corpus shapes: the same set as the corpus generator
 /// (`bench/zig/corpus.zig`) and the other codecs' benches.

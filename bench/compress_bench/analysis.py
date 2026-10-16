@@ -23,7 +23,7 @@ from functools import cache
 from pathlib import Path
 from typing import Any
 
-from zcompress_bench.jsonl import Measurement, parse
+from compress_bench.jsonl import Measurement, parse
 
 # The estimator has no random component. The runner still records this value.
 BOOTSTRAP_SEED = 20261021

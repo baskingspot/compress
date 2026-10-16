@@ -219,7 +219,7 @@ def build_zc(config: Config, source: Source, target: str, zig_version: str) -> B
         )
 
     prefix = finalize(config, key_data, install)
-    return Build("zc", target, prefix, prefix / "bin" / "bench-zcompress", sha_key(key_data))
+    return Build("zc", target, prefix, prefix / "bin" / "bench-compress", sha_key(key_data))
 
 
 def sha_key(key_data: list[Any]) -> str:

@@ -18,7 +18,7 @@ const Io = std.Io;
 
 const fastmem = @import("fastmem");
 
-const brotli = @import("zcompress").brotli;
+const brotli = @import("compress").brotli;
 
 const print = std.debug.print;
 

@@ -16,7 +16,7 @@ const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
 const bench = @import("benchmark");
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 
 /// The corpus shapes: the same set as the corpus generator
 /// (`bench/zig/corpus.zig`) and the other codecs' benches. The entropy pair

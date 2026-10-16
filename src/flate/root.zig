@@ -1,4 +1,4 @@
-//! Raw DEFLATE (RFC 1951): the `zcompress.flate` namespace. An inflate for all
+//! Raw DEFLATE (RFC 1951): the `compress.flate` namespace. An inflate for all
 //! three block types (stored, fixed, and dynamic), a fixed-Huffman encoder, and
 //! streaming `std.Io` adapters, all over caller-owned buffers with no heap
 //! allocation. Imports only `std` and `fastmem`.

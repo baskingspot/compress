@@ -1,7 +1,7 @@
 # flate
 
 Raw DEFLATE ([RFC 1951](https://www.rfc-editor.org/rfc/rfc1951.txt)) in pure Zig: an encoder,
-a decoder, and `std.Io` streaming adapters. It is the `zcompress.flate` namespace, imports
+a decoder, and `std.Io` streaming adapters. It is the `compress.flate` namespace, imports
 only `std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and never allocates.
 The spec is vendored at `docs/research/specs/rfc1951-deflate.txt`.
 
@@ -16,7 +16,7 @@ One call each way, over buffers you own:
 
 ```zig
 const std = @import("std");
-const flate = @import("zcompress").flate;
+const flate = @import("compress").flate;
 
 fn roundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
     const compressed = try gpa.alloc(u8, flate.encode.maxCompressedLength(input.len));

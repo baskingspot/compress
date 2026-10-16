@@ -23,8 +23,8 @@ from ec2bench.config import Config
 from ec2bench.fleet import Fleet, tags
 from ec2bench.parallel import parallel
 from ec2bench.runs import create_run, write_manifest
-from zcompress_bench.build import ARMS, build_all, source_hash
-from zcompress_bench.corpus import load as load_corpus
+from compress_bench.build import ARMS, build_all, source_hash
+from compress_bench.corpus import load as load_corpus
 
 
 def parse_summary(text: str, arm: str) -> dict[str, Any]:
@@ -144,7 +144,7 @@ def test_fleet(config: Config, targets: tuple[str, ...], launch: bool, ttl: str 
         }
     )
     write_manifest(path, manifest)
-    from zcompress_bench.build import resolve
+    from compress_bench.build import resolve
 
     source = resolve(config, "WORKTREE")
     builds, _ = build_all(config, source, names)

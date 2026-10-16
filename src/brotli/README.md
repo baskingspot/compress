@@ -5,7 +5,7 @@ header, the meta-block ladder, the canonical prefix codes in both tree forms,
 the block-switch and context-modeling layers, and the format's built-in static
 dictionary with its 121 word transforms — plus a `std.Io` streaming reader. It
 is the codec behind the `br` HTTP content encoding. This is the
-`zcompress.brotli` namespace; it imports only `std` and `fastmem`, and it
+`compress.brotli` namespace; it imports only `std` and `fastmem`, and it
 allocates nothing.
 
 The format is vendored at `docs/research/specs/rfc7932-brotli.txt`; `§` cites
@@ -24,7 +24,7 @@ One-shot decode over buffers you own. The format records no decoded length, so
 
 ```zig
 const std = @import("std");
-const brotli = @import("zcompress").brotli;
+const brotli = @import("compress").brotli;
 
 fn decode(gpa: std.mem.Allocator, stream: []const u8, out: *std.Io.Writer) !void {
     const plain = try gpa.alloc(u8, 1024 * 1024); // a cap; brotli records no size
@@ -52,7 +52,7 @@ decodes every stream in `in` in one call; `just example brotli decode FILE.br
 ## API
 
 ```zig
-const brotli = @import("zcompress").brotli; // two names today: `decode`, `Reader`
+const brotli = @import("compress").brotli; // two names today: `decode`, `Reader`
 
 // One-shot decode: one stream, header through last byte. `target` is a cap;
 // the return value is the decoded length.

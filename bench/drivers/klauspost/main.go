@@ -1,13 +1,13 @@
 // The klauspost/compress arm (bench/README.md). Same CLI, corpus, and
-// schema-v1 JSONL as the zcompress driver: one process is one round of this
+// schema-v1 JSONL as the compress driver: one process is one round of this
 // arm. Rows: flate/gzip/zlib at level 1 (the fast class, matching the
-// zcompress .fast rows) and snappy raw blocks, both directions, plus zstd
+// compress .fast rows) and snappy raw blocks, both directions, plus zstd
 // EncodeAll/DecodeAll on shared contexts. EncodeAll at SpeedFastest is the
 // level-1 class the zc one-shot (level .fast) targets; DecodeAll is the
 // single-buffer shape that the zc one-shot decode is measured against.
 //
 // One-shot shape: writers and readers are constructed per iteration, the Go
-// equivalent of the zcompress one-shots' per-call table setup. Decompression
+// equivalent of the compress one-shots' per-call table setup. Decompression
 // rows decode the corpus's reference blobs, identical bytes for every arm.
 package main
 

@@ -16,7 +16,7 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const gzip = @import("zcompress").gzip;
+const gzip = @import("compress").gzip;
 
 /// Cap on the member the harness will read into memory.
 const max_member_len = 1 << 30;

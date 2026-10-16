@@ -1,8 +1,8 @@
-# zcompress fleet configuration (bench/README.md).
+# compress fleet configuration (bench/README.md).
 #
 # The fleet shares the fastmem-bench infrastructure: the IAM user, the
 # launch templates, and the reaper of ~/code/fastmem-zig/infra (the account
-# predates this repo's own stack; creating a zcompress-bench IAM user needs
+# predates this repo's own stack; creating a compress-bench IAM user needs
 # the human bootstrap procedure in fastmem's infra/README.md with the
 # playground-ops SSO profile). project.name therefore stays "fastmem-bench":
 # the IAM policy pins the Project tag value. Boxes launched by this repo are
@@ -13,7 +13,7 @@
 name = "fastmem-bench"
 region = "us-west-2"
 profile = "fastmem-bench"
-adapter = "zcompress_bench"
+adapter = "compress_bench"
 remote_dir = "/root/bench"
 image_version = "1"
 tofu_dir = "/Users/matt/code/fastmem-zig/infra/base"

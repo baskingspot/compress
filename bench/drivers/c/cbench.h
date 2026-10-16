@@ -3,7 +3,7 @@
  * (google/snappy). The driver defines impl_compress/impl_decompress, the
  * ARM/IMPL/TOOL strings, and the codec set (CBENCH_CODECS,
  * CBENCH_CODEC_COUNT), then includes this header. Same CLI, corpus, and
- * schema-v1 JSONL as the zcompress driver: one process is one round of this
+ * schema-v1 JSONL as the compress driver: one process is one round of this
  * arm.
  *
  * Decompression rows decode the corpus's reference blobs; the warmup pass

@@ -1,4 +1,4 @@
-module zcompress-bench/klauspost
+module compress-bench/klauspost
 
 go 1.26
 

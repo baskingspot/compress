@@ -1,4 +1,4 @@
-module zcompress-oracle/zstd-klauspost
+module compress-oracle/zstd-klauspost
 
 go 1.26
 

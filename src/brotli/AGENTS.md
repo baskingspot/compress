@@ -130,7 +130,7 @@ marked **[sketch call]** and collected at the end.
   needed. The dictionary milestone verified the refusal live
   (`dictionary-notes.md §5.2`: the CLI 1.2.0's `-D` stream decodes with `-D`,
   fails without it, and fails here with the natural distance refusal) and lands
-  no brotli dictionary API; the milestone row in `docs/zcompress-plan.md`
+  no brotli dictionary API; the milestone row in `docs/compress-plan.md`
   records the negative.
 
 - **The prefix-code layer owns both forms and both Kraft rules (§3.4, §3.5).**
@@ -841,7 +841,7 @@ ships none and std ships none (both verified). The arms that exist:
   lane's second reference), not a fleet arm: the M6 run races google/brotli's
   C decoder only, and the missing competitors (klauspost/compress ships no
   brotli, std ships none) are recorded in the results file.
-- **zcompress** — ours.
+- **compress** — ours.
 
 The fleet run records the missing arms (the M4 precedent: the competitor-set
 gap is stated in the run's results file under `docs/results/`). Claims cite a

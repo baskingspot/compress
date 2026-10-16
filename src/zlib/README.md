@@ -3,7 +3,7 @@
 zlib streams ([RFC 1950][rfc1950]) for Zig: a 2-byte header, a DEFLATE body, and
 a big-endian Adler-32 trailer. The compression is [flate](../flate/README.md)'s
 (RFC 1951); this package adds the framing, the preset dictionary (§2.2), the
-checksum, and `std.Io` streaming. It is the `zcompress.zlib` namespace. It uses
+checksum, and `std.Io` streaming. It is the `compress.zlib` namespace. It uses
 `std`, `fastmem`, and `src/flate/` (copy `src/zlib/` out with `src/flate/` and
 `src/internal/`), allocates nothing, and takes caller-owned buffers. The spec
 is vendored at `docs/research/specs/rfc1950-zlib.txt`.
@@ -15,7 +15,7 @@ for `decompress`; `maxCompressedLength` sizes the target for `compress`.
 
 ```zig
 const std = @import("std");
-const zlib = @import("zcompress").zlib;
+const zlib = @import("compress").zlib;
 
 fn roundTrip(gpa: std.mem.Allocator, source: []const u8) !void {
     const target = try gpa.alloc(u8, zlib.encode.maxCompressedLength(source.len));
@@ -190,7 +190,7 @@ rows that show what the container adds. Local numbers are not performance claims
 
 ## License
 
-MIT, like the rest of zcompress. Ported test vectors are attributed in
+MIT, like the rest of compress. Ported test vectors are attributed in
 [`THIRD_PARTY.md`](../../THIRD_PARTY.md).
 
 [rfc1950]: https://www.rfc-editor.org/rfc/rfc1950.txt

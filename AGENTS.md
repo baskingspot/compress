@@ -1,15 +1,15 @@
-# zcompress: agent notes
+# compress: agent notes
 
-zcompress gives Zig fast compression codecs. `README.md` is the user overview.
-`docs/zcompress-plan.md` is the plan: mission, architecture, the codec
+compress gives Zig fast compression codecs. `README.md` is the user overview.
+`docs/compress-plan.md` is the plan: mission, architecture, the codec
 development loop, methodology, and milestones with acceptance criteria. Read
 it before you change a kernel or make a performance claim.
 
 ## Layout
 
-- `src/root.zig`: the barrel of the ONE `zcompress` build module. One pub
-  decl per codec, each a namespace under it (`zcompress.snappy`,
-  `zcompress.flate`).
+- `src/root.zig`: the barrel of the ONE `compress` build module. One pub
+  decl per codec, each a namespace under it (`compress.snappy`,
+  `compress.flate`).
 - `src/snappy/`: raw-block snappy, with fastmem wired into its copy paths.
   `encode.zig` ports the klauspost encoder algorithm (THIRD_PARTY.md);
   `decode.zig` is original, with golden vectors in `golden.zig` (ported
@@ -74,7 +74,7 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   the public namespace is `{encode, decode, Writer, Reader}`. `oracle.zig` is
   the external-oracle harness behind `just zstd-oracle`.
   `bench.zig` is the local benchmark; the
-  fleet rows live in `bench/zig/bench_zcompress.zig` (`just bench-run`). Fuzz
+  fleet rows live in `bench/zig/bench_compress.zig` (`just bench-run`). Fuzz
   targets are in `fuzz.zig`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
   sentinel test machinery, the reader lifecycle + generated reader vtable
@@ -265,8 +265,8 @@ Deviations, on purpose:
 - The barrel (`src/root.zig`) exposes exactly one namespace per codec, and
   each namespace exposes exactly `{Reader, Writer, encode, decode}` —
   everything else composes through those namespaces
-  (`zcompress.snappy.encode.compressBlock`,
-  `zcompress.snappy.Reader.streamAll`, `zcompress.flate.Writer.Buffer`).
+  (`compress.snappy.encode.compressBlock`,
+  `compress.snappy.Reader.streamAll`, `compress.flate.Writer.Buffer`).
   No flat re-export menu at the root.
 - CamelCase API names spell `Length` unabbreviated
   (`maxCompressedLength`, `decompressedBlockLength`); snake_case

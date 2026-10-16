@@ -1,6 +1,6 @@
-# zcompress bench
+# compress bench
 
-The remote benchmark harness. It cross-builds zcompress and its competitors for
+The remote benchmark harness. It cross-builds compress and its competitors for
 each EC2 target, runs them over one fixed corpus in interleaved rounds on
 dedicated boxes, and reports ratios with exact confidence intervals.
 
@@ -11,7 +11,7 @@ gets quoted comes from a run of this harness. The run directory is
 
 The harness is adapted from fastmem's (`~/code/fastmem-zig/bench/`).
 `ec2bench/` is the generic EC2 core and holds no benchmark-specific code
-(`ec2bench/README.md`). `zcompress_bench/` is the zcompress adapter: the suite,
+(`ec2bench/README.md`). `compress_bench/` is the compress adapter: the suite,
 the cross builds, the result schema, and the analysis.
 
 ## Arms
@@ -23,7 +23,7 @@ last physical core of the box, isolated through systemd
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_zcompress.zig) | zcompress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_compress.zig) | compress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
 | `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `EncodeAll` at SpeedFastest and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
 | `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
 | `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
@@ -44,7 +44,7 @@ level-`.fast` one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
 the level-1 class. The in-binary std.compress.zstd rows stay decode only: the
 std library ships no zstd compressor.
 
-brotli rows are decode only, on zc and brotli-c: zcompress ships no brotli
+brotli rows are decode only, on zc and brotli-c: compress ships no brotli
 encoder, and the std library ships no brotli at all. The C decoder has no
 reset, so every brotli-c iteration creates, runs, and destroys one decoder
 instance; its allocations come from an arena rewound per stream instead of
@@ -65,7 +65,7 @@ bench files (`src/flate/bench.zig`). `words` and `skewlit` are literals-heavy
 shapes that exercise zstd's Huffman path.
 
 Next to each raw file sit reference blobs: `.flate`, `.gz`, `.zz`, and `.snappy`
-from the zcompress encoders, `.zst` from the pinned zstd CLI (v1.5.7, from
+from the compress encoders, `.zst` from the pinned zstd CLI (v1.5.7, from
 the flake), and `.br` from the pinned brotli CLI (1.2.0, from the flake). Every arm's decompression rows decode these identical bytes. The
 CLI writes the `.zst` frames at level 1, the fast class that every arm's rows
 measure, except for `words` and `skewlit`, which use level 19 so that their
@@ -81,7 +81,7 @@ decoding.
 
 The generator compares every file it writes with `SHA256SUMS` and exits with an
 error on any difference, missing file, or extra file. The harness checks again
-before it uses the tree: `zcompress_bench/corpus.py` verifies each generated
+before it uses the tree: `compress_bench/corpus.py` verifies each generated
 file against the committed hashes, and a run fails if the generated directory
 is missing (run `just corpus`) or differs. Each driver's meta record carries the
 SHA-256 of every raw file it read, and the parser rejects a round whose hashes
@@ -95,7 +95,7 @@ Each driver (Zig, Go, C, C++) writes one JSONL file per arm and round: a `meta`
 record (arm, tool, rev, toolchain, target, cpu, optimize, suite, seed, samples,
 sample_ms, impls, corpus hashes), one `sample` record per case, implementation,
 and sample (the case is `<codec>/<direction>/<shape>/<size>`, plus iters, ns,
-out_len), and an `end` record. `zcompress_bench/jsonl.py` validates the schema
+out_len), and an `end` record. `compress_bench/jsonl.py` validates the schema
 strictly, and a file that does not validate fails the round.
 
 ## Analysis
@@ -133,7 +133,7 @@ target and terminates later duplicates, whichever repo launched it. Check
 `just bench-ls` before launching, and do not run this harness while a fastmem
 run is using its boxes.
 
-A dedicated `zcompress-bench` stack needs the human bootstrap in fastmem's
+A dedicated `compress-bench` stack needs the human bootstrap in fastmem's
 `infra/README.md` ("Copy into another project"), which needs the `playground-ops`
 SSO profile.
 

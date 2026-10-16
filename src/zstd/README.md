@@ -3,7 +3,7 @@
 Zstandard ([RFC 8878][rfc8878]) in pure Zig: a fast encoder and a complete
 decoder — frames, blocks, the Huffman and FSE entropy layers, the XXH64
 content checksum, dictionaries (§5), and streaming `std.Io` adapters. It is
-the `zcompress.zstd` namespace; it imports only `std` and `fastmem`, and
+the `compress.zstd` namespace; it imports only `std` and `fastmem`, and
 neither direction allocates (the `*Alloc` pumps allocate their default buffer
 for the call).
 
@@ -16,7 +16,7 @@ One call each way, over buffers you own:
 
 ```zig
 const std = @import("std");
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 
 fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
     const frame = try gpa.alloc(u8, zstd.encode.maxCompressedLength(data.len));
@@ -78,7 +78,7 @@ what `zstd -1 FILE -o OUT` writes.
 ## API
 
 ```zig
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 // the surface: `encode`, `decode`, `Writer`, `Reader`, and the shared `Dictionary`
 
 // A dictionary (§5): parse once and hand it to either direction. `parse`

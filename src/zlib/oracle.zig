@@ -18,7 +18,7 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const zlib = @import("zcompress").zlib;
+const zlib = @import("compress").zlib;
 
 /// Cap on the stream the harness will read into memory.
 const max_stream_len = 1 << 30;

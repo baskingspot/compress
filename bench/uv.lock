@@ -353,7 +353,7 @@ wheels = [
 ]
 
 [[package]]
-name = "zcompress-bench"
+name = "compress-bench"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

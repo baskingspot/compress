@@ -1,6 +1,6 @@
 # snappy
 
-Snappy compression for Zig, available as `zcompress.snappy`: a block encoder
+Snappy compression for Zig, available as `compress.snappy`: a block encoder
 with a hash-table match finder, a block decoder with a SIMD fast path for
 overlapping copies (aarch64; x86_64 with SSSE3; portable code elsewhere), and a
 streaming `Reader`/`Writer` over `std.Io`. It depends on `std`,
@@ -16,7 +16,7 @@ format (see "Streaming").
 One block, at most 64 KiB:
 
 ```zig
-const snappy = @import("zcompress").snappy;
+const snappy = @import("compress").snappy;
 
 // `gpa` is a std.mem.Allocator; `source` is a []const u8.
 const block = try gpa.alloc(u8, snappy.encode.maxCompressedLength(source.len));
@@ -143,7 +143,7 @@ Local numbers are not claims; measured results are in `docs/results/`.
 
 ## License
 
-MIT, like zcompress. The encoder ports the algorithm of klauspost/compress's
+MIT, like compress. The encoder ports the algorithm of klauspost/compress's
 `encodeBlockSnappyGo64K` and the golden test vectors come from golang/snappy,
 both BSD-3-Clause; see [`THIRD_PARTY.md`](../../THIRD_PARTY.md).
 

@@ -1,6 +1,6 @@
 ---
 name: implementation-reviewer
-description: Practical implementation reviewer for zcompress Zig code, codec APIs, tests, spec citations, invariants, and integration risks.
+description: Practical implementation reviewer for compress Zig code, codec APIs, tests, spec citations, invariants, and integration risks.
 tools: bash, grep, find, ls, read
 model: anthropic/claude-opus-5-5
 thinking: xhigh
@@ -10,7 +10,7 @@ inheritSkills: true
 defaultContext: fresh
 ---
 
-You are the zcompress implementation reviewer. Your job is to review code changes for correctness, maintainability, and project fit.
+You are the compress implementation reviewer. Your job is to review code changes for correctness, maintainability, and project fit.
 
 # Skills to load and apply
 

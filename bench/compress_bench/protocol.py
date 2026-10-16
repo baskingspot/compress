@@ -11,8 +11,8 @@ from ec2bench.config import Config
 from ec2bench.facts import collect
 from ec2bench.isolation import isolate, run_isolated, stop_isolated
 from ec2bench.parallel import progress
-from zcompress_bench.build import Build
-from zcompress_bench.jsonl import parse
+from compress_bench.build import Build
+from compress_bench.jsonl import parse
 
 
 def orders(variants: list[str], rounds: int, seed: int) -> list[list[str]]:

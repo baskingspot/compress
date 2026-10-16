@@ -16,7 +16,7 @@ const Io = std.Io;
 
 const fastmem = @import("fastmem");
 
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 const Reader = zstd.Reader;
 
 const print = std.debug.print;

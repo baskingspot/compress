@@ -1,8 +1,8 @@
-# zcompress plan
+# compress plan
 
 ## Mission
 
-zcompress gives Zig fast compression codecs. The performance class is
+compress gives Zig fast compression codecs. The performance class is
 klauspost/compress. The usability class is std.compress. Every codec is a
 self-contained directory that builds alone, with the shared `src/internal/`
 layer in tow. Every performance claim is measured, and every number names its
@@ -69,10 +69,10 @@ cases for it here.
 ### Modules
 
 One directory per codec under `src/`, and ONE build module for the whole
-library: `zcompress`, rooted at `src/root.zig` (owner's call, 2026-10-09).
+library: `compress`, rooted at `src/root.zig` (owner's call, 2026-10-09).
 The barrel re-exports each codec directory as a namespace
-(`zcompress.snappy`, `zcompress.flate`), so the consumer surface is
-`zcompress.<codec>.<name>` and there is no module graph to keep in sync.
+(`compress.snappy`, `compress.flate`), so the consumer surface is
+`compress.<codec>.<name>` and there is no module graph to keep in sync.
 Codecs import only `std` and `fastmem`, plus in-repo relative imports: a
 container imports the codec it wraps (gzip/zlib over flate, M3) by relative
 path.
@@ -188,7 +188,7 @@ waits for both.
 
 ## Licensing
 
-zcompress is MIT. klauspost/compress, golang/snappy, and the Go stdlib are
+compress is MIT. klauspost/compress, golang/snappy, and the Go stdlib are
 BSD-3-Clause: reading is unrestricted, ports are permitted with attribution
 in THIRD_PARTY.md. The posture stays the same anyway: reimplement from the
 spec and the algorithm description where practical. When code is ported, keep
@@ -390,7 +390,7 @@ pinned by tests.
   (2026-10-08).
 - No `@memcpy`/`@memmove`/`@memset` anywhere in this repo's source —
   `fastmem.copy`/`move`/`set` only (2026-10-08).
-- One `zcompress` build module, codecs as namespaces under it, `src/internal/`
+- One `compress` build module, codecs as namespaces under it, `src/internal/`
   reached by relative import (2026-10-09, owner's call). The retired wiring
   was one build module per codec plus a private `internal` module.
 

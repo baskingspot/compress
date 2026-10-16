@@ -8,7 +8,7 @@
 //! five mirror the codec bench files (src/flate/bench.zig). Alongside each raw
 //! file the generator writes the reference compressed blob per codec: flate,
 //! gzip, and zlib at level `.fast`, and the snappy raw block, all produced by
-//! the zcompress one-shots. Decompression rows decode these exact blobs, so
+//! the compress one-shots. Decompression rows decode these exact blobs, so
 //! every implementation's decoder sees identical input bytes.
 //!
 //! The `.zst` blobs come from the pinned zstd CLI instead (v1.5.7, from the
@@ -18,20 +18,20 @@
 //! entropy shapes (`words`, `skewlit`) use level 19, whose matcher leaves the
 //! literals to the Huffman streams that the level-1 rows never exercise. The
 //! generator decodes each frame with our decoder
-//! (`zcompress.zstd.decode.decompress`) and requires the raw bytes back before
+//! (`compress.zstd.decode.decompress`) and requires the raw bytes back before
 //! writing it. Every run checks the CLI's version first (`zstd_cli_version`),
 //! so a different PATH binary fails the run instead of silently rewriting the
 //! corpus.
 //!
 //! The `.br` streams come from the pinned brotli CLI (1.2.0, from the flake),
-//! because zcompress has no brotli encoder. Every shape uses quality 11, the
+//! because compress has no brotli encoder. Every shape uses quality 11, the
 //! CLI's default and the class of a precompressed `.br` asset; quality is a
 //! coverage choice here, not a fairness one, since no arm compresses brotli.
 //! The CLI reads the file by path, so it picks the window from the file size
 //! (WBITS 16 for 32 KiB, 17 for 64 KiB) and passes the size as a hint; piping
 //! the same bytes through stdin writes WBITS 24 and different streams. The
 //! generator decodes each stream with our decoder
-//! (`zcompress.brotli.decode.decompress`) and requires the raw bytes back
+//! (`compress.brotli.decode.decompress`) and requires the raw bytes back
 //! before writing it, and checks `brotli --version` against
 //! `brotli_cli_version` first.
 //!
@@ -51,7 +51,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const fastmem = @import("fastmem");
 
-const zcompress = @import("zcompress");
+const compress = @import("compress");
 
 pub const Shape = enum {
     text, // repetitive English-ish text (highly compressible)
@@ -215,10 +215,10 @@ pub fn main(init: std.process.Init) !void {
             // One blob at a time: every encoder writes the same scratch, so
             // the write must complete before the next encode starts.
             const target = try arena.alloc(u8, maxCompressedLength(size));
-            try writeBlob(io, arena, dir, &sums, base_name, "flate", target, zcompress.flate.encode.compress(raw, target, .{}));
-            try writeBlob(io, arena, dir, &sums, base_name, "gz", target, zcompress.gzip.encode.compress(raw, target, .{}));
-            try writeBlob(io, arena, dir, &sums, base_name, "zz", target, zcompress.zlib.encode.compress(raw, target, .{}));
-            try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, zcompress.snappy.encode.compressBlock(raw, target));
+            try writeBlob(io, arena, dir, &sums, base_name, "flate", target, compress.flate.encode.compress(raw, target, .{}));
+            try writeBlob(io, arena, dir, &sums, base_name, "gz", target, compress.gzip.encode.compress(raw, target, .{}));
+            try writeBlob(io, arena, dir, &sums, base_name, "zz", target, compress.zlib.encode.compress(raw, target, .{}));
+            try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, compress.snappy.encode.compressBlock(raw, target));
             try writeZstdBlob(io, arena, dir, dir_path, shape, base_name, raw);
             try writeBrotliBlob(io, arena, dir, dir_path, base_name, raw);
         }
@@ -287,7 +287,7 @@ fn writeZstdBlob(
         else => return error.ZstdCliFailed,
     }
     const back = try arena.alloc(u8, raw.len);
-    const n = zcompress.zstd.decode.decompress(result.stdout, back, null) catch |err| {
+    const n = compress.zstd.decode.decompress(result.stdout, back, null) catch |err| {
         std.debug.print("corpus: our zstd decoder rejected the CLI frame for {s}: {s}\n", .{
             base_name, @errorName(err),
         });
@@ -333,7 +333,7 @@ fn writeBrotliBlob(
         else => return error.BrotliCliFailed,
     }
     const back = try arena.alloc(u8, raw.len);
-    const n = zcompress.brotli.decode.decompress(result.stdout, back) catch |err| {
+    const n = compress.brotli.decode.decompress(result.stdout, back) catch |err| {
         std.debug.print("corpus: our brotli decoder rejected the CLI stream for {s}: {s}\n", .{
             base_name, @errorName(err),
         });
@@ -395,10 +395,10 @@ fn checkCliVersion(io: Io, arena: Allocator, tool: []const u8, pin: []const u8) 
 
 fn maxCompressedLength(input_len: usize) usize {
     return @max(
-        zcompress.gzip.encode.maxCompressedLength(input_len),
+        compress.gzip.encode.maxCompressedLength(input_len),
         @max(
-            zcompress.zlib.encode.maxCompressedLength(input_len),
-            zcompress.snappy.encode.maxCompressedLength(input_len),
+            compress.zlib.encode.maxCompressedLength(input_len),
+            compress.snappy.encode.maxCompressedLength(input_len),
         ),
     );
 }

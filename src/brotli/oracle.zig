@@ -18,7 +18,7 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
-const brotli = @import("zcompress").brotli;
+const brotli = @import("compress").brotli;
 
 /// Cap on the compressed stream the harness will read into memory.
 const max_stream_len = 1 << 30;

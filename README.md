@@ -1,10 +1,10 @@
-# zcompress
+# compress
 
 Fast, self-contained compression codecs in pure Zig. Performance in the class
 of [klauspost/compress](https://github.com/klauspost/compress), usability in
 the class of `std.compress`.
 
-zcompress is one Zig module with a namespace per codec. It imports only `std`
+compress is one Zig module with a namespace per codec. It imports only `std`
 and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and needs Zig 0.16.
 
 ## Codecs
@@ -32,16 +32,16 @@ with `DictionaryRequired`.
 ## Use
 
 ```sh
-zig fetch --save git+https://github.com/mattrobenolt/zcompress
+zig fetch --save git+https://github.com/baskingspot/compress
 ```
 
 ```zig
 // build.zig
-const zcompress = b.dependency("zcompress", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("zcompress", zcompress.module("zcompress"));
+const compress = b.dependency("compress", .{ .target = target, .optimize = optimize });
+exe.root_module.addImport("compress", compress.module("compress"));
 
 // your code
-const gzip = @import("zcompress").gzip;
+const gzip = @import("compress").gzip;
 ```
 
 [`examples/`](examples/README.md) has a command-line tool for each codec.

@@ -1,6 +1,6 @@
 //! gzip (RFC 1952) over the flate module: the member framing, the CRC-32 and
 //! size trailer, and the `std.Io` streaming layer. This is the
-//! `zcompress.gzip` namespace. It imports `std`, `fastmem`, and flate (by
+//! `compress.gzip` namespace. It imports `std`, `fastmem`, and flate (by
 //! relative path), and it never allocates.
 //!
 //! The public surface is four namespaces: `encode` (one-shot compress),

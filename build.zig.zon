@@ -1,7 +1,7 @@
 .{
-    .name = .zcompress,
+    .name = .compress,
     .version = "0.0.0",
-    .fingerprint = 0xaf92519576a0fa8a, // Changing this has security and trust implications.
+    .fingerprint = 0x4934d3195a751457, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .fastmem = .{

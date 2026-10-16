@@ -13,7 +13,7 @@ shared helpers in `src/internal/`, and never allocates. The format is
 ```zig
 // One-shot, over caller-owned buffers.
 const std = @import("std");
-const gzip = @import("zcompress").gzip;
+const gzip = @import("compress").gzip;
 
 fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
     const member = try gpa.alloc(u8, gzip.encode.maxCompressedLength(data.len));
@@ -51,7 +51,7 @@ one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 ## API
 
 ```zig
-// Names are relative to gzip = @import("zcompress").gzip
+// Names are relative to gzip = @import("compress").gzip
 encode.Level          // flate's level enum: .fast (default), .@"0" .. .@"9", .ratio
 encode.Options        // struct { level: Level = .fast }
 encode.maxCompressedLength(input_len: usize) usize

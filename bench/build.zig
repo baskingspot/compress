@@ -5,7 +5,7 @@ const Build = std.Build;
 // pinned C-competitor release tarballs through zig — url+hash in
 // bench/build.zig.zon, hash-verified by zig's fetcher — and materializes each
 // verified tree under bench/zig-out/bench-src/<name>/ for the harness's
-// zig-cc/cmake builds (bench/zcompress_bench/build.py). `dep.path(...)` is the
+// zig-cc/cmake builds (bench/compress_bench/build.py). `dep.path(...)` is the
 // hand-off, exactly as in ztls's conformance build; the tarballs carry no
 // build.zig, so there is nothing to import.
 //

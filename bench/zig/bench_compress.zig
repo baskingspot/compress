@@ -8,10 +8,10 @@
 //! one sample record per measurement, and an end record.
 //!
 //! Implementations in this binary:
-//!   - `zc`  — the zcompress one-shots: flate/gzip/zlib at level .fast and
+//!   - `zc`  — the compress one-shots: flate/gzip/zlib at level .fast and
 //!     the snappy raw block codec, both directions, plus the zstd one-shot
 //!     (level .fast, the CLI's level-1 class), both directions, and the
-//!     brotli one-shot decode (zcompress ships no brotli encoder, so its
+//!     brotli one-shot decode (compress ships no brotli encoder, so its
 //!     brotli rows are decode only).
 //!   - `std` — std.compress.flate with Container raw/gzip/zlib at level_1
 //!     (the fast class), both directions, plus std.compress.zstd decode
@@ -20,12 +20,12 @@
 //!     pair with the `zc` rows inside the same process.
 //!
 //! Decompression rows decode the reference blobs the corpus generator
-//! writes (the zcompress encoders; the pinned zstd and brotli CLIs for the
+//! writes (the compress encoders; the pinned zstd and brotli CLIs for the
 //! `.zst` and `.br` streams), so every arm's decoder sees the same bytes.
 //! The warmup pass of each cell verifies the round trip; `--check` runs the
 //! whole matrix as a correctness gate and reports one JSON line.
 //!
-//! Usage: bench-zcompress --corpus DIR [--suite standard|quick] [--seed N]
+//! Usage: bench-compress --corpus DIR [--suite standard|quick] [--seed N]
 //!         [--samples N] [--sample-ms MS] [--filter SUB] [--impl zc,std]
 //!         [--check]
 
@@ -39,7 +39,7 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 
 const fastmem = @import("fastmem");
 
-const zcompress = @import("zcompress");
+const compress = @import("compress");
 const build_options = @import("build_options");
 const std_flate = std.compress.flate;
 const std_zstd = std.compress.zstd;
@@ -74,7 +74,7 @@ fn carries(impl: []const u8, codec: []const u8) bool {
 /// both directions except std's zstd and brotli: std.compress.zstd ships
 /// only Decompress, so the std zstd rows decode the pinned CLI's reference
 /// frames (bench/zig/corpus.zig) and the zc arm carries the compress rows
-/// alone; zcompress ships no brotli encoder, so the zc brotli rows decode
+/// alone; compress ships no brotli encoder, so the zc brotli rows decode
 /// the pinned brotli CLI's reference streams.
 fn codecDirections(impl: []const u8, codec: []const u8) []const []const u8 {
     if (mem.eql(u8, codec, "zstd") and mem.eql(u8, impl, "std")) return &decode_only;
@@ -211,7 +211,7 @@ pub fn main(init: std.process.Init) !void {
     const args = try init.minimal.args.toSlice(arena);
     const options = parseArgs(args) catch |err| {
         std.debug.print(
-            "usage: bench-zcompress --corpus DIR [--suite standard|quick] [--seed N] " ++
+            "usage: bench-compress --corpus DIR [--suite standard|quick] [--seed N] " ++
                 "[--samples N] [--sample-ms MS] [--filter SUB] [--impl both|zc|std] " ++
                 "[--check]: {s}\n",
             .{@errorName(err)},
@@ -243,9 +243,9 @@ pub fn main(init: std.process.Init) !void {
 
 fn maxTargetLen() usize {
     return @max(
-        zcompress.gzip.encode.maxCompressedLength(64 * 1024),
-        zcompress.snappy.encode.maxCompressedLength(64 * 1024),
-        zcompress.zstd.encode.maxCompressedLength(64 * 1024),
+        compress.gzip.encode.maxCompressedLength(64 * 1024),
+        compress.snappy.encode.maxCompressedLength(64 * 1024),
+        compress.zstd.encode.maxCompressedLength(64 * 1024),
     );
 }
 
@@ -279,14 +279,14 @@ fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const 
     const target = bench.compressed;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
-            return zcompress.flate.encode.compress(raw, target, .{});
+            return compress.flate.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "gzip"))
-            return zcompress.gzip.encode.compress(raw, target, .{});
+            return compress.gzip.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zlib"))
-            return zcompress.zlib.encode.compress(raw, target, .{});
+            return compress.zlib.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zstd"))
-            return zcompress.zstd.encode.compress(raw, target, .{});
-        return zcompress.snappy.encode.compressBlock(raw, target);
+            return compress.zstd.encode.compress(raw, target, .{});
+        return compress.snappy.encode.compressBlock(raw, target);
     }
     return stdCompress(bench, codec, raw);
 }
@@ -317,16 +317,16 @@ fn decompressOne(bench: *Bench, impl: []const u8, codec: []const u8, blob: []con
     const target = bench.decoded;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
-            return zcompress.flate.decode.decompress(blob, target);
+            return compress.flate.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "gzip"))
-            return zcompress.gzip.decode.decompress(blob, target);
+            return compress.gzip.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zlib"))
-            return zcompress.zlib.decode.decompress(blob, target);
+            return compress.zlib.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zstd"))
-            return zcompress.zstd.decode.decompress(blob, target, null);
+            return compress.zstd.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "brotli"))
-            return zcompress.brotli.decode.decompress(blob, target);
-        return zcompress.snappy.decode.decompressBlock(blob, target);
+            return compress.brotli.decode.decompress(blob, target);
+        return compress.snappy.decode.decompressBlock(blob, target);
     }
     return stdDecompress(bench, codec, blob);
 }
@@ -499,7 +499,7 @@ fn sample(
 fn writeMeta(bench: *Bench) !void {
     const options = bench.options;
     try bench.out.print(
-        "{{\"type\":\"meta\",\"schema\":1,\"arm\":\"zc\",\"tool\":\"zcompress\"," ++
+        "{{\"type\":\"meta\",\"schema\":1,\"arm\":\"zc\",\"tool\":\"compress\"," ++
             "\"rev\":\"{s}\",\"toolchain\":\"zig {s}\",\"target\":\"{s}\",\"cpu\":\"{s}\"," ++
             "\"optimize\":\"{s}\",\"suite\":\"{s}\",\"seed\":{d},\"samples\":{d}," ++
             "\"sample_ms\":{d},\"impls\":[",

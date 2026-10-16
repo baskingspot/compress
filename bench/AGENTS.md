@@ -1,6 +1,6 @@
 # Agent notes: bench
 
-The benchmark harness: EC2 boxes, cross builds of zcompress and its competitors,
+The benchmark harness: EC2 boxes, cross builds of compress and its competitors,
 interleaved rounds, and exact-interval analysis. `README.md` is the operator
 documentation.
 
@@ -8,7 +8,7 @@ documentation.
 
 The harness is a port of fastmem's (`~/code/fastmem-zig/bench/`; the design is
 in `docs/bench-design.md` there). `ec2bench/` is copied from fastmem's and stays
-free of benchmark-specific code. `zcompress_bench/` is the zcompress adapter.
+free of benchmark-specific code. `compress_bench/` is the compress adapter.
 
 Not ported from fastmem:
 
@@ -16,14 +16,14 @@ Not ported from fastmem:
   tables).
 - `codegen.py` and the libc probes (fastmem kernel evidence).
 - The dist and large suites.
-- The runtime-dispatch machinery (zcompress has no dispatch).
+- The runtime-dispatch machinery (compress has no dispatch).
 - fastmem's `bench/tests` suite. The adapter has no tests of its own.
 
 Where the competitor pins came from:
 
 - libdeflate v1.26 and zlib-ng 2.3.3: the flate-family native competitors in
   `docs/research/containers-notes.md` §6.3 and §6.4.
-- google/snappy 1.3.1: the snappy competitor named in `docs/zcompress-plan.md`
+- google/snappy 1.3.1: the snappy competitor named in `docs/compress-plan.md`
   ("Benchmark methodology").
 - zstd v1.5.7: the tag in `docs/research/zstd-notes.md` §6.1.
 - google/brotli v1.2.0: the tag in `docs/research/brotli-notes.md` §8, the
@@ -38,13 +38,13 @@ Where the competitor pins came from:
 ## Design decisions
 
 - The corpus shape list is repeated in `bench/zig/corpus.zig`,
-  `bench/zig/bench_zcompress.zig`, `bench/zcompress_bench/jsonl.py` (twice),
+  `bench/zig/bench_compress.zig`, `bench/compress_bench/jsonl.py` (twice),
   `bench/drivers/c/cbench.h`, `bench/drivers/klauspost/main.go`,
   `src/zstd/bench.zig`, and `src/brotli/bench.zig`. A new shape updates all
   of them and `bench/corpus/SHA256SUMS` in the same commit.
-- The codec list is repeated in `bench/zig/bench_zcompress.zig` (`codecs`,
+- The codec list is repeated in `bench/zig/bench_compress.zig` (`codecs`,
   `blobExt`, `carries`, `codecDirections`), `bench/drivers/c/cbench.h`
-  (`blob_ext`), and `bench/zcompress_bench/jsonl.py` (`Sample.codec`,
+  (`blob_ext`), and `bench/compress_bench/jsonl.py` (`Sample.codec`,
   `STD_ABSENT`, `applicable`). A new codec updates all of them. A codec or
   direction that an implementation in a binary does not carry must be
   excluded in `applicable`, or every round fails the sample-set check at

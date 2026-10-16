@@ -19,14 +19,14 @@ from ec2bench.config import Config
 from ec2bench.fleet import Fleet, tags
 from ec2bench.parallel import Outcome, parallel, progress
 from ec2bench.runs import create_run, validate_label, write_manifest
-from zcompress_bench.analysis import BOOTSTRAP_SEED, analyze, validate_effect
-from zcompress_bench.build import ARMS, arm_revisions, build_all, provenance, resolve
-from zcompress_bench.corpus import load as load_corpus
-from zcompress_bench.protocol import execute, orders
-from zcompress_bench.report import write
+from compress_bench.analysis import BOOTSTRAP_SEED, analyze, validate_effect
+from compress_bench.build import ARMS, arm_revisions, build_all, provenance, resolve
+from compress_bench.corpus import load as load_corpus
+from compress_bench.protocol import execute, orders
+from compress_bench.report import write
 
 ARM_TOOLS = {
-    "zc": "zcompress",
+    "zc": "compress",
     "klauspost": "klauspost/compress",
     "libdeflate": "libdeflate",
     "zlibng": "zlib-ng",

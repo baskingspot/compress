@@ -1,6 +1,6 @@
 //! zlib streams (RFC 1950) over the flate module: the 2-byte header, the
 //! Adler-32 trailer, and a `std.Io` streaming layer. This is the
-//! `zcompress.zlib` namespace. It imports `std`, `fastmem`, and `flate` (by
+//! `compress.zlib` namespace. It imports `std`, `fastmem`, and `flate` (by
 //! relative path) and allocates no heap memory.
 //!
 //! The public surface is four names:

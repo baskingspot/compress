@@ -31,19 +31,19 @@ pub fn build(b: *Build) void {
     });
     const fastmem_mod = fastmem_dep.module("fastmem");
 
-    // One module, `zcompress`, rooted at src/root.zig. Codecs are
-    // namespaces under it (`zcompress.snappy`, `zcompress.flate`). The shared
+    // One module, `compress`, rooted at src/root.zig. Codecs are
+    // namespaces under it (`compress.snappy`, `compress.flate`). The shared
     // code in `src/internal/` is reached by relative import: it is not a
     // module and is not re-exported.
-    const zcompress_mod = b.addModule("zcompress", .{
+    const compress_mod = b.addModule("compress", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    zcompress_mod.addImport("fastmem", fastmem_mod);
+    compress_mod.addImport("fastmem", fastmem_mod);
 
     // ztest: plain-text test runner. Lazy — only fetched when the test step
-    // is actually built, not when consumers use zcompress as a dependency.
+    // is actually built, not when consumers use compress as a dependency.
     const ztest_dep = b.lazyDependency("ztest", .{});
     const test_runner: ?Build.Step.Compile.TestRunner = if (fuzz_mode) null else if (ztest_dep) |z|
         .{ .path = z.path("src/test_runner.zig"), .mode = .simple }
@@ -66,7 +66,7 @@ pub fn build(b: *Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "cli", .module = cli_mod },
-                .{ .name = "zcompress", .module = zcompress_mod },
+                .{ .name = "compress", .module = compress_mod },
             },
         });
         const exe = b.addExecutable(.{
@@ -96,7 +96,7 @@ pub fn build(b: *Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "zcompress", .module = zcompress_mod },
+                .{ .name = "compress", .module = compress_mod },
             },
         });
         const exe = b.addExecutable(.{
@@ -117,23 +117,23 @@ pub fn build(b: *Build) void {
     // Unit tests: one test executable over the one module, covering every
     // codec's tests and the barrel's own. ztest still reports each test by
     // name.
-    const zcompress_tests = b.addTest(.{
-        .root_module = zcompress_mod,
+    const compress_tests = b.addTest(.{
+        .root_module = compress_mod,
         .test_runner = test_runner,
     });
-    const run_zcompress_tests = b.addRunArtifact(zcompress_tests);
-    run_zcompress_tests.has_side_effects = true; // always run tests, don't cache
-    test_step.dependOn(&run_zcompress_tests.step);
+    const run_compress_tests = b.addRunArtifact(compress_tests);
+    run_compress_tests.has_side_effects = true; // always run tests, don't cache
+    test_step.dependOn(&run_compress_tests.step);
 
     // Compile-only gate: compiles the module's test binary without running
     // it, for cross-target checks (the portable fallbacks only compile on
     // non-native targets):
     //   zig build check -Dtarget=x86_64-linux
     const check_step = b.step("check", "Compile the tests without running (cross-target gate)");
-    check_step.dependOn(&zcompress_tests.step);
+    check_step.dependOn(&compress_tests.step);
 
     // The benchmark driver for the bench/ harness (bench/README.md): one
-    // binary with the zcompress one-shot rows and the std.compress rows,
+    // binary with the compress one-shot rows and the std.compress rows,
     // cross-built per EC2 target by the harness and uploaded to the boxes.
     // `-Drev` stamps the measured revision into the meta record.
     const rev =
@@ -141,23 +141,23 @@ pub fn build(b: *Build) void {
     const fleet_options = b.addOptions();
     fleet_options.addOption([]const u8, "rev", rev);
     const fleet_bench_mod = b.createModule(.{
-        .root_source_file = b.path("bench/zig/bench_zcompress.zig"),
+        .root_source_file = b.path("bench/zig/bench_compress.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
+            .{ .name = "compress", .module = compress_mod },
             .{ .name = "fastmem", .module = fastmem_mod },
         },
     });
     fleet_bench_mod.addOptions("build_options", fleet_options);
     const fleet_bench = b.addExecutable(.{
-        .name = "bench-zcompress",
+        .name = "bench-compress",
         .root_module = fleet_bench_mod,
     });
     const install_fleet_bench = b.addInstallArtifact(fleet_bench, .{});
     const fleet_bench_step = b.step(
         "fleet-bench",
-        "Install the fleet benchmark driver (zig-out/bin/bench-zcompress)",
+        "Install the fleet benchmark driver (zig-out/bin/bench-compress)",
     );
     fleet_bench_step.dependOn(&install_fleet_bench.step);
 
@@ -170,7 +170,7 @@ pub fn build(b: *Build) void {
         .target = target,
         .optimize = optimize,
         .imports = &.{
-            .{ .name = "zcompress", .module = zcompress_mod },
+            .{ .name = "compress", .module = compress_mod },
             .{ .name = "fastmem", .module = fastmem_mod },
         },
     });
@@ -229,7 +229,7 @@ pub fn build(b: *Build) void {
             .optimize = .ReleaseSafe,
         });
         probe32_mod.addImport("fastmem", fastmem_mod);
-        probe32_mod.addImport("zcompress", zcompress_mod);
+        probe32_mod.addImport("compress", compress_mod);
         const probe32_exe = b.addExecutable(.{
             .name = comptimePrint("{s}-probe32", .{name}),
             .root_module = probe32_mod,
@@ -258,7 +258,7 @@ pub fn build(b: *Build) void {
         // zig-benchmark's addRunTest injects @import("benchmark") into each
         // bench root module and generates the runner executable: one module
         // per codec over src/<codec>/bench.zig with the shared import set
-        // (zcompress + fastmem). The brotli bench is decode-only (over the
+        // (compress + fastmem). The brotli bench is decode-only (over the
         // generated corpus streams); see src/brotli/bench.zig.
         inline for (bench_codecs) |name| {
             const bench_root = b.createModule(.{
@@ -266,7 +266,7 @@ pub fn build(b: *Build) void {
                 .target = target,
                 .optimize = optimize,
                 .imports = &.{
-                    .{ .name = "zcompress", .module = zcompress_mod },
+                    .{ .name = "compress", .module = compress_mod },
                     .{ .name = "fastmem", .module = fastmem_mod },
                 },
             });

@@ -1,6 +1,6 @@
 /* The libdeflate arm (bench/README.md): whole-buffer
  * libdeflate_{deflate,gzip,zlib}_{compress,decompress} at level 1, the fast
- * class matching the zcompress .fast rows. Compressor and decompressor are
+ * class matching the compress .fast rows. Compressor and decompressor are
  * allocated once per process (the documented reuse pattern), so the timed
  * loop is the codec alone.
  *

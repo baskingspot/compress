@@ -1,4 +1,4 @@
-# zcompress: compression codecs for Zig. `just --list` shows the recipes.
+# compress: compression codecs for Zig. `just --list` shows the recipes.
 
 # The EC2 benchmark harness (bench/README.md) shares fastmem's IAM user and
 # launch templates (see bench.toml), so its recipes run under that AWS profile.

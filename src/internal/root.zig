@@ -1,4 +1,4 @@
-//! Code shared by zcompress codecs. Not public API: neither the barrel
+//! Code shared by compress codecs. Not public API: neither the barrel
 //! (`src/root.zig`) nor any codec namespace re-exports it, and there is no
 //! build module for it. A codec imports it by relative path
 //! (`@import("../internal/root.zig")`) and takes this directory along when it

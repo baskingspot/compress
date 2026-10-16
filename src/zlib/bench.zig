@@ -28,8 +28,8 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const bench = @import("benchmark");
-const flate = @import("zcompress").flate;
-const zlib = @import("zcompress").zlib;
+const flate = @import("compress").flate;
+const zlib = @import("compress").zlib;
 
 /// Input corpus shapes, the same set the flate bench uses.
 const Shape = enum {

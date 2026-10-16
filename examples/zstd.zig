@@ -28,7 +28,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const cli = @import("cli");
-const zstd = @import("zcompress").zstd;
+const zstd = @import("compress").zstd;
 
 /// The codec's CLI surface: `main` runs it, the tests drive the same pumps.
 const codec: cli.Codec = .{

@@ -1,7 +1,7 @@
 /* The brotli-c arm (bench/README.md): the pinned google/brotli v1.2.0
- * decoder, the native reference, decode only. zcompress ships no brotli
+ * decoder, the native reference, decode only. compress ships no brotli
  * encoder, so a compress row would have no zc counterpart. The rows match
- * the zc arm's `brotli/decompress/...` rows (bench/zig/bench_zcompress.zig),
+ * the zc arm's `brotli/decompress/...` rows (bench/zig/bench_compress.zig),
  * over the same `.br` reference streams (the pinned CLI at quality 11).
  *
  * The timed loop is the codec alone. The library has no decoder reset, so

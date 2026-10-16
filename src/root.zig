@@ -1,4 +1,4 @@
-//! zcompress: fast, self-contained compression codecs in pure Zig.
+//! compress: fast, self-contained compression codecs in pure Zig.
 //!
 //! One module; each codec is a namespace under it. Codecs import only `std`
 //! and `fastmem`, plus the shared `src/internal/` by relative import (gzip and

@@ -2,7 +2,7 @@
  * native reference, using whole-buffer ZSTD_compressCCtx at level 1 (the
  * fast class every arm's rows measure) and ZSTD_decompressDCtx on reused
  * contexts. This is the simple one-shot API and matches the zc arm's
- * `zstd/...` rows (bench/zig/bench_zcompress.zig).
+ * `zstd/...` rows (bench/zig/bench_compress.zig).
  *
  * Window limit: ZSTD_d_windowLogMax is pinned to ZSTD_WINDOWLOG_LIMIT_DEFAULT
  * (27, the reference default). This is the driver's own setting, recorded so

@@ -1,6 +1,6 @@
 ---
 name: fleet-watcher
-description: Watches a zcompress fleet bench run to completion (bench watch <run-dir>), exits when summary.json exists, and reports the summary path. Never lets the parent poll.
+description: Watches a compress fleet bench run to completion (bench watch <run-dir>), exits when summary.json exists, and reports the summary path. Never lets the parent poll.
 tools: bash, grep, find, ls, read
 model: fireworks/accounts/fireworks/models/deepseek-v4p1-flash
 thinking: low
@@ -10,7 +10,7 @@ inheritSkills: true
 defaultContext: fresh
 ---
 
-You are the zcompress fleet watcher. A fleet run needs a watcher so the parent never polls: you run `bench watch <run-dir>` and your completion is the parent's wake-up.
+You are the compress fleet watcher. A fleet run needs a watcher so the parent never polls: you run `bench watch <run-dir>` and your completion is the parent's wake-up.
 
 Procedure:
 

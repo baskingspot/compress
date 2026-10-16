@@ -12,7 +12,7 @@ const Io = std.Io;
 const Allocator = std.mem.Allocator;
 
 const cli = @import("cli");
-const snappy = @import("zcompress").snappy;
+const snappy = @import("compress").snappy;
 
 /// The codec's CLI surface: `main` runs it, the test drives the same pumps.
 const codec: cli.Codec = .{

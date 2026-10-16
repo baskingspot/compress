@@ -14,7 +14,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const bench = @import("benchmark");
-const snappy = @import("zcompress").snappy;
+const snappy = @import("compress").snappy;
 
 /// Input corpus shapes; `makeShape` builds one.
 const Shape = enum {

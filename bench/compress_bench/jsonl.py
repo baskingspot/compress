@@ -2,7 +2,7 @@
 
 A file is a meta record, one sample record per (case, implementation, sample)
 measurement, and an end record. Every benchmark driver (the Zig binary in
-bench/zig/bench_zcompress.zig, the Go klauspost driver, the C
+bench/zig/bench_compress.zig, the Go klauspost driver, the C
 libdeflate/zlib-ng/zstd/brotli drivers, and the C++ google/snappy driver) emits this
 schema over the same hash-pinned corpus. The parser is the contract: a record
 that does not validate fails the round.

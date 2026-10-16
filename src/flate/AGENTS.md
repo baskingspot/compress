@@ -152,4 +152,4 @@ containers.
   profiled), so it was reverted. Time the streaming path with the example pump,
   `just example flate encode|decode <file>`, over a large file.
 - Local numbers are never claims. A claim cites a recorded run in
-  `docs/results/` (method: `docs/zcompress-plan.md`, "Benchmark methodology").
+  `docs/results/` (method: `docs/compress-plan.md`, "Benchmark methodology").

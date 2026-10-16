@@ -3,7 +3,7 @@
 //! decompressing `std.Io.Reader` and `zstd.Writer` a compressing
 //! `std.Io.Writer`, each over one frame. No encode or decode path allocates,
 //! and the only imports are `std` and `fastmem`. This is the
-//! `zcompress.zstd` namespace.
+//! `compress.zstd` namespace.
 //!
 //! The source files, from the bottom up:
 //!

@@ -1,4 +1,4 @@
-module zcompress-oracle/brotli-go
+module compress-oracle/brotli-go
 
 go 1.26
 

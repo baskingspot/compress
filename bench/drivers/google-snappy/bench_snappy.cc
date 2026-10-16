@@ -1,7 +1,7 @@
 /* The google/snappy arm (bench/README.md): the canonical snappy
  * implementation, raw blocks only (the format description's block encoding,
  * no framing), both directions over the corpus. The rows compare against the
- * zc arm's `snappy/...` rows (bench/zig/bench_zcompress.zig).
+ * zc arm's `snappy/...` rows (bench/zig/bench_compress.zig).
  *
  * The timed loop is the codec alone: a `snappy::CompressionContext` is
  * created once in setup and reused, so no WorkingMemory is allocated per
@@ -14,7 +14,7 @@
  * caller's buffer (the same pair the string wrapper calls internally).
  *
  * Format: docs/research/specs/snappy-format-description.txt (the same spec
- * zcompress implements). Built against the pinned release tarball; build
+ * compress implements). Built against the pinned release tarball; build
  * defines: CBENCH_TARGET (triple string), CBENCH_CPU, ZIG_VERSION,
  * COMPETITOR_VERSION.
  */

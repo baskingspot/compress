@@ -17,7 +17,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const bench = @import("benchmark");
-const flate = @import("zcompress").flate;
+const flate = @import("compress").flate;
 
 /// Input data shapes.
 const Shape = enum {

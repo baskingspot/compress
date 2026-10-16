@@ -140,7 +140,7 @@ The launch template must set shutdown behavior to `terminate`.
 An external reaper must enforce the earlier of `ExpiresAt` and `LaunchTime + 24h`.
 The external reaper remains necessary when first-boot setup fails or the harness disappears.
 
-`up` calls `reap` first, and so does the zcompress adapter's `run` command.
+`up` calls `reap` first, and so does the compress adapter's `run` command.
 The harness reaper treats absent or malformed expiration tags as expired.
 A failed EC2 or image readiness wait triggers termination of that instance.
 A failed target does not prevent measurements on other targets with `run --up`.
@@ -178,4 +178,4 @@ These features are unsupported:
 
 ## Adapter
 
-The zcompress adapter (`zcompress_bench`) is documented in `../README.md`.
+The compress adapter (`compress_bench`) is documented in `../README.md`.

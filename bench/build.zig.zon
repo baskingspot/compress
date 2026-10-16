@@ -1,7 +1,7 @@
 .{
-    .name = .zcompress_bench,
+    .name = .compress_bench,
     .version = "0.0.0",
-    .fingerprint = 0x61555d402eb810a4, // Changing this has security and trust implications.
+    .fingerprint = 0x66e80da980e2944, // Changing this has security and trust implications.
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         // The C-arm competitor sources (bench/README.md, "Arms"): release
