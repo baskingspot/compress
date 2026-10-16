@@ -46,6 +46,7 @@ fmt:
 [group("test")]
 check-baseline:
     just check-target x86_64-linux
+    just check-target aarch64-linux
     just check-target x86-linux
     just check-target arm-linux
     just check-target riscv64-linux

@@ -13,11 +13,25 @@ jobs:
       contents: read
     uses: baskingspot/gh-actions/.github/workflows/ci.yml@081fb74a8d4731828de4f067e0106fef6df1bdec # v0.5.0
     with:
-      # One job per recipe, and per cross target. The 32-bit x86 target stays
-      # blocking because it catches the usize and shift bugs the gate exists
-      # for. The other targets run and show, and a failure does not fail CI.
-      recipes: '["test", "lint", "doc", "check-target x86_64-linux", "check-target x86-linux", "check-target arm-linux", "check-target riscv64-linux", "check-target wasm32-wasi"]'
-      non-blocking: '["check-target arm-linux", "check-target riscv64-linux", "check-target wasm32-wasi"]'
+      # One job per recipe, and per cross target. First class: Linux on x86_64
+      # and aarch64. Everything else is a stretch goal. Its jobs run and show,
+      # and a failure does not fail CI: a break on a 32-bit target gets fixed
+      # after the fact.
+      recipes: '["test", "lint", "doc", "check-target x86_64-linux", "check-target aarch64-linux", "check-target x86-linux", "check-target arm-linux", "check-target riscv64-linux", "check-target wasm32-wasi"]'
+      non-blocking: '["check-target x86-linux", "check-target arm-linux", "check-target riscv64-linux", "check-target wasm32-wasi"]'
+    secrets:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # macOS on aarch64 works for some projects and not others, so the lane runs
+  # the tests and never fails CI.
+  ci-macos:
+    permissions:
+      contents: read
+    uses: baskingspot/gh-actions/.github/workflows/ci.yml@081fb74a8d4731828de4f067e0106fef6df1bdec # v0.5.0
+    with:
+      recipes: '["test"]'
+      runners: '["macos-26"]'
+      non-blocking: '["test"]'
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
