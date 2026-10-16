@@ -61,22 +61,31 @@ const Lane = [4]u64;
 ///   integer multipliers. On aarch64 an explicit `@Vector(4, u64)` compiles to
 ///   two 2-wide SVE2 chains (mla.d/xar/mul.d) with higher latency, which
 ///   measured 9.2 vs 18.7 GB/s in the decode path on neoverse_v3. LLVM's SLP
-///   vectorizer picks that same shape on its own, which is what the barriers
-///   in `foldStripe` prevent.
+///   vectorizer packs the four isomorphic chains on its own — into that SVE2
+///   shape on aarch64, and into one `vpmullq` round on AVX-512DQ x86_64 —
+///   which is what the barriers in `foldStripe` prevent: on Intel's P-cores
+///   `vpmullq` is a ~15-cycle sequence on the serial accumulator chain, and
+///   four independent 3-cycle `imul`s measure twice as fast (15.5 vs 7.3 GB/s
+///   on graniterapids, 15.1 vs 7.1 on sapphirerapids; the four-lane micro
+///   grid is in the wave's results file).
 /// - **Vector** (AVX-512DQ+VL): a round is `vpmullq/vpaddq/vprolq/vpmullq` per
-///   32-byte stripe, 4 vector instructions for all four accumulators (checked
-///   in the sapphirerapids disassembly), against the scalar form's 8 separate
-///   multiplies per stripe.
+///   32-byte stripe, 4 vector instructions for all four accumulators. It pays
+///   only where `vpmullq` is fast — znver4 (19.1 vs 14.6 GB/s scalar;
+///   znver5's scalar `imul` dual-issues and flips it back, 24.7 vs 20.4).
 const Accumulator = if (use_vector_lanes) VectorAccumulator else ScalarAccumulator;
 
-/// The vector form pays only where a true 64-bit vector multiply exists:
-/// AVX-512DQ (vpmullq) with VL, so the four accumulators fit one ymm register.
-/// Everywhere else the scalar form wins: baseline x86_64 synthesizes the
-/// multiply from vpmuludq, and aarch64's SVE2 splits it into two serial 2-wide
-/// chains (measured on neoverse_v3; disassembly on x86_64).
+/// The vector form pays only where a true 64-bit vector multiply exists AND is
+/// fast: AVX-512DQ (`vpmullq`) with VL, so the four accumulators fit one ymm
+/// register, on a core whose `vpmullq` is cheap. That is znver4 among the
+/// fleet targets: Intel's P-cores run `vpmullq` as a multi-uop, ~15-cycle
+/// sequence (scalar wins, measured), znver5's scalar `imul` dual-issues
+/// (scalar wins, measured), baseline x86_64 synthesizes the multiply from
+/// `vpmuludq`, and aarch64's SVE2 splits it into two serial 2-wide chains
+/// (measured; the note above names the numbers).
 const use_vector_lanes = builtin.cpu.arch == .x86_64 and
     x86.featureSetHas(builtin.cpu.features, .avx512dq) and
-    x86.featureSetHas(builtin.cpu.features, .avx512vl);
+    x86.featureSetHas(builtin.cpu.features, .avx512vl) and
+    mem.eql(u8, builtin.cpu.model.name, "znver4");
 
 /// The scalar form: four `u64` accumulators, one stripe (32 bytes) at a time.
 const ScalarAccumulator = struct {
@@ -111,10 +120,21 @@ const ScalarAccumulator = struct {
         // (mla.d/xar/mul.d) when this is inlined into a big caller: two serial
         // chains of higher latency instead of four independent scalar ones,
         // which measured 9.4 vs 18.7 GB/s in the decode path on neoverse_v3.
-        // No current target has a fast 64-bit vector multiply (AVX-512DQ
-        // aside), so scalar is the right shape everywhere; the barrier pins it.
+        // Scalar is the right shape everywhere a vector form is not
+        // comptime-selected; the barriers pin it.
         var acc = self.acc;
         var i: usize = 0;
+        // x86_64 stays one stripe per iteration: unrolled, the 16 isomorphic
+        // chains are enough for LLVM's SLP to pay the extract cost of the
+        // per-lane barriers and pack the rounds back into `vpmullq`
+        // (disassembly-checked on graniterapids). One stripe per iteration
+        // keeps the multiply chains scalar; the loop overhead measured under
+        // the barrier win (the four-lane micro grid, this wave's results).
+        if (builtin.cpu.arch == .x86_64) {
+            while (i + 32 <= input.len) : (i += 32) foldStripe(&acc, input[i..][0..32]);
+            self.acc = acc;
+            return i;
+        }
         while (i + 128 <= input.len) : (i += 128) {
             inline for (0..4) |half| foldStripe(&acc, input[i + 32 * half ..][0..32]);
         }
@@ -124,6 +144,23 @@ const ScalarAccumulator = struct {
     }
 
     inline fn foldStripe(acc: *Lane, stripe: *const [32]u8) void {
+        if (builtin.cpu.arch == .x86_64) {
+            // x86_64: interleave load and round per lane, with a barrier on
+            // each finished lane. LLVM's SLP packs the four isomorphic
+            // chains into one `vpmullq` round whenever it can see them
+            // together — the batched-load barrier variant included (the
+            // extracts it emits to feed the barriers still pay): four
+            // independent 3-cycle imuls beat one ~15-cycle vpmullq on the
+            // serial accumulator chain on Intel (measured: 15.5 vs 7.3 GB/s
+            // on graniterapids, 15.1 vs 7.1 on sapphirerapids; the
+            // batched-load shape measured 6.2 there). The barrier must
+            // cover the multiply's result, not its input.
+            inline for (0..4) |j| {
+                acc[j] = round(acc[j], readInt(u64, stripe[j * 8 ..][0..8]));
+                mem.doNotOptimizeAway(acc[j]);
+            }
+            return;
+        }
         var lane: Lane = undefined;
         inline for (0..4) |j| lane[j] = readInt(u64, stripe[j * 8 ..][0..8]);
         // Batched, not interleaved word by word: barriers between the
