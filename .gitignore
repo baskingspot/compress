@@ -17,3 +17,7 @@ core.[0-9]*
 !src/zstd/testdata/*.zst
 *.z
 *.snappy
+
+# The link baskingspot-docs makes to the theme.
+docs/themes/
+.wrangler/
