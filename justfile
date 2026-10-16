@@ -45,11 +45,16 @@ fmt:
 [doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. The targets differ most from the dev box, and freestanding targets are excluded because the ztest runner needs an OS. It is not a supported-platform claim")]
 [group("test")]
 check-baseline:
-    zig build check -Dtarget=x86_64-linux
-    zig build check -Dtarget=x86-linux
-    zig build check -Dtarget=arm-linux
-    zig build check -Dtarget=riscv64-linux
-    zig build check -Dtarget=wasm32-wasi
+    just check-target x86_64-linux
+    just check-target x86-linux
+    just check-target arm-linux
+    just check-target riscv64-linux
+    just check-target wasm32-wasi
+
+[doc("Compile-only check for one target, such as `just check-target x86-linux`. CI runs one job per target")]
+[group("test")]
+check-target TARGET:
+    zig build check -Dtarget={{ TARGET }}
 
 [doc("Decode very large streams on a 32-bit target, with wasm32-wasi under wasmtime: the zstd probe's frames and the brotli probe's streams over 4 GiB")]
 [group("test")]

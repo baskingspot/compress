@@ -11,7 +11,9 @@ jobs:
   ci:
     permissions:
       contents: read
-    uses: baskingspot/gh-actions/.github/workflows/ci.yml@9e44f3e0a78690c111f4418afdfc3965ce54fca0 # v0.3.0
+    uses: baskingspot/gh-actions/.github/workflows/ci.yml@343c8fc1f3c56cdcd64e851cb69bf5772d062231 # v0.4.0
+    with:
+      recipes: '["test", "lint", "doc", "check-target x86_64-linux", "check-target x86-linux", "check-target arm-linux", "check-target riscv64-linux", "check-target wasm32-wasi"]'
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
 
