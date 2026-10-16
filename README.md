@@ -7,7 +7,11 @@
 
 Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and Zstandard, plus a Brotli decoder.
 
-`compress` is one Zig module with a namespace per codec. The caller owns every buffer, and the codecs do not allocate. Streaming goes through `std.Io`. The module imports only `std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig).
+`compress` is one Zig module with a namespace per codec. The caller owns
+every buffer, and the default APIs do not allocate: zstd's streaming
+`*Alloc` variants are the opt-in that takes an allocator, for buffers too
+large for a stack. Streaming goes through `std.Io`. The module imports only
+`std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig).
 
 ## What is in it
 
