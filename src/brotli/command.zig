@@ -17,6 +17,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const builtin = @import("builtin");
 const testing = std.testing;
 
 const fastmem = @import("fastmem");
@@ -891,6 +892,17 @@ inline fn insertLiteralsRun(
             // symbol decode and the byte store — the context lookups are
             // provably dead.
             const tree = &header.trees.literal[0];
+            if (Bits == bits.BitReader and builtin.cpu.arch == .x86_64) {
+                const out = try literalSegmentSingle(Bits, .{
+                    .reader = r.*,
+                    .previous = previous,
+                    .before = before,
+                }, tree, segment);
+                r.* = out.reader;
+                previous = out.previous;
+                before = out.before;
+                continue;
+            }
             for (segment) |*byte| {
                 const literal = if (try tree.decodeRoot(Bits, r)) |symbol|
                     symbol
@@ -908,6 +920,11 @@ inline fn insertLiteralsRun(
         // the map, and the symbol decode.
         switch (header.context.modes[block_type]) {
             inline else => |mode| {
+                // The context path stays inlined where the single-tree run
+                // outlines: its per-literal work is the two context lookups
+                // and the map row, not the reader spills, and the segment
+                // boundary's copy cost measured a net loss on the words and
+                // prose rows (c8i: 0.91-0.95) against skewlit's win (1.11).
                 for (segment) |*byte| {
                     const cid = literalContext(mode, previous, before);
                     const tree = &header.trees.literal[map_row[cid]];
@@ -926,6 +943,50 @@ inline fn insertLiteralsRun(
             },
         }
     }
+}
+
+/// The literal segment loops' cross-boundary state on the outlined path:
+/// the reader by value, plus the two context bytes.
+fn LiteralCarry(comptime Bits: type) type {
+    return struct {
+        reader: Bits,
+        previous: u8,
+        before: u8,
+    };
+}
+
+/// One block-type segment of the single-tree literal run, outlined (the
+/// per-literal order is `insertLiteralsRun`'s). The reader crosses by value:
+/// inside, its address escapes only into the inlined `decodeRoot`, so its
+/// fields stay in registers across symbols. Inlined into `decodeMetaBlock`
+/// instead, the run's state exceeds x86_64's 16 GPRs and every symbol pays
+/// a store-load round trip through the caller's stack frame (the skewlit
+/// row's hottest block on graniterapids/sapphirerapids was exactly those
+/// `rbp`-relative spills, perf-annotated); aarch64's 31 GPRs hold the
+/// inlined loop, so the outline is the x86_64 shape only.
+noinline fn literalSegmentSingle(
+    comptime Bits: type,
+    carry: LiteralCarry(Bits),
+    tree: *const huffman.LiteralTree,
+    segment: []u8,
+) Bits.ErrorSet!LiteralCarry(Bits) {
+    var state = carry;
+    for (segment) |*byte| {
+        const literal = if (try tree.decodeRoot(Bits, &state.reader)) |symbol|
+            symbol
+        else cold: {
+            // The subtable fallback is the cold path; it decodes through a
+            // copy so the hot local's address never escapes into a call.
+            var reader = state.reader;
+            const symbol = try tree.decodeSubtable(Bits, &reader);
+            state.reader = reader;
+            break :cold symbol;
+        };
+        byte.* = @intCast(literal);
+        state.before = state.previous;
+        state.previous = @intCast(literal);
+    }
+    return state;
 }
 
 // ---------------------------------------------------------------------------
