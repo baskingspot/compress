@@ -13,5 +13,7 @@ core.[0-9]*
 *.out
 *.o
 *.zst
+# Test fixtures that tests embed with @embedFile. Without these a fresh clone cannot compile its tests.
+!src/zstd/testdata/*.zst
 *.z
 *.snappy
