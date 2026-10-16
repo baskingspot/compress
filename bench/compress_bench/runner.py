@@ -254,6 +254,17 @@ def analyze_run(run_dir: Path, minimum_effect: float | None) -> None:
     """Analyze saved raw rounds without AWS, SSH, or builds."""
     import json
 
+    # A finished run carries the analysis as its record (summary.json,
+    # report.md). Refuse to re-analyze a run whose raw rows are gone — the
+    # re-analysis would find no rows and overwrite a good record with
+    # "No complete rounds" failures. Re-analysis needs a run kept with
+    # --keep-raw (its raw/ directories still present).
+    if not any((run_dir / target / "raw").is_dir() for target in run_dir.iterdir()):
+        raise click.ClickException(
+            f"{run_dir} has no raw rows: the record (summary.json, report.md) "
+            "stands as written. Re-analysis needs a run kept with --keep-raw."
+        )
+
     manifest = json.loads((run_dir / "manifest.json").read_text())
     effect = minimum_effect if minimum_effect is not None else manifest.get("minimum_effect", 0.0)
     corpus_hashes = manifest["corpus"]["hashes"]
