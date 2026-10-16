@@ -12,7 +12,7 @@ The format is vendored at `docs/research/specs/rfc7932-brotli.txt`; `§` cites
 in this directory are sections of that file.
 
 This package is decoder-first. `brotli.decode` (one-shot) and `brotli.Reader`
-(streaming) are the surface today; `brotli.encode` and `brotli.Writer` are the
+(streaming) are the surface; `brotli.encode` and `brotli.Writer` are the
 encoder's seats — reserved and stated, never silently absent. The namespace is
 exactly `{Reader, decode}`, and the encoder adds its two names without
 reshaping these.
@@ -47,12 +47,13 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 
 `brotli.Reader.streamAll(brotli.Reader.default_window_wbits, in, out, &buffer)`
 decodes every stream in `in` in one call; `just example brotli decode FILE.br
+
 > FILE` runs the example CLI.
 
 ## API
 
 ```zig
-const brotli = @import("compress").brotli; // two names today: `decode`, `Reader`
+const brotli = @import("compress").brotli; // two names: `decode`, `Reader`
 
 // One-shot decode: one stream, header through last byte. `target` is a cap;
 // the return value is the decoded length.
@@ -163,7 +164,7 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
   `Truncated`). The reference implementations fail closed on trailing bytes
   rather than warning, so there is no warn-and-continue mode.
 - **Empty input.** Zero bytes is `Truncated` from `decompress` and a `Reader`:
-  no stream began. The empty *stream* is the single byte `06` and decodes to
+  no stream began. The empty _stream_ is the single byte `06` and decodes to
   zero bytes. `streamAll` treats a zero-byte input as the walk's clean end
   (zero streams), like the other codecs here.
 - **Stack.** The per-meta-block scratch is comptime and KiB-scale: the
