@@ -1,0 +1,21 @@
+# First class: Linux on x86_64 and aarch64. A failure there fails CI.
+# Everything else is a stretch goal. Its jobs run and show, and a failure does
+# not fail CI: a break on a 32-bit target gets fixed after the fact.
+jobs:
+  - recipe: test
+  - recipe: lint
+  - recipe: doc
+  - recipe: check-target x86_64-linux
+  - recipe: check-target aarch64-linux
+  - recipe: check-target x86-linux
+    blocking: false
+  - recipe: check-target arm-linux
+    blocking: false
+  - recipe: check-target riscv64-linux
+    blocking: false
+  - recipe: check-target wasm32-wasi
+    blocking: false
+  # macOS on aarch64 works for some projects and not others.
+  - recipe: test
+    runners: [macos-26]
+    blocking: false
