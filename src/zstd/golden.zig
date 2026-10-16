@@ -18,6 +18,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
+const fixtures = @import("fixtures");
 
 /// Comptime hex decoding, so the vectors keep the spelling of their source
 /// (the CLI's own hex output, the research harness's dumps) instead of being
@@ -1182,20 +1183,20 @@ pub const skippable_huge = hex("512a4d18ffffffff616263");
 /// literals tree, an 18-symbol offsets table, the full 53/36-symbol length
 /// tables, the trainer's default {1,4,8} repcodes, and 14,378 content bytes
 /// from offset 115.
-pub const dict_trained: []const u8 = @embedFile("testdata/dict-trained.bin");
+pub const dict_trained: []const u8 = fixtures.dict_trained_bin;
 /// A second trained dictionary (8,192 bytes): ID 100 (the CLI's
 /// `--dictID=100`), 8,042 content bytes from offset 150 — the mismatch
 /// matrix's other seat, and `dict_frame_s01_r100`'s dictionary.
-pub const dict_100: []const u8 = @embedFile("testdata/dict-100.bin");
+pub const dict_100: []const u8 = fixtures.dict_100_bin;
 /// The C's `zero-weight-dict` (153 bytes): ID 16720127, 120 zero-weight
 /// symbols in its literals tree — an incomplete statistics dictionary the
 /// v1.5.6+ C and ours accept (DD11), 11 content bytes from offset 142.
-pub const dict_zero_weight: []const u8 = @embedFile("testdata/dict-zero-weight.bin");
+pub const dict_zero_weight: []const u8 = fixtures.dict_zero_weight_bin;
 /// The C's `http-dict-missing-symbols` (1,000 bytes): ID 1386686301, zero
 /// weights in the literals tree and zero-probability symbols in the offsets
 /// (12 symbols) and match-length (47) tables, 842 content bytes from offset
 /// 158.
-pub const dict_missing_symbols: []const u8 = @embedFile("testdata/dict-missing-symbols.bin");
+pub const dict_missing_symbols: []const u8 = fixtures.dict_missing_symbols_bin;
 
 /// `dict_frame_s00`'s plaintext (735 bytes): a corpus-shaped sample.
 pub const dict_s00: []const u8 = @embedFile("testdata/dict-s00.txt");
@@ -1213,28 +1214,28 @@ pub const dict_big: []const u8 = @embedFile("testdata/dict-big.txt");
 /// single-segment, the exact Frame_Content_Size, the 4-byte DID form, and
 /// the checksum. The CLI decodes it with `-D`; without one it fails
 /// "Dictionary mismatch".
-pub const dict_frame_s00: []const u8 = @embedFile("testdata/dict-s00.zst");
+pub const dict_frame_s00: []const u8 = fixtures.dict_s00_zst;
 /// The same frame with `--no-dictID` (183 bytes): DID flag 0, so it decodes
 /// with or without a supplied dictionary — and fails as corruption without
 /// one, because its first block is Treeless from the dictionary's tree.
-pub const dict_frame_s00_noid: []const u8 = @embedFile("testdata/dict-s00-noid.zst");
+pub const dict_frame_s00_noid: []const u8 = fixtures.dict_s00_noid_zst;
 /// The CLI's `-D dict-100.bin -19` frame for `dict_s01` (244 bytes): the
 /// 1-byte DID form (ID 100). The level is `-19`, not the level-1 class the
 /// encoder targets (verified at commit time: `-1` gives 311 bytes); it is a
 /// decode fixture only.
-pub const dict_frame_s01_r100: []const u8 = @embedFile("testdata/dict-s01-r100.zst");
+pub const dict_frame_s01_r100: []const u8 = fixtures.dict_s01_r100_zst;
 /// The CLI's raw-dictionary frame for `dict_s01` (300 bytes): `-D
 /// dict_s02.txt -19`, DID flag 0 (the level is `-19`; `-1` gives 321
 /// bytes). A decode fixture only. The CLI decodes it only with `dict_s02`; any
 /// other dictionary fails as corruption.
-pub const dict_frame_s01_raw: []const u8 = @embedFile("testdata/dict-s01-raw.zst");
+pub const dict_frame_s01_raw: []const u8 = fixtures.dict_s01_raw_zst;
 /// The CLI's `-D dict-zero-weight.bin -1` frame for `dict_s00` (357 bytes):
 /// the incomplete-statistics dictionary's own frame, decoded with it.
-pub const dict_frame_zw: []const u8 = @embedFile("testdata/dict-zw.zst");
+pub const dict_frame_zw: []const u8 = fixtures.dict_zw_zst;
 /// The CLI's `-D dict-trained.bin -1` frame for `dict_big` (3,783 bytes):
 /// several blocks, so the dictionary's tables seed block 0 and the frame's
 /// own state carries the rest.
-pub const dict_frame_big: []const u8 = @embedFile("testdata/dict-big.zst");
+pub const dict_frame_big: []const u8 = fixtures.dict_big_zst;
 
 // ---------------------------------------------------------------------------
 // The encoder's with-dictionary parity fixtures (RFC 8878 §5): the pinned CLI

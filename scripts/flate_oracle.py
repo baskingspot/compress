@@ -8,6 +8,7 @@ The harness is built from src/flate/oracle.zig. The shared plumbing is in
 scripts/oracle_common.py.
 """
 
+import base64
 import zlib
 
 import oracle_common as common
@@ -15,6 +16,17 @@ import oracle_common as common
 root = common.ROOT
 harness = root / "zig-out/bin/flate-oracle"
 testdata = root / "src/flate/testdata"
+
+# Every testdata input fixture, one entry per pair: the text `.in` files read
+# as committed; the binary ones commit `.in.base64` (no binary files in git,
+# the `check_binary_files` gate) and decode here.
+inputs = []
+for inp in sorted(testdata.glob("*.in")):
+    inputs.append((inp.name, inp.read_bytes()))
+for inp in sorted(testdata.glob("*.in.base64")):
+    inputs.append((inp.stem, base64.b64decode(inp.read_text())))
+input_by_name = dict(inputs)
+assert len(inputs) == 9, f"expected 9 input fixtures, found {len(inputs)}"
 
 
 # Raw-deflate shapes the oracle can emit. zlib has no level -2 (that is
@@ -109,10 +121,10 @@ shapes = common.SHAPES
 #    so verbatim it must be rejected, and with BFINAL set on that block it
 #    must decode to `.in` (both verified against the oracle).
 pairs = 0
-for golden in sorted(testdata.glob("*.golden")):
-    inp = golden.parent / (golden.name[: -len(".golden")] + ".in")
-    data = inp.read_bytes()
-    raw = golden.read_bytes()
+for golden in sorted(testdata.glob("*.golden.base64")):
+    name = golden.name[: -len(".golden.base64")] + ".in"
+    data = input_by_name[name]
+    raw = base64.b64decode(golden.read_text())
     assert python_decompress(raw) == data, f"oracle decode ({golden.name})"
     assert our_decompress_fails(raw, len(data)), f"{golden.name}: non-final block accepted"
     completed = bytearray(raw)
@@ -125,8 +137,8 @@ assert pairs == 9, f"expected 9 testdata pairs, found {pairs}"
 
 # 2. The oracle's own streams over the same inputs, every level, and our
 #    encoder's streams for the same bytes (both directions).
-for inp in sorted(testdata.glob("*.in")):
-    check(inp.name, inp.read_bytes(), len(inp.read_bytes()) + 1)
+for name, data in inputs:
+    check(name, data, len(data) + 1)
 
 # 3. The generated shapes: empty, text, random, single-byte runs, and a long
 #    text that spans several 64-KiB blocks (the encoder's cross-block
@@ -157,7 +169,7 @@ for desc, data in streaming:
     back = example(["decode", "-"], raw)
     assert back == data, f"example round trip ({desc}): {len(back)} bytes, want {len(data)}"
 
-fixture_inputs = len(list(testdata.glob("*.in"))) + len(shapes)
+fixture_inputs = len(inputs) + len(shapes)
 
 # 5. The preset dictionary (`§3.2.3`): raw deflate names no dictionary, so the
 #    caller vouches for the bytes on both sides — this lane is round-trip

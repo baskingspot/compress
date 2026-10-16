@@ -23,6 +23,7 @@ fuzz LIMIT="10M":
 lint:
     ziglint
     zig fmt --check src build.zig
+    uv run scripts/check_binary_files.py
     uvx ruff check --line-length 100 scripts
     uvx ruff format --check --line-length 100 scripts
     uvx ty check scripts

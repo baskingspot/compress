@@ -224,6 +224,13 @@ Deviations, on purpose:
 
 ## Rules
 
+- No binary files in git. Test data and reference bytes commit text: binary
+  payloads are single-line base64 with the `.base64` suffix
+  (`src/gzip/testdata/issue6550.gz.base64` set the shape). `build.zig`'s
+  `fixtures` manifest decodes them into the anonymous `fixtures` module the
+  codecs' golden data re-exports. The one exception: brand marks — a raster
+  under `docs/static/` commits only as a render, with its SVG source beside
+  it. `scripts/check_binary_files.py` enforces the rule in `just lint`.
 - Spec-first: a codec's work starts from `docs/research/specs/`. Every format
   test cites the spec file and section it validates:
   `// RFC 1951 §3.2.5 — fixed Huffman`.

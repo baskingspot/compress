@@ -39,6 +39,7 @@ dictionary), and the hand-built §5 boundary pair records the pinned CLI's
 verdict against ours (it decodes the late reach, we refuse it — DT1).
 """
 
+import base64
 import random
 import subprocess
 import tempfile
@@ -427,12 +428,14 @@ def check_dictionary_rows() -> int:
         raise AssertionError(f"our raw-dictionary decode: {decoded.stderr.decode().strip()}")
     checked += 1
 
-    # The C's incomplete-statistics fixture (`zero-weight-dict`, committed in
-    # src/zstd/testdata): the CLI compresses with it and we decode the frame —
-    # and our encoder re-emits the CLI's own frame byte for byte, the
-    # promotion rules degrading exactly as the C's do (its literals tree has
-    # zero weights, so nothing is reused blindly).
-    zero_weight = (root / "src/zstd/testdata/dict-zero-weight.bin").read_bytes()
+    # The C's incomplete-statistics fixture (`zero-weight-dict`, committed
+    # in src/zstd/testdata as base64 text): the CLI compresses with it and we
+    # decode the frame — and our encoder re-emits the CLI's own frame byte
+    # for byte, the promotion rules degrading exactly as the C's do (its
+    # literals tree has zero weights, so nothing is reused blindly).
+    zero_weight = base64.b64decode(
+        (root / "src/zstd/testdata/dict-zero-weight.bin.base64").read_text()
+    )
     data = common.SHAPES["text"]
     frame = cli_dict_frame(data, zero_weight)
     ours = our_decode_dict(frame, len(data), zero_weight)

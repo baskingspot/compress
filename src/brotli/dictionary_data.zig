@@ -3,7 +3,7 @@
 //! DICT hex and its NDBITS array, and Appendix B's 121 transforms,
 //! deduplicated into the C reference's prefix/suffix-pool shape
 //! (`c/common/transform.c`). Do not edit by hand: re-run the generator and
-//! commit its output. The dictionary bytes are `dictionary.bin` beside
+//! commit its output. The dictionary bytes are `dictionary.bin.base64`
 //! this file; the tests pin both by the RFC's own CRC-32 check values.
 
 /// RFC 7932 §8, Appendix A — NDBITS[0..24]: the index bit-depth of each

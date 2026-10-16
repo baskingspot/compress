@@ -184,7 +184,7 @@ ring, the special codes, and the per-meta-block NPOSTFIX/NDIRECT tables),
 `command.zig` (the insert-and-copy alphabet, the three block switches, the
 context IDs, the distance element, and the copy machinery), `dictionary.zig`
 (the §8 class's word fetch and transforms, over the generated
-`dictionary.bin` and `dictionary_data.zig`), `golden.zig` (the CLI-verified
+`dictionary.bin.base64` and `dictionary_data.zig`), `golden.zig` (the CLI-verified
 wire vectors, the test-side bit writer, and the §11.1 trivial compressor),
 `decode.zig` (the one-shot and the shared decode state, slice 5), and
 `Reader.zig` (the streaming `Io.Reader` over the same layers, slice 6). The
@@ -505,7 +505,7 @@ a commit-time script under `scripts/` (the flate-oracle pattern) — committed
 once, never re-run silently, never fetched at build time.
 
 **Landed (slice 4):** `scripts/brotli_dictionary_gen.py` parses the vendored
-RFC and writes two committed artifacts: `src/brotli/dictionary.bin` (Appendix
+RFC and writes two committed artifacts: `src/brotli/dictionary.bin.base64` (Appendix
 A's 122,784 DICT bytes, embedded by `dictionary.zig` via `@embedFile`) and
 `src/brotli/dictionary_data.zig` (NDBITS, the pool, the map, the 121 triplets,
 and the cut-off table, as Zig source). The script asserts every check value
@@ -525,7 +525,9 @@ by re-running the generator and diffing).
 
 Every value was verified during research, both by python's `zlib.crc32` and by
 `std.hash.crc.Crc32` against the 0.16.0 store, and the 122,784 bytes are
-byte-identical across the RFC, the C's `dictionary.bin`, and the Go port. The
+byte-identical across the RFC, the C's `dictionary.bin`, and the Go port
+(the committed form is `dictionary.bin.base64`, the same bytes as base64
+text). The
 ported *representation* is the C's deduplicated transform shape (OQ6): a
 217-byte prefix/suffix pool, a 50-entry `u16` offset map, and 121 triplets of
 `[prefix_id, transform_type, suffix_id]` (`transform.c:15-172`, 680 bytes), with

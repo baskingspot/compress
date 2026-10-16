@@ -5,7 +5,7 @@
 //!
 //! The data is generated, never hand-copied: `scripts/brotli_dictionary_gen.py`
 //! parses the vendored RFC's Appendix A hex and Appendix B table into
-//! `dictionary.bin` (DICT) and `dictionary_data.zig` (NDBITS and the C
+//! `fixtures.dictionary_bin` (DICT, the committed `dictionary.bin.base64` decoded)
 //! reference's deduplicated prefix/suffix-pool transform shape). The tests pin
 //! both by the RFC's own CRC-32 check values: Appendix A's DICT at
 //! 0x5136cb04, and Appendix B's flat 648-byte transform sequence — rebuilt
@@ -21,11 +21,13 @@ const testing = std.testing;
 
 const fastmem = @import("fastmem");
 
+const fixtures = @import("fixtures");
+
 const data = @import("dictionary_data.zig");
 
 /// §8, Appendix A — DICT: "an array of bytes", 122,784 of them, the words a
 /// static dictionary reference names.
-pub const words: []const u8 = @embedFile("dictionary.bin");
+pub const words: []const u8 = fixtures.dictionary_bin;
 
 /// §8 — "The copy length for a static dictionary reference must be between 4
 /// and 24": the base word lengths the table covers.
@@ -91,7 +93,7 @@ comptime {
     // §8 — DICTSIZE = DOFFSET[24] + 24 * NWORDS[24] is exactly Appendix A's
     // DICT, and the scratch is §8's bound over the generated tables.
     if (doffset[24] + 24 * (@as(u32, 1) << data.ndbits[24]) != words.len) {
-        @compileError("dictionary.bin is not the length NDBITS describes");
+        @compileError("dictionary.bin.base64 does not decode to the length NDBITS describes");
     }
     if (max_affix != 13) @compileError("Appendix B's affix bound moved");
     if (max_word_len + max_affix + 1 != scratch_len) {

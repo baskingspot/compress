@@ -23,6 +23,8 @@ const assert = std.debug.assert;
 
 const fastmem = @import("fastmem");
 
+const fixtures = @import("fixtures");
+
 /// A whole brotli stream and the bytes it decodes to.
 pub const Stream = struct {
     /// The compressed bytes.
@@ -868,6 +870,6 @@ pub const cli_digits_q11: Stream = .{
 /// encode of the `.in` bytes — `brotli -d -c` returns them unchanged — and
 /// the tests decode it through both layers.
 pub const cli_golden_q9_w16: Stream = .{
-    .bytes = @embedFile("testdata/cli_golden_q9_w16.br"),
+    .bytes = fixtures.cli_golden_q9_w16_br,
     .plain = @embedFile("testdata/cli_golden_q9_w16.in"),
 };

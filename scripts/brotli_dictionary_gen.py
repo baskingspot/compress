@@ -7,7 +7,9 @@ Run once, commit the artifacts:
 It reads the vendored RFC text (`docs/research/specs/rfc7932-brotli.txt`) and
 writes two files under `src/brotli/`:
 
-- `dictionary.bin` — Appendix A's DICT hex, 122,784 bytes;
+- `dictionary.bin.base64` — Appendix A's DICT as single-line base64, 122,784
+  bytes (binary files are never committed; `build.zig`'s fixture generation
+  decodes it into the `fixtures` module);
 - `dictionary_data.zig` — Appendix A's NDBITS array and Appendix B's 121
   transforms, deduplicated into the C reference's prefix/suffix-pool shape
   (google/brotli v1.2.0 `c/common/transform.c`): a length-prefixed string
@@ -21,13 +23,14 @@ tables and checking its CRC-32. Nothing here is fetched, and every check
 value the RFC prints is asserted before anything is written.
 """
 
+import base64
 import re
 import zlib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 RFC = ROOT / "docs/research/specs/rfc7932-brotli.txt"
-DICT_PATH = ROOT / "src/brotli/dictionary.bin"
+DICT_PATH = ROOT / "src/brotli/dictionary.bin.base64"
 DATA_PATH = ROOT / "src/brotli/dictionary_data.zig"
 
 DICT_CRC = 0x5136CB04
@@ -327,9 +330,9 @@ def main() -> None:
     assert cut_off == CUT_OFF, cut_off
 
     pool, pool_map, triplets = dedup(transforms)
-    DICT_PATH.write_bytes(dictionary)
+    DICT_PATH.write_text(base64.b64encode(dictionary).decode() + "\n")
     DATA_PATH.write_text(emit_data(ndbits, pool, pool_map, triplets, transforms, cut_off))
-    print(f"{DICT_PATH}: {len(dictionary)} bytes, CRC-32 {DICT_CRC:#010x}")
+    print(f"{DICT_PATH}: {len(dictionary)} bytes as base64, CRC-32 {DICT_CRC:#010x}")
     print(f"{DATA_PATH}: {len(pool)} pool bytes, {len(triplets)} transforms")
 
 

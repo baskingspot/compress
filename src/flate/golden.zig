@@ -23,6 +23,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
+const fixtures = @import("fixtures");
 const sentinel = internal.sentinel;
 const Checksum = @import("Checksum.zig");
 const decode = @import("decode.zig");
@@ -534,48 +535,48 @@ pub const dict_straddle_plain = "abcdefgh" ** 3;
 pub const huffman_fixtures: [9]HuffmanFixture = .{
     .{
         .name = "huffman-null-max",
-        .input = @embedFile("testdata/huffman-null-max.in"),
-        .golden = @embedFile("testdata/huffman-null-max.golden"),
+        .input = fixtures.huffman_null_max_in,
+        .golden = fixtures.huffman_null_max_golden,
     },
     .{
         .name = "huffman-pi",
         .input = @embedFile("testdata/huffman-pi.in"),
-        .golden = @embedFile("testdata/huffman-pi.golden"),
+        .golden = fixtures.huffman_pi_golden,
     },
     .{
         .name = "huffman-rand-1k",
-        .input = @embedFile("testdata/huffman-rand-1k.in"),
-        .golden = @embedFile("testdata/huffman-rand-1k.golden"),
+        .input = fixtures.huffman_rand_1k_in,
+        .golden = fixtures.huffman_rand_1k_golden,
     },
     .{
         .name = "huffman-rand-limit",
         .input = @embedFile("testdata/huffman-rand-limit.in"),
-        .golden = @embedFile("testdata/huffman-rand-limit.golden"),
+        .golden = fixtures.huffman_rand_limit_golden,
     },
     .{
         .name = "huffman-rand-max",
-        .input = @embedFile("testdata/huffman-rand-max.in"),
-        .golden = @embedFile("testdata/huffman-rand-max.golden"),
+        .input = fixtures.huffman_rand_max_in,
+        .golden = fixtures.huffman_rand_max_golden,
     },
     .{
         .name = "huffman-shifts",
         .input = @embedFile("testdata/huffman-shifts.in"),
-        .golden = @embedFile("testdata/huffman-shifts.golden"),
+        .golden = fixtures.huffman_shifts_golden,
     },
     .{
         .name = "huffman-text-shift",
         .input = @embedFile("testdata/huffman-text-shift.in"),
-        .golden = @embedFile("testdata/huffman-text-shift.golden"),
+        .golden = fixtures.huffman_text_shift_golden,
     },
     .{
         .name = "huffman-text",
         .input = @embedFile("testdata/huffman-text.in"),
-        .golden = @embedFile("testdata/huffman-text.golden"),
+        .golden = fixtures.huffman_text_golden,
     },
     .{
         .name = "huffman-zero",
         .input = @embedFile("testdata/huffman-zero.in"),
-        .golden = @embedFile("testdata/huffman-zero.golden"),
+        .golden = fixtures.huffman_zero_golden,
     },
 };
 
