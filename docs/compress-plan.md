@@ -374,6 +374,29 @@ fleet run committed with the dictionary rows (the trained-dictionary corpus
 shapes, decode and encode arms); the closing review's blockers fixed and
 pinned by tests.
 
+M8 — the perf waves: the fair grid and the two decoder/encoder passes.
+The brotli decode perf wave (the M6 grid's ranked gaps), then the zstd
+fair-grid fix and the entropy wave (the literal/entropy rows, worst on
+Intel).
+Acceptance, met 2026-10-16: the brotli wave found and fixed the
+mixed/random mechanism (the refilling byte drain — 6-13x behind to
+0.36-0.48, won on every target; the split root table and the u64
+promotion on the entropy rows: words 2.3-2.8x to 1.39-1.72, skewlit
+2.9-4.0x to 1.13-1.53; `docs/results/brotli-wave-fleet-20261016.md`;
+the corpus gained the `prose` natural-text shape — the shape set is
+copied in five places, the gates caught two stale copies during rollout).
+The zstd checksum grid became actually fair (`ZSTD_compress2`, not the
+no-op `ZSTD_compressCCtx` flag) and the entropy wave closed the Intel
+literal edges: the zstd encode text/html/rle rows 3.3-3.9x to 0.93-1.07
+on the Intel targets (the per-model XXH64 accumulator — the scalar
+chain with per-lane SLP barriers where the vector multiply's latency
+dominated, 2.1x the vector form on graniterapids; the brotli x86_64
+literal outline for the 16-GPR register starvation)
+(`docs/results/entropy-wave-fleet-20261016.md`). The remaining
+above-1.0 rows are the entropy rows on both codecs, each with ranked
+algorithmic evidence in the wave's file — the zstd match finder's
+literal count, the bit-reader's consume model — not unnamed gaps.
+
 ## Decisions made
 
 - Zig 0.16.0 only (2026-10-08). Revisit at 0.18: LLVM 23 restores loop
