@@ -1,44 +1,47 @@
 {
+  nixConfig = {
+    extra-substituters = [
+      "https://baskingspot.cachix.org"
+      "https://mattrobenolt.cachix.org"
+    ];
+    extra-trusted-public-keys = [
+      "baskingspot.cachix.org-1:4KDZc1xfJdL8VGAOZo1SkOgZlqMNH+thBzux9J66EjU="
+      "mattrobenolt.cachix.org-1:sn1IDSC4OxQvWaOVD4RRcqyKlket5wgb11nd1QII6i8="
+    ];
+  };
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
-    flake-parts.url = "github:hercules-ci/flake-parts";
-    mattware = {
-      url = "github:mattrobenolt/nixpkgs";
+    flake-parts.follows = "baskingspot/flake-parts";
+    baskingspot = {
+      url = "github:baskingspot/nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
   };
 
   outputs =
-    inputs@{
-      flake-parts,
-      nixpkgs,
-      mattware,
-      ...
-    }:
+    inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "aarch64-darwin"
+      # imports and inputsFrom below mirror each other, except the toolchain
+      # version: pick that once, in the import.
+      imports = with inputs.baskingspot.flakeModules; [
+        base
+        zig."0.16"
       ];
 
       perSystem =
-        { system, ... }:
-        let
-          pkgs = import nixpkgs {
-            inherit system;
-            overlays = [ mattware.overlays.default ];
-          };
-        in
+        { pkgs, config, ... }:
         {
           devShells.default = pkgs.mkShell {
+            inputsFrom = with config.devShells; [
+              base
+              zig
+            ];
+
             packages = with pkgs; [
-              zig_0_16
-              zls_0_16
-              ziglint
-              zigdoc
-              just
               uv
+              # nixpkgs' goperf is the golang.org/x/perf package. It supplies the
+              # benchstat that the bench recipes use.
               goperf
               pv
               # The bench/ fleet harness (bench/README.md): opentofu reads the
@@ -62,6 +65,7 @@
               zstd
               gzip
             ];
+
             env = {
               UV_PYTHON = "${pkgs.python314}/bin/python3";
               UV_PYTHON_DOWNLOADS = "never";
