@@ -42,7 +42,7 @@
 
 /* The corpus generator's shape set (bench/zig/corpus.zig): the entropy
  * pair's .zst blobs are the pinned CLI at level 19. */
-static const char *const shapes[] = {"text", "random", "html", "rle", "mixed", "words", "skewlit"};
+static const char *const shapes[] = {"text", "random", "html", "rle", "mixed", "words", "skewlit", "prose"};
 static const size_t shapes_len = sizeof shapes / sizeof *shapes;
 static const size_t shape_sizes[] = {32 * 1024, 64 * 1024};
 static const char *const codecs[] = CBENCH_CODECS;
