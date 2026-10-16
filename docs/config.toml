@@ -16,3 +16,5 @@ dark_theme = "github-dark"
 
 [extra]
 repo = "baskingspot/compress"
+api = true
+third_party = true

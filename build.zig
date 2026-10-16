@@ -216,6 +216,33 @@ pub fn build(b: *Build) void {
     run_compress_tests.has_side_effects = true; // always run tests, don't cache
     test_step.dependOn(&run_compress_tests.step);
 
+    // The guide's examples (docs/examples) are real programs against the
+    // public module, tested with everything else: a guide page cannot show
+    // code that does not build.
+    const examples_mod = b.createModule(.{
+        .root_source_file = b.path("docs/examples/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "compress", .module = compress_mod }},
+    });
+    const example_tests = b.addTest(.{ .root_module = examples_mod });
+    test_step.dependOn(&b.addRunArtifact(example_tests).step);
+
+    // The site serves the API reference under /api/, and Zola copies
+    // docs/static as is, so the reference installs there. `zig-out` is not
+    // the destination because Zola owns the site output directory.
+    const mod_docs = b.addObject(.{
+        .name = "compress",
+        .root_module = compress_mod,
+    });
+    const docs_install = b.addInstallDirectory(.{
+        .source_dir = mod_docs.getEmittedDocs(),
+        .install_dir = .{ .custom = "../docs/static/api" },
+        .install_subdir = "",
+    });
+    const docs_step = b.step("docs", "Generate API docs into docs/static/api");
+    docs_step.dependOn(&docs_install.step);
+
     // Compile-only gate: compiles the module's test binary without running
     // it, for cross-target checks (the portable fallbacks only compile on
     // non-native targets):

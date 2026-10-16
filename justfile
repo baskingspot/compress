@@ -68,9 +68,10 @@ check-32:
 [group("ci")]
 ci: test lint check-baseline doc
 
-[doc("Build the site into zig-out/site/compress/. The router in baskingspot/site serves /compress/... from it")]
+[doc("Build the site into zig-out/site/compress/: the guide (Zola, from docs/), the API reference (the wasm viewer `zig std` uses) under api/, and the static marks. The router in baskingspot/site serves /compress/... from it")]
 [group("docs")]
 doc:
+    zig build docs
     baskingspot-docs build compress
 
 [doc("Edit the site with live reload (http://127.0.0.1:1111)")]

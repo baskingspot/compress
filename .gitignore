@@ -25,3 +25,6 @@ docs/themes/
 # direnv state and local overrides.
 .direnv/
 .envrc.local
+
+# The API reference zig build docs installs (a build product).
+docs/static/api/
