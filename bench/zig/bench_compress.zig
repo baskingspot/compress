@@ -317,11 +317,11 @@ fn decompressOne(bench: *Bench, impl: []const u8, codec: []const u8, blob: []con
     const target = bench.decoded;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
-            return compress.flate.decode.decompress(blob, target);
+            return compress.flate.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "gzip"))
             return compress.gzip.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zlib"))
-            return compress.zlib.decode.decompress(blob, target);
+            return compress.zlib.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "zstd"))
             return compress.zstd.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "brotli"))
