@@ -18,8 +18,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SCHEMA = 1
 # The corpus generator's shape set (bench/zig/corpus.zig), in its order —
 # the entropy pair's `.zst` blobs are the pinned CLI at level 19. A corpus
-# revision extends this list and the anchor in the same commit.
-SHAPES = ("text", "random", "html", "rle", "mixed", "words", "skewlit")
+# revision extends this list and the anchor in the same commit, and every
+# copy of the set with it: the zig driver (bench/zig/bench_compress.zig),
+# the C drivers (bench/drivers/c/cbench.h), the Go driver
+# (bench/drivers/klauspost/main.go), and this one. The corpus-hash gate and
+# this validator are what catch a copy left behind.
+SHAPES = ("text", "random", "html", "rle", "mixed", "words", "skewlit", "prose")
 SIZES = (32768, 65536)
 SHA256_HEX = r"^[0-9a-f]{64}$"
 # The codecs the std library ships no implementation of, either direction.
@@ -74,7 +78,7 @@ class Sample(Record):
     case: str
     codec: Literal["flate", "gzip", "zlib", "snappy", "zstd", "brotli"]
     direction: Literal["compress", "decompress"]
-    shape: Literal["text", "random", "html", "rle", "mixed", "words", "skewlit"]
+    shape: Literal["text", "random", "html", "rle", "mixed", "words", "skewlit", "prose"]
     size: int
     impl: str = Field(min_length=1)
     sample: int = Field(ge=0)
