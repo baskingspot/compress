@@ -259,7 +259,10 @@ def analyze_run(run_dir: Path, minimum_effect: float | None) -> None:
     # re-analysis would find no rows and overwrite a good record with
     # "No complete rounds" failures. Re-analysis needs a run kept with
     # --keep-raw (its raw/ directories still present).
-    if not any((run_dir / target / "raw").is_dir() for target in run_dir.iterdir()):
+    # `iterdir` yields children already prefixed by run_dir: join the
+    # child itself, not run_dir over the child again (the double join
+    # pointed nowhere and refused every run, kept or not).
+    if not any((target / "raw").is_dir() for target in run_dir.iterdir()):
         raise click.ClickException(
             f"{run_dir} has no raw rows: the record (summary.json, report.md) "
             "stands as written. Re-analysis needs a run kept with --keep-raw."
