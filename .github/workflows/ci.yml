@@ -11,6 +11,6 @@ jobs:
   ci:
     permissions:
       contents: read
-    uses: baskingspot/gh-actions/.github/workflows/ci.yml@f2232334f1f7cca4a2e4461c60dbc64ef1d15ac1 # v0.1.1
+    uses: baskingspot/gh-actions/.github/workflows/ci.yml@85e49a8f95b45e59d6ea66c03fbed54d1b47ae1e # v0.2.0
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
