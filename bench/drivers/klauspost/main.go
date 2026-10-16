@@ -114,7 +114,9 @@ func zstdDecoder() (*zstd.Decoder, error) {
 // The zstd encoder, built once: EncodeAll on a shared *Encoder at
 // SpeedFastest (klauspost's fastest class, the peer of the CLI's level 1
 // that the corpus's .zst blobs and the zc one-shot's .fast level measure),
-// concurrency 1 as on the decode side.
+// concurrency 1 as on the decode side, and CRC on — the fair grid: the
+// zc one-shot's default form writes the 4-byte XXH64 trailer, so the Go
+// arm pays its checksum flag too (the C arm got the same fix).
 var zstdEnc *zstd.Encoder
 
 func zstdEncoder() (*zstd.Encoder, error) {
@@ -123,6 +125,7 @@ func zstdEncoder() (*zstd.Encoder, error) {
 			nil,
 			zstd.WithEncoderLevel(zstd.SpeedFastest),
 			zstd.WithEncoderConcurrency(1),
+			zstd.WithEncoderCRC(true),
 		)
 		if err != nil {
 			return nil, err

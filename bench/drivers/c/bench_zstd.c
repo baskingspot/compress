@@ -36,6 +36,13 @@ static void impl_setup(void)
     cctx = ZSTD_createCCtx();
     dctx = ZSTD_createDCtx();
     if (!cctx || !dctx) exit(1);
+    /* The fair grid: the zc one-shot's default form writes the 4-byte XXH64
+     * trailer (byte parity with the CLI's default output), so the library
+     * arm pays its checksum flag too — without this the C arm skips ~2.5
+     * us per 64 KiB on ARM, ~35% of the html-64K encode row, and every
+     * zstd comparison overstates the gap. */
+    if (ZSTD_isError(ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 1)))
+        exit(1);
     /* 27 = ZSTD_WINDOWLOG_LIMIT_DEFAULT (zstd_internal.h — the public
      * zstd.h hides it behind the static-linking-only section). */
     if (ZSTD_isError(ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 27)))
@@ -55,8 +62,10 @@ static size_t impl_compress(const char *codec, const unsigned char *in, size_t i
 {
     (void)codec; /* one codec: the zstd frame */
     /* Level 1: the fast class the zc one-shot (level .fast) targets. The
-     * default parameters carry the content-size flag and no checksum; the
-     * zc frame adds XXH64, which its size rows report. */
+     * default parameters carry the content-size flag; the checksum comes
+     * from the CCtx parameter set in impl_setup, so the frame form matches
+     * the zc one-shot's (content size + XXH64 trailer) and the zc = C + 4
+     * size rows become exact parity. */
     size_t n = ZSTD_compressCCtx(cctx, out, out_cap, in, in_len, 1);
     if (ZSTD_isError(n)) return 0;
     return n;
