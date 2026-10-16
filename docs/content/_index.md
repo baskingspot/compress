@@ -147,7 +147,7 @@ Pick the format for the job, not the fastest name:
 
 | You need                        | Use    | The trade                                                    |
 | ------------------------------- | ------ | ------------------------------------------------------------ |
-| The smallest payloads             | zstd   | The heaviest format of the five; also the best ratio         |
+| The smallest payloads           | zstd   | The heaviest format of the five; also the best ratio         |
 | Interop with everything         | gzip   | DEFLATE's ratio and speed, universal acceptance              |
 | A zlib-shaped wire format       | zlib   | gzip without the file framing, plus a preset dictionary      |
 | In-memory blocks, latency-bound | snappy | No ratio to speak of; the framing here is this package's own |
