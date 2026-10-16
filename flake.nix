@@ -1,15 +1,4 @@
 {
-  nixConfig = {
-    extra-substituters = [
-      "https://baskingspot.cachix.org"
-      "https://mattrobenolt.cachix.org"
-    ];
-    extra-trusted-public-keys = [
-      "baskingspot.cachix.org-1:4KDZc1xfJdL8VGAOZo1SkOgZlqMNH+thBzux9J66EjU="
-      "mattrobenolt.cachix.org-1:sn1IDSC4OxQvWaOVD4RRcqyKlket5wgb11nd1QII6i8="
-    ];
-  };
-
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
     flake-parts.follows = "baskingspot/flake-parts";
@@ -40,6 +29,7 @@
 
             packages = with pkgs; [
               uv
+              oxfmt
               # nixpkgs' goperf is the golang.org/x/perf package. It supplies the
               # benchstat that the bench recipes use.
               goperf
