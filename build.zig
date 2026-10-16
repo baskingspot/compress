@@ -7,6 +7,7 @@ const comptimePrint = std.fmt.comptimePrint;
 const example_codecs = [_][]const u8{ "brotli", "snappy", "flate", "gzip", "zlib", "zstd" };
 
 /// The codecs with a local bench (src/<codec>/bench.zig).
+// The codecs with a local bench (src/<codec>/bench.zig).
 const bench_codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd", "brotli" };
 
 /// The codecs with an oracle harness (src/<codec>/oracle.zig): every codec

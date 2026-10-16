@@ -29,6 +29,7 @@ const Shape = enum {
     mixed,
     words,
     skewlit,
+    prose,
 };
 
 /// The two corpus sizes.

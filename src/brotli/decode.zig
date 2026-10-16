@@ -155,7 +155,13 @@ pub const State = struct {
 /// The state is about 691 KiB of stack, nearly all of it the meta-block tree
 /// region, so give decoding threads 1 MiB or more. Nothing is allocated.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
-    var state: State = .{};
+    // The fields are initialized separately, never as one aggregate: a
+    // `.{}` whole-struct store lowers to a memcpy of a 709,824-byte comptime
+    // constant into the frame (the header's `undefined` bytes ride along),
+    // a per-call fixed cost that dominated small streams. Written this way
+    // the header stays untouched until `nextMetaBlock` fills it.
+    var state: State = undefined;
+    state.commands = .{};
     var br: bits.BitReader = .init(source);
     const stream = try frame.readStreamHeader(bits.BitReader, &br);
     var pos: usize = 0;

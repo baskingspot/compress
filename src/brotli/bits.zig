@@ -56,7 +56,10 @@ pub const BitReader = struct {
     /// Unconsumed bits, LSB first: bit 0 is the next bit on the wire.
     bits: u64,
     /// Valid bits in `bits` (0-64).
-    bit_count: u7,
+    // u64, not the u7 its range fits: the hot loops keep the reader in
+    // registers, and a byte-sized field next to the output byte stores
+    // defeats the alias analysis that promotion needs.
+    bit_count: u64,
     /// Absolute bit offset of the next unconsumed bit. u64 so the position
     /// arithmetic cannot overflow a 32-bit `usize` on a large input.
     bit_pos: u64,
@@ -97,7 +100,7 @@ pub const BitReader = struct {
     /// The prefix-code layer's peek table (`huffman.zig`) reads codes this
     /// way — a code may end before the stream's last byte, whose fill bits
     /// are still zeros on the wire.
-    pub fn peek(self: *BitReader, n: u6) Error!u32 {
+    pub inline fn peek(self: *BitReader, n: u6) Error!u32 {
         assert(n <= max_read_bits);
         self.refill();
         return @intCast(self.bits & ((@as(u64, 1) << n) - 1));
@@ -105,10 +108,31 @@ pub const BitReader = struct {
 
     /// The next `n` bits as an unsigned integer, least significant bit first
     /// (`§1.5.1`). `error.Truncated` when the input holds fewer than `n`.
-    pub fn take(self: *BitReader, n: u6) Error!u32 {
+    pub inline fn take(self: *BitReader, n: u6) Error!u32 {
         assert(n <= max_read_bits);
-        if (self.availableBits() < n) return error.Truncated;
-        const value = try self.peek(n);
+        self.refill();
+        // After a refill the accumulator holds every bit the stream has
+        // left (up to 63), and `n <= max_read_bits`, so a short accumulator
+        // *is* a short stream: no decoded value is ever assembled from
+        // past-the-end padding, and the check is one compare.
+        if (self.bit_count < n) return error.Truncated;
+        const value: u32 = @intCast(self.bits & ((@as(u64, 1) << n) - 1));
+        self.drop(n);
+        return value;
+    }
+
+    /// Consume `n` bits a `peek` of at least `n` has already loaded,
+    /// returning their value: the accumulator's count is the whole check
+    /// (after a refill it is every bit the stream has left, up to 63, so a
+    /// short count is a short stream — `take`'s gate with the refill
+    /// already done). The prefix-code layer's consume: a `peek` of a code's
+    /// maximum length covers the code's bits. Also the byte-granular
+    /// drain: unlike `take`, it never refills, so it empties exactly the
+    /// buffered bytes.
+    pub inline fn takeLoaded(self: *BitReader, n: u6) Error!u32 {
+        assert(n <= max_read_bits);
+        if (self.bit_count < n) return error.Truncated;
+        const value: u32 = @intCast(self.bits & ((@as(u64, 1) << n) - 1));
         self.drop(n);
         return value;
     }
@@ -158,8 +182,28 @@ pub const BitReader = struct {
 
     /// Load whole bytes while the accumulator has room. Afterwards `bits`
     /// holds `min(availableBits(), 64)` bits, so a `take` of up to
-    /// `max_read_bits` is exact whenever that many bits remain.
-    fn refill(self: *BitReader) void {
+    /// `max_read_bits` is exact whenever that many bits remain. The room
+    /// path is one unaligned eight-byte load, masked so the accumulator
+    /// stays zero above `bit_count` (the peek-reads-padding rule); the
+    /// slice's last seven bytes load a byte at a time.
+    inline fn refill(self: *BitReader) void {
+        if (self.bit_count > max_read_bits) return;
+        if (self.source.len - self.next_byte >= 8) {
+            // The whole bytes that fit above the held bits: 3..7, since
+            // `bit_count` is 0..32 here. `bits` keeps its high zeroes, so
+            // a peek past the loaded bits still reads zero padding.
+            const add: u64 = (63 - self.bit_count) >> 3;
+            const window = std.mem.readInt(u64, self.source[self.next_byte..][0..8], .little);
+            const loaded = window & ((@as(u64, 1) << @intCast(add << 3)) - 1);
+            self.bits |= loaded << @intCast(self.bit_count);
+            // `add` is 3..7 (the comment above), and `bit_count` is u64 here
+            // for the register promotion: the slice index stays `usize`, so
+            // the bounded add casts — this is the 32-bit seam `check-32`
+            // pins.
+            self.next_byte += @as(usize, @intCast(add));
+            self.bit_count += add << 3;
+            return;
+        }
         while (self.bit_count <= max_read_bits and self.next_byte < self.source.len) {
             self.bits |= @as(u64, self.source[self.next_byte]) << @intCast(self.bit_count);
             self.next_byte += 1;

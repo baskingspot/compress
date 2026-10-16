@@ -230,18 +230,49 @@ pub fn Tree(comptime bound: usize) type {
         /// package's `bits.BitReader` or the streaming reader's bit source.
         /// The peek may read padding; every consume is a strict `take`, so
         /// a starved decode is `error.Truncated`.
-        pub fn decode(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
+        pub inline fn decode(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
+            if (try self.decodeRoot(Bits, br)) |symbol| return symbol;
+            return self.decodeSubtable(Bits, br);
+        }
+
+        /// The root-table half of `decode` (§3.2): the symbol, or `null`
+        /// when the peeked code runs past `root_bits` — the caller's
+        /// fallback is `decodeSubtable` (or the plain `decode`). Split out
+        /// for hot loops that keep their bit source in a local the cold
+        /// path must not escape (the command layer's literal run).
+        pub inline fn decodeRoot(
+            self: *const Self,
+            comptime Bits: type,
+            br: *Bits,
+        ) Bits.ErrorSet!?u16 {
             if (self.single) |symbol| return symbol;
             const entry = self.root[@intCast(try br.peek(root_bits))];
-            if (entry.len != 0) {
-                _ = try br.take(entry.len);
-                return entry.symbol;
-            }
-            _ = try br.take(root_bits);
+            if (entry.len == 0) return null;
+            // The peek covered the root's width, and a root code is never
+            // wider: the consume needs no second refill.
+            _ = try br.takeLoaded(entry.len);
+            return entry.symbol;
+        }
+
+        /// The subtable half of `decode`, outlined: codes longer than
+        /// `root_bits` are the rare path, and keeping it out of the inlined
+        /// fast path keeps the hot loop's register pressure to the root
+        /// peek-and-take.
+        /// The subtable half of `decode`, outlined: codes longer than
+        /// `root_bits` are the rare path, and keeping it out of the inlined
+        /// fast path keeps the hot loop's register pressure to the root
+        /// peek-and-take. Re-peeks the root bits `decodeRoot` left
+        /// unconsumed.
+        pub fn decodeSubtable(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
+            const entry = self.root[@intCast(try br.peek(root_bits))];
+            assert(entry.len == 0);
+            _ = try br.takeLoaded(root_bits);
             const sub_index: u6 = @intCast(entry.symbol);
             const sub_base: usize = entry.sub_base;
+            // A subtable is as wide as its group's longest suffix, so the
+            // peek covers every code it holds.
             const sub_entry = self.sub[sub_base + @as(usize, @intCast(try br.peek(sub_index)))];
-            _ = try br.take(sub_entry.len);
+            _ = try br.takeLoaded(sub_entry.len);
             return sub_entry.symbol;
         }
     };

@@ -466,6 +466,14 @@ const StreamBits = struct {
         return self.r.bit_reader.take(n);
     }
 
+    /// Consume `n` bits a successful `peek` of at least `n` loaded: the
+    /// peek pulled until the accumulator held `n` bits or the input ended,
+    /// so the slice reader's own gate is exact. The prefix-code layer's
+    /// consume (see `bits.BitReader.takeLoaded`).
+    pub fn takeLoaded(self: *StreamBits, n: u6) ErrorSet!u32 {
+        return self.r.bit_reader.takeLoaded(n);
+    }
+
     /// Skip to the next byte boundary, checking that the skipped bits are
     /// zero (`§9.2`'s fill fields, `§9.3`'s last-byte fill).
     pub fn alignToByte(self: *StreamBits) ErrorSet!void {
@@ -482,10 +490,19 @@ const StreamBits = struct {
         assert(self.r.bit_reader.atByteBoundary());
         var done: usize = 0;
         // The whole bytes the accumulator already holds come out first: the
-        // loaded slice only holds what has not been loaded.
-        while (done < target.len and self.r.bit_reader.bit_count >= 8) {
-            target[done] = @intCast(try self.r.bit_reader.take(8));
-            done += 1;
+        // loaded slice only holds what has not been loaded. The count is
+        // captured on entry — a `take` refills the accumulator from the
+        // slice, so re-testing `bit_count` here would drain the whole
+        // payload a byte at a time and never reach the bulk copy below.
+        // The drain is `takeLoaded`, never `take`: refilling mid-drain
+        // would both keep the loop from ending and leave the accumulator
+        // holding bytes a later `pull` attaches past, which the bulk
+        // copy's `rewind` cannot represent (`bit_pos/8 < source_base`).
+        // Ending the drain with the accumulator empty keeps
+        // `bit_pos/8 == loadedBytes` across a `pull`.
+        const buffered = @min(target.len, self.r.bit_reader.bit_count / 8);
+        while (done < buffered) : (done += 1) {
+            target[done] = @intCast(try self.r.bit_reader.takeLoaded(8));
         }
         while (done < target.len) {
             const available = self.r.bit_reader.source.len - self.r.bit_reader.next_byte;
@@ -505,8 +522,13 @@ const StreamBits = struct {
     pub fn skipBytes(self: *StreamBits, count: u32) ErrorSet!void {
         assert(self.r.bit_reader.atByteBoundary());
         var left = count;
-        while (left > 0 and self.r.bit_reader.bit_count >= 8) {
-            _ = try self.r.bit_reader.take(8);
+        // As in `takeBytes`: only the bytes buffered on entry drain
+        // through the accumulator, and the drain is `takeLoaded` — a
+        // refilling `take` would never let the loop end, and would leave
+        // the accumulator holding bytes a later `pull` attaches past.
+        const buffered: u32 = @intCast(@min(left, self.r.bit_reader.bit_count / 8));
+        for (0..buffered) |_| {
+            _ = try self.r.bit_reader.takeLoaded(8);
             left -= 1;
         }
         while (left > 0) {

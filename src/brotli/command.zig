@@ -129,8 +129,15 @@ pub fn readCommand(
     assert(range.start == symbol & ~@as(u16, 63));
     const insert_code = range.insert + @as(u4, @intCast((symbol >> 3) & 7));
     const copy_code = range.copy + @as(u4, @intCast(symbol & 7));
-    const insert_length = insert_base[insert_code] + try br.take(insert_extra[insert_code]);
-    const copy_length = copy_base[copy_code] + try br.take(copy_extra[copy_code]);
+    // The extra-bit fields are read only when the code carries any — the
+    // common short lengths carry none, and a zero-width take still costs a
+    // refill check and a masked read.
+    const insert_extra_bits = insert_extra[insert_code];
+    const copy_extra_bits = copy_extra[copy_code];
+    var insert_length = insert_base[insert_code];
+    var copy_length = copy_base[copy_code];
+    if (insert_extra_bits != 0) insert_length += try br.take(insert_extra_bits);
+    if (copy_extra_bits != 0) copy_length += try br.take(copy_extra_bits);
     assert(copy_length >= 2);
     return .{
         .insert_length = insert_length,
@@ -486,7 +493,7 @@ pub fn decodeMetaBlock(
     assert(start <= window.len);
     assert(mlen <= window.len - start);
     state.beginMetaBlock(header);
-    var cursor: Cursor = .{ .blocks = .init(header) };
+    var blocks: Blocks = .init(header);
     var w: Window = .{
         .bytes = window,
         .pos = start,
@@ -494,7 +501,126 @@ pub fn decodeMetaBlock(
         .left = mlen,
         .bound = window_size,
     };
-    while (w.left > 0) try step(Bits, br, header, state, &cursor, &w);
+    // The walk runs on a local copy of the bit reader: the command,
+    // distance, and length reads then keep the accumulator in registers
+    // instead of round-tripping the pointee per symbol. Every cold escape
+    // — the block switches — flushes and reloads around the call.
+    // `decodeMetaBlock`'s only caller is the one-shot; the streaming
+    // reader drives `step`.
+    var local: Bits = br.*;
+    defer br.* = local;
+    const r = &local;
+    // The one-shot's window always has room for the whole meta-block, so
+    // the walk never stops mid-command: run the phases straight-line, one
+    // command per iteration, with the per-command state in locals — the
+    // streaming reader's `step` pays for resumability (the cursor, the
+    // phase dispatch) a one-shot never needs. Same reads, same order: this
+    // is `step`'s `.command` → `.literals` → `.distance` → `.word`/`.copy`
+    // sequence with the caps that bind only mid-ring removed.
+    while (w.left > 0) {
+        // §9.3 — the insert-and-copy block switch, before the length code.
+        const cmd_index = @intFromEnum(frame.Category.command);
+        if (blocks.counts[cmd_index] == 0) {
+            br.* = local;
+            try switchBlock(Bits, br, header, &blocks, .command);
+            local = br.*;
+        }
+        blocks.counts[cmd_index] -= 1;
+        const command = try @call(.always_inline, readCommand, .{
+            Bits,
+            r,
+            &header.trees.command[blocks.current(.command)],
+        });
+        // §9.3 — "if the number of literals to insert ... would cause MLEN
+        // to be exceeded, then the stream should be rejected as invalid".
+        if (command.insert_length > w.left) return error.BadBlockLength;
+        if (command.insert_length != 0) {
+            try insertLiterals(
+                Bits,
+                r,
+                header,
+                &blocks,
+                w.bytes[w.pos..][0..command.insert_length],
+                prevByte(&w, 1),
+                prevByte(&w, 2),
+            );
+            advance(&w, command.insert_length);
+        }
+        // §9.3 — "If the total number of uncompressed bytes produced after
+        // the insert part of the last command equals MLEN, then the copy
+        // length of the last command is ignored": the distance element is
+        // not read either.
+        if (w.left == 0) break;
+
+        // §8 — "a maximum backward distance value, which is the minimum of
+        // the window size and the number of uncompressed bytes produced":
+        // the command's literals are already out, so they count.
+        const max_allowed: u32 = @intCast(@min(@as(u64, w.bound), w.produced));
+        var symbol: u16 = 0;
+        var resolved: u32 = undefined;
+        if (command.implicit_distance) {
+            // §5 — "the distance code of the command is set to zero (the
+            // last distance reused)": no distance element is read.
+            resolved = state.ring.get(3);
+        } else {
+            // §9.3 — the distance block switch, before the distance code,
+            // and only when a distance is read (erratum 6977, T2).
+            const dist_index = @intFromEnum(frame.Category.distance);
+            if (blocks.counts[dist_index] == 0) {
+                br.* = local;
+                try switchBlock(Bits, br, header, &blocks, .distance);
+                local = br.*;
+            }
+            blocks.counts[dist_index] -= 1;
+            const tree_index = header.context.distance_map[
+                @as(usize, blocks.current(.distance)) * 4 + command.distance_context
+            ];
+            symbol = try header.trees.distance[tree_index].decode(Bits, r);
+            if (symbol < 16) {
+                resolved = try distance.special(&state.ring, symbol);
+            } else {
+                const dextra = try r.take(state.tables.extra_bits[symbol]);
+                resolved = state.tables.resolve(symbol, dextra);
+            }
+        }
+
+        if (resolved > max_allowed) {
+            // §8 — a distance past the produced data "is treated as a
+            // reference to a word in the static dictionary", and "the copy
+            // length for a static dictionary reference must be between 4
+            // and 24".
+            if (command.copy_length < dictionary.min_word_len or
+                command.copy_length > dictionary.max_word_len)
+            {
+                return error.BadDictionary;
+            }
+            var scratch: [dictionary.scratch_len]u8 = undefined;
+            const word = try dictionary.transformedWord(
+                &scratch,
+                resolved - max_allowed - 1,
+                command.copy_length,
+            );
+            // The reference's emptiness guard (`decode.c:2247`): a
+            // transform that empties the word is invalid when the distance
+            // code is at most 120 (T8).
+            if (word.len == 0 and resolved <= 120) return error.BadTransform;
+            // §9.3's MLEN accounting is the *produced* length — the
+            // transformed word's, not the copy length's.
+            if (word.len > w.left) return error.BadBlockLength;
+            fastmem.copy(u8, w.bytes[w.pos..][0..word.len], word);
+            advance(&w, @intCast(word.len));
+            continue;
+        }
+
+        if (command.copy_length > w.left) return error.BadBlockLength;
+        // §4, §10 — "if distance code is not zero, and distance is not a
+        // static dictionary reference, push distance to the ring buffer of
+        // last distances": an implicit distance is not a symbol and never
+        // pushes.
+        if (!command.implicit_distance and symbol != 0) state.ring.push(resolved);
+        @call(.always_inline, copyMatch, .{ w.bytes, w.pos, resolved, command.copy_length });
+        advance(&w, command.copy_length);
+    }
     assert(w.pos == start + mlen);
     return w.pos;
 }
@@ -544,16 +670,20 @@ pub fn step(
                     window.bytes.len - window.pos,
                     @min(cursor.insert_left, window.left),
                 ));
-                try insertLiterals(
-                    Bits,
-                    br,
-                    header,
-                    &cursor.blocks,
-                    window.bytes[window.pos..][0..n],
-                    prevByte(window, 1),
-                    prevByte(window, 2),
-                );
-                advance(window, n);
+                // A zero-length run neither inserts nor switches a block
+                // (`§9.3`'s switch is before each literal): skip the call.
+                if (n != 0) {
+                    try insertLiterals(
+                        Bits,
+                        br,
+                        header,
+                        &cursor.blocks,
+                        window.bytes[window.pos..][0..n],
+                        prevByte(window, 1),
+                        prevByte(window, 2),
+                    );
+                    advance(window, n);
+                }
                 cursor.insert_left -= n;
                 if (cursor.insert_left == 0) {
                     // §9.3 — "If the total number of uncompressed bytes
@@ -713,18 +843,88 @@ fn insertLiterals(
     p1: u8,
     p2: u8,
 ) Errors(Bits)!void {
+    // The one-shot's slice reader runs a long run on a local copy: the
+    // loop's peeks and takes then run on registers, where through the
+    // pointer they would round-trip memory (the output byte stores
+    // may-alias the pointee). The copy pays for itself only past a short
+    // run; below the gate, and for the streaming reader's pointer wrapper,
+    // the plain path runs on the caller's reader. The gate is outside the
+    // loop so the local's address never sits behind a runtime select.
+    if (Bits == bits.BitReader and target.len >= 24) {
+        var local: Bits = br.*;
+        defer br.* = local;
+        return insertLiteralsRun(Bits, &local, header, blocks, target, p1, p2);
+    }
+    return insertLiteralsRun(Bits, br, header, blocks, target, p1, p2);
+}
+
+/// The insert run's body (`§9.3` per-literal order): segmented at the
+/// literal block counts so the block type, its context mode, and its
+/// context-map row are invariant across a segment. `inline`: the caller's
+/// reader local must not escape, so the cold paths — the block switch, a
+/// code past the root table — are force-inlined too.
+inline fn insertLiteralsRun(
+    comptime Bits: type,
+    r: *Bits,
+    header: *const frame.Header,
+    blocks: *Blocks,
+    target: []u8,
+    p1: u8,
+    p2: u8,
+) Errors(Bits)!void {
     var previous = p1;
     var before = p2;
-    for (target) |*byte| {
-        // §9.3 — the literal block switch, before each literal.
-        try consumeSymbol(Bits, br, header, blocks, .literal);
-        const block_type = blocks.current(.literal);
-        const cid = literalContext(header.context.modes[block_type], previous, before);
-        const tree_index = header.context.literal_map[@as(usize, block_type) * 64 + cid];
-        const literal = try header.trees.literal[tree_index].decode(Bits, br);
-        byte.* = @intCast(literal);
-        before = previous;
-        previous = @intCast(literal);
+    var rest = target;
+    while (rest.len > 0) {
+        const index = @intFromEnum(frame.Category.literal);
+        if (blocks.counts[index] == 0)
+            try @call(.always_inline, switchBlock, .{ Bits, r, header, blocks, .literal });
+        const block_type = blocks.types[index][1];
+        const seg_len: u32 = @intCast(@min(rest.len, blocks.counts[index]));
+        blocks.counts[index] -= seg_len;
+        const segment = rest[0..seg_len];
+        rest = rest[seg_len..];
+        if (header.num_trees[@intFromEnum(frame.Category.literal)] == 1) {
+            // One literal tree: the map's values are all 0 (`§7.3`'s
+            // alphabet is NTREES + RLEMAX with values below NTREES), so the
+            // context ID selects nothing and the per-literal work is the
+            // symbol decode and the byte store — the context lookups are
+            // provably dead.
+            const tree = &header.trees.literal[0];
+            for (segment) |*byte| {
+                const literal = if (try tree.decodeRoot(Bits, r)) |symbol|
+                    symbol
+                else
+                    try @call(.always_inline, @TypeOf(tree.*).decodeSubtable, .{ tree, Bits, r });
+                byte.* = @intCast(literal);
+                before = previous;
+                previous = @intCast(literal);
+            }
+            continue;
+        }
+        const map_row = header.context.literal_map[@as(usize, block_type) * 64 ..][0..64];
+        // The mode dispatch is hoisted too: one specialized loop per
+        // `§7.1` mode, so the per-literal work is the two context lookups,
+        // the map, and the symbol decode.
+        switch (header.context.modes[block_type]) {
+            inline else => |mode| {
+                for (segment) |*byte| {
+                    const cid = literalContext(mode, previous, before);
+                    const tree = &header.trees.literal[map_row[cid]];
+                    const literal = if (try tree.decodeRoot(Bits, r)) |symbol|
+                        symbol
+                    else
+                        try @call(
+                            .always_inline,
+                            @TypeOf(tree.*).decodeSubtable,
+                            .{ tree, Bits, r },
+                        );
+                    byte.* = @intCast(literal);
+                    before = previous;
+                    previous = @intCast(literal);
+                }
+            },
+        }
     }
 }
 

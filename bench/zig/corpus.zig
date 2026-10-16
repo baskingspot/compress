@@ -65,6 +65,12 @@ pub const Shape = enum {
     // starve.
     words, // dictionary-word text (compressible, literals-heavy)
     skewlit, // skewed-distribution bytes (Huffman-literals-heavy)
+    // Natural text: a prefix of the vendored RFC 7932 (committed, so the
+    // same bytes on every host). The brotli rows are the point: real prose
+    // at quality 11 exercises context modeling and block switching at
+    // scale, which no synthetic shape does. Append new shapes after this
+    // one: the manifest's per-shape section follows the enum's order.
+    prose,
 };
 
 pub const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
@@ -115,9 +121,16 @@ const brotli_cli_quality = "11";
 /// `writeBlob` takes one named type rather than a duck-typed value.
 const Generated = error{ BufferTooSmall, Unimplemented }!usize;
 
+/// The committed file the `prose` shape's bytes are a prefix of: the
+/// vendored RFC 7932 text. The generator fails the run if it is shorter
+/// than the largest size, and the anchor pins the bytes.
+const prose_source_path = "docs/research/specs/rfc7932-brotli.txt";
+
 /// One definition of the corpus shapes: the benchmark drivers read the files
-/// this generates; nothing regenerates shapes on the boxes.
-pub fn makeShape(shape: Shape, buf: []u8) void {
+/// this generates; nothing regenerates shapes on the boxes. `prose_source`
+/// is the vendored RFC's bytes, read once by `main`; only the `prose`
+/// shape reads it.
+pub fn makeShape(shape: Shape, buf: []u8, prose_source: []const u8) void {
     switch (shape) {
         .text => fill(buf, "the quick brown fox jumps over the lazy dog. "),
         .random => {
@@ -158,6 +171,12 @@ pub fn makeShape(shape: Shape, buf: []u8) void {
                 const x: u16 = rng.random().int(u8);
                 b.* = @truncate(x * x >> 10);
             }
+        },
+        .prose => {
+            // Natural text: the vendored RFC 7932's prefix (the 32 KiB row
+            // is a prefix of the 64 KiB row, as with the other shapes).
+            std.debug.assert(prose_source.len >= buf.len);
+            fastmem.copy(u8, buf, prose_source[0..buf.len]);
         },
     }
 }
@@ -200,6 +219,11 @@ pub fn main(init: std.process.Init) !void {
     try checkCliVersion(io, arena, "zstd", zstd_cli_version);
     try checkCliVersion(io, arena, "brotli", brotli_cli_version);
 
+    // The prose shape's source: the committed vendored RFC, read from the
+    // repo root (the generator runs from there, as the CLI invocations do).
+    const prose_source = try Io.Dir.cwd().readFileAlloc(io, prose_source_path, arena, .unlimited);
+    if (prose_source.len < sizes[sizes.len - 1]) return error.ProseSourceTooSmall;
+
     try Io.Dir.cwd().createDirPath(io, dir_path);
     var dir = try Io.Dir.cwd().openDir(io, dir_path, .{ .iterate = true });
     defer dir.close(io);
@@ -208,7 +232,7 @@ pub fn main(init: std.process.Init) !void {
     for (std.enums.values(Shape)) |shape| {
         for (sizes) |size| {
             const raw = try arena.alloc(u8, size);
-            makeShape(shape, raw);
+            makeShape(shape, raw, prose_source);
             const base_name = try std.fmt.allocPrint(arena, "{s}-{d}", .{ @tagName(shape), size });
             try writeFile(io, arena, dir, &sums, base_name, raw);
 

@@ -2533,3 +2533,41 @@ test "brotli fuzz: the bit reader's reads are exact at every position" {
         }
     }
 }
+
+test "brotli fuzz: an uncompressed payload across tiny input chunks" {
+    // The payload drain must leave the bit accumulator empty before a
+    // mid-payload `pull`: a refilling drain leaves bytes loaded, the
+    // pull's `attach` moves `source_base` past the consumed position, and
+    // the bulk copy's `rewind` underflows. Found by `fuzzDifferential`
+    // (the differential target above) the first time the drain stopped
+    // draining to empty. `§9.2` — the payload form.
+    const storage = try testing.allocator.create(Storage);
+    defer testing.allocator.destroy(storage);
+
+    var raw: [4096]u8 = undefined;
+    var rng: std.Random.DefaultPrng = .init(0xC144E);
+    rng.random().bytes(&raw);
+    var stream_buf: [golden.trivialBound(raw.len)]u8 = undefined;
+    const stream = stream_buf[0..golden.trivialCompress(&raw, &stream_buf)];
+
+    // The one-shot is the model.
+    const expect = try decode.decompress(stream, &storage.out);
+    try testing.expectEqual(raw.len, expect);
+    try testing.expectEqualSlices(u8, &raw, storage.out[0..expect]);
+
+    // Chunked handovers from the four-byte floor up: every one forces
+    // pulls mid-payload, with the ladder's header bits leaving the
+    // accumulator non-empty at the payload's start.
+    for (4..12) |chunk_len| {
+        const streamed = try streamSource(
+            24,
+            stream,
+            &storage.ring24,
+            &storage.read_out,
+            storage.chunk[0..chunk_len],
+        );
+        try testing.expect(streamed.stop == .end_of_stream);
+        try testing.expectEqual(expect, streamed.served);
+        try testing.expectEqualSlices(u8, &raw, storage.read_out[0..expect]);
+    }
+}
