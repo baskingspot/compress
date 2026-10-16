@@ -28,7 +28,7 @@ lint:
     uvx ruff format --check --line-length 100 scripts
     uvx ty check scripts
     nix fmt -- --ci
-    oxfmt --check README.md AGENTS.md
+    oxfmt --check README.md AGENTS.md docs/content
     actionlint
     zizmor .
     just --fmt --check
@@ -39,7 +39,7 @@ fmt:
     zig fmt src build.zig
     uvx ruff format --line-length 100 scripts
     nix fmt
-    oxfmt README.md AGENTS.md
+    oxfmt README.md AGENTS.md docs/content
     just --fmt
 
 [doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. The targets differ most from the dev box, and freestanding targets are excluded because the ztest runner needs an OS. It is not a supported-platform claim")]
@@ -58,9 +58,24 @@ check-32:
     wasmtime zig-out/bin/zstd-probe32.wasm
     wasmtime zig-out/bin/brotli-probe32.wasm
 
-[doc("Everything CI runs: the unit tests, lint, and the cross-target compile gate")]
+[doc("Everything CI runs: the unit tests, lint, the cross-target compile gate, and the docs build")]
 [group("ci")]
-ci: test lint check-baseline
+ci: test lint check-baseline doc
+
+[doc("Build the site into zig-out/site/compress/. The router in baskingspot/site serves /compress/... from it")]
+[group("docs")]
+doc:
+    baskingspot-docs build compress
+
+[doc("Edit the site with live reload (http://127.0.0.1:1111)")]
+[group("docs")]
+guide:
+    baskingspot-docs serve compress
+
+[doc("Deploy the rendered site to Cloudflare as an assets-only Worker (config in wrangler.jsonc). Needs CLOUDFLARE_API_TOKEN in the environment, plus CLOUDFLARE_ACCOUNT_ID if the token can see more than one account")]
+[group("docs")]
+doc-deploy: doc
+    wrangler deploy
 
 [doc("Check gzip against python3's zlib, CPython's gzip module, and the gzip and gunzip CLIs")]
 [group("conformance")]
