@@ -259,7 +259,7 @@ pub const State = struct {
     /// The four accumulators, seeded with zero (`§3.1.1`).
     accumulator: Accumulator = .init(seed),
     /// The under-one-stripe tail: the bytes not yet folded into the accumulators.
-    buf: ArrayBuffer(u8, 32) = undefined,
+    buf: ArrayBuffer(u8, 32) = .empty,
     /// The running total: **u64** — a checksummed frame past 2^32 is
     /// legitimate (the CLI writes them), and this count must not wrap on
     /// any target.
