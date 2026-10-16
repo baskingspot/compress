@@ -11,6 +11,20 @@ jobs:
   ci:
     permissions:
       contents: read
-    uses: baskingspot/gh-actions/.github/workflows/ci.yml@85e49a8f95b45e59d6ea66c03fbed54d1b47ae1e # v0.2.0
+    uses: baskingspot/gh-actions/.github/workflows/ci.yml@9e44f3e0a78690c111f4418afdfc3965ce54fca0 # v0.3.0
     secrets:
       CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
+  # Deploys the site after CI passes on main. It stays skipped until
+  # Terraform in baskingspot/site has registered the site, which sets the
+  # variable and the secret.
+  deploy:
+    needs: ci
+    if: github.ref == 'refs/heads/main' && vars.CLOUDFLARE_ACCOUNT_ID != ''
+    permissions:
+      contents: read
+    uses: baskingspot/gh-actions/.github/workflows/deploy-docs.yml@9e44f3e0a78690c111f4418afdfc3965ce54fca0 # v0.3.0
+    with:
+      account-id: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
