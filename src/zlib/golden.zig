@@ -118,8 +118,9 @@ pub const zlib_cases: []const Case = &.{
         .source = &hex("78bb00010001ca48cdc9c9d75128cf2fca49010400" ++ "00ffff"),
         .expect = .{ .fail_with = error.DictionaryRequired },
     },
-    // 4. "empty": the C reference's empty stream, the bytes our own encoder
-    // emits at `.fast` (the hostile-header pins in `fuzz.zig` carry them too).
+    // 4. "empty": the C reference's empty stream at its default level; our
+    // own level-1 empty stream is `78 01`'s (`fuzz.zig`'s hostile-header
+    // pins carry that one).
     .{ .desc = "empty", .source = &hex("789c030000000001"), .expect = .{ .ok = "" } },
     // 5. "goodbye": the C reference's fixed-Huffman stream.
     .{

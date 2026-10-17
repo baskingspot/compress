@@ -52,8 +52,11 @@ one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 
 ```zig
 // Names are relative to gzip = @import("compress").gzip
-encode.Level          // flate's level enum: .fast (default), .@"0" .. .@"9", .ratio
-encode.Options        // struct { level: Level = .fast }
+encode.Options        // struct { level: u8 = 1 }
+                      //   flate's level scale, 1-9: level 1 (the default) and
+                      //   level 6 are implemented; levels 2-5 and 7-9, and
+                      //   anything outside 1-9, are reserved seats that return
+                      //   `error.Unimplemented`
 encode.maxCompressedLength(input_len: usize) usize
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize
@@ -113,7 +116,7 @@ and `InvalidBlockType` through `InvalidMatch` for a malformed deflate body.
   trailer and flushes `output`. After it, or after a failed write, the writer
   returns `error.WriteFailed`.
 - **Headers.** Output is reproducible: FLG=0, MTIME=0, OS=255, no name or
-  comment, and XFL 4 for `.fast`, `.@"0"`, and `.@"1"`, 2 for `.@"9"`, else 0. The
+  comment, and XFL 4 for levels 0 and 1, 2 for level 9, else 0. The
   decoder checks ID1, ID2, CM, and the reserved flags, verifies FHCRC when
   present, skips the extra field, name, and comment without storing them, and
   ignores (and does not return) MTIME, XFL, OS, and FTEXT.
@@ -128,8 +131,10 @@ and `InvalidBlockType` through `InvalidMatch` for a malformed deflate body.
 
 ## Limitations
 
-- Only flate's fast encoder exists: `.@"1"` to `.@"9"` match `.fast` apart from the
-  XFL byte, `.@"0"` stores, and `.ratio` returns `error.Unimplemented`.
+- Only flate's levels 1 and 6 exist: level 1 is the fixed-Huffman fast
+  encoder, level 6 the klauspost class. Levels 2-5 and 7-9, and anything
+  outside 1-9, return `error.Unimplemented`; a `Writer` made with one fails
+  every write and `finish`, and `Writer.streamAll` rejects it before reading.
 - A `Writer` or `compress` call writes one member, with no file name, comment,
   modification time, or extra field. On input, names and comments over 512 bytes
   are rejected (`HeaderTooLong`), though RFC 1952 allows them.

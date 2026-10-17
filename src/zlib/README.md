@@ -79,8 +79,11 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 // One-shot. `dict` is the stream's preset dictionary or `null` (§2.2): on
 // encode it sets FDICT and writes the Adler-32 of the whole slice as DICTID;
 // on decode it is checked against the header's DICTID before any body byte.
-zlib.encode.Level          // flate's level type: .fast (default), .@"0" to .@"9", .ratio
-zlib.encode.Options        // struct { level: Level = .fast, dict: ?[]const u8 = null }
+zlib.encode.Options        // struct { level: u8 = 1, dict: ?[]const u8 = null }
+                           //   flate's level scale, 1-9: level 1 (the default)
+                           //   and level 6 are implemented; levels 2-5 and 7-9,
+                           //   and anything outside 1-9, are reserved seats
+                           //   that return `error.Unimplemented`
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize      // the stream's length
@@ -168,18 +171,18 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   32 KiB window), FLEVEL follows the level (`encode.flgFor`), and FDICT is set
   exactly when a non-empty `options.dict` is, with DICTID the Adler-32 of the
   whole dictionary (most-significant byte first); otherwise FDICT is never set.
-  The default header is `78 9c`; with a dictionary it is `78 bb` plus the
-  4-byte DICTID at the default level (FLEVEL 0 gives `78 20`, the minimal
-  FCHECK; C zlib's naive arithmetic writes `78 3f` there, and both are
-  conformant). The empty stream is `78 9c 03 00 00 00 00 01`.
+  The default header is `78 01` (level 1's FLEVEL 0 band); with a dictionary it
+  is `78 20` plus the 4-byte DICTID (C zlib's naive arithmetic writes `78 3f`
+  there, and both are conformant). The empty stream is
+  `78 01 03 00 00 00 00 01`.
 
 ## Limitations
 
-- `.ratio` is not implemented. `compress` returns `error.Unimplemented`, and a
-  `Writer` made with it fails every write and `finish`.
-- The encoder writes fixed-Huffman and stored blocks only, and `.@"1"` to `.@"9"`
-  encode like `.fast`, so output is larger than a dynamic-Huffman encoder's. The
-  decoder handles every block type.
+- Only flate's levels 1 and 6 exist: `compress` returns `error.Unimplemented`
+  for levels 2-5 and 7-9 and for anything outside 1-9, and a `Writer` made
+  with one fails every write and `finish`.
+- Level 1 writes fixed-Huffman and stored blocks only, so its output is larger
+  than level 6's; the decoder handles every block type.
 
 ## Testing and benchmarks
 

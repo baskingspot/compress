@@ -8,9 +8,9 @@
 //! one sample record per measurement, and an end record.
 //!
 //! Implementations in this binary:
-//!   - `zc`  — the compress one-shots: flate/gzip/zlib at level .fast and
+//!   - `zc`  — the compress one-shots: flate/gzip/zlib at level 1 and
 //!     the snappy raw block codec, both directions, plus the zstd one-shot
-//!     (level .fast, the CLI's level-1 class), both directions, and the
+//!     (level 1, the CLI's level-1 class), both directions, and the
 //!     brotli one-shot decode (compress ships no brotli encoder, so its
 //!     brotli rows are decode only).
 //!   - `std` — std.compress.flate with Container raw/gzip/zlib at level_1

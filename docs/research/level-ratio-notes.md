@@ -80,6 +80,15 @@ cites a fleet run in `docs/results/`.
 
 ## 1. flate's ratio path
 
+> **Superseded 2026-10-17.** The class-pin recommendation below did not
+> survive review: Matt ruled flate's seat a **byte pin to klauspost's level
+> 6**, and it landed as `c60a6b5` ("flate: level 6, the klauspost port,
+> byte-identical at level 6") — their `fastEncL6` finder and dynamic-block
+> emitter, byte-identical on the pinned module version. §1.4's LR1 (the
+> dynamic emitter over our own level-1 finder) and §3.2's LR3 (a class pin,
+> ratio-gated) are the superseded shapes; the measurements and port costs
+> below stand as the research that preceded the ruling.
+
 ### 1.1 What the references do per level
 
 Three references, three ladders, one emission rule. All of them emit

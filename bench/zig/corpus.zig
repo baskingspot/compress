@@ -7,7 +7,7 @@
 //! The shapes (see `Shape`) come at two sizes, 32 KiB and 64 KiB. The first
 //! five mirror the codec bench files (src/flate/bench.zig). Alongside each raw
 //! file the generator writes the reference compressed blob per codec: flate,
-//! gzip, and zlib at level `.fast`, and the snappy raw block, all produced by
+//! gzip, and zlib at level 1, and the snappy raw block, all produced by
 //! the compress one-shots. Decompression rows decode these exact blobs, so
 //! every implementation's decoder sees identical input bytes.
 //!
@@ -85,7 +85,7 @@ const committed_sums_path = "bench/corpus/SHA256SUMS";
 
 /// The zstd CLI level of the fast-class shapes' `.zst` reference blobs. The
 /// CLI's own default is 3; level 1 is the fast class every other arm's rows
-/// measure (zc `.fast`, klauspost/libdeflate/zlib-ng level 1).
+/// measure (zc level 1, klauspost/libdeflate/zlib-ng level 1).
 const zstd_cli_level = "-1";
 
 /// The level the entropy shapes' `.zst` blobs generate at: level 19's

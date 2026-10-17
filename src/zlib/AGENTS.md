@@ -13,8 +13,8 @@ design", "Trailer location and the one-shot decoder", "Streaming"). zlib follows
 it unchanged, over the same driver (`src/internal/container.zig`) instantiated
 on `framing.zig`: one stream per reader with an exact boundary, no container
 buffers, the Adler-32 folded through flate's checksum hook, the trailer check on
-the fill and rebase paths, the `.ratio` rejection, and the rule that a `Reader`
-or `Writer` must not move after first use. What is specific to zlib:
+the fill and rebase paths, the reserved-level rejection, and the rule that a
+`Reader` or `Writer` must not move after first use. What is specific to zlib:
 
 - **No multi-stream mode** (OQ3). zlib has no concatenation convention, so
   `Reader.streamAll` decodes exactly one stream where gzip's walks members. A
@@ -127,10 +127,10 @@ rule (DQ4/DQ5).
   corner still arises on the decode side. Without a dictionary the stream lands
   on `DictionaryRequired`; with the reference's dictionary it decodes. Pinned
   by `golden.fcheck31_dict_stream` and the tests built on it.
-- **`.fast` reads differently in the two containers.** zlib emits FLEVEL 2
-  ("default algorithm") where gzip emits XFL 4 ("fastest algorithm"). Both are
-  legal and informational: no decoder may require either value. The FLEVEL bands
-  (C zlib's and Go's) are documented at `encode.flgFor`.
+- **Level 1 reads differently in the two containers.** zlib emits FLEVEL 0
+  where gzip emits XFL 4 ("fastest algorithm"). Both are legal and
+  informational: no decoder may require either value. The FLEVEL bands (C
+  zlib's and Go's) are documented at `encode.flgFor`.
 
 ## Testing and oracle
 

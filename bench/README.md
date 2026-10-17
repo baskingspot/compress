@@ -23,7 +23,7 @@ last physical core of the box, isolated through systemd
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_compress.zig) | compress one-shots, both directions (flate, gzip, zlib at level `.fast`; snappy blocks; zstd at level `.fast`, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_compress.zig) | compress one-shots, both directions (flate, gzip, zlib at level 1; snappy blocks; zstd at level 1, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
 | `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `EncodeAll` at SpeedFastest with `WithEncoderCRC(true)` (the zc one-shot's frame form) and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
 | `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
 | `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
@@ -40,7 +40,7 @@ delegates to `bench/build.zig`) materializes them under
 harness runs that step itself and never downloads or unpacks a tarball.
 
 zstd rows run both directions on the arms that carry the codec: zc (the
-level-`.fast` one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
+level-1 one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
 the level-1 class. The in-binary std.compress.zstd rows stay decode only: the
 std library ships no zstd compressor.
 

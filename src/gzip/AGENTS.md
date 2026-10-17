@@ -80,8 +80,8 @@ header parse, the trailer check, the CRC-32, and the member boundary.
   and written bytes land in flate's block buffer (the caller's `Writer.Buffer`).
 - The header is written lazily (Go's shape) because `init` cannot fail. The
   trailer is written by `finish` only.
-- `.ratio` poisons the writer at `init`, and `Writer.streamAll` rejects it
-  upfront: the same reserved-seat behavior as flate's.
+- A reserved level poisons the writer at `init`, and `Writer.streamAll`
+  rejects it upfront: the same reserved-seat behavior as flate's.
 - A clean `EndOfStream` always means the trailer was verified, on the fill path
   and on the rebase path. The rebase path is the easy one to miss: an
   over-the-end `peek` reaches flate's sticky end through `rebase`, before any
@@ -138,7 +138,7 @@ a plain unit test, so `just test` gates them; the fuzz targets need `just fuzz`.
 `just gzip-oracle` builds the harness (`oracle.zig`) and runs
 `scripts/gzip_oracle.py` (incantations: `containers-notes.md §5.5`). It covers:
 
-- Our encode at levels fast/0/1/6/9 into python3's `zlib` (wbits 31), the
+- Our encode at levels 1 and 6 into python3's `zlib` (wbits 31), the
   CPython `gzip` module, and `gunzip -c`, and their encoders (C zlib's
   `compressobj(level, DEFLATED, 31)`, `gzip.compress`, `gzip -c`) into our
   decode. Header and trailer checks run on every member we emit.
