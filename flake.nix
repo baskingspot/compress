@@ -31,7 +31,6 @@
 
             packages = with pkgs; [
               uv
-              oxfmt
               # nixpkgs' goperf is the golang.org/x/perf package. It supplies the
               # benchstat that the bench recipes use.
               goperf
