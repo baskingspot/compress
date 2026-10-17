@@ -39,6 +39,14 @@
 #define CBENCH_DIRECTIONS {"compress", "decompress"}
 #define CBENCH_DIRECTION_COUNT 2
 #endif
+/* True when this codec carries this direction. The default: every codec
+ * carries the driver's CBENCH_DIRECTIONS set. A driver whose codecs differ
+ * (the flate arms' and zstd-c's compress-only level rows) defines this
+ * macro before including the header; it receives the codec and direction
+ * strings and expands inside the functions below. */
+#ifndef CBENCH_CODEC_HAS_DIRECTION
+#define CBENCH_CODEC_HAS_DIRECTION(codec, direction) has_direction(direction)
+#endif
 
 /* The corpus generator's shape set (bench/zig/corpus.zig): the entropy
  * pair's .zst blobs are the pinned CLI at level 19. */
@@ -71,8 +79,9 @@ static const char *blob_ext(const char *codec)
 {
     if (!strcmp(codec, "gzip")) return "gz";
     if (!strcmp(codec, "zlib")) return "zz";
-    if (!strcmp(codec, "zstd")) return "zst";
-    if (!strcmp(codec, "brotli")) return "br";
+    if (!strcmp(codec, "zstd") || !strcmp(codec, "zstd3")) return "zst";
+    if (!strcmp(codec, "brotli") || !strcmp(codec, "brotli-stream")) return "br";
+    if (!strcmp(codec, "flate6")) return "flate";
     return codec;
 }
 
@@ -254,16 +263,17 @@ static int row_selected(struct cbench_options *o, const char *codec,
 static int any_row(struct cbench_options *o, const char *codec, const char *shape, size_t size)
 {
     for (int d = 0; d < direction_count; d++)
-        if (row_selected(o, codec, directions[d], shape, size)) return 1;
+        if (CBENCH_CODEC_HAS_DIRECTION(codec, directions[d]) &&
+            row_selected(o, codec, directions[d], shape, size)) return 1;
     return 0;
 }
 
 static int check_cell(struct cbench_case *c, int k, unsigned char *target,
                       unsigned char *decoded, const char **detail)
 {
-    /* Decode-only drivers have no round trip: the reference decode is the
+    /* Decode-only codecs have no round trip: the reference decode is the
      * whole check. */
-    if (has_direction("compress")) {
+    if (CBENCH_CODEC_HAS_DIRECTION(codecs[k], "compress")) {
         size_t n = impl_compress(codecs[k], c->raw, c->size, target, CBENCH_TARGET_CAP);
         if (n == 0) { *detail = "compress failed"; return -1; }
         size_t back = impl_decompress(codecs[k], target, n, decoded, c->size);
@@ -394,7 +404,8 @@ static void run_measure(struct cbench_options *o)
             for (int sample = 0; sample < o->samples; sample++)
                 for (int k = 0; k < CBENCH_CODEC_COUNT; k++)
                     for (int d = 0; d < direction_count; d++)
-                        if (row_selected(o, codecs[k], directions[d], c.shape, c.size))
+                        if (CBENCH_CODEC_HAS_DIRECTION(codecs[k], directions[d]) &&
+                            row_selected(o, codecs[k], directions[d], c.shape, c.size))
                             measure(o, &c, k, directions[d], sample, target);
             for (int k = 0; k < CBENCH_CODEC_COUNT; k++) free(c.blobs[k]);
             free(c.raw);

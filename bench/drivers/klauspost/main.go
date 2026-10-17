@@ -1,14 +1,17 @@
 // The klauspost/compress arm (bench/README.md). Same CLI, corpus, and
 // schema-v1 JSONL as the compress driver: one process is one round of this
-// arm. Rows: flate/gzip/zlib at level 1 (the fast class, matching the
-// compress .fast rows) and snappy raw blocks, both directions, plus zstd
-// EncodeAll/DecodeAll on shared contexts. EncodeAll at SpeedFastest is the
-// level-1 class the zc one-shot (level .fast) targets; DecodeAll is the
-// single-buffer shape that the zc one-shot decode is measured against.
+// arm. Rows: flate/gzip/zlib at level 1 and snappy raw blocks, both
+// directions, plus the level rows the zc arm carries — flate at level 6
+// (`flate6`, klauspost's fastEncL6 class, the seat's byte pin) and zstd
+// `EncodeAll` at SpeedFastest (level 1) and SpeedDefault (level 3, the
+// `zstd3` rows) with `DecodeAll`, both directions. SpeedFastest is the
+// level-1 class the zc one-shot targets; DecodeAll is the single-buffer
+// shape that the zc one-shot decode is measured against.
 //
 // One-shot shape: writers and readers are constructed per iteration, the Go
 // equivalent of the compress one-shots' per-call table setup. Decompression
 // rows decode the corpus's reference blobs, identical bytes for every arm.
+// The level rows are compress only: a decoder is not per-level.
 package main
 
 import (
@@ -36,12 +39,26 @@ import (
 // pair's .zst blobs are the pinned CLI at level 19.
 var shapes = []string{"text", "random", "html", "rle", "mixed", "words", "skewlit", "prose"}
 var sizes = []int{32 * 1024, 64 * 1024}
-var codecs = []string{"flate", "gzip", "zlib", "snappy", "zstd"}
+var codecs = []string{"flate", "gzip", "zlib", "snappy", "zstd", "flate6", "zstd3"}
 var directions = []string{"compress", "decompress"}
 
-// directionsFor: every codec runs both directions.
+// directionsFor: the level rows (flate6, zstd3) are compress only; every
+// other codec runs both directions.
 func directionsFor(codec string) []string {
+	if codec == "flate6" || codec == "zstd3" {
+		return []string{"compress"}
+	}
 	return directions
+}
+
+// carriesDirection reports whether this codec carries this direction.
+func carriesDirection(codec, direction string) bool {
+	for _, d := range directionsFor(codec) {
+		if d == direction {
+			return true
+		}
+	}
+	return false
 }
 
 type options struct {
@@ -67,8 +84,10 @@ func blobExt(codec string) string {
 		return "gz"
 	case "zlib":
 		return "zz"
-	case "zstd":
+	case "zstd", "zstd3":
 		return "zst"
+	case "flate6":
+		return "flate"
 	default:
 		return codec
 	}
@@ -113,7 +132,7 @@ func zstdDecoder() (*zstd.Decoder, error) {
 
 // The zstd encoder, built once: EncodeAll on a shared *Encoder at
 // SpeedFastest (klauspost's fastest class, the peer of the CLI's level 1
-// that the corpus's .zst blobs and the zc one-shot's .fast level measure),
+// that the corpus's .zst blobs and the zc one-shot's level-1 row measure),
 // concurrency 1 as on the decode side, and CRC on — the fair grid: the
 // zc one-shot's default form writes the 4-byte XXH64 trailer, so the Go
 // arm pays its checksum flag too (the C arm got the same fix).
@@ -135,11 +154,38 @@ func zstdEncoder() (*zstd.Encoder, error) {
 	return zstdEnc, nil
 }
 
-// compressOne compresses raw with the codec's level-1 writer (the zstd
-// encoder's EncodeAll) and returns the produced length.
+// The level-3 encoder, built once: SpeedDefault is klauspost's default
+// class, the peer of the CLI's level 3 that the zc arm's `zstd3` row
+// measures. Same concurrency and CRC as the level-1 encoder.
+var zstdEnc3 *zstd.Encoder
+
+func zstdEncoder3() (*zstd.Encoder, error) {
+	if zstdEnc3 == nil {
+		enc, err := zstd.NewWriter(
+			nil,
+			zstd.WithEncoderLevel(zstd.SpeedDefault),
+			zstd.WithEncoderConcurrency(1),
+			zstd.WithEncoderCRC(true),
+		)
+		if err != nil {
+			return nil, err
+		}
+		zstdEnc3 = enc
+	}
+	return zstdEnc3, nil
+}
+
+// compressOne compresses raw with the codec's writer (the zstd encoders'
+// EncodeAll) and returns the produced length.
 func compressOne(codec string, raw, target []byte) (int, error) {
-	if codec == "zstd" {
-		enc, err := zstdEncoder()
+	if codec == "zstd" || codec == "zstd3" {
+		var enc *zstd.Encoder
+		var err error
+		if codec == "zstd3" {
+			enc, err = zstdEncoder3()
+		} else {
+			enc, err = zstdEncoder()
+		}
 		if err != nil {
 			return 0, err
 		}
@@ -149,6 +195,18 @@ func compressOne(codec string, raw, target []byte) (int, error) {
 	switch codec {
 	case "flate":
 		w, err := flate.NewWriter(buf, 1)
+		if err != nil {
+			return 0, err
+		}
+		if _, err := w.Write(raw); err != nil {
+			return 0, err
+		}
+		if err := w.Close(); err != nil {
+			return 0, err
+		}
+	case "flate6":
+		// Klauspost's level-6 finder: the zc `flate6` row's byte pin.
+		w, err := flate.NewWriter(buf, 6)
 		if err != nil {
 			return 0, err
 		}
@@ -188,6 +246,13 @@ func compressOne(codec string, raw, target []byte) (int, error) {
 
 // decompressOne decodes blob into target and returns the decoded length.
 func decompressOne(codec string, blob, target []byte) (int, error) {
+	// The level rows decode through their base codec: the format is one.
+	switch codec {
+	case "flate6":
+		codec = "flate"
+	case "zstd3":
+		codec = "zstd"
+	}
 	if codec == "snappy" {
 		out, err := snappy.Decode(target[:0], blob)
 		if err != nil {
@@ -227,11 +292,11 @@ func decompressOne(codec string, blob, target []byte) (int, error) {
 	return out.Len(), nil
 }
 
-// checkCell round-trips the raw corpus and decodes the reference blob.
-// Decode-only codecs (zstd) skip the round trip: the reference decode is
-// the whole check.
+// checkCell round-trips the raw corpus (when the codec carries a compress
+// direction) and decodes the reference blob. Decode-only codecs (std's
+// zstd) skip the round trip: the reference decode is the whole check.
 func checkCell(c *kase, codec string, target, decoded []byte) error {
-	if len(directionsFor(codec)) == 2 {
+	if carriesDirection(codec, "compress") {
 		n, err := compressOne(codec, c.raw, target)
 		if err != nil {
 			return fmt.Errorf("compress %s/%s: %w", codec, c.shape, err)

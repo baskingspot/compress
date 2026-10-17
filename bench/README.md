@@ -23,13 +23,13 @@ last physical core of the box, isolated through systemd
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
-| `zc` | `zig build fleet-bench` (bench/zig/bench_compress.zig) | compress one-shots, both directions (flate, gzip, zlib at level 1; snappy blocks; zstd at level 1, the CLI's level-1 class), brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
-| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; zstd `EncodeAll` at SpeedFastest with `WithEncoderCRC(true)` (the zc one-shot's frame form) and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
-| `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1 | `zig cc -static` per target and CPU, over the pinned source tree |
-| `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1 | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
+| `zc` | `zig build fleet-bench` (bench/zig/bench_compress.zig) | compress one-shots, both directions (flate, gzip, zlib at level 1; snappy blocks; zstd at levels 1 and 3; brotli at quality 3 — the one-shot and the streaming `Writer`), plus flate level 6 (`flate6`) and brotli decode (`decode.decompress`), and the in-binary `std` rows: std.compress.flate raw/gzip/zlib at `level_1`, both directions, and std.compress.zstd decode | cross-built per target: `-Dtarget=<arch>-linux-musl -Dcpu=<model>`, ReleaseFast, static |
+| `klauspost` | bench/drivers/klauspost (Go) | klauspost/compress flate, gzip, zlib at level 1 and snappy, both directions; flate at level 6 (`flate6`, the byte pin's race); zstd `EncodeAll` at SpeedFastest (level 1) and SpeedDefault (level 3) with `WithEncoderCRC(true)` (the zc one-shot's frame form) and `DecodeAll`, both directions | `go build` with GOOS=linux per arch; module pinned to v1.18.1-0.20250402062133-8df4d013ff17 |
+| `libdeflate` | bench/drivers/c/bench_libdeflate.c | libdeflate v1.26 gzip, zlib, and deflate one-shots at level 1, plus raw deflate at level 6 (`flate6`) | `zig cc -static` per target and CPU, over the pinned source tree |
+| `zlibng` | bench/drivers/c/bench_zlibng.c | zlib-ng 2.3.3 streaming API (zlib-compat, windowBits -15/15/31) at level 1, plus raw deflate at level 6 (`flate6`) | cmake (ZLIB_COMPAT, static) with a zig-cc wrapper, per target and CPU |
 | `googlesnappy` | bench/drivers/google-snappy/bench_snappy.cc | google/snappy 1.3.1 raw blocks (`snappy::RawCompress`, `RawUncompress`), both directions | cmake (static `snappy`) with zig-cc and zig-c++ wrappers, per target and CPU |
-| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_compress2` at the CCtx's level-1 and checksum parameters (the zc one-shot's frame form: content size + the XXH64 trailer; `ZSTD_compressCCtx` ignores the sticky parameters, so the first checksum-fair attempt was a no-op) and `ZSTD_decompressDCtx`, both directions | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
-| `brotli-c` | bench/drivers/c/bench_brotli.c | google/brotli v1.2.0 `BrotliDecoderCreateInstance` + `BrotliDecoderDecompressStream` over the whole stream, allocating from a pre-faulted bump arena, decode only | cmake (static `brotlidec` and `brotlicommon`, no tools or tests) with a zig-cc wrapper, per target and CPU |
+| `zstd-c` | bench/drivers/c/bench_zstd.c | zstd v1.5.7 whole-buffer `ZSTD_compress2` at the CCtx's level-1 and level-3 parameters (the zc one-shot's frame form: content size + the XXH64 trailer; `ZSTD_compressCCtx` ignores the sticky parameters, so the first checksum-fair attempt was a no-op) and `ZSTD_decompressDCtx`, both directions | cmake (`build/cmake`, static library, no programs, tests, or threads) with a zig-cc wrapper, per target and CPU |
+| `brotli-c` | bench/drivers/c/bench_brotli.c | google/brotli v1.2.0 `BrotliDecoderCreateInstance` + `BrotliDecoderDecompressStream` over the whole stream, allocating from a pre-faulted bump arena, decode; and `BrotliEncoderCompress`'s q3 call sequence (the CLI's automatic window, the size hint, one FINISH call) over an arena instance, encode | cmake (static `brotlienc`, `brotlidec`, and `brotlicommon`, no tools or tests) with a zig-cc wrapper, per target and CPU |
 | `aa` | the `zc` binary again | the A/A noise floor | none |
 
 The sources of the five native arms are pinned by release-tarball URL and hash
@@ -39,18 +39,36 @@ delegates to `bench/build.zig`) materializes them under
 `bench/zig-out/bench-src/<name>/`, hash-verified by zig's own fetcher. The
 harness runs that step itself and never downloads or unpacks a tarball.
 
-zstd rows run both directions on the arms that carry the codec: zc (the
-level-1 one-shot), klauspost (SpeedFastest), and zstd-c (level 1) — all
-the level-1 class. The in-binary std.compress.zstd rows stay decode only: the
-std library ships no zstd compressor.
+Row naming: a case is `<codec>/<direction>/<shape>/<size>`, and a codec token
+names the codec plus, when it has a second class, that class — `flate6`
+(level 6), `zstd3` (level 3), `brotli-stream` (the streaming `Writer`). The
+bare tokens are the level-1 and one-shot rows. The level and streaming rows
+are compress only: a decoder is not per-level, so there is no separate decode
+row, and their round trips ride the base codec's decoder.
 
-brotli rows are decode only, on zc and brotli-c: compress ships no brotli
-encoder, and the std library ships no brotli at all. The C decoder has no
-reset, so every brotli-c iteration creates, runs, and destroys one decoder
-instance; its allocations come from an arena rewound per stream instead of
-`malloc`, the same "codec alone" rule the other native arms follow. The C
-decoder decodes through its ring buffer and copies out; the zc one-shot
-decodes in place. That copy is part of what the rows measure.
+zstd rows run both directions on the arms that carry the codec, at two
+levels: zc (the level-1 and level-3 one-shots), klauspost (SpeedFastest and
+SpeedDefault), and zstd-c (levels 1 and 3) — the same two classes on every
+arm. The in-binary std.compress.zstd rows stay decode only: the std library
+ships no zstd compressor.
+
+flate level-6 rows (`flate6/compress/...`) race on zc, klauspost, libdeflate,
+and zlib-ng: each library's own level-6-class setting (klauspost's level 6 —
+the class our level 6 is byte-identical to; libdeflate's level 6; zlib-ng's
+level 6). The flate family's level-1 rows stay the level-1 race.
+
+brotli rows run both directions on zc and brotli-c. The encode rows are the
+quality-3 class: the zc one-shot and the zc streaming `Writer` (the
+`brotli-stream` rows, whose window follows the CLI's automatic rule), against
+the C encoder's q3 one-shot. The decode rows decode the pinned CLI's quality
+11 reference streams. The C decoder has no reset, so every brotli-c decode
+iteration creates, runs, and destroys one decoder instance; its allocations
+come from an arena rewound per stream instead of `malloc`, the same "codec
+alone" rule the other native arms follow. The C encoder has no reset either,
+and its row is the same shape: one instance per iteration from the same
+arena, the one-shot's own call sequence. The C decoder decodes through its
+ring buffer and copies out; the zc one-shot decodes in place. That copy is
+part of what the rows measure.
 
 ## Corpus
 

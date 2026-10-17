@@ -26,8 +26,12 @@ SCHEMA = 1
 SHAPES = ("text", "random", "html", "rle", "mixed", "words", "skewlit", "prose")
 SIZES = (32768, 65536)
 SHA256_HEX = r"^[0-9a-f]{64}$"
-# The codecs the std library ships no implementation of, either direction.
-STD_ABSENT = frozenset({"snappy", "brotli"})
+# The cases the std competitor emits no row for. std's rows are the level-1
+# flate family and zstd decode: it ships no snappy, no brotli, and no zstd
+# encoder, and the zc arm's level and streaming rows (flate6, zstd3,
+# brotli-stream) are outside the std level-1 row set. A sample whose codec is
+# here must have no std sample; every other implementation must report it.
+STD_SKIPS = frozenset({"snappy", "brotli", "brotli-stream", "flate6", "zstd3"})
 
 
 class Record(BaseModel):
@@ -76,7 +80,21 @@ class Meta(Record):
 class Sample(Record):
     type: Literal["sample"]
     case: str
-    codec: Literal["flate", "gzip", "zlib", "snappy", "zstd", "brotli"]
+    # The codec tokens: the bare name is the codec's base row (level 1, or
+    # brotli's one-shot); a suffixed token is the second class of a codec
+    # that has one — flate6 (level 6), zstd3 (level 3), brotli-stream (the
+    # streaming Writer). The level and streaming rows are compress only.
+    codec: Literal[
+        "flate",
+        "gzip",
+        "zlib",
+        "snappy",
+        "zstd",
+        "brotli",
+        "flate6",
+        "zstd3",
+        "brotli-stream",
+    ]
     direction: Literal["compress", "decompress"]
     shape: Literal["text", "random", "html", "rle", "mixed", "words", "skewlit", "prose"]
     size: int
@@ -111,10 +129,9 @@ class Measurement:
 
 
 def applicable(meta: Meta, sample: Sample) -> list[str]:
-    """The implementations that must report this case: the std rows skip snappy
-    and brotli (std ships neither) and zstd compression (std.compress.zstd
-    ships no encoder)."""
-    std_skips = sample.codec in STD_ABSENT or (
+    """The implementations that must report this case: the std rows skip the
+    codecs and directions it carries no row for (STD_SKIPS; zstd compression)."""
+    std_skips = sample.codec in STD_SKIPS or (
         sample.codec == "zstd" and sample.direction == "compress"
     )
     return [impl for impl in meta.impls if not (impl == "std" and std_skips)]
@@ -174,7 +191,7 @@ def validate_samples(meta: Meta, samples: list[Sample], end: End) -> None:
     for sample in samples:
         if sample.impl not in meta.impls:
             raise ValueError(f"Sample implementation {sample.impl} is outside the meta list")
-        if sample.impl == "std" and sample.codec in STD_ABSENT:
+        if sample.impl == "std" and sample.codec in STD_SKIPS:
             raise ValueError(f"The std implementation has no {sample.codec} row")
         key = (sample.case, sample.impl, sample.sample)
         if key in seen:

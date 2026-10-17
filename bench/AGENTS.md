@@ -44,11 +44,14 @@ Where the competitor pins came from:
   of them and `bench/corpus/SHA256SUMS` in the same commit.
 - The codec list is repeated in `bench/zig/bench_compress.zig` (`codecs`,
   `blobExt`, `carries`, `codecDirections`), `bench/drivers/c/cbench.h`
-  (`blob_ext`), and `bench/compress_bench/jsonl.py` (`Sample.codec`,
-  `STD_ABSENT`, `applicable`). A new codec updates all of them. A codec or
-  direction that an implementation in a binary does not carry must be
-  excluded in `applicable`, or every round fails the sample-set check at
-  round 0.
+  (`blob_ext`, `CBENCH_CODEC_HAS_DIRECTION`), and
+  `bench/compress_bench/jsonl.py` (`Sample.codec`, `STD_SKIPS`, `applicable`).
+  A new codec updates all of them. A codec or direction that an
+  implementation in a binary does not carry must be excluded in `applicable`,
+  or every round fails the sample-set check at round 0. The level and
+  streaming rows (`flate6`, `zstd3`, `brotli-stream`) are codec tokens too:
+  they are compress-only, share their base codec's reference blob, and the
+  std rows skip them (STD_SKIPS) because std's rows are the level-1 class.
 - The corpus anchor is append-only. A new reference blob appends its rows
   after the existing ones, in the order the generator hashes them (the
   sorted `.zst` rows, then the sorted `.br` rows), and no existing row

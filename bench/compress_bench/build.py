@@ -549,8 +549,7 @@ def build_zstdc(config: Config, source: Vendor, target: str, zig_version: str) -
 
 def build_brotlic(config: Config, source: Vendor, target: str, zig_version: str) -> Build:
     """The brotli-c arm: google/brotli's cmake under a zig-cc wrapper, as for
-    zstd; the driver links the static decoder and common libraries (the
-    encoder library is never built)."""
+    zstd; the driver links the static decoder, encoder, and common libraries."""
     settings = config.targets[target]
     driver = config.root / "bench" / "drivers" / "c"
     driver_hash = hash_paths([driver / "cbench.h", driver / "bench_brotli.c"])
@@ -562,7 +561,7 @@ def build_brotlic(config: Config, source: Vendor, target: str, zig_version: str)
         zig_version,
         BROTLI_C_VERSION,
         source.tree_hash,
-        "v1",
+        "v2",
     ]
 
     def install(temporary: Path) -> None:
@@ -599,6 +598,7 @@ def build_brotlic(config: Config, source: Vendor, target: str, zig_version: str)
                 "--build",
                 str(library),
                 "--target",
+                "brotlienc",
                 "brotlidec",
                 "brotlicommon",
                 "-j",
@@ -619,7 +619,9 @@ def build_brotlic(config: Config, source: Vendor, target: str, zig_version: str)
                 f'-DCOMPETITOR_VERSION="{BROTLI_C_VERSION}"',
                 f"-I{source.path}/c/include",
                 str(driver / "bench_brotli.c"),
-                # The decoder library before the common one it depends on.
+                # The encoder, then the decoder, then the common library both
+                # depend on.
+                str(library / "libbrotlienc.a"),
                 str(library / "libbrotlidec.a"),
                 str(library / "libbrotlicommon.a"),
                 "-o",

@@ -8,20 +8,28 @@
 //! one sample record per measurement, and an end record.
 //!
 //! Implementations in this binary:
-//!   - `zc`  — the compress one-shots: flate/gzip/zlib at level 1 and
-//!     the snappy raw block codec, both directions, plus the zstd one-shot
-//!     (level 1, the CLI's level-1 class), both directions, and the
-//!     brotli one-shot decode (compress ships no brotli encoder, so its
-//!     brotli rows are decode only).
+//!   - `zc`  — the compress one-shots: flate/gzip/zlib at level 1, flate at
+//!     level 6 (`flate6`), the snappy raw block codec, the zstd one-shot at
+//!     levels 1 and 3 (`zstd3`), and brotli at q3 — the one-shot and the
+//!     streaming `Writer` (`brotli-stream`) — both directions where the
+//!     codec has them. Decompression rows decode the reference blobs the
+//!     corpus generator writes (the compress encoders; the pinned zstd and
+//!     brotli CLIs for the `.zst` and `.br` streams), so every arm's decoder
+//!     sees the same bytes.
 //!   - `std` — std.compress.flate with Container raw/gzip/zlib at level_1
 //!     (the fast class), both directions, plus std.compress.zstd decode
 //!     (std's zstd ships no compressor, so its zstd rows stay decode only).
-//!     std ships no snappy and no brotli. The in-binary competitor: its rows
-//!     pair with the `zc` rows inside the same process.
+//!     std ships no snappy and no brotli, and the level and streaming rows
+//!     (`flate6`, `zstd3`, `brotli-stream`) are outside its level-1 row set.
+//!     The in-binary competitor: its rows pair with the `zc` rows inside the
+//!     same process.
 //!
-//! Decompression rows decode the reference blobs the corpus generator
-//! writes (the compress encoders; the pinned zstd and brotli CLIs for the
-//! `.zst` and `.br` streams), so every arm's decoder sees the same bytes.
+//! Row naming: a codec token is the codec and, when a second class exists,
+//! its class — `flate6` (level 6), `zstd3` (level 3), `brotli-stream` (the
+//! streaming `Writer` form). The bare tokens stay the level-1 / one-shot
+//! rows. The level and streaming rows are compress only: a decoder is not
+//! per-level, so there is no separate decode row.
+//!
 //! The warmup pass of each cell verifies the round trip; `--check` runs the
 //! whole matrix as a correctness gate and reports one JSON line.
 //!
@@ -48,37 +56,53 @@ const std_zstd = std.compress.zstd;
 // the entropy pair's `.zst` blobs are the CLI at level 19.
 const shapes = [_][]const u8{ "text", "random", "html", "rle", "mixed", "words", "skewlit", "prose" };
 const sizes = [_]usize{ 32 * 1024, 64 * 1024 };
-const codecs = [_][]const u8{ "flate", "gzip", "zlib", "snappy", "zstd", "brotli" };
+const codecs = [_][]const u8{
+    "flate", "gzip", "zlib", "snappy", "zstd", "brotli", "flate6", "zstd3", "brotli-stream",
+};
 const directions = [_][]const u8{ "compress", "decompress" };
 const decode_only = [_][]const u8{"decompress"};
+const compress_only = [_][]const u8{"compress"};
+
+/// True when `list` carries `direction`.
+fn carriesDirection(list: []const []const u8, direction: []const u8) bool {
+    for (list) |carried| if (mem.eql(u8, carried, direction)) return true;
+    return false;
+}
 
 const Suite = enum { standard, quick };
 
-/// The blob extension of each codec's reference compressed form.
+/// The blob extension of each codec's reference compressed form. The level
+/// and streaming rows share their codec's reference blob (a decoder is not
+/// per-level): `flate6` decodes the `.flate` stream, `zstd3` the `.zst`
+/// frame, `brotli-stream` the `.br` stream.
 fn blobExt(codec: []const u8) []const u8 {
     if (mem.eql(u8, codec, "gzip")) return "gz";
     if (mem.eql(u8, codec, "zlib")) return "zz";
-    if (mem.eql(u8, codec, "zstd")) return "zst";
-    if (mem.eql(u8, codec, "brotli")) return "br";
+    if (mem.eql(u8, codec, "zstd") or mem.eql(u8, codec, "zstd3")) return "zst";
+    if (mem.eql(u8, codec, "brotli") or mem.eql(u8, codec, "brotli-stream")) return "br";
+    if (mem.eql(u8, codec, "flate6")) return "flate";
     return codec;
 }
 
-/// Whether an implementation carries a codec at all: std ships no snappy
-/// and no brotli.
+/// Whether an implementation carries a codec at all: std ships no snappy,
+/// no brotli, and no level or streaming rows — its rows are the level-1
+/// flate family and zstd decode, the classes it can encode.
 fn carries(impl: []const u8, codec: []const u8) bool {
     if (!mem.eql(u8, impl, "std")) return true;
-    return !mem.eql(u8, codec, "snappy") and !mem.eql(u8, codec, "brotli");
+    return mem.eql(u8, codec, "flate") or mem.eql(u8, codec, "gzip") or
+        mem.eql(u8, codec, "zlib") or mem.eql(u8, codec, "zstd");
 }
 
 /// The directions one implementation carries for a codec. Every codec is
-/// both directions except std's zstd and brotli: std.compress.zstd ships
-/// only Decompress, so the std zstd rows decode the pinned CLI's reference
-/// frames (bench/zig/corpus.zig) and the zc arm carries the compress rows
-/// alone; compress ships no brotli encoder, so the zc brotli rows decode
-/// the pinned brotli CLI's reference streams.
+/// both directions except std's zstd (std.compress.zstd ships only
+/// Decompress, so the std zstd rows decode the pinned CLI's reference
+/// frames) and the level and streaming rows (compress only: a decoder is
+/// not per-level, so `flate6`, `zstd3`, and `brotli-stream` have no decode
+/// row of their own — their round trip rides the base codec's decoder).
 fn codecDirections(impl: []const u8, codec: []const u8) []const []const u8 {
-    if (mem.eql(u8, codec, "zstd") and mem.eql(u8, impl, "std")) return &decode_only;
-    if (mem.eql(u8, codec, "brotli")) return &decode_only;
+    if (mem.eql(u8, impl, "std") and mem.eql(u8, codec, "zstd")) return &decode_only;
+    if (mem.eql(u8, codec, "flate6") or mem.eql(u8, codec, "zstd3") or
+        mem.eql(u8, codec, "brotli-stream")) return &compress_only;
     return &directions;
 }
 
@@ -179,6 +203,12 @@ const Bench = struct {
     /// The std zstd decoder's window buffer: std_zstd.Decompress asserts it
     /// holds window_len + block_size_max (the 8 MiB default + 128 KiB).
     zstd_window: []u8,
+    /// The brotli `Writer`'s buffers for the `brotli-stream` row: the
+    /// one-shot's per-size window (the CLI's automatic-window rule), 16 for
+    /// 32 KiB inputs and 17 for 64 KiB. Heap-owned: 9 MiB at the library
+    /// default, a stack local at no window.
+    brotli_window_16: *compress.brotli.Writer.Buffer(16),
+    brotli_window_17: *compress.brotli.Writer.Buffer(17),
     cases: u32 = 0,
 
     fn now(bench: Bench) i96 {
@@ -232,6 +262,8 @@ pub fn main(init: std.process.Init) !void {
         .decoded = try arena.alloc(u8, 64 * 1024),
         .window = try arena.alloc(u8, std_flate.max_window_len),
         .zstd_window = try arena.alloc(u8, std_zstd.default_window_len + std_zstd.block_size_max),
+        .brotli_window_16 = try arena.create(compress.brotli.Writer.Buffer(16)),
+        .brotli_window_17 = try arena.create(compress.brotli.Writer.Buffer(17)),
     };
     if (options.check) {
         try checkAll(&bench);
@@ -246,6 +278,7 @@ fn maxTargetLen() usize {
         compress.gzip.encode.maxCompressedLength(64 * 1024),
         compress.snappy.encode.maxCompressedLength(64 * 1024),
         compress.zstd.encode.maxCompressedLength(64 * 1024),
+        compress.brotli.encode.maxCompressedLength(64 * 1024),
     );
 }
 
@@ -274,21 +307,42 @@ fn loadCase(bench: *Bench, shape: []const u8, size: usize) !Case {
 // ---------------------------------------------------------------------------
 
 fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const u8) !usize {
-    // brotli is decode only (codecDirections gates every loop above).
-    assert(!mem.eql(u8, codec, "brotli"));
     const target = bench.compressed;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
             return compress.flate.encode.compress(raw, target, .{});
+        if (mem.eql(u8, codec, "flate6"))
+            return compress.flate.encode.compress(raw, target, .{ .level = 6 });
         if (mem.eql(u8, codec, "gzip"))
             return compress.gzip.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zlib"))
             return compress.zlib.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zstd"))
             return compress.zstd.encode.compress(raw, target, .{});
+        if (mem.eql(u8, codec, "zstd3"))
+            return compress.zstd.encode.compress(raw, target, .{ .level = 3 });
+        if (mem.eql(u8, codec, "brotli"))
+            return compress.brotli.encode.compress(raw, target, .{});
+        if (mem.eql(u8, codec, "brotli-stream"))
+            return brotliStream(bench, raw, target);
         return compress.snappy.encode.compressBlock(raw, target);
     }
     return stdCompress(bench, codec, raw);
+}
+
+/// The brotli `Writer` form, at the one-shot's per-size window (the CLI's
+/// automatic-window rule, so the row is the one-shot's class): 16 for
+/// 32 KiB inputs, 17 for 64 KiB. The writer's buffer is heap-owned and
+/// reused; the sink is the fixed target.
+fn brotliStream(bench: *Bench, raw: []const u8, target: []u8) !usize {
+    var in: Io.Reader = .fixed(raw);
+    var out: Io.Writer = .fixed(target);
+    if (raw.len <= (1 << 16) - 16) {
+        _ = try compress.brotli.Writer.streamAll(16, &in, &out, bench.brotli_window_16, .{});
+    } else {
+        _ = try compress.brotli.Writer.streamAll(17, &in, &out, bench.brotli_window_17, .{});
+    }
+    return out.buffered().len;
 }
 
 fn stdContainer(codec: []const u8) std_flate.Container {
@@ -316,15 +370,17 @@ fn stdCompress(bench: *Bench, codec: []const u8, raw: []const u8) !usize {
 fn decompressOne(bench: *Bench, impl: []const u8, codec: []const u8, blob: []const u8) !usize {
     const target = bench.decoded;
     if (mem.eql(u8, impl, "zc")) {
-        if (mem.eql(u8, codec, "flate"))
+        // The level and streaming rows round-trip and reference-decode
+        // through their base codec's decoder: the bytes are that format.
+        if (mem.eql(u8, codec, "flate") or mem.eql(u8, codec, "flate6"))
             return compress.flate.decode.decompress(blob, target, null);
         if (mem.eql(u8, codec, "gzip"))
             return compress.gzip.decode.decompress(blob, target);
         if (mem.eql(u8, codec, "zlib"))
             return compress.zlib.decode.decompress(blob, target, null);
-        if (mem.eql(u8, codec, "zstd"))
+        if (mem.eql(u8, codec, "zstd") or mem.eql(u8, codec, "zstd3"))
             return compress.zstd.decode.decompress(blob, target, null);
-        if (mem.eql(u8, codec, "brotli"))
+        if (mem.eql(u8, codec, "brotli") or mem.eql(u8, codec, "brotli-stream"))
             return compress.brotli.decode.decompress(blob, target);
         return compress.snappy.decode.decompressBlock(blob, target);
     }
@@ -356,9 +412,10 @@ fn checkCase(bench: *Bench, case: Case) !?[]const u8 {
             if (!carries(impl, codec)) continue;
             if (!bench.anyRow(case, codec)) continue;
             bench.cases += 1;
-            // Decode-only cells (std's zstd, brotli) have no round trip:
-            // the reference-blob decode below is the whole check.
-            if (codecDirections(impl, codec).len == 2) {
+            // A codec with a compress direction round-trips; decode-only
+            // cells (std's zstd) have no round trip: the reference-blob
+            // decode below is the whole check.
+            if (carriesDirection(codecDirections(impl, codec), "compress")) {
                 const n = compressOne(bench, impl, codec, case.raw) catch |err| {
                     return @errorName(err);
                 };
@@ -429,7 +486,7 @@ fn measure(bench: *Bench) !void {
                 for (codecs, 0..) |codec, k| {
                     if (!carries(impl, codec)) continue;
                     if (!bench.anyRow(case, codec)) continue;
-                    if (codecDirections(impl, codec).len == 2) {
+                    if (carriesDirection(codecDirections(impl, codec), "compress")) {
                         const n = try compressOne(bench, impl, codec, case.raw);
                         const back = try decompressOne(bench, impl, codec, bench.compressed[0..n]);
                         if (back != case.size or !mem.eql(u8, bench.decoded[0..back], case.raw))
