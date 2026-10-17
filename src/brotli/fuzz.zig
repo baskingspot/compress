@@ -1,17 +1,18 @@
 //! Fuzz targets for brotli (RFC 7932): the one-shot `decode.decompress`, the
-//! streaming `Reader`, and the layers they are composed from.
+//! streaming `Reader`, the encoder's `encode.compress` and `Writer`, and the
+//! layers they are composed from.
 //!
-//! The codec is decoder-only (the encoder seat is empty, `README.md`), so
-//! there is no self-round-trip and no in-process reference encoder. The
-//! corpus is therefore the pinned CLI's own output and the hand-built wire
-//! vectors of `golden.zig`, every one verified against brotli 1.2.0 before it
-//! landed; and the differential that *is* available in-process is the
+//! The decode side's corpus is the pinned CLI's own output and the hand-built
+//! wire vectors of `golden.zig`, every one verified against brotli 1.2.0
+//! before it landed; the differential that is available in-process is the
 //! one-shot against the streaming `Reader` — the same bytes through both must
 //! give the same verdict, the same named class, and the same output.
 //! `fuzzDifferential` runs that pairing over every mutation the other targets
-//! produce. The encoder half of the differential gap stays open until the
-//! encoder milestone; the external half is the oracle lane
-//! (`just brotli-oracle`).
+//! produce. The encode side is a self-round-trip (there is no in-process
+//! reference encoder): every stream our encoder writes must decode to exactly
+//! its input, which is the validity property a conformant encoder owes the
+//! format. The external half — byte parity with the pinned CLI at `q3` — is
+//! the oracle lane (`just brotli-oracle`).
 //!
 //! Targets, each with the property it checks in its own doc comment:
 //!
@@ -37,6 +38,10 @@
 //!   - `fuzzContextMaps`: `§7.3`'s maps — the RLEMAX runs and the IMTF
 //!   - `fuzzDictionary`: `§8`'s word arithmetic against an independent model
 //!     of the 121 transforms, and its two refusals
+//!   - `fuzzEncode`: our encoder's streams decode to their input, with the
+//!     guard untouched and the `maxCompressedLength` bound honored
+//!   - `fuzzEncodeStream`: the same through the streaming `Writer`, over
+//!     every window class and odd write sizes
 //!
 //! Run with `just fuzz <budget>` (ReleaseSafe only: a Debug-mode fuzz run
 //! hits ziglang/zig#30655). Every target caps its per-iteration input, its
@@ -65,11 +70,13 @@ const bits = @import("bits.zig");
 const context = @import("context.zig");
 const data = @import("dictionary_data.zig");
 const decode = @import("decode.zig");
+const encode = @import("encode.zig");
 const dictionary = @import("dictionary.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
 const huffman = @import("huffman.zig");
 const Reader = @import("Reader.zig");
+const Writer = @import("Writer.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -711,6 +718,16 @@ const index_seed_bytes: [vectors.len][64]u8 = blk: {
 /// The raw-stream seeds: the corpus bytes as `fuzzCorruption` and
 /// `fuzzDifferential` read them, so byte-level mutation starts from real
 /// streams instead of discovering the format from scratch.
+/// The encoder targets' seeds: the vectors' model bytes, so a run starts
+/// from real structure rather than an empty input.
+const plain_seeds: [vectors.len][]const u8 = blk: {
+    var out: [vectors.len][]const u8 = undefined;
+    for (&out, 0..) |*seed, i| {
+        seed.* = vectors[i].plain[0..@min(vectors[i].plain.len, 64)];
+    }
+    break :blk out;
+};
+
 const stream_seeds: [vectors.len][]const u8 = blk: {
     var out: [vectors.len][]const u8 = undefined;
     for (&out, 0..) |*seed, i| {
@@ -1174,6 +1191,129 @@ fn expectOneShotRefusal(streamed: Streamed, one_err: decode.DecompressError) !vo
     }
 }
 
+// ---------------------------------------------------------------------------
+// The encoder's round trip
+// ---------------------------------------------------------------------------
+
+/// The encoder's inputs: at most one input block plus a chunk, so a target
+/// crosses the 16-KiB input-block cadence without making the frame large.
+const encode_source_max: usize = 48 * 1024;
+const encode_out_max: usize = 48 * 1024 + 64;
+
+/// The encoder targets' storage. Heap-allocated once by the test body: the
+/// writer buffers are MiB-scale and cannot be stack locals.
+const EncodeStorage = struct {
+    writer10: Writer.Buffer(10) = undefined,
+    writer16: Writer.Buffer(16) = undefined,
+    writer22: Writer.DefaultBuffer = undefined,
+};
+
+fn writerBufferFor(comptime wbits: usize, storage: *EncodeStorage) *Writer.Buffer(wbits) {
+    return switch (wbits) {
+        10 => &storage.writer10,
+        16 => &storage.writer16,
+        else => &storage.writer22,
+    };
+}
+
+const SourceOp = enum {
+    /// A slice of a golden vector's model bytes: real structure, so the
+    /// matcher finds copies and the literal tree is not uniform.
+    seed,
+    /// A run of one byte: the RLE corner.
+    repeat,
+    /// Smith-chosen bytes: the incompressible corner, where the encoder
+    /// stores the meta-block uncompressed.
+    random,
+};
+
+/// A structured encoder input: seed slices, runs, and random stretches, in
+/// Smith-chosen proportions.
+fn buildEncodeSource(smith: *Smith, out: []u8) []u8 {
+    const vector = vectorAt(rangeAtMost(smith, 0, vectors.len - 1));
+    var len: usize = 0;
+    const ops = 1 + rangeAtMost(smith, 0, 31);
+    for (0..ops) |_| {
+        if (len == out.len) break;
+        const remaining = out.len - len;
+        switch (smith.value(SourceOp)) {
+            .seed => {
+                if (vector.plain.len == 0) continue;
+                const n = @min(remaining, @min(vector.plain.len, 1 + rangeAtMost(smith, 0, 255)));
+                fastmem.copy(u8, out[len..][0..n], vector.plain[0..n]);
+                len += n;
+            },
+            .repeat => {
+                const n = @min(remaining, 1 + rangeAtMost(smith, 0, 511));
+                fastmem.set(u8, out[len..][0..n], smith.value(u8));
+                len += n;
+            },
+            .random => {
+                const n = @min(remaining, 1 + rangeAtMost(smith, 0, 63));
+                for (out[len..][0..n]) |*byte| byte.* = smith.value(u8);
+                len += n;
+            },
+        }
+    }
+    return out[0..len];
+}
+
+/// Check that a stream our encoder wrote decodes to exactly its input, with
+/// every byte past the decoded length untouched.
+fn expectEncodeRoundTrip(input: []const u8, stream: []const u8) !void {
+    var plain: [encode_source_max + guard_len]u8 = undefined;
+    sentinel.fill(&plain);
+    const decoded = try decode.decompress(stream, plain[0..input.len]);
+    try testing.expectEqual(input.len, decoded);
+    try testing.expectEqualSlices(u8, input, plain[0..decoded]);
+    try sentinel.expect(&plain, decoded);
+}
+
+/// The one-shot encoder's round trip.
+///
+/// The property: `encode.compress` at the default quality writes a stream
+/// that decodes back to exactly its input, whatever the input — the validity
+/// a conformant encoder owes the format — with the guard past the decoded
+/// length untouched, the target's tail past the returned length untouched,
+/// and the result inside `maxCompressedLength`'s bound. The parity half (the
+/// pinned CLI's bytes) is the oracle lane's, not a fuzz property.
+fn fuzzEncode(_: void, smith: *Smith) anyerror!void {
+    var source: [encode_source_max]u8 = undefined;
+    const input = buildEncodeSource(smith, &source);
+
+    var target: [encode_out_max + guard_len]u8 = undefined;
+    sentinel.fill(&target);
+    const cap = encode.maxCompressedLength(input.len);
+    try testing.expect(cap <= encode_out_max);
+    const written = try encode.compress(input, target[0..cap], .{});
+    try testing.expect(written <= cap);
+    try sentinel.expect(&target, written);
+    try expectEncodeRoundTrip(input, target[0..written]);
+}
+
+/// The streaming encoder's round trip, at every window class.
+///
+/// The property: the same validity as `fuzzEncode`, through
+/// `Writer.streamAll` — whose staging cadence, ring wrap, mirror, and
+/// output-window flushes are the machinery the one-shot does not have. The
+/// window is a Smith choice over the three classes the reader's own machinery
+/// target uses, so the ring wraps under real copies at the small window.
+fn fuzzEncodeStream(storage: *EncodeStorage, smith: *Smith) anyerror!void {
+    var source: [encode_source_max]u8 = undefined;
+    const input = buildEncodeSource(smith, &source);
+
+    var compressed: [encode_out_max + guard_len]u8 = undefined;
+    sentinel.fill(&compressed);
+    var in: Io.Reader = .fixed(input);
+    var out: Io.Writer = .fixed(&compressed);
+    switch (rangeAtMost(smith, 0, 2)) {
+        0 => _ = try Writer.streamAll(10, &in, &out, &storage.writer10, .{}),
+        1 => _ = try Writer.streamAll(16, &in, &out, &storage.writer16, .{}),
+        else => _ = try Writer.streamAll(22, &in, &out, &storage.writer22, .{}),
+    }
+    try expectEncodeRoundTrip(input, out.buffered());
+}
+
 test "brotli fuzz: golden corpus" {
     try testing.fuzz({}, fuzzGoldenCorpus, .{ .corpus = &corpus_seeds });
 }
@@ -1192,6 +1332,16 @@ test "brotli fuzz: one-shot vs reader" {
     const storage = try testing.allocator.create(Storage);
     defer testing.allocator.destroy(storage);
     try testing.fuzz(storage, fuzzDifferential, .{ .corpus = &stream_seeds });
+}
+
+test "brotli fuzz: encode round trip" {
+    try testing.fuzz({}, fuzzEncode, .{ .corpus = &plain_seeds });
+}
+
+test "brotli fuzz: encode round trip through the writer" {
+    const storage = try testing.allocator.create(EncodeStorage);
+    defer testing.allocator.destroy(storage);
+    try testing.fuzz(storage, fuzzEncodeStream, .{ .corpus = &plain_seeds });
 }
 
 // ---------------------------------------------------------------------------

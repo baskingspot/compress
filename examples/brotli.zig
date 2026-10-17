@@ -1,13 +1,14 @@
-//! brotli example CLI: `brotli decode [FILE|-] > out`. Shared scaffolding in
-//! `examples/cli.zig`; the codec is decoder-only, so the CLI reports `encode`
-//! as usage.
+//! brotli example CLI: `brotli encode|decode [FILE|-] > out`. Shared
+//! scaffolding in `examples/cli.zig`.
 //!
-//! `decode` runs the input through `brotli.Reader.streamAll`, which decodes
-//! every stream in the input and writes the concatenation. Each stream is
-//! consumed exactly through its last byte, so the walk starts the next one at
-//! the right position; a tail that cannot begin a stream is an error. The
-//! default buffer is about 16.7 MiB, so it comes from the arena rather than
-//! the stack; nothing else is allocated.
+//! `encode` runs the input through `brotli.Writer.streamAll` at the encoder's
+//! `q3` class and the library's default window (22). `decode` runs it through
+//! `brotli.Reader.streamAll`, which decodes every stream in the input and
+//! writes the concatenation. Each stream is consumed exactly through its last
+//! byte, so the walk starts the next one at the right position; a tail that
+//! cannot begin a stream is an error. Both buffers are MiB-scale (8.7 MiB for
+//! the writer, 16.7 MiB for the reader), so they come from the arena rather
+//! than the stack; nothing else is allocated.
 
 const std = @import("std");
 const Io = std.Io;
@@ -20,8 +21,21 @@ const brotli = @import("compress").brotli;
 /// The codec's CLI surface: `main` runs it, the tests drive the same pump.
 const codec: cli.Codec = .{
     .name = "brotli",
+    .encode = encode,
     .decode = decode,
 };
+
+fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
+    // The default buffer is 8.7 MiB: never a stack local.
+    const buffer = try arena.create(brotli.Writer.DefaultBuffer);
+    _ = try brotli.Writer.streamAll(
+        brotli.Writer.default_window_wbits,
+        in,
+        out,
+        buffer,
+        .{},
+    );
+}
 
 pub fn main(init: std.process.Init) !u8 {
     return cli.run(codec, init);
@@ -36,6 +50,26 @@ fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
         out,
         buffer,
     );
+}
+
+test "example: the round trip holds through both pumps" {
+    // `cli.expectRoundTrip` hands the pumps the testing allocator; brotli's
+    // pumps put their MiB-scale buffers in the arena they are given, so this
+    // test drives them with a real arena instead.
+    const text = "the quick brown fox jumps over the lazy dog. " ** 100;
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+
+    var compressed: Io.Writer.Allocating = .init(testing.allocator);
+    defer compressed.deinit();
+    var in: Io.Reader = .fixed(text);
+    try encode(arena.allocator(), &in, &compressed.writer);
+
+    var plain: Io.Writer.Allocating = .init(testing.allocator);
+    defer plain.deinit();
+    var z: Io.Reader = .fixed(compressed.written());
+    try decode(arena.allocator(), &z, &plain.writer);
+    try testing.expectEqualStrings(text, plain.written());
 }
 
 test "example: the empty stream decodes to nothing" {

@@ -1,6 +1,7 @@
 # Agent notes: brotli
 
-The brotli decoder (RFC 7932). `README.md` is the user-facing contract; this
+The brotli codec (RFC 7932): the decoder, and the encoder at the reference's
+`q3` class. `README.md` is the user-facing contract; this
 file keeps the decisions, errata, and oracle notes behind it. The research is
 `docs/research/brotli-notes.md` (`brotli-notes.md` below): its `BR1`-`BR41`
 requirement matrix, `T1`-`T8` divergence rows, and `OQ1`-`OQ8` design questions
@@ -579,6 +580,161 @@ three CLI text streams) and the CRC pins are the gates.
   streams (6 shapes x 8 qualities) through the whole decoder (5,381
   dictionary words; F6).
 
+## The encoder (`encode.zig`, `encode_match.zig`, `encode_huffman.zig`, `Writer.zig`)
+
+The first encoder class is the reference's `q3` (`docs/research/brotli-encode-notes.md`
+§1.5, the `EN` matrix in §6): the `h03` quickly hasher through
+`BrotliStoreMetaBlockTrivial` — one emission path, fresh trees per meta-block,
+NBLTYPES 1/1/1, no block splitting, no context modeling, and no dictionary
+search (`H3`'s `USE_DICTIONARY` is 0, so the reference's dictionary decision
+path is compiled out, not ported). The file split follows the layers: the
+hasher, the greedy scan, and §5's length codes in `encode_match.zig`; the
+depth-limited tree builder, §3.2's assignment, and §3.5's run-length
+serialization in `encode_huffman.zig`; the bit writer, the stream/meta-block
+assembly, the trivial emission, and the one-shot in `encode.zig`; the
+streaming form in `Writer.zig`.
+
+**The parity pin.** `encode.compress` is byte-identical to the pinned CLI's
+file form at `brotli -q 3` — `BrotliEncoderCompressStream(FINISH)` with
+`SIZE_HINT` unset at the CLI's automatic window. The window rule is the CLI's
+own (`c/tools/brotli.c`): the smallest `lgwin` in 10..24 whose
+`(1 << lgwin) - 16` bound holds the input, so the one-shot is a pure function
+of the input bytes. The size hint is structurally unused at `q3`
+(`ChooseHasher` reads it at `q4`+, context modeling at `q5`+), which is what
+makes the pin a function of the input alone. The oracle lane asserts the
+parity per row; the fuzz targets assert validity only (there is no in-process
+reference encoder).
+
+**The emission is sized before it is written.** The reference writes a
+meta-block into a `2 * bytes + 503` storage buffer, compares the result
+against `bytes + 4`, and rolls back to the uncompressed form when the
+compressed one does not pay. This package has no such buffer — `target` is the
+caller's, sized to `maxCompressedLength` — so the same emission runs twice:
+once against a counting sink to learn the exact size (which is what the
+rollback rule needs), then for real. The two passes are the same code over
+the same cached trees, so they cannot disagree; the decision is made before
+the first byte lands, and the one-shot never writes past `target`. The cost is
+one extra pass over the emission per meta-block; the match finder dominates.
+
+**The sink.** `encode.Sink` is the bit writer's destination: a slice (the
+one-shot), a counting sink (the sizing pass), or a streaming window flushed
+to an `Io.Writer` (the `Writer`). That is what lets the streaming form write
+MiB-scale meta-blocks with no allocation: the emission hands whole bytes to
+the output window as it fills, instead of buffering the meta-block.
+
+**The `Writer`'s ring is the reference's.** `ComputeRbBits` gives
+`1 << (1 + max(lgwin, lgblock))` — twice the window — because a match at the
+window bound `(1 << lgwin) - 16` must stay resident while a whole 16-KiB input
+block is being written; a `1 << lgwin` ring is 16,368 bytes short at the
+bound. A 16-KiB mirror of the ring's first bytes follows it (the reference's
+`tail_size_`), so a read of up to one input block never wraps and the match
+length compare stays a flat 8-byte-at-a-time loop. The mirror is refreshed
+after every input block.
+
+**The `Writer` is not byte-pinned.** It shares the core with the one-shot, so
+a `Writer` fed everything at once at the one-shot's window emits the
+one-shot's exact bytes (a test pins that); a caller that flushes mid-stream or
+writes in pieces gets a valid stream with the encoder's own meta-block
+boundaries, which is the README's contract and the zstd precedent.
+
+**`maxCompressedLength` is the q3 class's bound, not §11.1's.** The research's
+`EQ6` recorded `input_len + 3 * (input_len >> 16) + 5` — §11.1's bound for the
+*trivial* compressor's 64-KiB blocks. The q3 class emits 16-KiB-granular
+meta-blocks and a fresh tree per meta-block, so its worst case is larger:
+every meta-block costs at most five bytes of header beyond its input (the
+`bytes + 4 < (*storage_ix >> 3)` rollback rule bounds the kept compressed
+form, and an uncompressed meta-block's header is at most 28 bits plus the
+zero fill), and every meta-block but the last holds at least one full input
+block, so an `N`-byte input has at most `1 + (N >> 14)` of them. Measured, not
+argued: on a 128-KiB adversarial input (`/tmp` shapes from the research lane,
+a 5-byte repeat every 700 bytes) the pinned CLI emits `N + 11`, past §11.1's
+bound. The shipped formula is `N + 5 * (N >> 14) + 7`, and the README's
+figures move with it.
+
+**Deviations.** `encode_match.findReferences` is 141 lines: the reference's
+greedy scan cascade, kept whole for the same reason snappy's `encodeBlock`
+and zstd's `match_compress.scanBlock` are (the house's deviation register) —
+one labeled control flow whose state would otherwise be threaded through
+helpers. Its pure pieces are extracted. The encoder carries no Tracy zones
+(the repo has no profiler dependency) and no allocation on any path.
+
+## Encoder register findings
+
+- **E1 — the distance ring's initial order is the *reverse* of the decoder's
+  array.** The C's encoder initializes `dist_cache_ = {4, 11, 15, 16}` with
+  index 0 the most recent, while the decoder's `dist_rb = {16, 15, 11, 4}` is
+  indexed so that the initial "last distance" (symbol 0) resolves to 4
+  (`TakeDistanceFromRingBuffer` walks backwards from `dist_rb_idx`). The
+  encoder's `ComputeDistanceCode` compares against `dist_cache[0]`, so the two
+  orders are the same state. Porting the decoder's array order into the
+  encoder produces a stream that decodes to different bytes — the parity suite
+  catches it on any input with a short-code distance.
+- **E2 — `ExtendLastCommand` is what makes a block boundary invisible.** When
+  the pending meta-block's last command is a copy and the new input continues
+  the same match, the reference extends that command's copy length instead of
+  starting a new command mid-match. Without it, every chunk-boundary match
+  costs a command and the byte parity fails on any input longer than one input
+  block. The extension's condition reads `CommandRestoreDistanceCode` — the
+  *intermediate* code, distance + 15 — not the distance, so the port compares
+  `code - 15` against `dist_cache[0]`.
+- **E3 — `CommandRestoreDistanceCode` adds the 16 short codes, not 15.** The
+  decoder's §4 reconstruction is `offset + extra + 1`; the encoder's inverse
+  is `offset + extra + 16`, because its offset is 4 lower (`-4` in the
+  formula) and its result is the intermediate code. Reading the `- 1` of the
+  short-code count into this function (as the first port did) shifts every
+  extended command's distance by one and fails parity on multi-block inputs.
+- **E4 — the `H3` hasher's bucket bits are 16, not 17.** `quality.h`'s
+  comment says `b17`; the `hash.h` macro block that instantiates `H3` inherits
+  `BUCKET_BITS 16` from `H2` and only overrides the sweep bits and the
+  dictionary flag, so the table is `1 << 16` entries with a two-entry sweep
+  (`BUCKET_SWEEP_BITS 1`) and `HASH_LEN 5`. Verified by compiling the
+  reference's `HasherSize` (`alloc0 = 262144` bytes = 65,536 buckets) and by
+  the byte parity of every small input.
+- **E5 — the reference allows one read at the current block's end.** The
+  hasher's compare byte (`data[cur_ix + best_len]`) can land exactly on
+  `pos_end` when the previous match ran to the block's end. The reference's
+  ring carries zeros in the seven bytes past the copied input on the first
+  lap, so that read is zero; the port makes it explicit
+  (`Window.compare(position, block_end)`) instead of relying on ring slack.
+- **E6 — the empty input's pin is the CLI's file form, not the library's
+  shortcut.** `BrotliEncoderCompress` returns the two-byte `06` for an empty
+  input before any encoder state exists; the CLI's file form goes through the
+  streaming encoder and emits the window header plus the empty last
+  meta-block (`a1 01`, WBITS 10). The one-shot follows the CLI — the pin —
+  and the README records the divergence.
+- **E8 — the hasher stitches *before* `ExtendLastCommand`.** The reference's
+  `EncodeData` order is: `InitOrStitchToPreviousBlock` with the *unadvanced*
+  position and the full block, then `ExtendLastCommand` (which advances both
+  for the matcher only), then `BrotliCreateBackwardReferences`. The stitch's
+  three stores (`position - 3`, `-2`, `-1`) are the only way the last three
+  bytes of a block ever enter the bucket table — every other store is bounded
+  by `store_end = position + num_bytes - 7` — so stitching after the extension
+  silently drops those candidates and picks a different (equally valid, longer
+  distance) match. Caught by a "runs" generator at 128 KiB: ours 63,620 bytes
+  against the CLI's 63,624, both decoding to the input.
+- **E9 — the pin is the CLI's file form, and its read loop is part of the
+  wire.** `tools/brotli.c` reads through a 512-KiB buffer and passes PROCESS
+  while `feof` is clear, FINISH at the end; a read that returns exactly the
+  requested count does not set `feof` (glibc), so a positive multiple of
+  512 KiB is processed as non-final and the stream ends with the empty
+  ISLAST+ISLASTEMPTY meta-block. The reference *library*'s one-shot
+  (`BrotliEncoderCompress`, all input through one FINISH) puts ISLAST on the
+  last data meta-block instead, so the two disagree by a byte for exactly
+  those sizes. The oracle's encode rows compare against the CLI, so the port
+  follows the CLI (`run`'s `final_chunk_is_last`); the README records both
+  this and the empty-input `06`-vs-`a1 01` corner. Measured with a streaming
+  driver that mimics the CLI (`BrotliEncoderCompressStream(PROCESS)` then
+  `FINISH`): it reproduces the CLI's bytes exactly, while
+  `BrotliEncoderCompress` at the same (quality, lgwin, size hint) differs at
+  byte 175,855 of a 512-KiB record-shaped input.
+- **E7 — `ShouldCompress` is a wire constant, not a heuristic.** Its entropy
+  sample reads the reference's 256-entry `kBrotliLog2Table` (16 digits, as
+  `fast_log.c` prints them) and compares a double against
+  `bytes * 7.92 / 13`; the port embeds the table and keeps the accumulation
+  order, because a different rounding flips the decision on near-random data
+  and the stream then differs by a meta-block header. Above 255 the table
+  falls back to `log2`, matching the reference.
+
 ## Testing
 
 - **The day-one goldens are the RFC's own check values.** Appendix C defines
@@ -678,7 +834,19 @@ three CLI text streams) and the CRC pins are the gates.
   runs the two references' own streams instead.
 - **Every decode test carries the sentinel overrun check** (the house rule):
   output pre-filled, bytes past the decoded length untouched.
-- **Fuzz is the fuzz-engineer's lane. Landed:** `fuzz.zig`'s eleven
+- **The encoder's set.** `encode.zig`, `encode_match.zig`,
+  `encode_huffman.zig`, and `Writer.zig` carry the unit tests: the pinned
+  bytes of the empty input (`a1 01`) and the one-byte input, the
+  window-by-size ladder, round trips through the one-shot and through a
+  `Writer` at every window class, the multi-meta-block and incompressible
+  paths, the cap (`BufferTooSmall`, never a short write), the unimplemented
+  quality's refusal (and the poisoned writer), the forced mid-stream flush,
+  §3.2's own worked example for the canonical assignment, the builder's
+  depth limit and determinism, §5's length-code table positions, §4's
+  distance-prefix inverse, the matcher's first copy and ring push, and the
+  README's writer buffer figure pinned with `@sizeOf`. The parity half is the
+  oracle lane, not the suite.
+- **Fuzz is the fuzz-engineer's lane. Landed:** `fuzz.zig`'s thirteen
   targets, seeded from `golden.zig`'s vectors and the CLI's streams (nothing
   generated is committed). The codec is decoder-only, so there is no
   self-round-trip and no in-process reference encoder: the corpus's model
@@ -744,6 +912,10 @@ three CLI text streams) and the CRC pins are the gates.
   surfaces: the `word_id` arithmetic's boundaries (the last valid word_id,
   transform 121, index wrap), the transform ids' classes (the two Ferment
   UTF-8 paths, the omit overruns into the empty string), the emptiness guard,
+  the encoder's `fuzzEncode` (the one-shot's stream decodes to its input,
+  the guard past the decoded length untouched, the result inside
+  `maxCompressedLength`) and `fuzzEncodeStream` (the same through a `Writer`
+  at every window class, over structured seeds, runs, and random stretches),
   the transformed-length MLEN overrun, and a hostile `dictionary.bin` is not
   a surface — the data is comptime and CRC-pinned, not input. Slice 5's
   surfaces: the one-shot's walk (a stream plus trailing bytes, a stream cut

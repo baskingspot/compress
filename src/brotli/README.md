@@ -3,19 +3,20 @@
 Brotli ([RFC 7932][rfc7932]) in pure Zig: a complete decoder — the stream
 header, the meta-block ladder, the canonical prefix codes in both tree forms,
 the block-switch and context-modeling layers, and the format's built-in static
-dictionary with its 121 word transforms — plus a `std.Io` streaming reader. It
-is the codec behind the `br` HTTP content encoding. This is the
-`compress.brotli` namespace; it imports only `std` and `fastmem`, and it
-allocates nothing.
+dictionary with its 121 word transforms — plus an encoder at the reference's
+`q3` class, and `std.Io` streaming forms of both. It is the codec behind the
+`br` HTTP content encoding. This is the `compress.brotli` namespace; it
+imports only `std` and `fastmem`, and it allocates nothing.
 
 The format is vendored at `docs/research/specs/rfc7932-brotli.txt`; `§` cites
 in this directory are sections of that file.
 
-This package is decoder-first. `brotli.decode` (one-shot) and `brotli.Reader`
-(streaming) are the surface; `brotli.encode` and `brotli.Writer` are the
-encoder's seats — reserved and stated, never silently absent. The namespace is
-exactly `{Reader, decode}`, and the encoder adds its two names without
-reshaping these.
+The namespace is exactly `{Reader, Writer, encode, decode}`: one-shot
+`brotli.encode.compress` and `brotli.decode.decompress`, and the streaming
+`brotli.Writer` and `brotli.Reader`. The decoder came first and is the fuller
+surface; the encoder's implemented class is the reference's `q3`, and every
+other quality is a reserved seat that returns `error.Unimplemented` rather
+than silently aliasing another class.
 
 ## Usage
 
@@ -126,23 +127,28 @@ brotli.encode.compress(source: []const u8, target: []u8, options: Options)
     // BufferTooSmall: `target` cannot hold the stream
     // Unimplemented: a quality other than 3 is selected
 brotli.encode.maxCompressedLength(input_len: usize) usize
-    // input_len + 3 * (input_len >> 16) + 5 — the §11.1 uncompressed-meta-block
-    // bound: a block that does not shrink is stored, so this is the worst case
+    // input_len + 5 * (input_len >> 14) + 7 — the q3 class's worst case: a
+    // meta-block that does not shrink is stored uncompressed, and every
+    // meta-block but the last holds at least one 16-KiB input block, so at
+    // most five bytes of header land per 16 KiB
 brotli.encode.Options = struct { quality: u8 = 3 }
     // quality: 0-11, the reference's scale. 3 (the default) is the implemented
     // q3 class; every other value — 0-2, 4-11, and anything outside 0-11 — is
     // a reserved seat: error.Unimplemented, never a silent alias.
 
 // Streaming encode: one `Writer` writes one stream; `finish` is required.
-// You own the `Buffer`: the window-sized history ring, the hash table, the
-// delayed literal and command buffers, and the tree-build scratch.
+// You own the `Buffer`: the history ring, the hash table, the delayed
+// commands, the tree-build scratch, and the I/O windows.
 brotli.Writer.Buffer(comptime window_wbits: usize) type
-    // { ring: [(1 << window_wbits)]u8, hash: [1 << 17]u32 — the q3 bucket
-    //   table's cap, sized down by input at runtime — the delayed literal and
-    //   command buffers (the 0x2FFF budget), and the tree-build scratch };
+    // { ring: [(1 << (lgwin + 1)) + 16384]u8 — the reference's ring (twice
+    //   the window, so a match at the window bound is resident) plus a
+    //   16-KiB mirror of its first bytes; hash: [1 << 16]u32 — the q3 bucket
+    //   table; commands: [16384]Command — the 0x2FFF budget plus one input
+    //   block's worth; scratch: the tree-build region; staging: [16384]u8,
+    //   the input block; out: [65536]u8, the compressed-output window };
     // window_wbits is 10..24
 brotli.Writer.default_window_wbits: usize // 22: the reference encoder library's own default
-brotli.Writer.DefaultBuffer // Buffer(22): about 4.6 MiB
+brotli.Writer.DefaultBuffer // Buffer(22): 9,097,172 bytes (about 8.7 MiB)
 brotli.Writer.init(comptime window_wbits: usize, output: *Io.Writer,
     buffer: *Buffer(window_wbits), options: encode.Options) Writer
     // write through `&w.writer`, then call `finish`
@@ -170,23 +176,48 @@ Of these, only `q3` is implemented; every other rung is a reserved seat that
 returns `error.Unimplemented`.
 
 The one-shot is byte-identical to the pinned CLI's file form at `brotli -q 3`
-— the window sized to the input — and to the C library's own one-shot: the
-parity rows (6/6, 12/12, and 48/48) hold byte for byte, and two runs of the
-same input are identical 18/18. The Go port diverges from the C at `q0`-`q4`,
-so the C is the port's algorithm source of record. A `Writer` flushes at its
-own buffer boundaries, so its streams are valid-stream, not byte-pinned: the
-pinned CLI, the Go port, and this package's decoder all decode them.
+— the window sized to the input, which is the CLI's own automatic-window rule
+(the smallest `lgwin` in 10..24 whose `(1 << lgwin) - 16` window holds the
+whole input). The pin is asserted per row by the oracle lane, over every
+conformance shape, the empty input, and a size ladder of 22 boundaries (the
+window steps, the 16-KiB meta-block cadence, and their neighbours); two runs
+of the same input are identical. The Go port diverges from the C at
+`q0`-`q4`, so the C is the port's algorithm source of record. A `Writer`
+flushes at its own buffer boundaries, so its streams are valid-stream, not
+byte-pinned: the pinned CLI, the Go port, and this package's decoder all
+decode them.
+
+The pin is the CLI, and the CLI's file form is not always the reference
+*library*'s one-shot. Two corners, both the CLI's, both followed here:
+
+- **Empty input.** `BrotliEncoderCompress` returns the two-byte `06`
+  shortcut; the CLI's file form writes the window header plus the empty last
+  meta-block (`a1 01`).
+- **Sizes that are a positive multiple of 512 KiB.** The CLI reads through a
+  512-KiB buffer and calls the streaming encoder with PROCESS until a read
+  hits end-of-file; a read that returns exactly the requested count does not
+  hit EOF, so such an input is processed to its last byte as non-final and the
+  stream ends with the empty ISLAST+ISLASTEMPTY meta-block. The library's
+  one-shot hands the whole input to FINISH, which puts ISLAST on the last data
+  meta-block — a different stream (and a byte shorter) for the same bytes.
 
 ## Behavior
 
 - **Buffers.** You own every buffer; nothing is allocated, freed, or retained,
   and no function takes an allocator. `decompress` writes only into `target`,
   leaves the bytes past the returned length untouched, and returns
-  `error.BufferTooSmall` before any write that would pass the end. A `Reader`
-  keeps the sliding window and the meta-block trees in the `Buffer` you give
-  it: a `(1 << window_wbits)`-byte history ring — the window bound is
+  `error.BufferTooSmall` before any write that would pass the end. `compress`
+  writes only into `target`, leaves the bytes past the returned length
+  untouched, and returns `error.BufferTooSmall` when the stream would not fit;
+  a target of `maxCompressedLength(input.len)` always fits. A `Reader` keeps
+  the sliding window and the meta-block trees in the `Buffer` you give it: a
+  `(1 << window_wbits)`-byte history ring — the window bound is
   `(1 << window_wbits) - 16` (§9.1) — plus the tree region. The default
-  `Buffer(24)` is about 16.7 MiB; `Buffer(22)` is about 4.7 MiB.
+  `Buffer(24)` is about 16.7 MiB; `Buffer(22)` is about 4.7 MiB. A `Writer`
+  keeps the history ring (twice the window plus a 16-KiB mirror), the q3
+  bucket table, the delayed commands, the tree-build scratch, and the input
+  and output windows in its `Buffer`: `Writer.DefaultBuffer` is 9,097,172
+  bytes, about 8.7 MiB.
 - **The window.** The stream header's only field is WBITS (§9.1), a 1..7-bit
   code over 10..24 (16 is the single bit `0`); the window is
   `(1 << WBITS) - 16` bytes, 1,008 bytes to 16,777,200 (§9.1, §2).
@@ -201,6 +232,16 @@ pinned CLI, the Go port, and this package's decoder all decode them.
   (§9.1), and reused by the reference family as the marker for its large-window
   extension — is refused with `BadWindowBits`; there is no large-window surface
   here.
+- **Encoding.** The one-shot's window is the CLI's automatic one: the smallest
+  `lgwin` in 10..24 whose `(1 << lgwin) - 16` bound holds the whole input, so
+  the stream header records a window sized to the data. Meta-blocks are
+  emitted the reference's way: a meta-block flushes when its delayed-symbol
+  budget (`0x2FFF` literals-and-commands) is reached or when the next 16-KiB
+  input block would not fit the window's meta-block bound, and one that does
+  not shrink is stored uncompressed with its bytes passed through. The
+  streaming `Writer` takes its window from its comptime parameter instead and
+  flushes at its own input-block boundaries; `finish` writes the last
+  meta-block, and a mid-stream `flush` forces the pending one out.
 - **Meta-blocks.** A stream is a header plus one or more meta-blocks, each
   producing 0 to 16,777,216 bytes (§2); the caller sees only the decoded bytes
   and the stream's end, never a meta-block boundary. Metadata meta-blocks are
@@ -244,7 +285,10 @@ pinned CLI, the Go port, and this package's decoder all decode them.
   ceiling (about 2.5 KiB per literal tree, 4.3 KiB per command tree, 3.7 KiB
   per distance tree) — so give decoding threads 1 MiB or more. A `Reader`
   keeps that region in its `Buffer` instead, and its own stack stays
-  KiB-scale.
+  KiB-scale. `compress` carries the 256-KiB bucket table, the
+  delayed-command buffer, and the tree-build scratch as comptime locals —
+  about 600 KiB — so give encoding threads 1 MiB or more; a `Writer` keeps
+  all three in its `Buffer`.
 - **Reader input.** `input` needs a buffer of at least 4 bytes (the widest
   field the bit reader assembles is 24 bits); `Io.Reader.fixed` always
   qualifies. A contiguous `peek` or `take` is served up to the history ring's
@@ -281,18 +325,28 @@ vectors), and the streams the pinned reference CLI wrote — the small text,
 repeat, run, and digits inputs at five qualities, the `-w 10` ring vector,
 and one 34,382-byte mixed text — each decoded byte-exact through both the
 one-shot and the streaming reader, with a check on every decode that no byte
-past the decoded length was written. The codec is decoder-only, so there is
-no round trip to test: the CLI's own output is the encoder evidence, and the
-45-vector reference corpus is not vendored.
-`just fuzz 1M` runs the fuzz targets (ReleaseSafe only). `just brotli-oracle`
-cross-checks the decoder against the pinned reference CLI (brotli 1.2.0) and
-andybalholm/brotli over streams both encoders wrote: the CLI's quality sweep
+past the decoded length was written. The encoder's half: every shape round
+trips through `compress` and through a `Writer` at every window class (the
+streaming form fed everything at once emits the one-shot's exact bytes), a
+`Writer`'s forced flush is a valid stream prefix, the empty input and the
+one-byte input are pinned to the CLI's own bytes, and an unimplemented
+quality is a refusal, never an alias. The 45-vector reference corpus is not
+vendored.
+`just fuzz 1M` runs the fuzz targets (ReleaseSafe only): the decoder's corpus,
+mutation, differential, and layer targets, and the encoder's round trip —
+every stream `compress` or a `Writer` writes decodes back to its input, with
+the guard past the decoded length untouched.
+`just brotli-oracle` cross-checks both directions against the pinned reference
+CLI (brotli 1.2.0) and andybalholm/brotli. Decode: the CLI's quality sweep
 (eight inputs × qualities 0..11), its window, file, metadata, and
 trailing-byte lanes, and the Go port's own 40 streams, with the truncation
-and corruption batteries asserting the references' verdicts. `just bench`
-runs the local benchmarks; local numbers are not performance claims. Design
-notes, the divergence register, and the fixture inventory are in
-[`AGENTS.md`](AGENTS.md).
+and corruption batteries asserting the references' verdicts. Encode: our
+one-shot's stream is byte-identical to the CLI's file form on every row, and
+every stream our encoder writes — one-shot and `Writer`, every window — is
+decoded by the CLI, the Go reference, and our own decoder.
+`just bench` runs the local benchmarks; local numbers are not performance
+claims. Design notes, the divergence register, and the fixture inventory are
+in [`AGENTS.md`](AGENTS.md).
 
 ## License
 

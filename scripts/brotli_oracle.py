@@ -1,15 +1,21 @@
 """Check brotli against the pinned reference CLI (brotli 1.2.0).
 
-The codec is decoder-only, so this lane has one direction: every stream the
-CLI produced must decode through our one-shot (`brotli.decode.decompress`) to
-the bytes the CLI decodes it to, and to the bytes the CLI compressed. The rows
-cover the CLI's whole quality range (0..11, the dictionary-bearing q4-and-up
-class included), the window flag's range, the metadata lane (`-C`), the
-trailing-bytes and concatenation rules (T4 of src/brotli/AGENTS.md), the empty
-family, the truncation battery, and the corruption battery under the
-no-checksum rule (T6). The streaming half of the lane (`stream <file> <wbits>`)
-pumps the same streams through `brotli.Reader.streamAll`, so the ring, the
-window cap, and the input seams are checked against the same references.
+Both directions. Decode: every stream the CLI produced must decode through our
+one-shot (`brotli.decode.decompress`) to the bytes the CLI decodes it to, and
+to the bytes the CLI compressed. The rows cover the CLI's whole quality range
+(0..11, the dictionary-bearing q4-and-up class included), the window flag's
+range, the metadata lane (`-C`), the trailing-bytes and concatenation rules
+(T4 of src/brotli/AGENTS.md), the empty family, the truncation battery, and the
+corruption battery under the no-checksum rule (T6). The streaming half of the
+lane (`stream <file> <wbits>`) pumps the same streams through
+`brotli.Reader.streamAll`, so the ring, the window cap, and the input seams are
+checked against the same references.
+
+Encode: our one-shot at `q3` is byte-identical to the CLI's *file* form
+(`brotli -q 3 -c FILE`, the window sized to the input), and every stream it
+writes decodes through the CLI, the Go reference, and our own decoder. The
+streaming `Writer`'s streams are valid streams, not byte-pinned ones; they are
+decoded by all three.
 
 Run it with `just brotli-oracle`; brotli comes from the flake (the pinned
 1.2.0) and the Go reference from scripts/brotli_go. The harness is built from
@@ -96,6 +102,16 @@ def our_decode(stream: bytes, cap: int) -> bytes:
 def our_stream(stream: bytes, wbits: int) -> bytes:
     """Our streaming reader, through the oracle harness, at `wbits`."""
     return common.harness_output(harness, "stream", stream, str(wbits))
+
+
+def our_encode(data: bytes) -> bytes:
+    """Our one-shot encoder, through the oracle harness, at the default q3."""
+    return common.harness_output(harness, "encode", data)
+
+
+def our_encode_stream(data: bytes, wbits: int) -> bytes:
+    """Our streaming encoder, through the oracle harness, at `wbits`."""
+    return common.harness_output(harness, "encode-stream", data, str(wbits))
 
 
 def our_stream_result(stream: bytes, wbits: int) -> bytes | None:
@@ -356,6 +372,110 @@ for desc, data in sweep_inputs:
         assert cli_decode(stream) == data, f"the CLI's decode ({label})"
         go_streams += 1
 
+# 9a. The encode direction (EQ2's pin): the one-shot at q3 is byte-identical
+#     to the CLI's file form — the window sized to the input — and its stream
+#     decodes through the CLI, the Go reference, and our own decoder. The
+#     empty input is the pin's own corner: the CLI's file form writes the
+#     window header plus the empty last meta-block (`a1 01`), not the
+#     reference library's two-byte `06` shortcut.
+encode_rows = 0
+encode_windows: set[int] = set()
+for desc, data in sweep_inputs + [
+    ("1-byte file", b"A"),
+    ("12-byte file", b"hello world\n"),
+    ("8 KiB text file", text),
+    ("133 KiB rle file", common.SHAPES["rle"]),
+]:
+    stream = our_encode(data)
+    want = cli_encode_file(data, "3")
+    assert stream == want, f"encode parity ({desc}): ours {len(stream)} bytes, CLI {len(want)}"
+    assert cli_decode(stream) == data, f"the CLI's decode ({desc})"
+    go_decode(stream, data)
+    assert our_decode(stream, len(data)) == data, f"our decode ({desc})"
+    encode_windows.add(wbits(stream))
+    encode_rows += 1
+# The window-by-size mapping is the pin's other half: the file form's WBITS
+# ladder, as our encoder derives it from the input alone.
+assert wbits(our_encode(b"")) == 10, "the empty input is WBITS 10"
+assert wbits(our_encode(b"A")) == 10, "a 1-byte input is WBITS 10"
+assert wbits(our_encode(bytes(1008))) == 10, "1008 bytes fit a 10-bit window"
+assert wbits(our_encode(bytes(1009))) == 11, "1009 bytes need 11"
+assert wbits(our_encode(bytes(2048))) == 12, "2048 bytes need 12"
+
+
+def boundary_shape(n: int) -> bytes:
+    """A structured shape for the size ladder: runs of one byte, record-ish
+    text, and random stretches, so matches, the tree build, and the
+    meta-block cadence are all exercised at every size."""
+    import random
+
+    rng = random.Random(0xB0A7D3)
+    out = bytearray()
+    while len(out) < n:
+        pick = rng.randrange(3)
+        if pick == 0:
+            out += bytes([rng.randrange(256)]) * rng.choice([1, 2, 3, 7, 32, 300])
+        elif pick == 1:
+            out += b"id=%08d,name=%-16s\n" % (
+                rng.randrange(1 << 30),
+                bytes(rng.randrange(97, 123) for _ in range(8)),
+            )
+        else:
+            out += bytes(rng.randrange(256) for _ in range(rng.choice([16, 64, 256])))
+    return bytes(out[:n])
+
+
+# The size ladder: every meta-block and window boundary the class has, the
+# CLI's 512-KiB read-buffer multiple included (a full read does not set EOF,
+# so that size ends with an empty last meta-block), and each boundary's
+# neighbours.
+boundary_sizes = (
+    0,
+    1,
+    1008,
+    1009,
+    2048,
+    16383,
+    16384,
+    16385,
+    32768,
+    65535,
+    65536,
+    65537,
+    98304,
+    131071,
+    131072,
+    131073,
+    262143,
+    262144,
+    262145,
+    524287,
+    524288,
+    524289,
+)
+for n in boundary_sizes:
+    data = boundary_shape(n)
+    stream = our_encode(data)
+    want = cli_encode_file(data, "3")
+    label = f"boundary {n}"
+    assert stream == want, f"encode parity ({label}): ours {len(stream)} bytes, CLI {len(want)}"
+    assert cli_decode(stream) == data, f"the CLI's decode ({label})"
+    assert our_decode(stream, len(data)) == data, f"our decode ({label})"
+    assert wbits(stream) == wbits(want), f"the window ({label})"
+encode_rows += len(boundary_sizes)
+
+# 9b. The streaming encoder: its streams are valid streams, not byte-pinned
+#     ones, so each row is decoded by the CLI, the Go reference, and ours.
+stream_encode_rows = 0
+for desc, data in sweep_inputs:
+    for w in ("10", "16", "22", "24"):
+        stream = our_encode_stream(data, int(w))
+        label = f"{desc}, Writer w{w}"
+        assert cli_decode(stream) == data, f"the CLI's decode ({label})"
+        go_decode(stream, data)
+        assert our_decode(stream, len(data)) == data, f"our decode ({label})"
+        stream_encode_rows += 1
+
 # 9. The file lane: the CLI takes its window from a file's size when it can
 #    stat one (10 for a tiny file, 14..19 up the size ladder), where every
 #    stdin stream above is WBITS 24 — the pipe form cannot be stat'd, so the
@@ -389,6 +509,9 @@ assert stdin_windows == {24}, f"stdin streams are not WBITS 24: {stdin_windows}"
 
 print(
     "brotli-oracle: "
+    f"+ {encode_rows} encode rows (byte-identical to the CLI's file form, "
+    f"WBITS {min(encode_windows)}..{max(encode_windows)}), "
+    f"+ {stream_encode_rows} Writer rows (decoded by both references), "
     f"{swept} CLI streams over {len(sweep_inputs)} inputs x {len(qualities)} qualities, "
     f"+ {streamed} of them through the streaming reader (doubled, too), "
     f"+ {ring_rows} ring rows (Buffer(10..24)), "
