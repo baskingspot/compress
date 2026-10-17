@@ -749,6 +749,24 @@ fn decodeInto(r: *Reader, target: []u8) !usize {
     return served;
 }
 
+/// A parsed dictionary on the heap: a `Dictionary` value is 947,824 bytes
+/// (the documented size), and `parse`'s own frame is another ~5.5 MiB, so a
+/// test holding several by value overflows a thread stack. The caller owns
+/// the value and destroys it through `testing.allocator`.
+fn parseDictionary(source: []const u8) !*Dictionary {
+    const dict = try testing.allocator.create(Dictionary);
+    errdefer testing.allocator.destroy(dict);
+    dict.* = try Dictionary.parse(source);
+    return dict;
+}
+
+/// `parseDictionary` for §5's raw-content form.
+fn initRawDictionary(content: []const u8) !*Dictionary {
+    const dict = try testing.allocator.create(Dictionary);
+    dict.* = Dictionary.initRaw(content);
+    return dict;
+}
+
 /// One good fixture through the streaming layer: the bytes, and the output
 /// the one-shot decoder's tests expect.
 const Case = struct {
@@ -896,17 +914,26 @@ test "Reader: the CLI's dictionary frames decode through the streaming layer" {
     // frame's state through the streaming path too (the header check, the
     // tables, the repcodes, and the content), and the reader consumes the
     // frame exactly. Each expectation is the CLI's own `-D` decode.
-    const trained = try Dictionary.parse(golden.dict_trained);
-    const id_100 = try Dictionary.parse(golden.dict_100);
-    const zero_weight = try Dictionary.parse(golden.dict_zero_weight);
-    const raw = Dictionary.initRaw(golden.dict_s02);
+    // The dictionaries live on the heap (`parseDictionary`): each value is
+    // 947,824 bytes (the documented size), and five by value — plus a
+    // `parse` call's own frame — is ~19 MiB of stack, past macOS's thread
+    // stack.
+    const gpa = testing.allocator;
+    const trained = try parseDictionary(golden.dict_trained);
+    defer gpa.destroy(trained);
+    const id_100 = try parseDictionary(golden.dict_100);
+    defer gpa.destroy(id_100);
+    const zero_weight = try parseDictionary(golden.dict_zero_weight);
+    defer gpa.destroy(zero_weight);
+    const raw = try initRawDictionary(golden.dict_s02);
+    defer gpa.destroy(raw);
     const rows = [_]struct { source: []const u8, dict: *const Dictionary, expected: []const u8 }{
-        .{ .source = golden.dict_frame_s00, .dict = &trained, .expected = golden.dict_s00 },
-        .{ .source = golden.dict_frame_s00_noid, .dict = &trained, .expected = golden.dict_s00 },
-        .{ .source = golden.dict_frame_s01_r100, .dict = &id_100, .expected = golden.dict_s01 },
-        .{ .source = golden.dict_frame_s01_raw, .dict = &raw, .expected = golden.dict_s01 },
-        .{ .source = golden.dict_frame_zw, .dict = &zero_weight, .expected = golden.dict_s00 },
-        .{ .source = golden.dict_frame_big, .dict = &trained, .expected = golden.dict_big },
+        .{ .source = golden.dict_frame_s00, .dict = trained, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_s00_noid, .dict = trained, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_s01_r100, .dict = id_100, .expected = golden.dict_s01 },
+        .{ .source = golden.dict_frame_s01_raw, .dict = raw, .expected = golden.dict_s01 },
+        .{ .source = golden.dict_frame_zw, .dict = zero_weight, .expected = golden.dict_s00 },
+        .{ .source = golden.dict_frame_big, .dict = trained, .expected = golden.dict_big },
     };
     var rbuf: Buffer(fixture_buffer_len) = undefined;
     var target: [300 * 1024]u8 = undefined;
@@ -924,16 +951,17 @@ test "Reader: the CLI's dictionary frames decode through the streaming layer" {
     // decodes, one byte past it is `OffsetTooFar` with the RLE output left
     // behind (a failed reader's bytes are not trusted, but the sentinel
     // proves the refused copy wrote nothing).
-    const boundary = try Dictionary.parse(&golden.dict_boundary);
+    const boundary = try parseDictionary(&golden.dict_boundary);
+    defer gpa.destroy(boundary);
     var ok_in: Io.Reader = .fixed(&golden.dict_frame_boundary);
-    var ok: Reader = .init(fixture_buffer_len, &ok_in, &rbuf, &boundary);
+    var ok: Reader = .init(fixture_buffer_len, &ok_in, &rbuf, boundary);
     const n = try decodeInto(&ok, &target);
     try testing.expectEqual(golden.dict_boundary_expected.len, n);
     try testing.expectEqualSlices(u8, golden.dict_boundary_expected, target[0..n]);
     try sentinel.expect(&target, n);
     sentinel.fill(&target);
     var over_in: Io.Reader = .fixed(&golden.dict_frame_boundary_after);
-    var over: Reader = .init(fixture_buffer_len, &over_in, &rbuf, &boundary);
+    var over: Reader = .init(fixture_buffer_len, &over_in, &rbuf, boundary);
     var over_out: Io.Writer = .fixed(&target);
     try testing.expectError(error.ReadFailed, over.reader.streamRemaining(&over_out));
     try testing.expectEqual(Error.OffsetTooFar, over.err.?);
