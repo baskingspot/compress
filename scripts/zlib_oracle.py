@@ -21,15 +21,16 @@ harness = root / "zig-out/bin/zlib-oracle"
 # Our emitted header: CMF 0x78 (CM=8, CINFO=7); FLG carries only the level's
 # FLEVEL band and the minimal FCHECK, FDICT clear. The bands follow the C
 # reference (containers-notes.md §5.5: {0,1}->0, {2-5}->1, {6,-1}->2, {7-9}->3).
-FLEVEL_BY_LEVEL = {"fast": 2, "0": 0, "1": 0, "2": 1, "5": 1, "6": 2, "9": 3}
+# Levels 1 and 6 are the implemented ones.
+FLEVEL_BY_LEVEL = {str(n): 0 if n <= 1 else 1 if n <= 5 else 2 if n == 6 else 3 for n in range(10)}
 
 
-def our_compress(data: bytes, level: str = "fast") -> bytes:
+def our_compress(data: bytes, level: str = "1") -> bytes:
     """Our encoder, through the oracle harness: one zlib stream."""
     return common.harness_output(harness, "encode", data, level)
 
 
-def our_compress_dict(data: bytes, zdict: bytes, level: str = "fast") -> bytes:
+def our_compress_dict(data: bytes, zdict: bytes, level: str = "1") -> bytes:
     """Our encoder with a preset dictionary (`§2.2` FDICT + DICTID)."""
     return common.harness_output_dict(harness, "encode", data, zdict, level)
 
@@ -80,7 +81,7 @@ text = shapes["text"]
 long_text = shapes["long text (multi-block)"]
 
 # 1. Our encode -> the C reference's decode, every level, over the shapes.
-levels = ("fast", "0", "1", "6", "9")
+levels = ("1", "6")
 rows = 0
 for desc, data in shapes.items():
     for level in levels:
@@ -236,7 +237,7 @@ for desc, data in (("streaming text", text), ("streaming multi-block", long_text
     p = example(["encode", "-"], data)
     assert p.returncode == 0, f"example encode ({desc}): {p.stderr.decode().strip()}"
     stream = p.stdout
-    check_header(stream, "fast")
+    check_header(stream, "1")
     check_trailer(stream, data)
     assert zlib.decompress(stream) == data, f"example encode -> zlib decode ({desc})"
     p = example(["decode", "-"], stream)

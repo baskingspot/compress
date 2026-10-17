@@ -9,7 +9,7 @@
 //!
 //! `decode` writes the decoded bytes of one gzip member to stdout; `encode`
 //! writes our gzip member for the input file at `LEVEL` (`fast` by default;
-//! `0`-`9` and `ratio` name the flate levels). Exit 1 on a codec error, with
+//! `1` and `6` are the implemented flate levels). Exit 1 on a codec error,
 //! the error name on stderr.
 
 const std = @import("std");
@@ -69,13 +69,13 @@ pub fn main(init: std.process.Init) !u8 {
             print("gzip-oracle: encode needs <input-file> [LEVEL]\n", .{});
             return 1;
         }
-        const level: gzip.encode.Level = if (args.len == 4)
-            std.meta.stringToEnum(gzip.encode.Level, args[3]) orelse {
-                print("gzip-oracle: unknown level '{s}'\n", .{args[3]});
+        const level: u8 = if (args.len == 4)
+            std.fmt.parseInt(u8, args[3], 10) catch {
+                print("gzip-oracle: level must be a number, got '{s}'\n", .{args[3]});
                 return 1;
             }
         else
-            .fast;
+            1;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, gzip.encode.maxCompressedLength(source.len));
 

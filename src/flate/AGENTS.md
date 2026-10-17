@@ -14,15 +14,71 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   decodes straight from the input `Io.Reader` through a bit reader with a few
   bytes of lookahead: a Huffman block has no compressed length, so there is no
   staging region. std's decoder works the same way (flate-notes §5.4).
-- The fast level is fixed Huffman with a stored fallback (OQ1). Fixed emission
-  needs no header, precode, or table build, and zlib-ng's fastest level is
-  fixed-only too (flate-notes §5.3). The cost is ratio: a literal takes 8-9 bits
-  against about 5 dynamic on text. Dynamic Huffman with cross-block table reuse
-  is the planned `.ratio` mode (flate-notes §6, §8); whether `.fast` gains a
-  dynamic sibling is a benchmark question.
+- Level 1 is fixed Huffman with a stored fallback (OQ1). Fixed emission needs
+  no header, precode, or table build, and zlib-ng's fastest level is fixed-only
+  too (flate-notes §5.3). The cost is ratio: a literal takes 8-9 bits against
+  about 5 dynamic on text — which is what level 6 buys (the dynamic emitter,
+  klauspost's wider finder, and the per-block dispatch).
 - The match finder is klauspost's level-1 shape (OQ3); encode.zig's header
   describes it. It is greedy because every fast-level reference is lazyless.
-  Minimum match is 4; 3-byte matches wait for the ratio mode.
+  Minimum match is 4; 3-byte matches wait for the level-6 finder.
+- Level 6 is a byte pin, not a class pin: the finder (`Finder6`, encode.zig)
+  and the dynamic block machinery (`dynamic.zig`) are ports of
+  klauspost/compress's `flate/level6.go` and its `huffman_bit_writer.go` +
+  `huffman_code.go`, and the emitted bytes must equal theirs for the pinned
+  module version (scripts/klauspost_flate, the oracle's level-6 lane). The
+  pin is what forces the ports' fidelity: the empty-slot sentinel
+  (`finder_origin` = 65535, klauspost's `cur`, so a zero table entry is
+  unreachable by the distance cap), the *full* final block emitted with
+  `sync` (their `Close` processes a still-full window), the deferred
+  end-of-block code a non-final dynamic block owes, and the two candidate
+  tables' exact store order.
+- Two port traps, both found by the parity lane and worth keeping in mind
+  when touching either scan:
+  - Zig lowers `slot.* = .{ .cur = x, .prev = slot.cur }` field-wise, so the
+    `prev` read sees the *new* cur. Go's multiple assignment reads the old
+    one. Every table store that chains a previous entry captures the old cur
+    in a local first (`storeAhead`, the in-between loops).
+  - In the end-of-match check, the second candidate's `t2 = prev - l + 2` is
+    computed with the possibly *updated* `l` (Go reads the current value);
+    hoisting `l` into a local before the first check diverges the output.
+- The dynamic emitter's numbers that are part of the bytes: the tree
+  construction (`bitCounts` + `assignEncodingAndSize`, klauspost's
+  level-by-level build with the 15-bit cap), the codegen run codes (16/17/18),
+  the `filled` alphabet shortcut (`indexTokens(tokens, true)` → HLIT 286 /
+  HDIST 30 for every mid-stream block), the table-reuse estimate
+  (`EstimatedBits`'s float32 log2, `logNewTablePenalty` 7), the literals-only
+  block's 70-byte header guess, and the 1/16th huff-vs-dynamic rule. The
+  *sorts* (`sortByFreq`/`sortByLiteral`) are not ported: their comparators
+  are total orders on unique keys, so any correct sort produces the same
+  lists.
+- Level 6's one-shot and streaming layers must agree byte for byte: the
+  one-shot splits blocks exactly as `Write` + `Close` do (a full block is
+  emitted mid-stream only when input follows it; the last block, full or not,
+  is the `sync` one), and the streaming `Writer` gets the same split from the
+  generated writer machinery (a full block region drains only when the next
+  write needs the room). `Writer.finish` sets `finishing` so the final block
+  is emitted with `sync`; `writeEnding` flushes any owed end-of-block code
+  before the empty fixed block.
+- A preset dictionary primes the level-6 tables the way klauspost's
+  `fillWindow` does: a full scan over the dictionary's tail with the tokens
+  discarded, run before the first block. The one-shot's priming scan uses the
+  dictionary itself as the window's stream (its positions are the window
+  positions the block scans use), never the `Window(preset)` shape, whose
+  `source` side assumes the block is in the stream's own region.
+- One deliberate divergence in the streaming layer: a block under 13 bytes
+  (`minNonLiteralBlockSize`) cannot hold a match, and klauspost's finder marks
+  it with its token count rather than a token list — a marker only its own
+  close-time path reads, because its window never flushes a tiny block
+  mid-stream. Our `flush` and `rebase` can, so `compressBlock6` writes such a
+  block as stored before the finder runs. The one-shot path is unaffected
+  (its sub-128-byte final block takes the close-time branch), so the byte pin
+  holds; the `Writer` test with a flushed 1-byte block pins the divergence.
+- The `Writer`'s finder state is a union of the two level classes, so a
+  level-1 `Writer` reserves the level-6 tables (392 KiB total against the old
+  128 KiB). The alternative — two optional fields — is 512 KiB, and an
+  allocator-taking `init` would break the committed signature. Documented in
+  the README's Stack paragraph.
 - Writer layout (OQ4). `Writer.Buffer` is the retained history followed by the
   block region, so the encoder's window is one contiguous slice. The block
   region (`writer.buffer`) is always the `max_block_size` bytes after the
@@ -63,8 +119,10 @@ touching one.
 - The 3-byte input buffer. A 16-bit peek can start 7 bits into a byte, and
   `Io.Reader.fill` asserts its capacity, so a narrower buffer cannot show the
   decoder enough bits. Widening any peek raises this floor for every container.
-- `.ratio` fails instead of aliasing: `error.Unimplemented` from `compress`, a
-  poisoned `Writer`, `error.ReadFailed` from `Writer.streamAll`.
+- A reserved level fails instead of aliasing: `error.Unimplemented` from
+  `compress`, a poisoned `Writer`, `error.ReadFailed` from `Writer.streamAll`
+  (levels 1 and 6 are the implemented ones; `encode.levelImplemented` is the
+  one predicate, and the containers' shared driver asks through it).
 - A contiguous read the window cannot hold is `error.ReadFailed` with
   `err == .StreamTooLong`, never an assert.
 - The preset-history parameter. `decode.decompress`, `Reader.init`, and
@@ -127,11 +185,24 @@ suites.
 - Go's `deflateTests` outputs are decode goldens only. Deflate has no canonical
   form and those bytes assert Go's encoder heuristics, so nothing compares our
   encoder's output against them.
+- Level 6's encode goldens are klauspost's own bytes for five small inputs
+  (encode.zig) plus one dictionary case, generated from the pinned module and
+  re-derived by the oracle's parity lane. `dynamic.zig`'s tests pin the
+  §3.2.7 machinery structurally: canonical assignment against §3.2.2's
+  construction, the 15-bit cap on a Fibonacci histogram, the codegen's
+  16/17/18 runs, the one-distance-code case, and the three dispatch rungs.
 
 ## Oracles
 
 `just flate-oracle` builds `oracle.zig` and runs `scripts/flate_oracle.py`, with
-python3's `zlib` (raw, `wbits=-15`) as the independent implementation. Both
+python3's `zlib` (raw, `wbits=-15`) as the independent implementation and
+klauspost/compress's flate (the pinned module, `scripts/klauspost_flate`) as
+the level-6 byte target. Level 1 is pinned against its own bytes (a hash per
+fixture and shape in the script): the level-6 work must not perturb a single
+one. The level-6 lane compares ours with theirs byte for byte over the
+fixtures, the oracle shapes, the generated corpus shapes when `bench/corpus-gen`
+is populated, and the dictionary rows, and cross-decodes both directions. The
+Go tool is the module pin's second consumer; bumping the pin moves both. Both
 directions run over the committed fixtures and generated shapes: our encoder
 into zlib's decoder, and zlib's streams (stored, `Z_HUFFMAN_ONLY`, levels 1, 6,
 9) into our decoder. The preset-dictionary rows are the same both-directions

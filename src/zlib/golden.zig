@@ -327,7 +327,7 @@ pub fn checkOneShot(
 /// Assert the deterministic header on an emitted stream: CMF = 0x78 (CM=8,
 /// CINFO=7), FLG = the level's FLEVEL band plus the minimal FCHECK, FDICT
 /// clear, and `(CMF*256 + FLG) % 31 == 0` (§2.2).
-pub fn expectHeader(stream: []const u8, level: encode.Level) !void {
+pub fn expectHeader(stream: []const u8, level: u8) !void {
     try testing.expect(stream.len >= encode.header_len + encode.trailer_len);
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
     try testing.expectEqual(encode.flgFor(level, false), stream[1]);
@@ -343,7 +343,7 @@ pub fn expectHeader(stream: []const u8, level: encode.Level) !void {
 /// level's FLEVEL band plus FDICT plus the minimal FCHECK (§2.2), then the
 /// 4-byte DICTID — the Adler-32 of the *whole* `dict`, most-significant byte
 /// first (§2.1).
-pub fn expectDictHeader(stream: []const u8, level: encode.Level, dict: []const u8) !void {
+pub fn expectDictHeader(stream: []const u8, level: u8, dict: []const u8) !void {
     try testing.expect(stream.len >= encode.header_len + encode.dict_id_len);
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
     try testing.expectEqual(encode.flgFor(level, true), stream[1]);
@@ -448,12 +448,11 @@ test "golden decode: the oracle-verified emissions" {
     const data = "The quick brown fox jumps over the lazy dog. " ** 5;
     // Level bands: {0,1} -> FLEVEL 0 (`78 01`), {2-5} -> 1 (`78 5e`),
     // {6,-1} -> 2 (`78 9c`), {7-9} -> 3 (`78 da`).
-    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"0", false));
-    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"1", false));
-    try testing.expectEqual(@as(u8, 0x5e), encode.flgFor(.@"3", false));
-    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.fast, false));
-    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(.@"6", false));
-    try testing.expectEqual(@as(u8, 0xda), encode.flgFor(.@"9", false));
+    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(0, false));
+    try testing.expectEqual(@as(u8, 0x01), encode.flgFor(1, false));
+    try testing.expectEqual(@as(u8, 0x5e), encode.flgFor(3, false));
+    try testing.expectEqual(@as(u8, 0x9c), encode.flgFor(6, false));
+    try testing.expectEqual(@as(u8, 0xda), encode.flgFor(9, false));
 
     // The dictionary stream: DICTID is the dictionary's Adler-32, and the
     // trailer is the payload's — both stored most-significant-byte first.

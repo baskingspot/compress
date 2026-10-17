@@ -17,6 +17,16 @@ and dependency with a license that is not ours.
   258/255 match split. The algorithm is ported, not the code. Attribution:
   Copyright klauspost/compress contributors,
   https://github.com/klauspost/compress.
+- `src/flate/encode.zig` (level 6) and `src/flate/dynamic.zig`: ports of the
+  algorithms in klauspost/compress (BSD-3-Clause) `flate/level6.go`
+  (`fastEncL6`: the two hash tables, the accelerating skip, the candidate
+  arbitration, the end-of-match check), `flate/huffman_code.go` (the
+  length-limited tree construction), and `flate/huffman_bit_writer.go` (the
+  codegen, the dynamic header, the cost model, the stored/fixed/dynamic
+  dispatch). The algorithm is ported, not the code; the oracle's level-6 lane
+  checks the bytes against the pinned module (`scripts/klauspost_flate`).
+  Attribution: Copyright klauspost/compress contributors,
+  https://github.com/klauspost/compress.
 - `src/snappy/golden.zig` golden fixtures: ported from golang/snappy
   (BSD-3-Clause) `TestDecode`, `TestDecodeCopy4`, and `TestDecodeLengthOffset`
   tables. Attribution: Copyright the Go Authors,

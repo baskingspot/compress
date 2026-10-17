@@ -5,14 +5,14 @@
 //!
 //! Usage:
 //!   flate-oracle decode <stream-file> <cap-bytes> [dict-file] > out
-//!   flate-oracle encode <input-file> [dict-file] > stream
+//!   flate-oracle encode <input-file> [LEVEL] [dict-file] > stream
 //!
 //! `decode` writes the decoded bytes of one raw deflate stream to stdout, with
 //! the output capped at `cap-bytes`; `dict-file` is the stream's preset
 //! dictionary (`§3.2.3`), read whole. `encode` writes our raw deflate stream
-//! for the input file, against `dict-file` as the preset dictionary when one is
-//! given. Exits 1 on a usage or codec error and prints the error name to
-//! stderr.
+//! for the input file at `LEVEL` (1 by default, 6 for the dynamic-Huffman
+//! class), against `dict-file` as the preset dictionary when one is given.
+//! Exits 1 on a usage or codec error and prints the error name to stderr.
 
 const std = @import("std");
 const Io = std.Io;
@@ -79,15 +79,25 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (std.mem.eql(u8, args[1], "encode")) {
-        if (args.len != 3 and args.len != 4) {
-            print("flate-oracle: encode needs <input-file> [dict-file]\n", .{});
+        if (args.len < 3 or args.len > 5) {
+            print("flate-oracle: encode needs <input-file> [LEVEL] [dict-file]\n", .{});
             return 1;
         }
-        const dict: ?[]const u8 = if (args.len == 4) try readFile(arena, io, args[3]) else null;
+        const level: u8 = if (args.len >= 4)
+            std.fmt.parseInt(u8, args[3], 10) catch {
+                print("flate-oracle: level must be a number, got '{s}'\n", .{args[3]});
+                return 1;
+            }
+        else
+            1;
+        const dict: ?[]const u8 = if (args.len == 5) try readFile(arena, io, args[4]) else null;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, flate.encode.maxCompressedLength(source.len));
 
-        const encoded_len = flate.encode.compress(source, target, .{ .dict = dict }) catch |err| {
+        const encoded_len = flate.encode.compress(source, target, .{
+            .level = level,
+            .dict = dict,
+        }) catch |err| {
             print("flate-oracle: {s}\n", .{@errorName(err)});
             return 1;
         };

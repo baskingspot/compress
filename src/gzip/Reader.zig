@@ -155,7 +155,7 @@ fn roundTrip(source: []const u8) !void {
     try w.writer.writeAll(source);
     try w.finish();
     const member = compressed.written();
-    try golden.expectHeader(member, encode.xflFor(.fast));
+    try golden.expectHeader(member, encode.xflFor(1));
     try golden.expectTrailer(member, source);
 
     const markers = 8;

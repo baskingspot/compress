@@ -1,7 +1,8 @@
 //! flate.Writer: a compressing `Io.Writer` that produces a raw deflate stream
-//! (RFC 1951) at the `fast` or stored-only (`@"0"`) level. The caller provides
-//! the `Buffer`; nothing is allocated. `streamAll` compresses a whole input in
-//! one call.
+//! (RFC 1951) at level 1 (fixed-Huffman blocks) or level 6
+//! (dynamic-Huffman blocks, byte-identical to klauspost/compress's flate at
+//! level 6). The caller provides the `Buffer`; nothing is allocated.
+//! `streamAll` compresses a whole input in one call.
 //!
 //! Input accumulates in `Buffer` and is emitted as blocks of up to
 //! `max_block_size` bytes when the buffer fills, and on `flush` and `finish`.
@@ -32,6 +33,7 @@ const sentinel = internal.sentinel;
 /// `checksum` before the first write.
 pub const Checksum = @import("Checksum.zig");
 const decode = @import("decode.zig");
+const dynamic = @import("dynamic.zig");
 const encode = @import("encode.zig");
 const max_block_size = encode.max_block_size;
 const history_len = encode.history_len;
@@ -49,9 +51,18 @@ pub const Buffer = [max_block_size + history_len]u8;
 /// room.
 const scratch_len = encode.maxCompressedLength(max_block_size);
 
-/// The tail scratch for the final empty fixed block: its 10 bits plus the
+/// The tail scratch for the final empty fixed block: its 10 bits, plus the
+/// up-to-15-bit end-of-block code a level-6 stream may still owe, plus the
 /// up-to-7 pending bits of the previous block, rounded up to whole bytes.
-const ending_len = (7 + 10 + 7) / 8;
+const ending_len = (7 + 15 + 10 + 7) / 8;
+
+/// The match-finder state, one shape per level class: level 1's single
+/// 128-KiB table, or level 6's two-table finder (384 KiB). The union is the
+/// larger shape, so a level-1 `Writer` reserves the level-6 tables too.
+const Finder = union(enum) {
+    l1: encode.FinderTable,
+    l6: encode.Finder6,
+};
 
 const Writer = @This();
 
@@ -72,12 +83,18 @@ checksum: ?Checksum = null,
 /// `buffer[block_start..]` the accumulating block. The embedded
 /// `Io.Writer`'s own `buffer`/`end` are the block region alone.
 buffer: *Buffer,
-/// The match-finder table, persistent across the stream's blocks
-/// (`encode.FinderTable`): entries are absolute stream positions, so a block
-/// pays a strided priming pass over its history, never a 128-KiB re-zero.
-/// Null until the first block that runs the match finder, so a stored-only
-/// stream never initializes it.
-table: ?encode.FinderTable = null,
+/// The match-finder state, persistent across the stream's blocks: level 1's
+/// table (entries are absolute stream positions, so a block pays a strided
+/// priming pass over its history, never a 128-KiB re-zero) or level 6's two
+/// tables. Null until the first block that runs the match finder, so a
+/// never-emitted stream does not initialize it.
+finder: ?Finder = null,
+/// Level 6's dynamic-block emitter state: the trees that persist across
+/// blocks and the reuse bookkeeping. Unused at level 1.
+emitter: dynamic.BlockWriter = .{},
+/// True while `finish` emits the stream's final block: the level-6 emitter
+/// writes the end-of-block code inline and keeps no table open for it.
+finishing: bool = false,
 /// The absolute stream position of `buffer[0]` (wrapping u32, matching the
 /// table entries): `compact` advances it by the bytes it drops from the
 /// window's front. A preset dictionary's first byte is position 0, so the
@@ -108,17 +125,19 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2).
 ///
-/// `options.level == .ratio` is not implemented: the returned writer is
-/// poisoned, so every write and `finish` returns `error.WriteFailed`.
+/// `options.level` is 1 or 6; a reserved level (2-5, 7-9, or anything
+/// outside 1-9) poisons the returned writer, so every write and `finish`
+/// returns `error.WriteFailed` — never a silent alias of another level.
 ///
-/// Stack: a `Writer` holds the 128-KiB match-finder table, and `Buffer` is
-/// 98303 bytes, so place both with that in mind. Each block emission also
-/// uses about 64 KiB of stack for its compressed-output scratch.
+/// Stack: a `Writer` holds the level-6 match-finder tables (384 KiB) and the
+/// emitter state, and `Buffer` is 98303 bytes, so place both with that in
+/// mind. Each block emission also uses about 320 KiB of stack for its
+/// token list and compressed-output scratch.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
-    // `.ratio` is reserved and not implemented, and must not silently alias
-    // another level. Poisoning the interface makes every write and `finish`
-    // return `error.WriteFailed`; `streamAll` rejects it up front.
-    if (options.level == .ratio) {
+    // A reserved level must not silently alias another one. Poisoning the
+    // interface makes every write and `finish` return `error.WriteFailed`;
+    // `streamAll` rejects it up front.
+    if (!encode.levelImplemented(options.level)) {
         return .{
             .writer = .failing,
             .output = output,
@@ -152,13 +171,15 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 /// or already finished also returns `error.WriteFailed`, so a truncated stream
 /// is never reported as complete.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
+    w.finishing = true;
     return Hooks.finish(w);
 }
 
 /// Write the stream's last block: an empty fixed-Huffman block (BFINAL=1,
 /// BTYPE=01, end-of-block code) at the stream's current bit offset, then pad
 /// to a byte boundary. The one-shot encoder ends its streams with the same
-/// bytes, from the same function.
+/// bytes, from the same function. A level-6 stream whose last flushed block
+/// still owes its end-of-block code writes that code first.
 fn writeEnding(w: *Writer) Io.Writer.Error!void {
     var tail: [ending_len]u8 = undefined;
     var bw: encode.BitWriter = .{
@@ -166,6 +187,7 @@ fn writeEnding(w: *Writer) Io.Writer.Error!void {
         .bits = w.bits,
         .bit_count = w.bit_count,
     };
+    if (w.options.level == 6) w.emitter.flushEob(&bw) catch unreachable;
     encode.writeFinalEmptyBlock(&bw) catch unreachable;
     bw.finish() catch unreachable;
     w.bits = 0;
@@ -198,20 +220,40 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     };
     // The finder's window is the block's 32-KiB history followed by the
     // block itself, so a match crosses block boundaries exactly as `§3.2.3`
-    // allows. The stored-only level (`§3.2.4`) skips the finder entirely.
-    if (w.options.level == .@"0") {
-        encode.emitStoredBlock(&bw, w.buffer[w.block_start..block_end]) catch unreachable;
+    // allows.
+    if (w.options.level == 6) {
+        var prime_dict = false;
+        if (w.finder == null) {
+            w.finder = .{ .l6 = undefined };
+            w.finder.?.l6.clear();
+            // The window's front is the preset dictionary when a stream
+            // starts with one: its length is the block start before the
+            // first emission.
+            prime_dict = w.block_start > 0;
+        }
+        const base = w.window_base +% encode.finder_origin;
+        encode.compressBlockStream6(
+            w.buffer[0..block_end],
+            w.block_start,
+            block_end,
+            &bw,
+            &w.finder.?.l6,
+            &w.emitter,
+            base,
+            prime_dict,
+            w.finishing,
+        ) catch unreachable;
     } else {
-        if (w.table == null) {
-            w.table = undefined;
-            fastmem.set(u32, &w.table.?, 0);
+        if (w.finder == null) {
+            w.finder = .{ .l1 = undefined };
+            fastmem.set(u32, &w.finder.?.l1, 0);
         }
         encode.compressBlockStream(
             w.buffer[0..block_end],
             w.block_start,
             block_end,
             &bw,
-            &w.table.?,
+            &w.finder.?.l1,
             w.window_base,
         ) catch unreachable;
     }
@@ -490,11 +532,11 @@ test "Writer: a stream crossing the 4-GiB window-base wrap round-trips" {
     }
 }
 
-test "Writer: the stored-only level emits stored blocks through the stream" {
-    // Spec: rfc1951-deflate.txt §3.2.4 (stored blocks). The stored-only
-    // level through the streaming Writer: every data block is stored, the
-    // length is exactly maxCompressedLength (the stored bound, tight), and
-    // the first block's BTYPE is 00.
+test "Writer: level 6 round-trips through the stream, dispatch included" {
+    // The dynamic-Huffman level through the streaming Writer: random input
+    // (the stored rung), a phrase (the dynamic rung), and a run (long
+    // matches). The one-shot encoder emits the same bytes for the same
+    // input, so the streaming and one-shot layers cannot drift.
     const gpa = testing.allocator;
     const input_len = 3 * max_block_size + 17;
     const input = try gpa.alloc(u8, input_len);
@@ -505,32 +547,39 @@ test "Writer: the stored-only level emits stored blocks through the stream" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"0" });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
     try w.writer.writeAll(input);
     try w.finish();
-
-    try testing.expectEqual(encode.maxCompressedLength(input_len), out.written().len);
-    // BFINAL=0, BTYPE=00, then pad: the first header byte is 0x00.
-    try testing.expectEqual(@as(u8, 0), out.written()[0]);
+    // Random bytes cannot beat the stored form, so the stream is exactly
+    // the bound at level 6.
+    try testing.expect(out.written().len <= encode.maxCompressedLength(input_len));
 
     var d_buf: [input_len + 1]u8 = undefined;
     sentinel.fill(&d_buf);
     const n = try decode.decompress(out.written(), d_buf[0..input_len], null);
     try testing.expectEqualSlices(u8, input, d_buf[0..n]);
     try sentinel.expect(&d_buf, n);
+
+    // The one-shot path emits the identical stream, byte for byte.
+    const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(input_len));
+    defer gpa.free(one_shot);
+    const clen = try encode.compress(input, one_shot, .{ .level = 6 });
+    try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
 }
 
-test "Writer: the ratio level is rejected, never silently aliased" {
-    // `.ratio` is reserved and not implemented: it poisons the writer at
+test "Writer: a reserved level is rejected, never silently aliased" {
+    // Levels 2-5 and 7-9 are reserved seats: they poison the writer at
     // init, so every write and `finish` returns `error.WriteFailed`.
     const gpa = testing.allocator;
-    var out: Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = .ratio });
-    try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, flate"));
-    try testing.expectError(error.WriteFailed, w.finish());
-    try testing.expectEqual(@as(usize, 0), out.written().len);
+    for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        var buf: Buffer = undefined;
+        var w: Writer = .init(&out.writer, &buf, .{ .level = level });
+        try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, flate"));
+        try testing.expectError(error.WriteFailed, w.finish());
+        try testing.expectEqual(@as(usize, 0), out.written().len);
+    }
 }
 
 test "Writer: a failed or finished writer never reports a false success" {
@@ -845,16 +894,17 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
 /// `out`, and return the number of input bytes consumed. The stream is
 /// finished and `out` is flushed before the call returns.
 ///
-/// Returns `error.ReadFailed` if `in` fails or if `options.level` is `.ratio`
-/// (checked before any work), and `error.WriteFailed` if `out` fails.
+/// Returns `error.ReadFailed` if `in` fails or if `options.level` is a
+/// reserved level (2-5, 7-9, or anything outside 1-9), checked before any
+/// work. `error.WriteFailed` if `out` fails.
 /// Allocates nothing: the `Writer`, its `Buffer`, and the block scratch are
-/// locals on the caller's stack, about 288 KiB at the peak.
+/// locals on the caller's stack, about 700 KiB at the peak at level 6.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
     options: encode.Options,
 ) Io.Reader.StreamRemainingError!usize {
-    if (options.level == .ratio) return error.ReadFailed;
+    if (!encode.levelImplemented(options.level)) return error.ReadFailed;
     var buf: Buffer = undefined;
     var ww: Writer = .init(out, &buf, options);
     const n = try in.streamRemaining(&ww.writer);
@@ -922,4 +972,98 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     try w3.writer.writeAll(source);
     try w3.finish();
     try testing.expectEqualSlices(u8, plainest.written(), plain.written());
+}
+
+test "Writer: random call sequences round-trip at both levels" {
+    // Random `Io.Writer` call sequences at both levels against a model:
+    // writes, direct-slice writes (the `rebase` path), flushes, and bytes,
+    // then a decode compared byte for byte with the model. This is the
+    // streaming half of the fuzz targets' contract, driven by a fixed PRNG so
+    // a regression reproduces. It found the sub-13-byte mid-stream block bug
+    // (see `compressBlock6`): a flushed tiny block used to dispatch
+    // klauspost's "too small" marker as a real token list.
+    const gpa = testing.allocator;
+    for ([_]u8{ 1, 6 }) |level| {
+        var rng: DefaultPrng = .init(0xF00D + @as(u64, level));
+        const rand = rng.random();
+        var iter: usize = 0;
+        while (iter < 200) : (iter += 1) {
+            var out: Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            var expect: std.ArrayList(u8) = .empty;
+            defer expect.deinit(gpa);
+            var buf: Buffer = undefined;
+            var w: Writer = .init(&out.writer, &buf, .{ .level = level });
+            var ops: usize = 0;
+            while (ops < 20) : (ops += 1) {
+                var b: [9000]u8 = undefined;
+                rand.bytes(&b);
+                const n = rand.uintAtMost(usize, b.len);
+                switch (rand.uintLessThan(u8, 4)) {
+                    0 => {
+                        try w.writer.writeAll(b[0..n]);
+                        try expect.appendSlice(gpa, b[0..n]);
+                    },
+                    1 => {
+                        // The File.Reader simple-mode path: a direct write
+                        // into the block region, which lands on `rebase`.
+                        const dest = try w.writer.writableSliceGreedy(1);
+                        const k = @min(dest.len, n);
+                        fastmem.copy(u8, dest[0..k], b[0..k]);
+                        w.writer.advance(k);
+                        try expect.appendSlice(gpa, b[0..k]);
+                    },
+                    2 => try w.writer.flush(),
+                    else => {
+                        try w.writer.writeByte(b[0]);
+                        try expect.append(gpa, b[0]);
+                        if (rand.boolean()) try w.writer.flush();
+                    },
+                }
+            }
+            try w.finish();
+
+            const target = try gpa.alloc(u8, expect.items.len + sentinel.len);
+            defer gpa.free(target);
+            sentinel.fill(target);
+            const dn = decode.decompress(
+                out.written(),
+                target[0..expect.items.len],
+                null,
+            ) catch |err| {
+                print("FAIL: level {d} iteration {d}: decode {s}\n", .{
+                    level, iter, @errorName(err),
+                });
+                return err;
+            };
+            try testing.expectEqual(expect.items.len, dn);
+            try testing.expectEqualSlices(u8, expect.items, target[0..dn]);
+            try sentinel.expect(target, dn);
+        }
+    }
+}
+
+test "Writer: a flushed tiny block is stored at level 6" {
+    // A block under 13 bytes cannot hold a match, and klauspost's finder marks
+    // such a block with its token count rather than a token list — a marker
+    // only its own close-time path reads. Our `flush` can emit one mid-stream,
+    // so the caller writes it as a stored block (`§3.2.4`) instead of
+    // dispatching the marker. The bytes round-trip through the one-shot
+    // decoder, sentinel-checked.
+    const gpa = testing.allocator;
+    const data = "abc";
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var buf: Buffer = undefined;
+    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
+    try w.writer.writeAll(data[0..1]);
+    try w.writer.flush();
+    try w.writer.writeAll(data[1..2]);
+    try w.writer.flush();
+    try w.writer.writeAll(data[2..3]);
+    try w.finish();
+
+    const target = try gpa.alloc(u8, data.len + sentinel.len);
+    defer gpa.free(target);
+    try golden.checkDecode(target, out.written(), data);
 }

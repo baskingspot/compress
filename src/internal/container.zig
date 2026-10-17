@@ -16,8 +16,9 @@
 //! they are checked where their values flow: a `HeaderError` must coerce into
 //! `Error`, and an `initReader` result must fit the `inner` field.
 //!
-//! - `Level`, `Options`: the public encoder knobs. `Options.level` is a
-//!   `Level`, which has a `.ratio` member (reserved, not implemented).
+//! - `Options`: the public encoder knobs. `Options.level` is a numeric level;
+//!   `levelImplemented(level)` says which levels the inner codec implements
+//!   (the rest are reserved, not implemented).
 //! - `Error`: the streaming reader's detail errors: the inner codec's reader
 //!   errors, `EndOfStream`, and the framing's own.
 //! - `DecompressError`: the one-shot decoder's errors: `Error` minus
@@ -260,10 +261,10 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Returns a `Host` that writes one container to `output`, with
         /// `buffer` as the compression window and `options` fixed for the
-        /// writer's lifetime. The `.ratio` level is reserved and not
-        /// implemented: it returns a poisoned writer whose every write and
-        /// `finish` returns `error.WriteFailed`, matching `streamOne`, which
-        /// rejects it before reading.
+        /// writer's lifetime. A reserved level is not implemented: it returns
+        /// a poisoned writer whose every write and `finish` returns
+        /// `error.WriteFailed`, matching `streamOne`, which rejects it before
+        /// reading.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
             var host: Host = .{
                 .writer = .failing,
@@ -276,7 +277,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             // the encoder fills. A framing with a preset dictionary starts
             // that region after the dictionary (the inner writer knows where),
             // so it is taken from there, never recomputed here.
-            if (options.level != .ratio) {
+            if (F.levelImplemented(options.level)) {
                 host.writer = .{
                     .buffer = host.inner.writer.buffer,
                     .end = 0,
@@ -392,7 +393,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Reads `in` to its end, writes it to `out` as one complete container
         /// (the stream ending and the trailer included), and returns the
-        /// number of input bytes consumed. A `.ratio` level returns
+        /// number of input bytes consumed. A reserved level returns
         /// `error.ReadFailed` before any input is read; a failing `in` returns
         /// `error.ReadFailed` and a failing `out` returns `error.WriteFailed`.
         /// The window is a stack local of `@sizeOf(F.WriterBuffer)` bytes;
@@ -402,7 +403,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             out: *Io.Writer,
             options: F.Options,
         ) Io.Reader.StreamRemainingError!usize {
-            if (options.level == .ratio) return error.ReadFailed;
+            if (!F.levelImplemented(options.level)) return error.ReadFailed;
             var buffer: F.WriterBuffer = undefined;
             var ww: Host = init(out, &buffer, options);
             const n = try in.streamRemaining(&ww.writer);
@@ -430,14 +431,13 @@ pub fn EncodeHooks(comptime F: type) type {
         /// cannot hold the result: `maxCompressedLength(source.len)` is always
         /// enough, a smaller target may still fit when the body compresses
         /// under the bound, and `target`'s contents are unspecified after a
-        /// failure. Returns `error.Unimplemented` for the reserved `.ratio`
-        /// level.
+        /// failure. Returns `error.Unimplemented` for a reserved level.
         pub fn compress(
             source: []const u8,
             target: []u8,
             options: F.Options,
         ) error{ BufferTooSmall, Unimplemented }!usize {
-            if (options.level == .ratio) return error.Unimplemented;
+            if (!F.levelImplemented(options.level)) return error.Unimplemented;
             // The header is written before the body is attempted, so the
             // check must come first: a target that cannot hold even the
             // framing is too small.

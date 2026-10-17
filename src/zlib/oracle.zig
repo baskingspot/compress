@@ -83,13 +83,13 @@ pub fn main(init: std.process.Init) !u8 {
             print("zlib-oracle: encode needs <input-file> [LEVEL] [dict-file]\n", .{});
             return 1;
         }
-        const level: zlib.encode.Level = if (args.len >= 4)
-            std.meta.stringToEnum(zlib.encode.Level, args[3]) orelse {
-                print("zlib-oracle: unknown level '{s}'\n", .{args[3]});
+        const level: u8 = if (args.len >= 4)
+            std.fmt.parseInt(u8, args[3], 10) catch {
+                print("zlib-oracle: level must be a number, got '{s}'\n", .{args[3]});
                 return 1;
             }
         else
-            .fast;
+            1;
         const dict: ?[]const u8 = if (args.len == 5) try readFile(arena, io, args[4]) else null;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, zlib.encode.maxCompressedLength(source.len));

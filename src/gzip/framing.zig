@@ -19,13 +19,15 @@ const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 
-/// Compression level: flate's `encode.Level`, re-exported. `.ratio` is not
-/// implemented and selects `error.Unimplemented`.
-pub const Level = flate.encode.Level;
+/// Whether the inner codec implements `level` (flate's rule, re-exported):
+/// 1 and 6 are implemented; the rest are reserved seats.
+pub const levelImplemented = flate.encode.levelImplemented;
 
-/// Encoder configuration. `.{}` is the default: the fast level.
+/// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = struct {
-    level: Level = .fast,
+    /// The zlib-scale compression level: 1 or 6 (flate's implemented
+    /// levels). A reserved level selects `error.Unimplemented`.
+    level: u8 = 1,
 };
 
 /// The failure detail a reader records in `err` once its state is `.failed`:

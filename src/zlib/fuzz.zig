@@ -100,14 +100,11 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked implemented level: `.fast`, the stored-only `.@"0"`, or one
-/// of the numeric levels `.@"1"` to `.@"9"` (see `encode.Level`). `.ratio` is
-/// never returned: it is `error.Unimplemented`, which the round-trip target
-/// exercises explicitly.
-fn implementedLevel(smith: *Smith) zlib.encode.Level {
-    const pick = rangeAtMost(smith, 0, 10);
-    if (pick == 0) return .fast;
-    return @enumFromInt(@as(u8, @intCast(pick + 1)));
+/// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
+/// Huffman). A reserved level is never returned: it is `error.Unimplemented`,
+/// which the round-trip target exercises explicitly.
+fn implementedLevel(smith: *Smith) u8 {
+    return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
 }
 
 /// How many `stream` calls decoding `plain_len` bytes may take: each call
@@ -183,7 +180,7 @@ fn shapeSeed(
 }
 
 /// A seed for the stream targets in Smith's serialized form: the
-/// little-endian level `smith.value(encode.Level)` consumes, then the `u32-le`
+/// little-endian level `smith.value(u8)` consumes, then the `u32-le`
 /// length plus bytes `smith.slice` consumes.
 fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8 {
     var seed: [12 + bytes.len]u8 = undefined;
@@ -266,7 +263,7 @@ fn buildShape(smith: *Smith, buf: []u8) usize {
 /// FDICT clear. The exact FLG bytes are derived here from the §2.2
 /// arithmetic, not from the implementation's formula: FLEVEL 0 -> 0x01,
 /// 1 -> 0x5e, 2 -> 0x9c, 3 -> 0xda.
-fn expectZlibHeader(stream: []const u8, level: zlib.encode.Level) !void {
+fn expectZlibHeader(stream: []const u8, level: u8) !void {
     try testing.expect(stream.len >= header_len + trailer_len);
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
     try testing.expectEqual(flgFor(level), stream[1]);
@@ -279,15 +276,15 @@ fn expectZlibHeader(stream: []const u8, level: zlib.encode.Level) !void {
 }
 
 /// RFC 1950 §2.2 — FLEVEL by level band (the C zlib mapping, checked through
-/// python3's zlib): {0,1} -> 0, {2-5} -> 1, {fast, 6} -> 2, {7-9} -> 3. The
-/// FLG byte is the band's FLEVEL plus the minimal FCHECK for CMF=0x78.
-fn flgFor(level: zlib.encode.Level) u8 {
+/// python3's zlib): {0,1} -> 0, {2-5} -> 1, {6} -> 2, {7-9} -> 3. The FLG
+/// byte is the band's FLEVEL plus the minimal FCHECK for CMF=0x78.
+fn flgFor(level: u8) u8 {
     const flevel: u8 = switch (level) {
-        .@"0", .@"1" => 0,
-        .@"2", .@"3", .@"4", .@"5" => 1,
-        .fast, .@"6" => 2,
-        .@"7", .@"8", .@"9" => 3,
-        .ratio => unreachable, // never emits a stream
+        0, 1 => 0,
+        2, 3, 4, 5 => 1,
+        6 => 2,
+        7, 8, 9 => 3,
+        else => 2, // reserved levels never emit a stream
     };
     // The minimal FCHECK: (31 - r) % 31, r = (CMF*256 + FLEVEL<<6) % 31.
     const r = (@as(u16, 0x78) * 256 + @as(u16, flevel) * 64) % 31;
@@ -355,7 +352,7 @@ fn expectFailure(result: zlib.decode.DecompressError!usize) !void {
 fn reencodeRoundTrip(bytes: []const u8) !void {
     assert(bytes.len <= corrupt_out_max);
     var stream: [zlib.encode.maxCompressedLength(corrupt_out_max)]u8 = undefined;
-    const s_len = try zlib.encode.compress(bytes, &stream, .{ .level = .fast });
+    const s_len = try zlib.encode.compress(bytes, &stream, .{ .level = 1 });
     try testing.expect(s_len <= zlib.encode.maxCompressedLength(bytes.len));
 
     var plain: [corrupt_out_max + guard_len]u8 = undefined;
@@ -371,8 +368,8 @@ fn reencodeRoundTrip(bytes: []const u8) !void {
 // ---------------------------------------------------------------------------
 
 /// Seeds for target 1: the Smith values the shape builder reads, so each seed
-/// pins a structure instead of relying on the fuzzer to grow one. `0` is
-/// `fast`, `1` is `ratio`, `2` is `@"0"` (stored-only).
+/// pins a structure instead of relying on the fuzzer to grow one. `1` and
+/// `6` are the implemented levels; `5` is reserved.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -382,11 +379,11 @@ const roundtrip_corpus: []const []const u8 = &.{
     &shapeSeed(0, .run, 4096, &u64Le(0x41)),
     // A 2048-byte phrase, eight bytes long, repeated.
     &shapeSeed(0, .phrase, 2048, &(u64Le(8) ++ [8]u8{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' })),
-    // 70000 bytes of 'Z' at the stored-only level: two stored blocks plus the
-    // final empty fixed block.
-    &shapeSeed(2, .run, 70_000, &u64Le(0x5a)),
-    // The reserved ratio mode: `error.Unimplemented`, never a silent alias.
-    &shapeSeed(1, .random, 0, ""),
+    // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
+    // fixed block.
+    &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
+    // A reserved level: `error.Unimplemented`, never a silent alias.
+    &shapeSeed(5, .random, 0, ""),
 };
 
 /// Target 1: the whole one-shot codec, on the shapes a compressor is worst at.
@@ -399,27 +396,26 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// followed by marker bytes decodes identically (bytes after ADLER32 are not
 /// part of the stream).
 fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(zlib.encode.Level);
+    const level = smith.value(u8);
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
-    if (level == .ratio) {
-        // encode.Level's contract: the ratio mode is `error.Unimplemented` on
-        // the one-shot and `error.ReadFailed` on the stream, never silent
-        // aliasing.
+    if (level != 1 and level != 6) {
+        // A reserved level is `error.Unimplemented` on the one-shot and
+        // `error.ReadFailed` on the stream, never silent aliasing.
         var tiny: [16]u8 = undefined;
         try testing.expectError(
             error.Unimplemented,
-            zlib.encode.compress(source, &tiny, .{ .level = .ratio }),
+            zlib.encode.compress(source, &tiny, .{ .level = 5 }),
         );
         var sink: Io.Writer.Discarding = .init(&.{});
         var fixed_in: Io.Reader = .fixed(source);
         try testing.expectError(
             error.ReadFailed,
-            zlib.Writer.streamAll(&fixed_in, &sink.writer, .{ .level = .ratio }),
+            zlib.Writer.streamAll(&fixed_in, &sink.writer, .{ .level = 5 }),
         );
         var wbuf: zlib.Writer.Buffer = undefined;
-        var w: zlib.Writer = .init(&sink.writer, &wbuf, .{ .level = .ratio });
+        var w: zlib.Writer = .init(&sink.writer, &wbuf, .{ .level = 5 });
         try testing.expectError(error.WriteFailed, w.writer.writeAll("x"));
         try testing.expectError(error.WriteFailed, w.finish());
         return;
@@ -1524,8 +1520,8 @@ const amplification_corpus: []const []const u8 = &.{
 /// stored-only level decodes the same source through the passthrough path, so
 /// the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(zlib.encode.Level);
-    if (level == .ratio) return; // not implemented; target 1 covers it
+    const level = smith.value(u8);
+    if (level != 1 and level != 6) return; // reserved; target 1 covers it
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];
@@ -1534,7 +1530,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const s_len = try zlib.encode.compress(source, &stream_buf, .{ .level = level });
     const stream = stream_buf[0..s_len];
     try testing.expect(s_len <= zlib.encode.maxCompressedLength(source.len));
-    if (level != .@"0" and shape == .run and source.len >= 1024) {
+    if (shape == .run and source.len >= 1024) {
         // The bomb property, where the shape pins it: a run of at least a KiB
         // is almost all 258-byte matches, so its stream is a small fraction
         // of its output and a cap that ignored the decoded length would be a
@@ -1584,9 +1580,9 @@ test "zlib fuzz: amplification caps" {
 // The constructed streams the header parser must reject, as plain unit tests
 // so a normal `zig build test` run gates them too.
 test "zlib fuzz: hostile-header pins" {
-    // The empty stream our encoder emits at `.fast`: CMF=0x78, FLG=0x9c
-    // (FLEVEL 2, FCHECK 28), the final empty fixed block, Adler-32 1 (§2.2).
-    const empty_stream = "\x78\x9c\x03\x00\x00\x00\x00\x01";
+    // The empty stream our encoder emits at level 1: CMF=0x78, FLG=0x01
+    // (FLEVEL 0, FCHECK 1), the final empty fixed block, Adler-32 1 (§2.2).
+    const empty_stream = "\x78\x01\x03\x00\x00\x00\x00\x01";
 
     // A zero-byte input is error.Truncated: no stream began.
     try testing.expectError(error.Truncated, zlib.decode.decompress("", &.{}, null));

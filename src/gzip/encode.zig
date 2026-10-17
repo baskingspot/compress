@@ -15,8 +15,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const fastmem = @import("fastmem");
-
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const common = @import("common.zig");
@@ -25,10 +23,7 @@ const writeInt = common.writeInt;
 const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
-/// Compression level: flate's `encode.Level`, re-exported. `.fast` is the
-/// default. `.ratio` is not implemented and selects `error.Unimplemented`.
-pub const Level = framing.Level;
-/// Encoder configuration. `.{}` is the default: the fast level.
+/// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = framing.Options;
 /// RFC 1952 §2.3 — the fixed header's length.
 pub const header_len = framing.header_len;
@@ -53,7 +48,7 @@ pub fn maxCompressedLength(input_len: usize) usize {
 /// (unknown; `§2.3.1.2` suggests "255 for OS"). For a given level the header
 /// is the same every time: nothing in it depends on the clock or the
 /// environment. Multi-byte fields are little-endian (`§2.1`).
-pub fn writeHeader(target: *[header_len]u8, level: Level) void {
+pub fn writeHeader(target: *[header_len]u8, level: u8) void {
     target[0] = 0x1f; // ID1
     target[1] = 0x8b; // ID2
     target[2] = 8; // CM: deflate
@@ -72,14 +67,14 @@ pub fn writeTrailer(target: *[trailer_len]u8, crc: u32, len: u32) void {
 }
 
 /// The XFL byte for `level` (`§2.3.1`: 2 means "maximum compression", 4
-/// means "fastest algorithm"): 4 for `.fast`, `.@"0"`, and `.@"1"`, 2 for
-/// `.@"9"`, and 0 for the rest. These are the bands C zlib and Go use. The
-/// field is informational (`§2.3.1.2`) and reflects the requested level, not
-/// what the encoder did with it.
-pub fn xflFor(level: Level) u8 {
+/// means "fastest algorithm"): 4 for levels 0 and 1, 2 for level 9, and 0
+/// for the rest. These are the bands C zlib and Go use. The field is
+/// informational (`§2.3.1.2`) and reflects the requested level, not what the
+/// encoder did with it.
+pub fn xflFor(level: u8) u8 {
     return switch (level) {
-        .fast, .@"0", .@"1" => 4,
-        .@"9" => 2,
+        0, 1 => 4,
+        9 => 2,
         else => 0,
     };
 }
@@ -88,10 +83,11 @@ pub fn xflFor(level: Level) u8 {
 /// member's length. Returns `error.BufferTooSmall` when `target` cannot hold
 /// it: size `target` with `maxCompressedLength`, though a smaller `target` can
 /// still fit when the data compresses well. `target`'s contents are
-/// unspecified after an error. Returns `error.Unimplemented` for `.ratio`.
+/// unspecified after an error. Returns `error.Unimplemented` for a reserved
+/// level (2-5 and 7-9, or anything outside 1-9).
 ///
-/// Allocates nothing. Uses about 128 KiB of stack (flate's match-finder
-/// table).
+/// Allocates nothing. Level 1 uses about 128 KiB of stack (flate's
+/// match-finder table), level 6 about 700 KiB.
 pub fn compress(
     source: []const u8,
     target: []u8,
@@ -152,31 +148,34 @@ test "encode: the empty member is the golden bytes" {
 
 test "encode: XFL follows the level bands" {
     // RFC 1952 §2.3.1 — XFL 4 is "compressor used fastest algorithm", 2
-    // "maximum compression"; the bands are C zlib's and Go's. `.ratio` never
-    // emits a member.
-    const cases = [_]struct { level: Level, xfl: u8 }{
-        .{ .level = .fast, .xfl = 4 },
-        .{ .level = .@"0", .xfl = 4 },
-        .{ .level = .@"1", .xfl = 4 },
-        .{ .level = .@"2", .xfl = 0 },
-        .{ .level = .@"8", .xfl = 0 },
-        .{ .level = .@"9", .xfl = 2 },
+    // "maximum compression"; the bands are C zlib's and Go's.
+    const cases = [_]struct { level: u8, xfl: u8 }{
+        .{ .level = 0, .xfl = 4 },
+        .{ .level = 1, .xfl = 4 },
+        .{ .level = 2, .xfl = 0 },
+        .{ .level = 8, .xfl = 0 },
+        .{ .level = 9, .xfl = 2 },
     };
+    for (cases) |case| try testing.expectEqual(case.xfl, xflFor(case.level));
+
+    // The implemented levels emit a member carrying the matching byte.
     var target: [64]u8 = undefined;
-    for (cases) |case| {
-        const len = try compress("x", &target, .{ .level = case.level });
-        try testing.expectEqual(case.xfl, target[8]);
+    for ([_]u8{ 1, 6 }) |level| {
+        const len = try compress("x", &target, .{ .level = level });
+        try testing.expectEqual(xflFor(level), target[8]);
         try testing.expect(len > 0);
     }
 }
 
-test "encode: the ratio seat is unimplemented, never aliased" {
-    // `.ratio` is not implemented: `error.Unimplemented`, and nothing is
-    // written to `target`.
+test "encode: a reserved level is unimplemented, never aliased" {
+    // Levels 2-5 and 7-9 (and anything outside 1-9) are reserved:
+    // `error.Unimplemented`, and nothing is written to `target`.
     var target: [64]u8 = undefined;
-    sentinel.fill(&target);
-    try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = .ratio }));
-    try sentinel.expect(&target, 0);
+    for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
+        sentinel.fill(&target);
+        try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = level }));
+        try sentinel.expect(&target, 0);
+    }
 }
 
 test "encode: a small target fails, an exact one fits" {
@@ -227,15 +226,18 @@ test "encode: the bound holds for every shape" {
         const len = try compress(source, target, .{});
         try testing.expect(len <= maxCompressedLength(source.len));
     }
-    // A single-byte run of every block-split size: the bound is tight at the
-    // stored fallback's worst case.
-    const run = try testing.allocator.alloc(u8, 3 * 65535 + 17);
-    defer testing.allocator.free(run);
-    fastmem.set(u8, run, 0x41);
-    const target = try testing.allocator.alloc(u8, maxCompressedLength(run.len));
+    // Incompressible bytes across four block splits: the bound is tight at
+    // the stored fallback's worst case, at both implemented levels.
+    const noise = try testing.allocator.alloc(u8, 3 * 65535);
+    defer testing.allocator.free(noise);
+    var prng: std.Random.DefaultPrng = .init(0x5EED);
+    prng.random().bytes(noise);
+    const target = try testing.allocator.alloc(u8, maxCompressedLength(noise.len));
     defer testing.allocator.free(target);
-    const len = try compress(run, target, .{ .level = .@"0" });
-    try testing.expectEqual(maxCompressedLength(run.len), len);
+    for ([_]u8{ 1, 6 }) |level| {
+        const len = try compress(noise, target, .{ .level = level });
+        try testing.expectEqual(maxCompressedLength(noise.len), len);
+    }
 }
 
 test "encode: the golden outputs re-encode to decodable members" {

@@ -96,10 +96,11 @@ zlib-oracle:
     zig build zlib-oracle-harness
     uv run scripts/zlib_oracle.py
 
-[doc("Check flate, raw deflate, against python3's zlib in both directions")]
+[doc("Check flate, raw deflate, against python3's zlib in both directions, and level 6 against klauspost/compress byte for byte")]
 [group("conformance")]
 flate-oracle:
     zig build flate-oracle-harness
+    go build -C scripts/klauspost_flate -o ../../zig-out/bin/flate-klauspost .
     uv run scripts/flate_oracle.py
 
 [doc("Check zstd against the reference CLI and klauspost/compress. klauspost makes the strict Window_Size check that the C decoder does not")]

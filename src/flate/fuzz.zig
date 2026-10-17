@@ -57,14 +57,11 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked level the encoder implements: `fast`, the stored-only
-/// `@"0"`, or one of `@"1"` to `@"9"` (which behave like `fast`). `ratio` is
-/// never returned: it is `error.Unimplemented`, which `fuzzRoundTrip` checks
-/// explicitly.
-fn implementedLevel(smith: *Smith) encode.Level {
-    const pick = rangeAtMost(smith, 0, 10);
-    if (pick == 0) return .fast;
-    return @enumFromInt(@as(u8, @intCast(pick + 1)));
+/// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
+/// Huffman). A reserved level is never returned: it is `error.Unimplemented`,
+/// which `fuzzRoundTrip` checks explicitly.
+fn implementedLevel(smith: *Smith) u8 {
+    return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
 }
 
 /// Every stream this codec writes ends with the final empty fixed block:
@@ -147,8 +144,8 @@ fn streamSeed(comptime stream: []const u8) [8 + 4 + stream.len]u8 {
 }
 
 /// A `fuzzStreamRoundTrip` or `fuzzReaderMachinery` seed in Smith's
-/// serialized form: the little-endian level `smith.value(encode.Level)`
-/// consumes, then the `u32-le` length plus bytes `smith.slice` consumes.
+/// serialized form: the little-endian level `smith.value(u8)` consumes, then
+/// the `u32-le` length plus bytes `smith.slice` consumes.
 fn sliceSeed(comptime level: u64, comptime bytes: []const u8) [12 + bytes.len]u8 {
     @setEvalBranchQuota(10_000);
     var seed: [12 + bytes.len]u8 = undefined;
@@ -359,9 +356,9 @@ fn shapeSeed(
     return seed;
 }
 
-/// Seeds for `fuzzRoundTrip`: the Smith values the shape builder reads, so each
-/// seed pins a structure instead of relying on the fuzzer to grow one. `0` is
-/// `fast`, `1` is `ratio`, `2` is `@"0"` (stored-only).
+/// Seeds for `fuzzRoundTrip`: the Smith values the shape builder reads, so
+/// each seed pins a structure instead of relying on the fuzzer to grow one.
+/// `1` and `6` are the implemented levels; `5` is reserved.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -372,11 +369,11 @@ const roundtrip_corpus: []const []const u8 = &.{
     // A 2048-byte phrase, eight bytes long, repeated: the shape reads a
     // phrase length, then that many content bytes.
     &shapeSeed(0, .phrase, 2048, &(u64Le(8) ++ [8]u8{ 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h' })),
-    // 70000 bytes of 'Z' at the stored-only level: two stored blocks plus the
-    // final empty fixed block.
-    &shapeSeed(2, .run, 70_000, &u64Le(0x5a)),
-    // The reserved ratio mode: `error.Unimplemented`, never a silent alias.
-    &shapeSeed(1, .random, 0, ""),
+    // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
+    // fixed block.
+    &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
+    // A reserved level: `error.Unimplemented`, never a silent alias.
+    &shapeSeed(5, .random, 0, ""),
 };
 
 /// The whole one-shot codec, on the shapes a compressor handles worst.
@@ -390,23 +387,23 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// final empty fixed block (`03 00` where byte-aligned), and the decode writes
 /// nothing past the decoded length.
 fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(encode.Level);
+    const level = smith.value(u8);
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
-    if (level == .ratio) {
-        // encode.Level's contract: the ratio mode is `error.Unimplemented` on
+    if (level != 1 and level != 6) {
+        // The level contract: a reserved level is `error.Unimplemented` on
         // both layers, never silent aliasing.
         var tiny: [8]u8 = undefined;
         try testing.expectError(
             error.Unimplemented,
-            encode.compress(source, &tiny, .{ .level = .ratio }),
+            encode.compress(source, &tiny, .{ .level = 5 }),
         );
         var sink: Io.Writer.Discarding = .init(&.{});
         var fixed_in: Io.Reader = .fixed(source);
         try testing.expectError(
             error.ReadFailed,
-            Writer.streamAll(&fixed_in, &sink.writer, .{ .level = .ratio }),
+            Writer.streamAll(&fixed_in, &sink.writer, .{ .level = 5 }),
         );
         return;
     }
@@ -550,8 +547,8 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
 /// encoder turns into matches across blocks.
 const stream_corpus: []const []const u8 = &.{
     &sliceSeed(0, "the quick brown fox " ** 8),
-    // implementedLevel maps pick 1 to the stored-only .@"0" (pick+1 is the
-    // Level backing int: 2 = .@"0"), with real content so stored blocks emit.
+    // implementedLevel's pick 1 is level 6 (pick 0 is level 1), with real
+    // content so blocks emit.
     &sliceSeed(1, "z" ** 1024),
 };
 
@@ -1144,9 +1141,8 @@ fn buildBomb(smith: *Smith, shape: Shape, buf: []u8) usize {
 /// decoded into a cap below its decoded length (any cap, including the exact
 /// boundary `len - 1`), which must return `BufferTooSmall` and leave every
 /// byte past the cap untouched, then at the exact length (identity) and with
-/// slack (the guard region untouched). The stored-only level decodes the same
-/// source through the passthrough path, so the cap rule is not a property of
-/// the match finder.
+/// slack (the guard region untouched). Both levels run the same cap rule, so
+/// it is not a property of one match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const level = implementedLevel(smith);
     const shape = smith.value(Shape);
@@ -1157,7 +1153,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const c_len = try encode.compress(source, &compressed, .{ .level = level });
     const bomb = compressed[0..c_len];
     try testing.expect(c_len <= encode.maxCompressedLength(source.len));
-    if (level != .@"0" and shape == .run and source.len >= 1024) {
+    if (shape == .run and source.len >= 1024) {
         // The bomb property, where the shape pins it: a run of at least a
         // KiB is almost all 258-byte matches (`§3.2.5`), so its stream is a
         // small fraction of its output and a cap that ignored the decoded
@@ -1197,12 +1193,12 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
 }
 
 /// Seeds for `fuzzAmplification`: a run and a phrase, at the fast and
-/// stored-only levels, so the cap boundary runs over a match-heavy and a
-/// passthrough stream.
+/// implemented levels, so the cap boundary runs over the dynamic and fixed
+/// block forms.
 const amplification_corpus: []const []const u8 = &.{
     &shapeSeed(0, .run, 8192, &u64Le(0x41)),
     &shapeSeed(0, .phrase, 4096, &u64Le(16) ++ "0123456789abcdef"),
-    &shapeSeed(2, .run, 4096, &u64Le(0x5a)),
+    &shapeSeed(6, .run, 4096, &u64Le(0x5a)),
 };
 
 test "flate fuzz: amplification caps" {

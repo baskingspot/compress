@@ -21,8 +21,6 @@
 const std = @import("std");
 const testing = std.testing;
 
-const fastmem = @import("fastmem");
-
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const adler32 = @import("adler32.zig");
@@ -31,11 +29,8 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
-/// The flate level type, re-exported (see `flate.encode.Level`). The level
-/// also selects the header's FLEVEL bits (`flgFor`). `.ratio` is not
-/// implemented: `compress` returns `error.Unimplemented` for it.
-pub const Level = framing.Level;
-/// Encoder configuration. `.{}` is the default: the fast level.
+/// Encoder configuration. `.{}` is the default: level 1. The level also
+/// selects the header's FLEVEL bits (`flgFor`).
 pub const Options = framing.Options;
 /// RFC 1950 §2.2 — the header's length: CMF and FLG.
 pub const header_len = framing.header_len;
@@ -67,7 +62,7 @@ pub fn maxCompressedLength(input_len: usize) usize {
 /// `flgFor(level, fdict)`. `fdict` sets FDICT (bit 5) — the encoder sets it
 /// exactly when a DICTID follows the header. Nothing else depends on the
 /// clock or the environment, so the output is reproducible (`§2.2`).
-pub fn writeHeader(target: *[header_len]u8, level: Level, fdict: bool) void {
+pub fn writeHeader(target: *[header_len]u8, level: u8, fdict: bool) void {
     target[0] = cmf;
     target[1] = flgFor(level, fdict);
 }
@@ -83,28 +78,25 @@ pub fn writeDictId(target: *[dict_id_len]u8, dict: []const u8) void {
 /// The FLG byte `compress` writes for `level` (`§2.2`): FLEVEL in bits 6-7,
 /// FDICT (bit 5) set exactly when `fdict` is, FCHECK in bits 0-4. FLEVEL
 /// follows the bands C zlib and Go use: levels 0 and 1 give 0, 2 to 5 give 1,
-/// `.fast` and 6 give 2, and 7 to 9 give 3. It is only a hint ("not needed
-/// for decompression"). FCHECK is the smallest value that makes `CMF*256 +
-/// FLG` a multiple of 31, as the RFC requires ("CMF and FLG, when viewed as a
-/// 16-bit unsigned integer stored in MSB order (CMF*256 + FLG), is a multiple
-/// of 31"), so the pair always passes `decode.checkHeader`. C zlib's naive
+/// 6 gives 2, and 7 to 9 give 3. It is only a hint ("not needed for
+/// decompression"). FCHECK is the smallest value that makes `CMF*256 + FLG` a
+/// multiple of 31, as the RFC requires ("CMF and FLG, when viewed as a 16-bit
+/// unsigned integer stored in MSB order (CMF*256 + FLG), is a multiple of
+/// 31"), so the pair always passes `decode.checkHeader`. C zlib's naive
 /// emission with FDICT and FLEVEL 0 gives FCHECK = 31 (`78 3f`), which is 0
 /// mod 31 and fits the field; ours is minimal, so the corner only arises when
 /// decoding.
 ///
-/// `.ratio` is not implemented, but this function is total: it reports
-/// FLEVEL 2, the same as `.fast`.
-pub fn flgFor(level: Level, fdict: bool) u8 {
+/// This function is total: a reserved level (one `compress` rejects) reports
+/// FLEVEL 2, the default-algorithm band level 1 writes, never `unreachable`
+/// (undefined behavior in ReleaseFast).
+pub fn flgFor(level: u8, fdict: bool) u8 {
     const flevel: u8 = switch (level) {
-        .@"0", .@"1" => 0,
-        .@"2", .@"3", .@"4", .@"5" => 1,
-        .fast, .@"6" => 2,
-        .@"7", .@"8", .@"9" => 3,
-        // `compress` never emits a stream for `.ratio`, but this function is
-        // public, so it must be total: `unreachable` here would be undefined
-        // behavior in ReleaseFast. Report the default-algorithm band, the same
-        // FLEVEL `.fast` writes.
-        .ratio => 2,
+        0, 1 => 0,
+        2, 3, 4, 5 => 1,
+        6 => 2,
+        7, 8, 9 => 3,
+        else => 2,
     };
     const fdict_bit: u8 = if (fdict) decode.flg_fdict else 0;
     return flevel << 6 | fdict_bit | fcheck(flevel, fdict);
@@ -131,7 +123,7 @@ pub fn writeTrailer(target: *[trailer_len]u8, adler: u32) void {
 /// the stream: size it with `maxCompressedLength`, although a smaller target
 /// can still fit when the data compresses under the bound. After an error,
 /// `target`'s contents are unspecified; nothing is written past its end.
-/// Returns `error.Unimplemented` for the `.ratio` level.
+/// Returns `error.Unimplemented` for a reserved level.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§2.2`): FDICT
 /// is set and the dictionary's Adler-32 written as DICTID, and the compressor
@@ -163,7 +155,7 @@ test "encode: the emitted stream is the deterministic one" {
     const stream = target[0..len];
 
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
-    try testing.expectEqual(@as(u8, 0x9c), stream[1]); // FLEVEL 2, FCHECK 28
+    try testing.expectEqual(@as(u8, 0x01), stream[1]); // FLEVEL 0, FCHECK 1
     const header = @as(u16, stream[0]) * 256 + @as(u16, stream[1]);
     try testing.expectEqual(@as(u16, 0), header % 31);
     try testing.expectEqual(@as(u8, 0), stream[1] & 0x20); // FDICT clear
@@ -181,14 +173,14 @@ test "encode: the emitted stream is the deterministic one" {
 }
 
 test "encode: the empty stream is the golden bytes" {
-    // RFC 1950 §2.2 — an empty payload is a valid stream: the header, the
-    // final empty fixed block (`03 00`, flate's uniform ending), and the
-    // Adler-32 of nothing, 1. The hostile-header pins in `fuzz.zig` carry the
-    // same bytes; Go's `zlibTests` "empty" vector is byte-identical.
+    // RFC 1950 §2.2 — an empty payload is a valid stream: the header (the
+    // default level 1's FLEVEL 0 band), the final empty fixed block
+    // (`03 00`, flate's uniform ending), and the Adler-32 of nothing, 1. The
+    // hostile-header pins in `fuzz.zig` carry the same bytes.
     var target: [maxCompressedLength(0)]u8 = undefined;
     const len = try compress("", &target, .{});
     try testing.expectEqualSlices(u8, &[_]u8{
-        0x78, 0x9c, // header: CM=8, CINFO=7, FLEVEL 2, FCHECK 28
+        0x78, 0x01, // header: CM=8, CINFO=7, FLEVEL 0, FCHECK 1
         0x03, 0x00, // final empty fixed block
         0x00, 0x00, 0x00, 0x01, // Adler-32 of nothing
     }, target[0..len]);
@@ -197,23 +189,24 @@ test "encode: the empty stream is the golden bytes" {
 test "encode: FLEVEL follows the level bands" {
     // RFC 1950 §2.2 — FLEVEL is informational ("not needed for
     // decompression"); the bands are C zlib's and Go's: {0,1} -> 0,
-    // {2-5} -> 1, {fast, 6} -> 2, {7-9} -> 3. python3's zlib (the C
-    // reference) writes 78 01 at level 0/1, 78 9c at level 6, and 78 da at
-    // level 9. `.ratio` never emits a stream.
-    const cases = [_]struct { level: Level, flg: u8 }{
-        .{ .level = .fast, .flg = 0x9c },
-        .{ .level = .@"0", .flg = 0x01 },
-        .{ .level = .@"1", .flg = 0x01 },
-        .{ .level = .@"2", .flg = 0x5e },
-        .{ .level = .@"5", .flg = 0x5e },
-        .{ .level = .@"6", .flg = 0x9c },
-        .{ .level = .@"7", .flg = 0xda },
-        .{ .level = .@"9", .flg = 0xda },
+    // {2-5} -> 1, {6} -> 2, {7-9} -> 3. python3's zlib (the C reference)
+    // writes 78 01 at level 0/1, 78 9c at level 6, and 78 da at level 9.
+    const cases = [_]struct { level: u8, flg: u8 }{
+        .{ .level = 0, .flg = 0x01 },
+        .{ .level = 1, .flg = 0x01 },
+        .{ .level = 2, .flg = 0x5e },
+        .{ .level = 5, .flg = 0x5e },
+        .{ .level = 6, .flg = 0x9c },
+        .{ .level = 7, .flg = 0xda },
+        .{ .level = 9, .flg = 0xda },
     };
+    for (cases) |case| try testing.expectEqual(case.flg, flgFor(case.level, false));
+
+    // The implemented levels emit a stream carrying the matching byte.
     var target: [64]u8 = undefined;
-    for (cases) |case| {
-        const len = try compress("x", &target, .{ .level = case.level });
-        try testing.expectEqual(case.flg, target[1]);
+    for ([_]u8{ 1, 6 }) |level| {
+        const len = try compress("x", &target, .{ .level = level });
+        try testing.expectEqual(flgFor(level, false), target[1]);
         const header = @as(u16, target[0]) * 256 + @as(u16, target[1]);
         try testing.expectEqual(@as(u16, 0), header % 31);
         try testing.expectEqual(@as(u8, 0), target[1] & 0x20);
@@ -221,27 +214,29 @@ test "encode: FLEVEL follows the level bands" {
     }
 }
 
-test "encode: the reserved seat's FLG is defined, never unreachable" {
-    // `.ratio` is not implemented: `compress` returns `error.Unimplemented`
-    // and never emits a stream. `flgFor` is public, so it must be total: the
-    // band is the default algorithm's (FLEVEL 2, the band `.fast` emits), and
-    // the pair still satisfies §2.2's FCHECK arithmetic. An `unreachable`
-    // here would be undefined behavior in ReleaseFast through the public
-    // surface.
-    const flg = flgFor(.ratio, false);
-    try testing.expectEqual(@as(u8, 0x9c), flg);
+test "encode: a reserved level's FLG is defined, never unreachable" {
+    // A reserved level is not implemented: `compress` returns
+    // `error.Unimplemented` and never emits a stream. `flgFor` is public, so
+    // it must be total: it reports the level's own FLEVEL band (5 is the
+    // fast band, FLEVEL 1), and the pair still satisfies §2.2's FCHECK
+    // arithmetic. An `unreachable` here would be undefined behavior in
+    // ReleaseFast through the public surface.
+    const flg = flgFor(5, false);
+    try testing.expectEqual(@as(u8, 0x5e), flg);
     const header = @as(u16, cmf) * 256 + @as(u16, flg);
     try testing.expectEqual(@as(u16, 0), header % 31);
     try testing.expectEqual(@as(u8, 0), flg & 0x20); // FDICT clear
 }
 
-test "encode: the ratio seat is unimplemented, never aliased" {
-    // `.ratio` is not implemented: `error.Unimplemented`, and the target is
-    // left untouched.
+test "encode: a reserved level is unimplemented, never aliased" {
+    // A reserved level: `error.Unimplemented`, and the target is left
+    // untouched.
     var target: [64]u8 = undefined;
-    sentinel.fill(&target);
-    try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = .ratio }));
-    try sentinel.expect(&target, 0);
+    for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
+        sentinel.fill(&target);
+        try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = level }));
+        try sentinel.expect(&target, 0);
+    }
 }
 
 test "encode: a small target fails, an exact one fits" {
@@ -292,21 +287,23 @@ test "encode: the bound holds for every shape" {
         const len = try compress(source, target, .{});
         try testing.expect(len <= maxCompressedLength(source.len));
     }
-    // A single-byte run of every block-split size: the bound is tight at the
-    // stored fallback's worst case.
-    const run = try testing.allocator.alloc(u8, 3 * 65535 + 17);
-    defer testing.allocator.free(run);
-    fastmem.set(u8, run, 0x41);
-    const target = try testing.allocator.alloc(u8, maxCompressedLength(run.len));
-    defer testing.allocator.free(target);
-    const len = try compress(run, target, .{ .level = .@"0" });
-    // The stored-only level hits flate's body bound exactly; the container's
+    // Incompressible bytes across four block splits: the stored fallback hits
+    // flate's body bound exactly, at both implemented levels. The container's
     // bound reserves the DICTID's 4 bytes on top of it, used or not.
-    try testing.expectEqual(
-        framing.header_len + framing.bodyMaxCompressedLength(run.len) + framing.trailer_len,
-        len,
-    );
-    try testing.expectEqual(maxCompressedLength(run.len) - framing.dict_id_len, len);
+    const noise = try testing.allocator.alloc(u8, 3 * 65535);
+    defer testing.allocator.free(noise);
+    var prng: std.Random.DefaultPrng = .init(0x5EED);
+    prng.random().bytes(noise);
+    const target = try testing.allocator.alloc(u8, maxCompressedLength(noise.len));
+    defer testing.allocator.free(target);
+    for ([_]u8{ 1, 6 }) |level| {
+        const len = try compress(noise, target, .{ .level = level });
+        try testing.expectEqual(
+            framing.header_len + framing.bodyMaxCompressedLength(noise.len) + framing.trailer_len,
+            len,
+        );
+        try testing.expectEqual(maxCompressedLength(noise.len) - framing.dict_id_len, len);
+    }
 }
 
 test "encode: the golden payloads re-encode to decodable streams" {
@@ -341,8 +338,7 @@ test "encode: the dictionary header is FDICT plus the whole dictionary's Adler-3
     const len = try compress(source, &stream, .{ .dict = dict });
 
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
-    try testing.expectEqual(flgFor(.fast, true), stream[1]);
-    try testing.expectEqual(@as(u8, 0xbb), stream[1]); // FLEVEL 2 + FDICT + FCHECK
+    try testing.expectEqual(flgFor(1, true), stream[1]);
     try testing.expectEqual(@as(u16, 0), (@as(u16, stream[0]) * 256 + stream[1]) % 31);
     try testing.expectEqual(adler32.adler32(1, dict), readInt(u32, stream[2..6]));
     try testing.expectEqual(
@@ -354,10 +350,10 @@ test "encode: the dictionary header is FDICT plus the whole dictionary's Adler-3
     // with FLEVEL 0 and FDICT the partial value is already 0 mod 31, so the
     // header is `78 20` — the C reference's naive arithmetic writes `78 3f`
     // there, and both are conformant (§2.2).
-    try testing.expectEqual(@as(u8, 0x20), flgFor(.@"0", true));
-    try testing.expectEqual(@as(u8, 0x01), flgFor(.@"0", false));
-    try testing.expectEqual(@as(u16, 0), (@as(u16, 0x78) * 256 + flgFor(.@"0", true)) % 31);
-    for ([_]Level{ .fast, .@"0", .@"1", .@"5", .@"6", .@"9" }) |level| {
+    try testing.expectEqual(@as(u8, 0x20), flgFor(0, true));
+    try testing.expectEqual(@as(u8, 0x01), flgFor(0, false));
+    try testing.expectEqual(@as(u16, 0), (@as(u16, 0x78) * 256 + flgFor(0, true)) % 31);
+    for ([_]u8{ 1, 6 }) |level| {
         const flg = flgFor(level, true);
         try testing.expect(flg & decode.flg_fdict != 0);
         try testing.expectEqual(@as(u16, 0), (@as(u16, 0x78) * 256 + flg) % 31);

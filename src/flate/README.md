@@ -5,10 +5,14 @@ a decoder, and `std.Io` streaming adapters. It is the `compress.flate` namespace
 only `std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and never allocates.
 The spec is vendored at `docs/research/specs/rfc1951-deflate.txt`.
 
-The decoder handles stored, fixed-Huffman, and dynamic-Huffman blocks. The encoder
-is a greedy match finder in the style of klauspost/compress level 1 that emits
-fixed-Huffman blocks, storing any block that would not shrink. "Raw" means no
-container: the gzip (RFC 1952) and zlib (RFC 1950) packages wrap this one.
+The decoder handles stored, fixed-Huffman, and dynamic-Huffman blocks. The
+encoder has two levels. Level 1 is a greedy match finder in the style of
+klauspost/compress level 1 that emits fixed-Huffman blocks, storing any block
+that would not shrink. Level 6 is klauspost/compress's level-6 class: their
+wider two-table greedy finder, dynamic-Huffman blocks, and the per-block
+stored/fixed/dynamic dispatch, byte-identical to their flate at level 6 (the
+pinned module version). "Raw" means no container: the gzip (RFC 1952) and zlib
+(RFC 1950) packages wrap this one.
 
 ## Usage
 
@@ -126,11 +130,14 @@ declarations in `encode` and `decode` are shared internals.
   rest of `input` unconsumed, so you can keep parsing after it. Once the final
   block's output is consumed it returns `error.EndOfStream`.
 - **Output.** Deterministic, but not canonical: other encoders emit other valid streams.
-- **Stack.** `compress` keeps a 128 KiB match-finder table on the stack. A `Writer` is
-  about 128 KiB, `Writer.Buffer` adds 96 KiB, and emitting a block uses 64 KiB more, so
-  `Writer.streamAll` peaks near 288 KiB. A `Reader` is about 4 KiB plus its 64 KiB
-  buffer; `decompress` needs a few KiB. On a small stack, heap-allocate the structs and
-  buffers, leaving 64 KiB for `Writer` blocks.
+- **Stack.** `compress` keeps a 128 KiB match-finder table on the stack at
+  level 1; at level 6 it keeps 384 KiB of finder tables, a 257 KiB token list,
+  and the tree scratch, about 650 KiB in all. A `Writer` is about 392 KiB (it
+  reserves the level-6 tables at every level), `Writer.Buffer` adds 96 KiB,
+  and a level-6 block emission uses about 320 KiB more, so `Writer.streamAll`
+  peaks near 810 KiB. A `Reader` is about 4 KiB plus its 64 KiB buffer;
+  `decompress` needs a few KiB. On a small stack, heap-allocate the structs and
+  buffers.
 
 ## Streaming
 
@@ -163,11 +170,14 @@ declarations in `encode` and `decode` are shared internals.
 
 `just test` runs the unit tests: vectors ported from Go's `compress/flate` suite, RFC 1951's
 worked examples, round trips, and overrun checks on every decode. `just flate-oracle`
-cross-checks both directions against python3's `zlib`, `just fuzz` runs the fuzz targets,
-and `just bench` runs the local benchmarks. Local numbers are not performance claims; a
-claim cites a recorded run in `docs/results/`.
+cross-checks both directions against python3's `zlib`, pins level 1's bytes, and checks
+level 6 against klauspost/compress's flate at level 6 byte for byte. `just fuzz` runs the
+fuzz targets, and `just bench` runs the local benchmarks. Local numbers are not
+performance claims; a claim cites a recorded run in `docs/results/`.
 
 ## License
 
-MIT. The match finder follows klauspost/compress's level-1 encoder and the test vectors come
-from golang/go's `compress/flate` (both BSD-3-Clause); see [`THIRD_PARTY.md`](../../THIRD_PARTY.md).
+MIT. The level-1 match finder follows klauspost/compress's level-1 encoder, the level-6
+finder and block emitter follow their level-6 class, and the test vectors come from
+golang/go's `compress/flate` (all BSD-3-Clause); see
+[`THIRD_PARTY.md`](../../THIRD_PARTY.md).

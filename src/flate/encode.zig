@@ -1,21 +1,28 @@
-//! Raw DEFLATE (RFC 1951) encoder, the fast level. `compress` splits the input
-//! into blocks of at most 65535 bytes and encodes each as fixed-Huffman symbols
-//! from a greedy match finder, or as a stored block when that is smaller
-//! (`§3.2.4`), so the output never exceeds `maxCompressedLength`. Every stream
-//! ends with an empty final fixed block (`03 00`); no data block carries BFINAL.
+//! Raw DEFLATE (RFC 1951) encoder, levels 1 and 6. `compress` splits the input
+//! into blocks of at most 65535 bytes and encodes each from a greedy match
+//! finder: level 1 as fixed-Huffman symbols or a stored block when that is
+//! smaller (`§3.2.4`); level 6 as klauspost/compress's level-6 class — their
+//! wider finder, dynamic-Huffman blocks (`§3.2.7`, `dynamic.zig`), and the
+//! per-block stored/fixed/dynamic dispatch. Either way the output never
+//! exceeds `maxCompressedLength`. Every stream ends with an empty final fixed
+//! block (`03 00`); no data block carries BFINAL.
 //!
-//! The finder follows klauspost/compress level 1: a single-slot table of
-//! `1 << 15` absolute stream positions keyed by a 5-byte hash, a 4-byte
+//! The level-1 finder follows klauspost/compress level 1: a single-slot table
+//! of `1 << 15` absolute stream positions keyed by a 5-byte hash, a 4-byte
 //! confirm, an accelerating skip, backward extension into the preceding
 //! literals, minimum match 4, and a 32768-byte distance cap (`§3.2.5`). Its
 //! window is a block's 32 KiB of history followed by the block, so matches
 //! cross block boundaries as the format allows (`§3.2.3`). A preset
 //! dictionary (`Options.dict`) is history in front of that window: the finder
 //! is primed from the dictionary's tail and may emit distances that reach
-//! into it.
+//! into it. The level-6 finder (`Finder6`, `encodeTokens6`) is their
+//! `fastEncL6`: a 4-byte-hash table plus a 7-byte-hash table with two
+//! candidates per slot, the same window shape, and the same dictionary
+//! priming (a full scan over the dictionary's tail).
 //!
 //! The streaming `Writer` is built on `BitWriter`, `compressBlockStream`,
-//! `emitStoredBlock`, and `writeFinalEmptyBlock`, which are public for it.
+//! `compressBlockStream6`, `emitStoredBlock`, and `writeFinalEmptyBlock`,
+//! which are public for it.
 //!
 //! Format: docs/research/specs/rfc1951-deflate.txt
 //! Lineage: klauspost/compress `flate/level1.go` (`fastEncL1`) and
@@ -35,6 +42,8 @@ const sentinel = internal.sentinel;
 const common = @import("common.zig");
 const readInt = common.readInt;
 const decode = @import("decode.zig");
+const dynamic = @import("dynamic.zig");
+const writer = @import("Writer.zig");
 const golden = @import("golden.zig");
 
 /// The encoder's block size: 65535, the stored-block LEN cap (`§3.2.4`), so any
@@ -123,6 +132,18 @@ fn Window(comptime preset: bool) type {
         inline fn byte(self: Self, pos: usize) u8 {
             if (preset and pos < self.dict.len) return self.dict[pos];
             return self.source[if (preset) pos - self.dict.len else pos];
+        }
+
+        /// The window's bytes at `[start, end)`. Both positions are inside
+        /// the stream's own region (`start >= dict.len`), so this is a plain
+        /// `source` slice; the finder's blocks and literal runs are always
+        /// there.
+        inline fn sourceSlice(self: Self, start: usize, end: usize) []const u8 {
+            const offset = if (preset) self.dict.len else 0;
+            assert(start >= offset);
+            assert(end >= start);
+            assert(end <= offset + self.source.len);
+            return self.source[start - offset .. end - offset];
         }
 
         /// The 4 bytes at window position `pos` (`§3.2.5`'s match confirm).
@@ -259,13 +280,13 @@ const min_match_block_size: usize = 1 + 1 + input_margin;
 /// One Huffman code: its wire bits (the numeral's MSB first on the wire,
 /// `§3.1.1`) and its length. `writeCode` consumes exactly this, so a numeral
 /// cannot be passed where wire bits are expected.
-const Code = struct { bits: u16, len: u5 };
+pub const Code = struct { bits: u16, len: u5 };
 
 /// The wire bits of a canonical code: `§3.2.2` assigns the numeral and
 /// `§3.1.1` transmits its MSB first, so the low `len` bits of the result are
 /// the code in transmission order. (decode.zig's `wireBits` is the decoder's
 /// half of the same transform.)
-fn wireBits(code: u16, len: u5) u16 {
+pub fn wireBits(code: u16, len: u5) u16 {
     return @bitReverse(code) >> @intCast(16 - @as(u6, len));
 }
 
@@ -275,7 +296,7 @@ fn wireBits(code: u16, len: u5) u16 {
 /// `0010111`; 280-287 are 8 bits, `11000000` through `11000111`. Values 286-287
 /// "will never actually occur in the compressed data, but participate in the
 /// code construction", so they are part of the table.
-const fixed_literal_codes: [288]Code = blk: {
+pub const fixed_literal_codes: [288]Code = blk: {
     var codes: [288]Code = undefined;
     for (0..144) |i| codes[i] = .{ .bits = wireBits(@intCast(0x30 + i), 8), .len = 8 };
     for (144..256) |i| codes[i] = .{ .bits = wireBits(@intCast(0x190 + (i - 144)), 9), .len = 9 };
@@ -286,7 +307,7 @@ const fixed_literal_codes: [288]Code = blk: {
 
 /// `§3.2.6` — "Distance codes 0-31 are represented by (fixed-length) 5-bit
 /// codes", so the numeral is the symbol. 30-31 never occur.
-const fixed_distance_codes: [32]Code = blk: {
+pub const fixed_distance_codes: [32]Code = blk: {
     var codes: [32]Code = undefined;
     for (&codes, 0..) |*code, i| code.* = .{ .bits = wireBits(@intCast(i), 5), .len = 5 };
     break :blk codes;
@@ -295,7 +316,7 @@ const fixed_distance_codes: [32]Code = blk: {
 /// `§3.2.5` — the length/distance code tables live once, in decode.zig (the
 /// canonical tables both sides read); the encoder aliases them, so the two
 /// spellings cannot drift.
-const max_match_len = decode.max_match_len;
+pub const max_match_len = decode.max_match_len;
 const length_base = decode.length_base;
 const length_extra = decode.length_extra;
 const distance_base = decode.distance_base;
@@ -303,7 +324,7 @@ const distance_extra = decode.distance_extra;
 
 /// A length symbol ready to emit: the merged-alphabet symbol (257-285), its
 /// extra-bit count, and the extra-bit value.
-const LengthSymbol = struct { symbol: u16, extra_bits: u5, extra_value: u16 };
+pub const LengthSymbol = struct { symbol: u16, extra_bits: u5, extra_value: u16 };
 
 /// `§3.2.5` — length -> its symbol and extra bits, derived at comptime from the
 /// base/extra table above. Index = the length (3-258); 0-2 are unused. Code
@@ -339,11 +360,22 @@ const distance_codes: [history_len + 1]u8 = blk: {
     break :blk table;
 };
 
+/// `§3.2.5` — the length symbol for `length` (3-258): the merged-alphabet
+/// symbol, its extra-bit count, and the extra-bit value. Code 284's entry
+/// covers 227-258 by the table's own arithmetic, and code 285 overwrites 258
+/// with zero extra bits, which is what the encoder emits: 258 is code 285,
+/// the one code with no extra bits.
+pub fn lengthSymbol(length: usize) LengthSymbol {
+    assert(length >= min_length);
+    assert(length <= max_match_len);
+    return length_symbols[length];
+}
+
 /// A distance symbol with its extra bits.
-const DistanceSymbol = struct { symbol: u8, extra_bits: u5, extra: u16 };
+pub const DistanceSymbol = struct { symbol: u8, extra_bits: u5, extra: u16 };
 
 /// `§3.2.5` — the distance symbol for `distance` (1-32768) and its extra bits.
-fn distanceSymbol(distance: usize) DistanceSymbol {
+pub fn distanceSymbol(distance: usize) DistanceSymbol {
     assert(distance >= 1);
     assert(distance <= history_len);
     const symbol = distance_codes[distance];
@@ -399,7 +431,7 @@ pub const BitWriter = struct {
     /// (`§3.1.1`): the block header, extra bits, stored LEN/NLEN. Extra bits
     /// are an ordinary element, so they go out LSB first; `§3.2.5`'s
     /// "most-significant bit first" sentence describes the numeral.
-    fn writeBits(self: *BitWriter, value: u32, n: u5) error{BufferTooSmall}!void {
+    pub fn writeBits(self: *BitWriter, value: u32, n: u5) error{BufferTooSmall}!void {
         assert(n <= 32);
         assert(n == 32 or value >> n == 0);
         assert(self.bit_count < 8);
@@ -410,7 +442,7 @@ pub const BitWriter = struct {
 
     /// Write a Huffman code, MSB-of-code first (`§3.1.1`). `code` carries the
     /// wire bits (see `wireBits`), never the numeral.
-    fn writeCode(self: *BitWriter, code: Code) error{BufferTooSmall}!void {
+    pub fn writeCode(self: *BitWriter, code: Code) error{BufferTooSmall}!void {
         self.bits |= @as(u64, code.bits) << self.bit_count;
         self.bit_count += code.len;
         try self.flushBytes();
@@ -771,34 +803,534 @@ fn compressBlockStateful(
     }
 }
 
-/// Compression level. Numeric zlib-style levels are accepted
-/// (`.{ .level = .@"5" }`) alongside the named ones:
-///
-///   - `.fast`: fixed-Huffman blocks from the match finder, or a stored block
-///     when that is smaller. The default.
-///   - `.ratio`: reserved for a dynamic-Huffman encoder that is not
-///     implemented yet. Selecting it is `error.Unimplemented` (a `Writer` made
-///     with it fails every write); it never falls back to another level.
-///   - `.@"0"`: stored blocks only, the format's passthrough level.
-///   - `.@"1"` to `.@"9"`: the same as `.fast`.
-pub const Level = enum {
-    fast,
-    ratio,
-    @"0",
-    @"1",
-    @"2",
-    @"3",
-    @"4",
-    @"5",
-    @"6",
-    @"7",
-    @"8",
-    @"9",
+// ---------------------------------------------------------------------------
+// Level 6: klauspost/compress's `fastEncL6` finder and its block pipeline.
+// The scan and its two tables are a faithful port of `flate/level6.go`
+// (attribution in THIRD_PARTY.md); the token list, the trees, and the block
+// dispatch are in dynamic.zig. Byte-identity with the reference is the
+// contract (`src/flate/README.md`), so the arithmetic below — including the
+// "empty table entry" rejection — mirrors theirs, not the level-1 port's
+// wrapping-position scheme.
+// ---------------------------------------------------------------------------
+
+/// klauspost's level-6 `inputMargin` (`12 - 1`): the scan stops this far
+/// from the block's end so its 8-byte loads stay in bounds.
+const input_margin_6: usize = 12 - 1;
+
+/// klauspost's `minNonLiteralBlockSize` for level 6: below this the whole
+/// block is literals, and the finder sets the token count to the block
+/// length (which sends it to the literals-only block form).
+const min_non_literal_block_size_6: usize = 1 + 1 + input_margin_6;
+
+/// The scan's skip acceleration: `next_s = s + 1 + (s - next_emit) >> 7`.
+const skip_log_6: u6 = 7;
+
+/// klauspost's 4-byte hash multiplier (`hashLen(..., 4)`).
+const prime4bytes: u32 = 2654435761;
+
+/// klauspost's 7-byte hash multiplier.
+const prime7bytes: u64 = 58295818150454627;
+
+/// The finder's long-table entry: the two most recent positions with a
+/// hash, as absolute stream positions (wrapping u32).
+const EntryPrev = struct { cur: u32 = 0, prev: u32 = 0 };
+
+/// The level-6 finder's tables (klauspost's `fastEncL6` pair): a 4-byte-hash
+/// table and a 7-byte-hash table with two candidates per slot. 384 KiB,
+/// zeroed once per stream.
+pub const Finder6 = struct {
+    table: [table_size]u32,
+    b_table: [table_size]EntryPrev,
+
+    /// Zero the tables. An entry of 0 names a position before the window
+    /// (`finder_origin` is above the distance cap), so a cleared slot never
+    /// yields a candidate — the sentinel the scan relies on.
+    pub fn clear(self: *Finder6) void {
+        fastmem.set(u32, &self.table, 0);
+        fastmem.set(EntryPrev, &self.b_table, .{});
+    }
 };
 
-/// Encoder configuration. `.{}` is the default: the fast level.
+/// The finder's absolute-position origin: klauspost starts `cur` at
+/// `maxStoreBlockSize`, so a zero-initialized slot is out of reach of the
+/// distance cap and can never be a candidate.
+pub const finder_origin: u32 = 65535;
+
+/// The 4-byte hash into the 15-bit table: klauspost's `hashLen(u, 15, 4)`.
+inline fn hash4(u: u64) usize {
+    return @intCast((@as(u32, @truncate(u)) *% prime4bytes) >> (32 - table_bits));
+}
+
+/// The 7-byte hash into the 15-bit table: klauspost's `hash7(u, 15)`.
+inline fn hash7(u: u64) usize {
+    return @intCast(((u << 8) *% prime7bytes) >> (64 - table_bits));
+}
+
+/// The 15-bit tables' hash mask, as the distance cap: klauspost's
+/// `maxMatchOffset`.
+const max_match_offset_6: i32 = 1 << 15;
+
+/// A table entry's window position when it names a position the scan may
+/// read at `s` — klauspost's `t = entry - cur; s - t < maxMatchOffset` gate,
+/// made total. A cleared entry, an entry the window has slid past, and an
+/// entry at or ahead of `s` all return null; the reference relies on the
+/// first two being cleared by its buffer rebase and the third being
+/// unreachable, and this port's checks accept exactly the same candidates.
+inline fn candidateAt(entry: u32, s_abs: u32, s_at: usize, base: u32) ?usize {
+    const distance: i32 = @bitCast(s_abs -% entry);
+    if (distance < 1 or distance >= max_match_offset_6) return null;
+    const t_at: usize = entry -% base;
+    if (t_at >= s_at) return null;
+    return t_at;
+}
+
+/// klauspost's `matchlen`: the match length between `s` and `t` (window
+/// positions, `t < s`), capped at `max_match_len - 4` — the caller adds the
+/// four confirmed bytes back. `limit` is the block's end position.
+inline fn matchLen6(
+    comptime preset: bool,
+    window: Window(preset),
+    s: usize,
+    t: usize,
+    limit: usize,
+) usize {
+    const s1 = @min(s + (max_match_len - 4), limit);
+    return window.matchLength(t, s, s1);
+}
+
+/// klauspost's `matchlenLong`: the match length between `s` and `t`, extended
+/// as far as the block allows.
+inline fn matchLenLong6(
+    comptime preset: bool,
+    window: Window(preset),
+    s: usize,
+    t: usize,
+    limit: usize,
+) usize {
+    return window.matchLength(t, s, limit);
+}
+
+/// Store `next_s` (and nothing else) in both tables: klauspost's
+/// `e.table[nextHashS] = nextS; e.bTable[nextHashL] = {nextS, old cur}`.
+inline fn storeAhead(
+    finder: *Finder6,
+    next_hash_s: usize,
+    next_hash_l: usize,
+    next_s: usize,
+    base: u32,
+) void {
+    const entry: u32 = base +% @as(u32, @truncate(next_s));
+    finder.table[next_hash_s] = entry;
+    const slot = &finder.b_table[next_hash_l];
+    // The old cur is read before the store: Zig lowers a struct-literal
+    // assignment field-wise, so `slot.cur` inside the literal would already
+    // be the new value.
+    const prev = slot.cur;
+    slot.* = .{ .cur = entry, .prev = prev };
+}
+
+/// The level-6 scan (klauspost's `fastEncL6.Encode`): fill `tokens` with the
+/// block's literals and matches and leave both tables holding the block's
+/// positions. `window` is the finder's window (history followed by the
+/// block, `§3.2.3`), `block_start`/`block_end` are window positions, and
+/// `base` is the absolute stream position of the window's first byte.
+///
+/// The labeled control flow is the reference's scan cascade, kept whole in
+/// the parent for the same reason as the level-1 scan (`src/flate/AGENTS.md`,
+/// Deviations): the pure logic is already extracted (`candidateAt`,
+/// `matchLen6`, `matchLenLong6`, `storeAhead`).
+fn encodeTokens6(
+    comptime preset: bool,
+    window: Window(preset),
+    block_start: usize,
+    block_end: usize,
+    tokens: *dynamic.TokenList,
+    finder: *Finder6,
+    base: u32,
+) void {
+    const block_len = block_end - block_start;
+    if (block_len < min_non_literal_block_size_6) {
+        // The reference's marker: the count is the block length, and the
+        // token array stays untouched. Only `compressBlock6` reads it, and it
+        // handles this case before calling here; the dictionary priming
+        // discards the list.
+        tokens.n = @intCast(block_len);
+        return;
+    }
+    var next_emit = block_start;
+    var s = block_start;
+    const s_limit = block_end - input_margin_6;
+    var cv = window.load64At(s);
+    var repeat: usize = 1;
+
+    scan: while (true) {
+        var next_s = s;
+        var l: usize = 0;
+        var t: usize = 0;
+        inner: while (true) {
+            const next_hash_s = hash4(cv);
+            const next_hash_l = hash7(cv);
+            s = next_s;
+            next_s = s + 1 + ((s - next_emit) >> skip_log_6);
+            if (next_s > s_limit) break :scan;
+            const s_candidate = finder.table[next_hash_s];
+            const l_candidate = finder.b_table[next_hash_l];
+            const next = window.load64At(next_s);
+            const s_abs = base +% @as(u32, @truncate(s));
+            finder.table[next_hash_s] = s_abs;
+            finder.b_table[next_hash_l] = .{ .cur = s_abs, .prev = l_candidate.cur };
+            const next_hash_s_next = hash4(next);
+            const next_hash_l_next = hash7(next);
+            const cv32: u32 = @truncate(cv);
+            const next32: u32 = @truncate(next);
+
+            // The long table's current entry.
+            if (candidateAt(l_candidate.cur, s_abs, s, base)) |tc| {
+                t = tc;
+                if (cv32 == window.load32At(tc)) {
+                    // The long candidate confirms four bytes.
+                    storeAhead(finder, next_hash_s_next, next_hash_l_next, next_s, base);
+                    if (candidateAt(l_candidate.prev, s_abs, s, base)) |t2| {
+                        if (cv32 == window.load32At(t2)) {
+                            l = matchLen6(preset, window, s + 4, tc + 4, block_end) + 4;
+                            const ml1 = matchLen6(preset, window, s + 4, t2 + 4, block_end) + 4;
+                            if (ml1 > l) {
+                                t = t2;
+                                l = ml1;
+                            }
+                        }
+                    }
+                    break :inner;
+                }
+                // The current entry missed; the previous one may still hit.
+                if (candidateAt(l_candidate.prev, s_abs, s, base)) |t2| {
+                    if (cv32 == window.load32At(t2)) {
+                        storeAhead(finder, next_hash_s_next, next_hash_l_next, next_s, base);
+                        t = t2;
+                        break :inner;
+                    }
+                }
+            }
+
+            // The short table's entry.
+            if (candidateAt(s_candidate, s_abs, s, base)) |tc| {
+                if (cv32 == window.load32At(tc)) {
+                    t = tc;
+                    l = matchLen6(preset, window, s + 4, tc + 4, block_end) + 4;
+                    const next_candidate = finder.b_table[next_hash_l_next];
+                    storeAhead(finder, next_hash_s_next, next_hash_l_next, next_s, base);
+                    // The previous match's distance, checked at s+1.
+                    const t2 = s - repeat + 1;
+                    if (@as(u32, @truncate(cv >> 8)) == window.load32At(t2)) {
+                        const ml = matchLen6(preset, window, s + 5, t2 + 4, block_end) + 4;
+                        if (ml > l) {
+                            t = t2;
+                            l = ml;
+                            s += 1;
+                            break :inner;
+                        }
+                    }
+                    // The long table's two entries at the next position.
+                    const next_abs = base +% @as(u32, @truncate(next_s));
+                    if (candidateAt(next_candidate.cur, next_abs, next_s, base)) |tn| {
+                        if (next32 == window.load32At(tn)) {
+                            const ml = matchLen6(preset, window, next_s + 4, tn + 4, block_end) + 4;
+                            if (ml > l) {
+                                t = tn;
+                                s = next_s;
+                                l = ml;
+                            }
+                        }
+                        if (candidateAt(next_candidate.prev, next_abs, next_s, base)) |tn2| {
+                            if (next32 == window.load32At(tn2)) {
+                                const ml = matchLen6(
+                                    preset,
+                                    window,
+                                    next_s + 4,
+                                    tn2 + 4,
+                                    block_end,
+                                ) + 4;
+                                if (ml > l) {
+                                    t = tn2;
+                                    s = next_s;
+                                    l = ml;
+                                    break :inner;
+                                }
+                            }
+                        }
+                    }
+                    break :inner;
+                }
+            }
+            cv = next;
+        }
+
+        // Extend the match: a confirmed four bytes when no length was
+        // computed, or a 258-cap match that may run on.
+        if (l == 0) {
+            l = matchLenLong6(preset, window, s + 4, t + 4, block_end) + 4;
+        } else if (l == max_match_len) {
+            l += matchLenLong6(preset, window, s + l, t + l, block_end);
+        }
+
+        // Try to locate a better match by checking the end of the match: the
+        // long table may hold a candidate whose first bytes mismatch but
+        // whose tail runs on. The skipped bytes are recovered by the
+        // backward extension below.
+        if (s + l < s_limit) {
+            const skip_beginning = 2;
+            const slot = &finder.b_table[hash7(window.load64At(s + l))];
+            const s2 = s + skip_beginning;
+            const s2_i: i32 = @intCast(s2);
+            var t2: i32 = @as(i32, @bitCast(slot.cur -% base)) -%
+                @as(i32, @intCast(l)) +% skip_beginning;
+            if (s2_i -% t2 < max_match_offset_6) {
+                if (t2 >= 0 and t2 < s2_i) {
+                    const l2 = matchLenLong6(preset, window, s2, @intCast(t2), block_end);
+                    if (l2 > l) {
+                        t = @intCast(t2);
+                        l = l2;
+                        s = s2;
+                    }
+                }
+                // The previous candidate's offset is measured against the
+                // possibly updated `l`: the reference reads the current value.
+                t2 = @as(i32, @bitCast(slot.prev -% base)) -%
+                    @as(i32, @intCast(l)) +% skip_beginning;
+                if (t2 >= 0 and t2 < s2_i and s2_i -% t2 < max_match_offset_6) {
+                    const l2 = matchLenLong6(preset, window, s2, @intCast(t2), block_end);
+                    if (l2 > l) {
+                        t = @intCast(t2);
+                        l = l2;
+                        s = s2;
+                    }
+                }
+            }
+        }
+
+        // Extend backwards over the literals already scanned.
+        while (t > 0 and s > next_emit and window.byte(t - 1) == window.byte(s - 1)) {
+            s -= 1;
+            t -= 1;
+            l += 1;
+        }
+        if (next_emit < s) tokens.addLiterals(window.sourceSlice(next_emit, s));
+        tokens.addMatchLong(l, s - t);
+        repeat = s - t;
+        s += l;
+        next_emit = s;
+        if (next_s >= s) s = next_s + 1;
+
+        if (s >= s_limit) {
+            // Index the positions after the match that the scan will never
+            // visit: every second one, both tables.
+            var i = next_s + 1;
+            while (i + 8 < block_end) : (i += 2) {
+                const ahead = window.load64At(i);
+                const entry: u32 = base +% @as(u32, @truncate(i));
+                finder.table[hash4(ahead)] = entry;
+                const slot = &finder.b_table[hash7(ahead)];
+                const prev = slot.cur;
+                slot.* = .{ .cur = entry, .prev = prev };
+            }
+            break :scan;
+        }
+
+        // Store every second position in between, both tables, plus the
+        // long entry one past it.
+        var i = next_s + 1;
+        while (i + 1 < s) : (i += 2) {
+            const ahead = window.load64At(i);
+            const entry: u32 = base +% @as(u32, @truncate(i));
+            finder.table[hash4(ahead)] = entry;
+            const slot = &finder.b_table[hash7(ahead)];
+            const prev = slot.cur;
+            slot.* = .{ .cur = entry, .prev = prev };
+            const slot2 = &finder.b_table[hash7(ahead >> 8)];
+            const prev2 = slot2.cur;
+            slot2.* = .{ .cur = entry +% 1, .prev = prev2 };
+        }
+        cv = window.load64At(s);
+    }
+
+    // The trailing bytes are literals; a block that found nothing at all is
+    // left with no tokens, which sends it to the stored form.
+    if (next_emit < block_end) {
+        if (tokens.n == 0) return;
+        tokens.addLiterals(window.sourceSlice(next_emit, block_end));
+    }
+}
+
+/// One level-6 block: the finder fills `tokens`, then the dispatch picks
+/// stored, fixed, or dynamic (`dynamic.writeBlockFast`). `sync` marks the
+/// stream's final block, whose emission differs (the end-of-block code is
+/// written inline and no table is left open); a final block under 128 bytes
+/// takes klauspost's tiny-block path: stored at 32 bytes or below,
+/// literals-only above.
+fn compressBlock6(
+    comptime preset: bool,
+    window: Window(preset),
+    block_start: usize,
+    block_end: usize,
+    w: *BitWriter,
+    tokens: *dynamic.TokenList,
+    finder: *Finder6,
+    emitter: *dynamic.BlockWriter,
+    base: u32,
+    sync: bool,
+) error{BufferTooSmall}!void {
+    const block_len = block_end - block_start;
+    const block = window.sourceSlice(block_start, block_end);
+    if (sync and block_len < 128) {
+        if (block_len == 0) return;
+        if (block_len <= 32) return emitter.writeStored(w, block);
+        return emitter.writeBlockHuff(w, block, true);
+    }
+    // A block too small to scan has no matches: klauspost's finder marks it
+    // by setting the token count, which only its own `storeFast` reads back
+    // (and only at close, where blocks under 128 bytes are handled above).
+    // Our streaming `flush` and `rebase` can emit such a block mid-stream, so
+    // the stored form is chosen here instead.
+    if (block_len < min_non_literal_block_size_6) return emitter.writeStored(w, block);
+    tokens.reset();
+    encodeTokens6(preset, window, block_start, block_end, tokens, finder, base);
+    return emitter.writeBlockFast(w, tokens, block, sync);
+}
+
+/// The level-6 one-shot block loop: split `source` at `max_block_size`, run
+/// the finder over each block, and end with the final empty fixed block —
+/// the block boundaries and closing bytes klauspost's `NewWriter(w, 6)` +
+/// `Write` + `Close` produce. A full final block is emitted mid-stream
+/// (`sync` false), exactly as the reference's window fill does; only a
+/// partial tail is the stream's final block.
+fn compressBlocks6(
+    comptime preset: bool,
+    window: Window(preset),
+    source: []const u8,
+    target: []u8,
+) error{BufferTooSmall}!usize {
+    const base = finder_origin;
+    var w: BitWriter = .{ .target = target };
+    var finder: Finder6 = undefined;
+    finder.clear();
+    var emitter: dynamic.BlockWriter = .{};
+    var tokens: dynamic.TokenList = .{};
+    if (preset) {
+        // The dictionary seeds the tables exactly as klauspost's
+        // `fillWindow` does: a full scan over its tail, tokens discarded.
+        // The scan sees the dictionary itself as the window's stream, so the
+        // positions it stores (0..dict.len) are the window positions the
+        // block scans use.
+        const dict_window: Window(false) = .{ .dict = &.{}, .source = window.dict };
+        encodeTokens6(false, dict_window, 0, window.dict.len, &tokens, &finder, base);
+        tokens.reset();
+    }
+    var block_start: usize = 0;
+    // A full block is emitted mid-stream only while input follows it: the
+    // stream's last block — full or partial — is the final one (`sync`),
+    // exactly as klauspost's `Write` and `Close` split them (their window
+    // flush runs only when the next fill has data, so an exactly-full input
+    // reaches `Close` and is processed with `sync`).
+    while (source.len - block_start > max_block_size) {
+        try compressBlock6(
+            preset,
+            window,
+            window.at(block_start),
+            window.at(block_start + max_block_size),
+            &w,
+            &tokens,
+            &finder,
+            &emitter,
+            base,
+            false,
+        );
+        block_start += max_block_size;
+    }
+    if (block_start < source.len) {
+        try compressBlock6(
+            preset,
+            window,
+            window.at(block_start),
+            window.at(source.len),
+            &w,
+            &tokens,
+            &finder,
+            &emitter,
+            base,
+            true,
+        );
+    }
+    // A final block that was exactly full was emitted mid-stream, so its
+    // end-of-block code is still owed: the ending flushes it first, exactly
+    // where klauspost's `close` reaches it through `writeStoredHeader(0,
+    // true)`.
+    try emitter.flushEob(&w);
+    try writeFinalEmptyBlock(&w);
+    try w.finish();
+    assert(w.pos <= maxCompressedLength(source.len));
+    return w.pos;
+}
+
+/// The streaming level-6 block encode for the `Writer`: `source` is the
+/// window (history followed by the block), `block_start`/`block_end` are
+/// window positions, and `base` is the absolute stream position of
+/// `source[0]`. `prime_dict` is true on a stream's first block when the
+/// window's front is a preset dictionary: the tables are seeded by the same
+/// scan klauspost's `fillWindow` runs over the dictionary's tail.
+///
+/// Returns `error.BufferTooSmall` if `w`'s target cannot hold the block.
+pub fn compressBlockStream6(
+    source: []const u8,
+    block_start: usize,
+    block_end: usize,
+    w: *BitWriter,
+    finder: *Finder6,
+    emitter: *dynamic.BlockWriter,
+    base: u32,
+    prime_dict: bool,
+    sync: bool,
+) error{BufferTooSmall}!void {
+    const window: Window(false) = .{ .dict = &.{}, .source = source };
+    var tokens: dynamic.TokenList = .{};
+    if (prime_dict) {
+        encodeTokens6(false, window, 0, block_start, &tokens, finder, base);
+        tokens.reset();
+    }
+    try compressBlock6(
+        false,
+        window,
+        block_start,
+        block_end,
+        w,
+        &tokens,
+        finder,
+        emitter,
+        base,
+        sync,
+    );
+}
+
+/// Whether `level` is implemented: 1 (fixed Huffman) and 6 (dynamic Huffman)
+/// are; the reserved seats (2-5, 7-9, and anything outside 1-9) are
+/// `error.Unimplemented`, never a silent alias of another level. The
+/// containers' shared driver asks through this, so the rule lives once.
+pub fn levelImplemented(level: u8) bool {
+    return level == 1 or level == 6;
+}
+
+/// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = struct {
-    level: Level = .fast,
+    /// The zlib-scale compression level, 1-9:
+    ///
+    ///   - 1 (the default): fixed-Huffman blocks from the level-1 match
+    ///     finder, or a stored block when that is smaller.
+    ///   - 6: klauspost/compress's level-6 class — their wider greedy match
+    ///     finder, dynamic-Huffman blocks (`§3.2.7`), and the per-block
+    ///     stored/fixed/dynamic dispatch. Byte-identical to
+    ///     klauspost/compress's flate at level 6 (the pinned module version).
+    ///   - 2-5 and 7-9 are reserved seats: `error.Unimplemented`, never a
+    ///     silent alias, and so is any level outside 1-9.
+    level: u8 = 1,
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
     /// of the stream, which the finder's table is primed from and a match may
     /// reach into. Raw deflate names no dictionary, so the caller vouches for
@@ -811,21 +1343,22 @@ pub const Options = struct {
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
 /// always suffices; a smaller one may return `error.BufferTooSmall`, leaving
-/// `target` partly written. `error.Unimplemented` for `.ratio`.
+/// `target` partly written. `error.Unimplemented` for a reserved level.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`); see
 /// `Options`.
 ///
 /// The stream ends with an empty final block (BFINAL, `§3.2.3`), and every data
-/// block is fixed Huffman or stored. The same input and options always produce
-/// the same bytes. Allocates nothing, but keeps a 128 KiB match-finder table on
-/// the stack.
+/// block is fixed Huffman, dynamic Huffman, or stored. The same input and
+/// options always produce the same bytes. Allocates nothing; level 1 keeps a
+/// 128 KiB match-finder table on the stack, level 6 its two tables (384 KiB),
+/// a 256 KiB token list, and the tree scratch.
 pub fn compress(
     source: []const u8,
     target: []u8,
     options: Options,
 ) error{ BufferTooSmall, Unimplemented }!usize {
-    if (options.level == .ratio) return error.Unimplemented;
+    if (!levelImplemented(options.level)) return error.Unimplemented;
     // A preset dictionary is a second region in front of `source` (the caller
     // owns the source bytes, so they cannot be prepended to). The streaming
     // `Writer` owns a buffer and puts its dictionary inside it instead; both
@@ -841,9 +1374,10 @@ pub fn compress(
     return compressBlocks(false, window, source, target, options);
 }
 
-/// The one-shot block loop, shared by both window shapes: split `source` at
-/// `max_block_size` (`§3.2.4`'s stored LEN cap, so any block can fall back to
-/// stored), emit each block, and end the stream with the final empty block.
+/// The one-shot block loop, shared by both window shapes and both levels:
+/// split `source` at `max_block_size` (`§3.2.4`'s stored LEN cap, so any block
+/// can fall back to stored), emit each block, and end the stream with the
+/// final empty block.
 fn compressBlocks(
     comptime preset: bool,
     window: Window(preset),
@@ -851,7 +1385,8 @@ fn compressBlocks(
     target: []u8,
     options: Options,
 ) error{ BufferTooSmall, Unimplemented }!usize {
-    const stored_only = options.level == .@"0";
+    if (options.level == 6) return compressBlocks6(preset, window, source, target);
+
     var w: BitWriter = .{ .target = target };
 
     // One finder table for the whole stream, zeroed once (`FinderTable`):
@@ -865,21 +1400,17 @@ fn compressBlocks(
     var block_start: usize = 0;
     while (block_start < source.len) {
         const block_end = @min(block_start + max_block_size, source.len);
-        if (stored_only) {
-            try emitStoredBlock(&w, source[block_start..block_end]);
-        } else {
-            try compressBlockStateful(
-                preset,
-                window,
-                block_start,
-                block_end,
-                &w,
-                &table,
-                0,
-                stream_prime_stride,
-                false,
-            );
-        }
+        try compressBlockStateful(
+            preset,
+            window,
+            block_start,
+            block_end,
+            &w,
+            &table,
+            0,
+            stream_prime_stride,
+            false,
+        );
         block_start = block_end;
     }
 
@@ -916,36 +1447,185 @@ fn roundTrip(input: []const u8) !void {
 }
 
 test "compress: options — every implemented level round-trips" {
-    // Levels are addressable by number and by name (`.{ .level = .@"5" }`);
-    // every implemented level must produce a stream our decoder decodes, and
-    // `.{}` is the fast default.
+    // Levels are the zlib scale: 1 (fixed Huffman) and 6 (dynamic Huffman)
+    // are implemented, and `.{}` is level 1.
     var comp: [4096]u8 = undefined;
     var decoded: [4096]u8 = undefined;
     const input = "the quick brown fox jumps over the lazy dog. " ** 8;
 
-    for ([_]Level{ .fast, .@"0", .@"1", .@"5", .@"9" }) |level| {
+    try testing.expectEqual(@as(u8, 1), (Options{}).level);
+    for ([_]u8{ 1, 6 }) |level| {
         const n = try compress(input, &comp, .{ .level = level });
         const dn = try decode.decompress(comp[0..n], &decoded, null);
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
     }
 
-    // The reserved seat: dynamic huffman is unimplemented, never silent.
-    try testing.expectError(error.Unimplemented, compress(input, &comp, .{ .level = .ratio }));
+    // The reserved seats: never a silent alias, and any level outside 1-9 is
+    // rejected too (0 and 10 included).
+    for ([_]u8{ 0, 2, 3, 4, 5, 7, 8, 9, 10, 255 }) |level| {
+        try testing.expectError(
+            error.Unimplemented,
+            compress(input, &comp, .{ .level = level }),
+        );
+    }
 }
 
-test "compress: the stored-only level emits stored blocks" {
-    // `.{ .level = .@"0" }` is the format's passthrough: every data block is
-    // stored (`§3.2.4`) — no match finding, no huffman codes.
-    var comp: [64]u8 = undefined;
-    const n = try compress("hello, flate!", &comp, .{ .level = .@"0" });
-    // 1 header byte (BFINAL=0, BTYPE=00, pad; our ending carries BFINAL) +
-    // LEN/NLEN (4) + 13 data + the 03 00 ending (2) = 20. zlib's level 0 sets
-    // BFINAL on the stored block instead (19); both are valid streams, and ours
-    // shares one ending with every level.
-    try testing.expectEqual(@as(usize, 20), n);
-    var decoded: [16]u8 = undefined;
-    const dn = try decode.decompress(comp[0..n], &decoded, null);
-    try testing.expectEqualSlices(u8, "hello, flate!", decoded[0..dn]);
+test "compress: level 6 emits a dynamic-Huffman block for compressible text" {
+    // Spec: rfc1951-deflate.txt §3.2.7 — a dynamic block's header carries
+    // BTYPE = 10 (LSB-first bits 1,0) and the tree description; a fixed block
+    // carries BTYPE = 01. The phrase repeats, so the finder finds matches and
+    // the dynamic rung wins over both the fixed and stored forms: the stream
+    // is smaller than level 1's for the same input, and its first block's
+    // BTYPE is dynamic.
+    const gpa = testing.allocator;
+    const input = "the quick brown fox jumps over the lazy dog. " ** 400;
+    const dynamic_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
+    defer gpa.free(dynamic_comp);
+    const dynamic_len = try compress(input, dynamic_comp, .{ .level = 6 });
+    const fixed_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
+    defer gpa.free(fixed_comp);
+    const fixed_len = try compress(input, fixed_comp, .{ .level = 1 });
+    try testing.expect(dynamic_len < fixed_len);
+
+    // BFINAL=0, BTYPE=10: the first three bits are 1, 0, 0 (LSB first).
+    try testing.expectEqual(@as(u8, 0b100), dynamic_comp[0] & 0b111);
+    const target = try gpa.alloc(u8, input.len + sentinel.len);
+    defer gpa.free(target);
+    try golden.checkDecode(target, dynamic_comp[0..dynamic_len], input);
+}
+
+/// `bytes(range(64)) * 3`, the "mixed binary" parity case's input.
+const mixed_binary_192 = blk: {
+    var bytes: [192]u8 = undefined;
+    for (0..3) |rep| {
+        for (0..64) |i| bytes[rep * 64 + i] = @intCast(i);
+    }
+    break :blk bytes;
+};
+
+test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
+    // The parity pin, without the Go tool: klauspost/compress's flate at
+    // level 6 (v1.18.1-0.20250402062133-8df4d013ff17, the module pin the
+    // oracle vendors) produced exactly these bytes. `just flate-oracle`
+    // re-derives them from the module itself over every shape; this test
+    // keeps a small, readable slice of the pin in the unit suite. The cases
+    // cover the tiny-block stored path (13 bytes), the final empty block, a
+    // dynamic block with one distance code, a mixed binary block, and the
+    // `03 00` ending every stream carries.
+    const cases = [_]struct { name: []const u8, input: []const u8, want: []const u8 }{
+        .{ .name = "empty", .input = "", .want = &[_]u8{ 0x03, 0x00 } },
+        .{
+            .name = "stored tiny block",
+            .input = "hello, flate!",
+            .want = &[_]u8{
+                0x00, 0x0d, 0x00, 0xf2, 0xff, 0x68, 0x65, 0x6c, 0x6c, 0x6f,
+                0x2c, 0x20, 0x66, 0x6c, 0x61, 0x74, 0x65, 0x21, 0x03, 0x00,
+            },
+        },
+        .{
+            .name = "dynamic phrase",
+            .input = "the quick brown fox jumps over the lazy dog. " ** 4,
+            .want = &[_]u8{
+                0x2a, 0xc9, 0x48, 0x55, 0x28, 0x2c, 0xcd, 0x4c, 0xce, 0x56,
+                0x48, 0x2a, 0xca, 0x2f, 0xcf, 0x53, 0x48, 0xcb, 0xaf, 0x50,
+                0xc8, 0x2a, 0xcd, 0x2d, 0x28, 0x56, 0xc8, 0x2f, 0x4b, 0x2d,
+                0x52, 0x00, 0x49, 0xe7, 0x24, 0x56, 0x55, 0x2a, 0xa4, 0xe4,
+                0xa7, 0xeb, 0x29, 0x0c, 0x12, 0xc5, 0x80, 0x01, 0x00,
+            },
+        },
+        .{
+            .name = "one distance code",
+            .input = "\x5a" ** 300,
+            .want = &[_]u8{ 0x8a, 0x1a, 0x05, 0x44, 0x03, 0xc0, 0x00 },
+        },
+        .{
+            .name = "mixed binary",
+            .input = &mixed_binary_192,
+            .want = &[_]u8{
+                0x62, 0x60, 0x64, 0x62, 0x66, 0x61, 0x65, 0x63, 0xe7, 0xe0,
+                0xe4, 0xe2, 0xe6, 0xe1, 0xe5, 0xe3, 0x17, 0x10, 0x14, 0x12,
+                0x16, 0x11, 0x15, 0x13, 0x97, 0x90, 0x94, 0x92, 0x96, 0x91,
+                0x95, 0x93, 0x57, 0x50, 0x54, 0x52, 0x56, 0x51, 0x55, 0x53,
+                0xd7, 0xd0, 0xd4, 0xd2, 0xd6, 0xd1, 0xd5, 0xd3, 0x37, 0x30,
+                0x34, 0x32, 0x36, 0x31, 0x35, 0x33, 0xb7, 0xb0, 0xb4, 0xb2,
+                0xb6, 0xb1, 0xb5, 0xb3, 0x1f, 0x68, 0xfd, 0x80, 0x01, 0x00,
+            },
+        },
+    };
+    const gpa = testing.allocator;
+    for (cases) |case| {
+        var comp: [256]u8 = undefined;
+        const n = try compress(case.input, &comp, .{ .level = 6 });
+        try testing.expectEqualSlices(u8, case.want, comp[0..n]);
+        const target = try gpa.alloc(u8, case.input.len + sentinel.len);
+        defer gpa.free(target);
+        golden.checkDecode(target, comp[0..n], case.input) catch |err| {
+            print("FAIL: {s}\n", .{case.name});
+            return err;
+        };
+    }
+}
+
+test "compress: level 6 with a preset dictionary emits klauspost's bytes" {
+    // The dictionary path runs klauspost's `fillWindow` scan over the
+    // dictionary's tail before the first block, so the tables hold its
+    // positions. These bytes come from their `NewWriterDict(w, 6, dict)`; the
+    // oracle's dictionary parity rows re-derive them from the module.
+    const dict = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const source = ("she sells seashells by the seashore\n" ** 6) ++
+        ("the quick brown fox jumps over the lazy dog. " ** 3);
+    const want = &[_]u8{
+        0x2a, 0xce, 0x48, 0x55, 0x28, 0x4e, 0xcd, 0xc9, 0x29, 0x56, 0x28, 0x4e,
+        0x4d, 0x2c, 0xce, 0x00, 0xb3, 0x92, 0x2a, 0xc1, 0x66, 0x80, 0x05, 0xf2,
+        0x8b, 0x52, 0xb9, 0x86, 0xa2, 0x9a, 0x41, 0x12, 0x17, 0x80, 0x01, 0x00,
+    };
+    var comp: [256]u8 = undefined;
+    const n = try compress(source, &comp, .{ .level = 6, .dict = dict });
+    try testing.expectEqualSlices(u8, want, comp[0..n]);
+
+    const gpa = testing.allocator;
+    const target = try gpa.alloc(u8, source.len + sentinel.len);
+    defer gpa.free(target);
+    try golden.checkDecodeDict(target, comp[0..n], dict, source);
+
+    // The one-shot and streaming layers agree with the same dictionary.
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var buf: writer.Buffer = undefined;
+    var w: writer = .init(&out.writer, &buf, .{ .level = 6, .dict = dict });
+    try w.writer.writeAll(source);
+    try w.finish();
+    try testing.expectEqualSlices(u8, comp[0..n], out.written());
+}
+
+test "compress: level 6 round-trips every shape" {
+    // The dynamic path through the whole encoder for the corpus shapes at the
+    // sizes that exercise the block split, the cross-block reach, and the
+    // stored fallback.
+    const gpa = testing.allocator;
+    inline for (.{
+        golden.Shape.text, golden.Shape.random, golden.Shape.html,
+        golden.Shape.rle,  golden.Shape.mixed,
+    }) |shape| {
+        for ([_]usize{ 0, 1, 13, 32, 127, 128, 1000, 65535, 65536, 131071 }) |len| {
+            const input = try golden.makeShape(gpa, shape, len);
+            defer gpa.free(input);
+            const comp = try gpa.alloc(u8, maxCompressedLength(len));
+            defer gpa.free(comp);
+            const clen = compress(input, comp, .{ .level = 6 }) catch |err| {
+                print("FAIL: {s} len {d}: {s}\n", .{ @tagName(shape), len, @errorName(err) });
+                return err;
+            };
+            try testing.expect(clen <= maxCompressedLength(len));
+            try golden.expectFinalEmptyBlock(comp[0..clen]);
+            const target = try gpa.alloc(u8, len + sentinel.len);
+            defer gpa.free(target);
+            golden.checkDecode(target, comp[0..clen], input) catch |err| {
+                print("FAIL: {s} len {d}\n", .{ @tagName(shape), len });
+                return err;
+            };
+        }
+    }
 }
 
 test "matchCandidate: the position edge cases of the absolute-entry arithmetic" {

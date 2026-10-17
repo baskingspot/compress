@@ -19,12 +19,12 @@ root = common.ROOT
 harness = root / "zig-out/bin/gzip-oracle"
 
 # Our emitted header: FLG=0, MTIME=0, OS=255. XFL is informational and follows
-# the level bands ({fast, 0, 1} -> 4, 9 -> 2, 2-8 -> 0; see encode.xflFor and
-# containers-notes.md §5.5).
-XFL_BY_LEVEL = {str(n): 4 if n <= 1 else 2 if n == 9 else 0 for n in range(10)} | {"fast": 4}
+# the level bands ({0, 1} -> 4, 9 -> 2, 2-8 -> 0; see encode.xflFor and
+# containers-notes.md §5.5). Levels 1 and 6 are the implemented ones.
+XFL_BY_LEVEL = {str(n): 4 if n <= 1 else 2 if n == 9 else 0 for n in range(10)}
 
 
-def our_compress(data: bytes, level: str = "fast") -> bytes:
+def our_compress(data: bytes, level: str = "1") -> bytes:
     """Our encoder, through the oracle harness: one gzip member."""
     return common.harness_output(harness, "encode", data, level)
 
@@ -69,7 +69,7 @@ text = shapes["text"]
 long_text = shapes["long text (multi-block)"]
 
 # 1. Our encode -> the C reference's decode, every level, over the shapes.
-levels = ("fast", "0", "1", "6", "9")
+levels = ("1", "6")
 rows = 0
 for desc, data in shapes.items():
     for level in levels:
@@ -150,7 +150,7 @@ for desc, data in (("streaming text", text), ("streaming multi-block", long_text
     p = example(["encode", "-"], data)
     assert p.returncode == 0, f"example encode ({desc}): {p.stderr.decode().strip()}"
     member = p.stdout
-    check_header(member, "fast")
+    check_header(member, "1")
     assert python_decompress(member) == data, f"example encode -> zlib decode ({desc})"
     p = example(["decode", "-"], member)
     assert p.returncode == 0, f"example decode ({desc}): {p.stderr.decode().strip()}"
