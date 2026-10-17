@@ -109,6 +109,74 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
     buffer: *Buffer(window_wbits)) error{ ReadFailed, WriteFailed }!usize
 ```
 
+## Encoding
+
+`brotli.encode` (one-shot) and `brotli.Writer` (streaming) are the encoder's
+two names. The implemented class is the reference's `q3` — the quickly hasher
+with trivial trees, one emission path, no block splitter and no context
+machinery.
+
+```zig
+const brotli = @import("compress").brotli; // the encoder's two names: `encode`, `Writer`
+
+// One-shot encode: one stream, header through last byte. `target` is a cap;
+// the return value is the compressed length.
+brotli.encode.compress(source: []const u8, target: []u8, options: Options)
+    error{ BufferTooSmall, Unimplemented }!usize
+    // BufferTooSmall: `target` cannot hold the stream
+    // Unimplemented: a quality other than 3 is selected
+brotli.encode.maxCompressedLength(input_len: usize) usize
+    // input_len + 3 * (input_len >> 16) + 5 — the §11.1 uncompressed-meta-block
+    // bound: a block that does not shrink is stored, so this is the worst case
+brotli.encode.Options = struct { quality: u8 = 3 }
+    // quality: 0-11, the reference's scale. 3 (the default) is the implemented
+    // q3 class; every other value — 0-2, 4-11, and anything outside 0-11 — is
+    // a reserved seat: error.Unimplemented, never a silent alias.
+
+// Streaming encode: one `Writer` writes one stream; `finish` is required.
+// You own the `Buffer`: the window-sized history ring, the hash table, the
+// delayed literal and command buffers, and the tree-build scratch.
+brotli.Writer.Buffer(comptime window_wbits: usize) type
+    // { ring: [(1 << window_wbits)]u8, hash: [1 << 17]u32 — the q3 bucket
+    //   table's cap, sized down by input at runtime — the delayed literal and
+    //   command buffers (the 0x2FFF budget), and the tree-build scratch };
+    // window_wbits is 10..24
+brotli.Writer.default_window_wbits: usize // 22: the reference encoder library's own default
+brotli.Writer.DefaultBuffer // Buffer(22): about 4.6 MiB
+brotli.Writer.init(comptime window_wbits: usize, output: *Io.Writer,
+    buffer: *Buffer(window_wbits), options: encode.Options) Writer
+    // write through `&w.writer`, then call `finish`
+brotli.Writer.writer: Io.Writer
+brotli.Writer.finish(w: *Writer) Io.Writer.Error!void
+    // writes the last meta-block; the stream is incomplete without it
+brotli.Writer.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.Writer,
+    buffer: *Buffer(window_wbits), options: encode.Options)
+    error{ ReadFailed, WriteFailed }!usize
+```
+
+The quality scale is the reference's, `q0` through `q11`:
+
+- `q0`: one-pass fragment compressor (a snappy adaptation).
+- `q1`: two-pass fragment compressor.
+- `q2`: quickly hasher with precomputed static entropy codes.
+- `q3`: quickly hasher with fresh trivial trees — the implemented class.
+- `q4`: quickly hasher with block splitting.
+- `q5`: chain hasher with splitting and context modeling.
+- `q6`-`q9`: chain hashers, longer chains.
+- `q10`: zopfli with the clustering split.
+- `q11`: zopfli, 5 candidates.
+
+Of these, only `q3` is implemented; every other rung is a reserved seat that
+returns `error.Unimplemented`.
+
+The one-shot is byte-identical to the pinned CLI's file form at `brotli -q 3`
+— the window sized to the input — and to the C library's own one-shot: the
+parity rows (6/6, 12/12, and 48/48) hold byte for byte, and two runs of the
+same input are identical 18/18. The Go port diverges from the C at `q0`-`q4`,
+so the C is the port's algorithm source of record. A `Writer` flushes at its
+own buffer boundaries, so its streams are valid-stream, not byte-pinned: the
+pinned CLI, the Go port, and this package's decoder all decode them.
+
 ## Behavior
 
 - **Buffers.** You own every buffer; nothing is allocated, freed, or retained,
@@ -184,9 +252,9 @@ brotli.Reader.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.W
 
 ## Limitations
 
-- **Decoder only.** There is no encoder: `brotli.encode` and `brotli.Writer`
-  are the encoder's seats, and the namespace grows to the full
-  `{Reader, Writer, encode, decode}` then.
+- **Encoder: quality 3 only, the rest are reserved seats.** `brotli.encode`
+  and `brotli.Writer` are the encoder's two names; every other quality
+  returns `error.Unimplemented`.
 - **No dictionary-supplying API.** The built-in dictionary ships
   unconditionally — any stream can reference it, so there is nothing to
   configure — and a custom or shared dictionary is outside RFC 7932: a stream

@@ -51,12 +51,20 @@ entry points and `options.dict` on the encode ones.
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize
 encode.maxCompressedLength(input_len: usize) usize  // input_len + 5 * ceil(input_len / 65535) + 2
-encode.Options = struct { level: Level = .fast, dict: ?[]const u8 = null }
+encode.Options = struct { level: u8 = 1, dict: ?[]const u8 = null }
+    // level: 1-9, the zlib scale (1 is the default):
+    //   1: fixed-Huffman blocks over the level-1 finder, or a stored block
+    //      when that is smaller.
+    //   6: the class above — klauspost/compress's wider greedy finder,
+    //      dynamic-Huffman blocks (§3.2.7 length-limited trees), and the
+    //      per-block stored/fixed/dynamic dispatch. Byte-identical to
+    //      klauspost/compress's flate at level 6 (the pinned module version).
+    // Levels 2-5 and 7-9 are reserved seats that return error.Unimplemented,
+    // never a silent alias, and so is any level outside 1-9. Callers of the
+    // old `.fast` name change to level 1 — the same class under its number, a
+    // source-breaking rename.
     // dict: preset history in front of the stream (§3.2.3). The caller vouches
     // for the bytes on both sides; zlib's FDICT/DICTID is the checked form.
-encode.Level = enum { fast, ratio, @"0", @"1", @"2", @"3", @"4", @"5", @"6", @"7", @"8", @"9" }
-    // fast: fixed-Huffman blocks, or a stored block when that is smaller (the default)
-    // @"0": stored blocks only. @"1" to @"9": the same as fast. ratio: reserved, not implemented
 encode.max_block_size = 65535, encode.history_len = 32768  // block size; match reach
 
 decode.decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize
@@ -142,11 +150,11 @@ declarations in `encode` and `decode` are shared internals.
 
 ## Limitations
 
-- No dynamic-Huffman encoder: fixed-Huffman codes spend 8 or 9 bits per literal, so
-  output is larger than from encoders that build per-block tables. `Level.ratio` is
-  reserved for one: `compress` returns `error.Unimplemented` for it, a `Writer` made
-  with it fails every write and `finish`, and `Writer.streamAll` returns
-  `error.ReadFailed` before reading.
+- Level 1 emits fixed-Huffman blocks only: codes spend 8 or 9 bits per literal,
+  so its output is larger than level 6's. Levels 2-5 and 7-9 are reserved
+  seats: `compress` returns `error.Unimplemented` for them and for any level
+  outside 1-9, a `Writer` made with one fails every write and `finish`, and
+  `Writer.streamAll` returns `error.ReadFailed` before reading.
 - A preset dictionary on raw flate is unverified: no container carries an
   identifier, so the caller vouches for the bytes on both sides. The zlib
   container's FDICT/DICTID is the checked form.

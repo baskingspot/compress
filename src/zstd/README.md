@@ -112,8 +112,21 @@ zstd.encode.compressBuffered(source: []const u8, target: []u8, buffer: *Buffer,
     options: Options) error{ BufferTooSmall, Unimplemented }!usize
 zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + hash table 128 KiB; 768 KiB
 zstd.encode.maxCompressedLength(input_len: usize) usize // 18-byte header cap + 3/block + input_len + 4
-zstd.encode.Options = struct { level: Level = .fast, dict: ?*const Dictionary = null }
-zstd.encode.Level = enum { fast, ratio } // fast: level-1 class (the default); ratio: reserved
+zstd.encode.Options = struct { level: u8 = 1, dict: ?*const Dictionary = null }
+    // level: 1-19, the CLI's scale (1 is the default):
+    //   1: the level-1 class — the `zstd -1` byte pin.
+    //   3: the double-fast (dfast) class — two hash tables (long + small), the
+    //      two-candidate scan, the repcode pre-check reused — byte-identical to
+    //      the pinned CLI's `zstd -3` (v1.5.7, file form, default threading,
+    //      inputs up to 8 MiB, the level's job size; above it the CLI's
+    //      multithread form splits jobs, so the pin there is round-trip-only,
+    //      the same shape the level-1 parity exclusions already document).
+    // Levels 2 and 4-19 are reserved seats that return error.Unimplemented,
+    // never a silent alias, and so is any level outside 1-19. A level-3
+    // `Writer`'s match table region grows to the long+small tables, and its
+    // default window is log 21 (the -3 class's window), so `Writer.Buffer(21)`
+    // is its default. Callers of the old `.fast` name change to level 1, and
+    // of `.ratio` to level 3 — a source-breaking rename of the same classes.
 
 // One-shot decode. `dict` seeds the frame's tables, repeat offsets, and
 // history; `null` is the no-dictionary decode. The third parameter is
@@ -337,11 +350,11 @@ state — so `encode` exposes only the names above.
 
 ## Limitations
 
-- Fast level only: `.fast` is a level-1-class encoder, and `.ratio` is a
-  reserved seat that returns `error.Unimplemented` (a `Writer` made with it
-  fails every write and `finish`). There are no seats for the CLI's numeric
-  levels: each of `zstd -2` through `-22` is a distinct output class this
-  package cannot produce.
+- Levels 1 and 3 only: level 1 is the level-1 class and level 3 the dfast
+  class; levels 2 and 4-19, and anything outside 1-19, are reserved seats
+  that return `error.Unimplemented` (a `Writer` made with one fails every
+  write and `finish`). Each of the CLI's other levels is a distinct output
+  class this package cannot produce.
 - No trainer: a dictionary is an input. `zstd --train` (the CLI's fastCover)
   or any other tool produces the file, and `zstd.Dictionary` consumes it; an
   in-repo trainer is out of scope. Content-only dictionaries work through
