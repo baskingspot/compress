@@ -2,9 +2,9 @@
 title = "compress"
 +++
 
-Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and Zstandard, plus a Brotli decoder.
+Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brotli.
 
-One module, a namespace per codec, the same buffer discipline everywhere: the caller owns every buffer, the default APIs do not allocate, and every failure has a name. Streaming goes through `std.Io`. The encoders target the speed class — the zstd encoder is byte-identical to `zstd -1` — and the zstd decoder verifies what the C library does not.
+One module, a namespace per codec, the same buffer discipline everywhere: the caller owns every buffer, the default APIs do not allocate, and every failure has a name. Streaming goes through `std.Io`. The encoders target the speed class — the zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3 — and the zstd decoder verifies what the C library does not.
 
 - [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.16, and what this package adds. gzip, zlib, and Snappy are missing from std entirely; zstd in std is decode-only.
 - [One-shot encode and decode](#one-shot-encode-and-decode): the same shape in every codec. Encode returns the compressed length, decode returns the decoded length, and both take caller-owned buffers.
@@ -74,22 +74,22 @@ just test
 | [`gzip`](api/#compress.gzip)     | gzip, RFC 1952        | encode, decode, streaming                    |
 | [`zlib`](api/#compress.zlib)     | zlib, RFC 1950        | encode, decode, streaming, preset dictionary |
 | [`zstd`](api/#compress.zstd)     | Zstandard, RFC 8878   | encode, decode, streaming, dictionaries      |
-| [`brotli`](api/#compress.brotli) | Brotli, RFC 7932      | decode, streaming (no encoder)               |
+| [`brotli`](api/#compress.brotli) | Brotli, RFC 7932      | encode (quality 3), decode, streaming        |
 
 `flate` is the kernel: `gzip` and `zlib` are containers over it, each adding its framing, its checksum, and its own error names. `snappy`, `zstd`, and `brotli` are self-contained.
 
 # Choose std or compress
 
-`std.compress` in Zig 0.16 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, or Snappy at all, and it does not ship a Brotli decoder.
+`std.compress` in Zig 0.16 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, Snappy, or Brotli at all.
 
-| Format  | std.compress 0.16 | this package                                    |
-| ------- | ----------------- | ----------------------------------------------- |
-| DEFLATE | both directions   | both, one-shot and streaming, preset history    |
-| gzip    | not present       | both, one-shot and streaming                    |
-| zlib    | not present       | both, one-shot and streaming, preset history    |
-| Snappy  | not present       | both, one-shot and streaming                    |
-| zstd    | decode only       | both, byte-identical to `zstd -1`, dictionaries |
-| Brotli  | not present       | decode, streaming                               |
+| Format  | std.compress 0.16 | this package                                                  |
+| ------- | ----------------- | ------------------------------------------------------------- |
+| DEFLATE | both directions   | both, one-shot and streaming, preset history                  |
+| gzip    | not present       | both, one-shot and streaming                                  |
+| zlib    | not present       | both, one-shot and streaming, preset history                  |
+| Snappy  | not present       | both, one-shot and streaming                                  |
+| zstd    | decode only       | both, byte-identical to `zstd -1` and `zstd -3`, dictionaries |
+| Brotli  | not present       | both, one-shot and streaming                                  |
 
 Use std when it has the direction you need and its shape fits. Use this package when you need the missing formats, a zstd encoder, or the same buffer discipline across every codec you touch. The decode paths here also check what std's zstd decoder does not: the frame checksum, the content size, and the dictionary ID, each with a named error.
 
@@ -121,7 +121,7 @@ A `Writer` compresses into an `Io.Writer`, and a `Reader` decompresses from an `
 {{ load_data(path="examples/streaming_pump.zig", format="plain") | trim_end }}
 ```
 
-The streaming buffers are named types the caller owns. `gzip`'s is `[98303]u8` — a stack local. zstd's are not: the `Reader` window is 8 MiB and `Writer.Buffer(19)` is 1.44 MiB, so its `*Alloc` pumps take an allocator for exactly those buffers. Keep every streaming buffer in static or heap storage, not on the stack, unless its type is small enough to prove otherwise.
+The streaming buffers are named types the caller owns. `gzip`'s is `[98303]u8` — a stack local. zstd's are not: the `Reader` window is 8 MiB and `Writer.Buffer(19)` is 2.2 MiB, so its `*Alloc` pumps take an allocator for exactly those buffers. Keep every streaming buffer in static or heap storage, not on the stack, unless its type is small enough to prove otherwise.
 
 The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming framing is this package's own length-prefixed form, not Google's: it has no end marker and no checksum, so a stream cut at a block boundary reads as complete. Snappy framing is a decision to make with that in mind.
 
@@ -151,9 +151,9 @@ Pick the format for the job, not the fastest name:
 | Interop with everything         | gzip   | DEFLATE's ratio and speed, universal acceptance              |
 | A zlib-shaped wire format       | zlib   | gzip without the file framing, plus a preset dictionary      |
 | In-memory blocks, latency-bound | snappy | No ratio to speak of; the framing here is this package's own |
-| Web text, decode-side only      | brotli | No encoder; the static dictionary ships inside               |
+| Web text, either direction      | brotli | Encoder at quality 3; the static dictionary ships inside     |
 
-The zstd encoder is byte-identical to `zstd -1`, which pins it to the fast class: `.fast` is level 1, and `.ratio` is a reserved seat that returns `error.Unimplemented` until a higher level exists. The DEFLATE encoder writes fixed-Huffman and stored blocks only, which is the speed class of that family; `gzip` and `zlib` inherit it.
+The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; levels 2 and 4-19 on the CLI's 1-19 scale return `error.Unimplemented`. The DEFLATE encoder's level 1 writes fixed-Huffman and stored blocks only; its level 6 writes dynamic-Huffman blocks and is byte-identical to klauspost/compress's level 6; `gzip` and `zlib` inherit both.
 
 # Errors and corrupt input
 
@@ -170,15 +170,16 @@ Hostile input gets error returns, never assertions: the decoders treat every inp
 The encoders and decoders target the fast class, and the numbers are measured, not asserted. Every comparison runs on a 7-target EC2 grid — ARM and Intel — against the C reference libraries, 5 rounds each with an A/A control, and every claim names a run and a results file in [`docs/results/`](https://github.com/baskingspot/compress/tree/main/docs/results):
 
 - The zstd encoder is at parity to faster than facebook/zstd's C library at the level-1 class on literal-heavy input on every ARM target, with both sides paying the frame checksum. It is 4-17x faster than klauspost/compress's Go zstd on entropy-heavy input. The zstd decoder verifies the frame checksum and the content size that the C library skips.
-- The Brotli decoder is 2-3x faster than google/brotli's C decoder on copy-structure input, and the remaining gaps are entropy rows with ranked, measured causes.
+- The Brotli encoder's one-shot beats google/brotli's C encoder on every encode row of the encoder-seats run: 1.4-2.4x on text and HTML, up to 10.7x on random and mixed input. The numbers are in [`docs/results/encoder-seats-fleet-20261017.md`](https://github.com/baskingspot/compress/blob/main/docs/results/encoder-seats-fleet-20261017.md).
+- Brotli decoding is 2-3x faster than google/brotli's C decoder on copy-structure input, and the remaining gaps are entropy rows with ranked, measured causes.
 - Local `just bench` numbers are never claims. The grid and the methodology are in [`bench/README.md`](https://github.com/baskingspot/compress/blob/main/bench/README.md).
 
 No allocation on the hot paths, no `Io` value held, and the caller's buffers are the only memory the codecs touch.
 
 # Framing, and what is not implemented
 
-- A Brotli encoder, and Brotli custom dictionaries.
-- `Level.ratio` in `flate` and `zstd`: a reserved seat that returns `error.Unimplemented`.
+- Brotli custom dictionaries: a custom or shared dictionary is outside RFC 7932, so there is no API for one.
+- The reserved seats: Brotli qualities other than 3, `flate` levels 2-5 and 7-9, and `zstd` levels 2 and 4-19. Each returns `error.Unimplemented`, never a silent alias.
 - A Zstandard dictionary trainer.
 
 Everything else a caller needs is on the [API reference](api/) page.

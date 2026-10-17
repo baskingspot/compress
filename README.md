@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and Zstandard, plus a Brotli decoder.
+Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brotli.
 
 `compress` is one Zig module with a namespace per codec. The caller owns
 every buffer, and the default APIs do not allocate: zstd's streaming
@@ -22,14 +22,14 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 | [`gzip`](src/gzip/README.md)     | gzip, RFC 1952, over `flate` | encode, decode, streaming                    |
 | [`zlib`](src/zlib/README.md)     | zlib, RFC 1950, over `flate` | encode, decode, streaming, preset dictionary |
 | [`zstd`](src/zstd/README.md)     | Zstandard, RFC 8878          | encode, decode, streaming, dictionaries      |
-| [`brotli`](src/brotli/README.md) | Brotli, RFC 7932             | decode, streaming (no encoder)               |
+| [`brotli`](src/brotli/README.md) | Brotli, RFC 7932             | encode (quality 3), decode, streaming        |
 
 Each codec README documents its API, error sets, and buffer sizes. The specs are vendored in [`docs/research/specs/`](docs/research/specs/README.md).
 
 Not implemented:
 
-- A Brotli encoder, and Brotli custom dictionaries.
-- `Level.ratio` in `flate` and `zstd`. It is a reserved seat that returns `error.Unimplemented`. The `flate` encoder writes fixed-Huffman and stored blocks only, and `gzip` and `zlib` inherit that.
+- Brotli custom dictionaries: a custom or shared dictionary is outside RFC 7932, so there is no API for one.
+- The reserved seats: Brotli qualities other than 3, `flate` levels 2-5 and 7-9, and `zstd` levels 2 and 4-19. Each returns `error.Unimplemented`, never a silent alias.
 - A Zstandard dictionary trainer.
 
 The snappy `Reader` and `Writer` use a length-prefixed framing of this package's own, not Google's framing format. It has no end marker or checksum, so a stream cut at a block boundary reads as complete.
@@ -59,7 +59,7 @@ const gzip = @import("compress").gzip;
 
 ## Design
 
-- The caller owns every buffer. One-shot functions take `source` and `target` slices, and the streaming types take a caller-provided buffer. zstd's default buffers are too large for a stack, at 8 MiB for the `Reader` window and 1.5 MiB for the `Writer`, so its `*Alloc` pumps take an allocator.
+- The caller owns every buffer. One-shot functions take `source` and `target` slices, and the streaming types take a caller-provided buffer. zstd's default buffers are too large for a stack, at 8 MiB for the `Reader` window and 2.2 MiB for the `Writer`, so its `*Alloc` pumps take an allocator.
 - Streaming is `std.Io`. A `Writer` compresses into an `Io.Writer`, and a `Reader` decompresses from an `Io.Reader`.
 - Decoders return an error on corrupt input, and on truncated input where the format allows it.
 - Vector code uses `@Vector` and `std.simd`, sized at compile time for the build target. The one inline-assembly kernel is the snappy decoder's byte shuffle, `tbl` on aarch64 and `pshufb` on x86, with a portable fallback.

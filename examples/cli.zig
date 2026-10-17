@@ -24,8 +24,8 @@ pub const StreamFn = *const fn (arena: Allocator, in: *Io.Reader, out: *Io.Write
 
 pub const Codec = struct {
     name: []const u8,
-    /// Encode the whole input and write the encoded stream to `out`. Null for
-    /// a codec with no encoder (zstd): the CLI reports the direction as usage.
+    /// Encode the whole input and write the encoded stream to `out`. Null
+    /// when a codec has no encoder: the CLI reports the direction as usage.
     encode: ?StreamFn = null,
     /// Decode a stream produced by `encode` and write the decoded bytes.
     decode: StreamFn,
