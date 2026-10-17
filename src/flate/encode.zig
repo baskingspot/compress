@@ -1311,7 +1311,7 @@ pub fn compressBlockStream6(
 }
 
 /// Whether `level` is implemented: 1 (fixed Huffman) and 6 (dynamic Huffman)
-/// are; the reserved seats (2-5, 7-9, and anything outside 1-9) are
+/// are; every other level (2-5, 7-9, and anything outside 1-9) returns
 /// `error.Unimplemented`, never a silent alias of another level. The
 /// containers' shared driver asks through this, so the rule lives once.
 pub fn levelImplemented(level: u8) bool {
@@ -1328,7 +1328,7 @@ pub const Options = struct {
     ///     finder, dynamic-Huffman blocks (`§3.2.7`), and the per-block
     ///     stored/fixed/dynamic dispatch. Byte-identical to
     ///     klauspost/compress's flate at level 6 (the pinned module version).
-    ///   - 2-5 and 7-9 are reserved seats: `error.Unimplemented`, never a
+    ///   - 2-5 and 7-9 are not implemented: `error.Unimplemented`, never a
     ///     silent alias, and so is any level outside 1-9.
     level: u8 = 1,
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
@@ -1343,7 +1343,7 @@ pub const Options = struct {
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
 /// always suffices; a smaller one may return `error.BufferTooSmall`, leaving
-/// `target` partly written. `error.Unimplemented` for a reserved level.
+/// `target` partly written. `error.Unimplemented` for an unimplemented level.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`); see
 /// `Options`.
@@ -1460,8 +1460,8 @@ test "compress: options — every implemented level round-trips" {
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
     }
 
-    // The reserved seats: never a silent alias, and any level outside 1-9 is
-    // rejected too (0 and 10 included).
+    // The unimplemented levels: never a silent alias, and any level outside
+    // 1-9 is rejected too (0 and 10 included).
     for ([_]u8{ 0, 2, 3, 4, 5, 7, 8, 9, 10, 255 }) |level| {
         try testing.expectError(
             error.Unimplemented,

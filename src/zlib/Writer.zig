@@ -69,8 +69,8 @@ const Hooks = container.WriterHooks(framing, Writer);
 /// than 32 KiB contributes only its tail to the window while DICTID names the
 /// whole.
 ///
-/// A reserved `options.level` is not implemented: the returned writer has
-/// already failed, so every write and `finish` returns `error.WriteFailed`.
+/// If `options.level` is not implemented, the returned writer has already
+/// failed, so every write and `finish` returns `error.WriteFailed`.
 /// Do not move the `Writer` after its first write.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     return Hooks.init(output, buffer, options);
@@ -93,7 +93,7 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// Compress everything in `in` into one zlib stream written to `out`, and
 /// return the number of input bytes consumed. `in` is read to its end, then
 /// the stream is finished. Returns `error.ReadFailed` if `in` fails (and at
-/// once for a reserved level) and `error.WriteFailed` if
+/// once for an unimplemented level) and `error.WriteFailed` if
 /// `out` fails. Uses about 288 KiB of stack (the 96 KiB buffer plus flate's
 /// writer state and block scratch) and allocates nothing.
 pub fn streamAll(
@@ -318,7 +318,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     try golden.expectTrailer(out.written(), "hello, zlib");
 }
 
-test "Writer: the ratio seat is rejected, never silently aliased" {
+test "Writer: an unimplemented level is rejected, never silently aliased" {
     // `Writer.init(..., .{ .level = 5 })` poisons the interface (every
     // write and `finish` reports `error.WriteFailed`), and `Writer.streamAll`
     // returns `error.ReadFailed` upfront.

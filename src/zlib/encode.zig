@@ -87,9 +87,9 @@ pub fn writeDictId(target: *[dict_id_len]u8, dict: []const u8) void {
 /// mod 31 and fits the field; ours is minimal, so the corner only arises when
 /// decoding.
 ///
-/// This function is total: a reserved level (one `compress` rejects) reports
-/// FLEVEL 2, the default-algorithm band level 1 writes, never `unreachable`
-/// (undefined behavior in ReleaseFast).
+/// This function is total: an unimplemented level (one `compress` rejects)
+/// reports FLEVEL 2, the default-algorithm band level 1 writes, never
+/// `unreachable` (undefined behavior in ReleaseFast).
 pub fn flgFor(level: u8, fdict: bool) u8 {
     const flevel: u8 = switch (level) {
         0, 1 => 0,
@@ -123,7 +123,7 @@ pub fn writeTrailer(target: *[trailer_len]u8, adler: u32) void {
 /// the stream: size it with `maxCompressedLength`, although a smaller target
 /// can still fit when the data compresses under the bound. After an error,
 /// `target`'s contents are unspecified; nothing is written past its end.
-/// Returns `error.Unimplemented` for a reserved level.
+/// Returns `error.Unimplemented` for an unimplemented level.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§2.2`): FDICT
 /// is set and the dictionary's Adler-32 written as DICTID, and the compressor
@@ -214,9 +214,9 @@ test "encode: FLEVEL follows the level bands" {
     }
 }
 
-test "encode: a reserved level's FLG is defined, never unreachable" {
-    // A reserved level is not implemented: `compress` returns
-    // `error.Unimplemented` and never emits a stream. `flgFor` is public, so
+test "encode: an unimplemented level's FLG is defined, never unreachable" {
+    // An unimplemented level: `compress` returns `error.Unimplemented` and
+    // never emits a stream. `flgFor` is public, so
     // it must be total: it reports the level's own FLEVEL band (5 is the
     // fast band, FLEVEL 1), and the pair still satisfies §2.2's FCHECK
     // arithmetic. An `unreachable` here would be undefined behavior in
@@ -228,8 +228,8 @@ test "encode: a reserved level's FLG is defined, never unreachable" {
     try testing.expectEqual(@as(u8, 0), flg & 0x20); // FDICT clear
 }
 
-test "encode: a reserved level is unimplemented, never aliased" {
-    // A reserved level: `error.Unimplemented`, and the target is left
+test "encode: an unimplemented level is rejected, never aliased" {
+    // An unimplemented level: `error.Unimplemented`, and the target is left
     // untouched.
     var target: [64]u8 = undefined;
     for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {

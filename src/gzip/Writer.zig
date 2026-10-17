@@ -62,10 +62,10 @@ const Hooks = container.WriterHooks(framing, Writer);
 /// `buffer` as its working space. `options` (the level) is fixed for the
 /// member. Write through `&w.writer` and end the member with `finish`.
 ///
-/// `init` writes nothing to `output`. With a reserved level (2-5, 7-9, or
-/// anything outside 1-9), the writer is created already failed: every write
-/// and `finish` returns `error.WriteFailed`. Do not move the writer once you
-/// have started using it.
+/// `init` writes nothing to `output`. With an unimplemented level (2-5, 7-9,
+/// or anything outside 1-9), the writer is created already failed: every
+/// write and `finish` returns `error.WriteFailed`. Do not move the writer
+/// once you have started using it.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     return Hooks.init(output, buffer, options);
 }
@@ -83,7 +83,7 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// Compress everything from `in` into `out` as one member and return the
 /// number of bytes read from `in`. `in` is read to its end, then the member is
 /// finished. Returns `error.ReadFailed` for a failure of `in`, or at once for
-/// a reserved level, and `error.WriteFailed` for a failure of `out`.
+/// an unimplemented level, and `error.WriteFailed` for a failure of `out`.
 ///
 /// Allocates nothing. The writer and its buffer take about 224 KiB of stack,
 /// and emitting a block needs another 64 KiB.
@@ -298,7 +298,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     try golden.expectTrailer(out.written(), "hello, gzip");
 }
 
-test "Writer: the ratio seat is rejected, never silently aliased" {
+test "Writer: an unimplemented level is rejected, never silently aliased" {
     // `Writer.init(..., .{ .level = 5 })` makes the interface fail (every
     // write and `finish` returns `error.WriteFailed`), and `Writer.streamAll`
     // returns `error.ReadFailed` at once.

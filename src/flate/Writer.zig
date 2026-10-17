@@ -125,7 +125,7 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2).
 ///
-/// `options.level` is 1 or 6; a reserved level (2-5, 7-9, or anything
+/// `options.level` is 1 or 6; any other level (2-5, 7-9, or anything
 /// outside 1-9) poisons the returned writer, so every write and `finish`
 /// returns `error.WriteFailed` — never a silent alias of another level.
 ///
@@ -134,8 +134,8 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// mind. Each block emission also uses about 320 KiB of stack for its
 /// token list and compressed-output scratch.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
-    // A reserved level must not silently alias another one. Poisoning the
-    // interface makes every write and `finish` return `error.WriteFailed`;
+    // An unimplemented level must not silently alias another one. Poisoning
+    // the interface makes every write and `finish` return `error.WriteFailed`;
     // `streamAll` rejects it up front.
     if (!encode.levelImplemented(options.level)) {
         return .{
@@ -567,8 +567,8 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
 }
 
-test "Writer: a reserved level is rejected, never silently aliased" {
-    // Levels 2-5 and 7-9 are reserved seats: they poison the writer at
+test "Writer: an unimplemented level is rejected, never silently aliased" {
+    // Levels 2-5 and 7-9 are not implemented: they poison the writer at
     // init, so every write and `finish` returns `error.WriteFailed`.
     const gpa = testing.allocator;
     for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
@@ -894,8 +894,8 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
 /// `out`, and return the number of input bytes consumed. The stream is
 /// finished and `out` is flushed before the call returns.
 ///
-/// Returns `error.ReadFailed` if `in` fails or if `options.level` is a
-/// reserved level (2-5, 7-9, or anything outside 1-9), checked before any
+/// Returns `error.ReadFailed` if `in` fails or if `options.level` is not
+/// implemented (2-5, 7-9, or anything outside 1-9), checked before any
 /// work. `error.WriteFailed` if `out` fails.
 /// Allocates nothing: the `Writer`, its `Buffer`, and the block scratch are
 /// locals on the caller's stack, about 700 KiB at the peak at level 6.

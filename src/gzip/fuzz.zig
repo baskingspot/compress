@@ -106,8 +106,8 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
 }
 
 /// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
-/// Huffman). A reserved level is never returned: it is `error.Unimplemented`,
-/// which the round-trip target exercises explicitly.
+/// Huffman). An unimplemented level is never returned: it is
+/// `error.Unimplemented`, which the round-trip target exercises explicitly.
 fn implementedLevel(smith: *Smith) u8 {
     return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
 }
@@ -369,7 +369,7 @@ fn reencodeRoundTrip(bytes: []const u8) !void {
 
 /// Seeds for target 1: the Smith values the shape builder reads, so each seed
 /// pins a structure instead of relying on the fuzzer to grow one. `1` and
-/// `6` are the implemented levels; `5` is reserved.
+/// `6` are the implemented levels; `5` is not implemented.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -382,7 +382,7 @@ const roundtrip_corpus: []const []const u8 = &.{
     // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
     // fixed block.
     &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
-    // A reserved level: `error.Unimplemented`, never a silent alias.
+    // An unimplemented level: `error.Unimplemented`, never a silent alias.
     &shapeSeed(5, .random, 0, ""),
 };
 
@@ -400,7 +400,7 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     if (level != 1 and level != 6) {
-        // A reserved level is `error.Unimplemented` on the one-shot and
+        // An unimplemented level is `error.Unimplemented` on the one-shot and
         // `error.ReadFailed` on the stream pump, never silently aliased to
         // another level.
         var tiny: [16]u8 = undefined;
@@ -1535,7 +1535,7 @@ const amplification_corpus: []const []const u8 = &.{
 /// passthrough path, so the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const level = smith.value(u8);
-    if (level != 1 and level != 6) return; // reserved; target 1 covers it
+    if (level != 1 and level != 6) return; // unimplemented; target 1 covers it
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];

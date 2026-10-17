@@ -83,8 +83,8 @@ pub fn xflFor(level: u8) u8 {
 /// member's length. Returns `error.BufferTooSmall` when `target` cannot hold
 /// it: size `target` with `maxCompressedLength`, though a smaller `target` can
 /// still fit when the data compresses well. `target`'s contents are
-/// unspecified after an error. Returns `error.Unimplemented` for a reserved
-/// level (2-5 and 7-9, or anything outside 1-9).
+/// unspecified after an error. Returns `error.Unimplemented` for an
+/// unimplemented level (2-5 and 7-9, or anything outside 1-9).
 ///
 /// Allocates nothing. Level 1 uses about 128 KiB of stack (flate's
 /// match-finder table), level 6 about 700 KiB.
@@ -167,8 +167,8 @@ test "encode: XFL follows the level bands" {
     }
 }
 
-test "encode: a reserved level is unimplemented, never aliased" {
-    // Levels 2-5 and 7-9 (and anything outside 1-9) are reserved:
+test "encode: an unimplemented level is rejected, never aliased" {
+    // Levels 2-5 and 7-9 (and anything outside 1-9) are not implemented:
     // `error.Unimplemented`, and nothing is written to `target`.
     var target: [64]u8 = undefined;
     for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {

@@ -225,7 +225,7 @@ pub fn main(init: std.process.Init) !u8 {
     return 1;
 }
 
-/// Parse a CLI-scale level argument (1-19; `encode` gates the reserved ones).
+/// Parse a CLI-scale level argument (1-19; `encode` gates the unimplemented ones).
 fn parseLevel(text: []const u8) !u8 {
     return std.fmt.parseInt(u8, text, 10) catch {
         print("zstd-oracle: level must be 1-19, got '{s}'\n", .{text});

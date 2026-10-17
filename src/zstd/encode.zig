@@ -39,8 +39,8 @@ const split_compress = @import("split_compress.zig");
 /// `compress`'s options.
 pub const Options = struct {
     /// The compression level on the CLI's 1-19 scale: 1 is the level-1 class
-    /// (`ZSTD_fast`), 3 the dfast class (`ZSTD_dfast`). Every other level is
-    /// a reserved seat: `error.Unimplemented`, never a silent alias.
+    /// (`ZSTD_fast`), 3 the dfast class (`ZSTD_dfast`). Every other level
+    /// returns `error.Unimplemented`, never a silent alias.
     level: u8 = 1,
     /// The dictionary the frame is compressed against (`§5`): its tables seed
     /// the frame's entropy state (with `ZSTD_loadCEntropy`'s promotions) and
@@ -62,7 +62,7 @@ pub fn implemented(level: u8) bool {
 pub const Error = error{
     /// `target` cannot hold the frame. Its contents are then unspecified.
     BufferTooSmall,
-    /// The option is not implemented (a reserved level).
+    /// The level option is not implemented.
     Unimplemented,
 };
 
@@ -579,7 +579,7 @@ test "maxCompressedLength bounds every emission" {
     );
 }
 
-test "the level seat is reserved, never aliased" {
+test "an unimplemented level is rejected, never aliased" {
     var target: [64]u8 = undefined;
     for ([_]u8{ 0, 2, 4, 5, 19, 20 }) |level| {
         try testing.expectError(

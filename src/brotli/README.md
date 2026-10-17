@@ -15,8 +15,8 @@ The namespace is exactly `{Reader, Writer, encode, decode}`: one-shot
 `brotli.encode.compress` and `brotli.decode.decompress`, and the streaming
 `brotli.Writer` and `brotli.Reader`. The decoder came first and is the fuller
 surface; the encoder's implemented class is the reference's `q3`, and every
-other quality is a reserved seat that returns `error.Unimplemented` rather
-than silently aliasing another class.
+other quality returns `error.Unimplemented` rather than silently aliasing
+another class.
 
 ## Usage
 
@@ -133,8 +133,8 @@ brotli.encode.maxCompressedLength(input_len: usize) usize
     // most five bytes of header land per 16 KiB
 brotli.encode.Options = struct { quality: u8 = 3 }
     // quality: 0-11, the reference's scale. 3 (the default) is the implemented
-    // q3 class; every other value — 0-2, 4-11, and anything outside 0-11 — is
-    // a reserved seat: error.Unimplemented, never a silent alias.
+    // q3 class; every other value — 0-2, 4-11, and anything outside 0-11 —
+    // returns error.Unimplemented, never a silent alias.
 
 // Streaming encode: one `Writer` writes one stream; `finish` is required.
 // You own the `Buffer`: the history ring, the hash table, the delayed
@@ -172,8 +172,8 @@ The quality scale is the reference's, `q0` through `q11`:
 - `q10`: zopfli with the clustering split.
 - `q11`: zopfli, 5 candidates.
 
-Of these, only `q3` is implemented; every other rung is a reserved seat that
-returns `error.Unimplemented`.
+Of these, only `q3` is implemented; every other rung returns
+`error.Unimplemented`.
 
 The one-shot is byte-identical to the pinned CLI's file form at `brotli -q 3`
 — the window sized to the input, which is the CLI's own automatic-window rule
@@ -296,9 +296,8 @@ The pin is the CLI, and the CLI's file form is not always the reference
 
 ## Limitations
 
-- **Encoder: quality 3 only, the rest are reserved seats.** `brotli.encode`
-  and `brotli.Writer` are the encoder's two names; every other quality
-  returns `error.Unimplemented`.
+- **Encoder: quality 3 only; other qualities return `error.Unimplemented`.**
+  `brotli.encode` and `brotli.Writer` are the encoder's two names.
 - **No dictionary-supplying API.** The built-in dictionary ships
   unconditionally — any stream can reference it, so there is nothing to
   configure — and a custom or shared dictionary is outside RFC 7932: a stream

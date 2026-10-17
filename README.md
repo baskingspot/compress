@@ -29,8 +29,7 @@ Each codec README documents its API, error sets, and buffer sizes. The specs are
 Not implemented:
 
 - Brotli custom dictionaries: a custom or shared dictionary is outside RFC 7932, so there is no API for one.
-- The reserved seats: Brotli qualities other than 3, `flate` levels 2-5 and 7-9, and `zstd` levels 2 and 4-19. Each returns `error.Unimplemented`, never a silent alias.
-- A Zstandard dictionary trainer.
+- The zstd CLI trains dictionaries; this package consumes them.
 
 The snappy `Reader` and `Writer` use a length-prefixed framing of this package's own, not Google's framing format. It has no end marker or checksum, so a stream cut at a block boundary reads as complete.
 

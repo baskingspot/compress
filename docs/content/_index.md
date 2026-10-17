@@ -137,7 +137,7 @@ A dictionary is caller bytes, and both sides must supply the same bytes. zstd ta
 {{ load_data(path="examples/dictionary_zlib.zig", format="plain") | trim_end }}
 ```
 
-The value borrows the file bytes: keep them alive as long as the dictionary is. A raw dictionary carries no ID — a frame made with one decodes without it only until a match reaches back into history that is not there, and fails `error.OffsetTooFar`. A formatted dictionary carries a DICTID, and its frames refuse by name: `DictionaryRequired` when none is supplied, `DictionaryMismatch` for the wrong one. The zlib preset fails the same way. gzip has no dictionary concept (RFC 1952 defines none), and Brotli's static dictionary already ships inside the decoder.
+The value borrows the file bytes: keep them alive as long as the dictionary is. A raw dictionary carries no ID — a frame made with one decodes without it only until a match reaches back into history that is not there, and fails `error.OffsetTooFar`. A formatted dictionary carries a DICTID, and its frames refuse by name: `DictionaryRequired` when none is supplied, `DictionaryMismatch` for the wrong one. The zlib preset fails the same way. gzip has no dictionary concept (RFC 1952 defines none), and Brotli's static dictionary already ships inside the decoder — RFC 7932 defines no way to supply your own.
 
 There is no trainer in this package, on purpose. Training is a tooling decision the `zstd` CLI already makes well; this package is the consumer side.
 
@@ -175,11 +175,3 @@ The encoders and decoders target the fast class, and the numbers are measured, n
 - Local `just bench` numbers are never claims. The grid and the methodology are in [`bench/README.md`](https://github.com/baskingspot/compress/blob/main/bench/README.md).
 
 No allocation on the hot paths, no `Io` value held, and the caller's buffers are the only memory the codecs touch.
-
-# Framing, and what is not implemented
-
-- Brotli custom dictionaries: a custom or shared dictionary is outside RFC 7932, so there is no API for one.
-- The reserved seats: Brotli qualities other than 3, `flate` levels 2-5 and 7-9, and `zstd` levels 2 and 4-19. Each returns `error.Unimplemented`, never a silent alias.
-- A Zstandard dictionary trainer.
-
-Everything else a caller needs is on the [API reference](api/) page.

@@ -63,7 +63,7 @@ encode.Options = struct { level: u8 = 1, dict: ?[]const u8 = null }
     //      dynamic-Huffman blocks (§3.2.7 length-limited trees), and the
     //      per-block stored/fixed/dynamic dispatch. Byte-identical to
     //      klauspost/compress's flate at level 6 (the pinned module version).
-    // Levels 2-5 and 7-9 are reserved seats that return error.Unimplemented,
+    // Levels 2-5 and 7-9 are not implemented and return error.Unimplemented,
     // never a silent alias, and so is any level outside 1-9. Callers of the
     // old `.fast` name change to level 1 — the same class under its number, a
     // source-breaking rename.
@@ -158,10 +158,10 @@ declarations in `encode` and `decode` are shared internals.
 ## Limitations
 
 - Level 1 emits fixed-Huffman blocks only: codes spend 8 or 9 bits per literal,
-  so its output is larger than level 6's. Levels 2-5 and 7-9 are reserved
-  seats: `compress` returns `error.Unimplemented` for them and for any level
-  outside 1-9, a `Writer` made with one fails every write and `finish`, and
-  `Writer.streamAll` returns `error.ReadFailed` before reading.
+  so its output is larger than level 6's. Levels 2-5 and 7-9 are not
+  implemented: `compress` returns `error.Unimplemented` for them and for any
+  level outside 1-9, a `Writer` made with one fails every write and `finish`,
+  and `Writer.streamAll` returns `error.ReadFailed` before reading.
 - A preset dictionary on raw flate is unverified: no container carries an
   identifier, so the caller vouches for the bytes on both sides. The zlib
   container's FDICT/DICTID is the checked form.

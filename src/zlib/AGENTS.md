@@ -13,8 +13,8 @@ design", "Trailer location and the one-shot decoder", "Streaming"). zlib follows
 it unchanged, over the same driver (`src/internal/container.zig`) instantiated
 on `framing.zig`: one stream per reader with an exact boundary, no container
 buffers, the Adler-32 folded through flate's checksum hook, the trailer check on
-the fill and rebase paths, the reserved-level rejection, and the rule that a
-`Reader` or `Writer` must not move after first use. What is specific to zlib:
+the fill and rebase paths, the rejection of unimplemented levels, and the rule
+that a `Reader` or `Writer` must not move after first use. What is specific to zlib:
 
 - **No multi-stream mode** (OQ3). zlib has no concatenation convention, so
   `Reader.streamAll` decodes exactly one stream where gzip's walks members. A

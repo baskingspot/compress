@@ -3451,9 +3451,9 @@ const WriteOp = enum(u8) {
 /// boundary through the streaming reader. The window log is Smith-chosen from
 /// the small classes to the default, so the block region, the slide, and the
 /// emission cadence all vary. The poison lifecycle runs after the frame: a
-/// reserved-level writer, a sink that fills mid-frame, `finish` twice, and a write
-/// after `finish` must all report `error.WriteFailed`, and a finished or
-/// failed writer never reports a false success.
+/// writer at an unimplemented level, a sink that fills mid-frame, `finish`
+/// twice, and a write after `finish` must all report `error.WriteFailed`, and
+/// a finished or failed writer never reports a false success.
 fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
     switch (rangeAtMost(smith, 0, 3)) {
         0 => try machineryCase(10, smith),
@@ -3593,15 +3593,15 @@ fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
     try expectStickyEnd(&r);
 }
 
-/// The poison lifecycle: a reserved-level writer, a sink that fills mid-frame,
-/// `finish` twice, and a write after `finish` — every one reports
+/// The poison lifecycle: a writer at an unimplemented level, a sink that fills
+/// mid-frame, `finish` twice, and a write after `finish` — every one reports
 /// `error.WriteFailed`, and no false success.
 fn writerPoison(smith: *Smith) !void {
     var buffer: Writer.Buffer(10) = undefined;
     switch (rangeAtMost(smith, 0, 3)) {
-        // A reserved level is poisoned at `init`: every write and `finish` fails and
-        // the sink sees nothing. The one-shot's seat returns `Unimplemented`
-        // before any byte.
+        // An unimplemented level is poisoned at `init`: every write and
+        // `finish` fails and the sink sees nothing. The one-shot returns
+        // `Unimplemented` before any byte.
         0 => {
             var out: [64]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);

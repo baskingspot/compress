@@ -126,7 +126,7 @@ zstd.encode.Options = struct { level: u8 = 1, dict: ?*const Dictionary = null }
     //      inputs up to 8 MiB, the level's job size; above it the CLI's
     //      multithread form splits jobs, so the pin there is round-trip-only,
     //      the same shape the level-1 parity exclusions already document).
-    // Levels 2 and 4-19 are reserved seats that return error.Unimplemented,
+    // Levels 2 and 4-19 are not implemented and return error.Unimplemented,
     // never a silent alias, and so is any level outside 1-19. A level-3
     // `Writer`'s match table region grows to the long+small tables, and its
     // default window is log 21 (the -3 class's window), so `Writer.Buffer(21)`
@@ -377,8 +377,8 @@ state — so `encode` exposes only the names above.
 ## Limitations
 
 - Levels 1 and 3 only: level 1 is the level-1 class and level 3 the dfast
-  class; levels 2 and 4-19, and anything outside 1-19, are reserved seats
-  that return `error.Unimplemented` (a `Writer` made with one fails every
+  class; levels 2 and 4-19, and anything outside 1-19, are not implemented
+  and return `error.Unimplemented` (a `Writer` made with one fails every
   write and `finish`). Each of the CLI's other levels is a distinct output
   class this package cannot produce. Level 3's byte pin is the CLI's file
   form only: a level-3 `Writer`'s frames are the same class (windowLog 21,

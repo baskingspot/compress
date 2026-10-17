@@ -18,7 +18,7 @@
 //!
 //! - `Options`: the public encoder knobs. `Options.level` is a numeric level;
 //!   `levelImplemented(level)` says which levels the inner codec implements
-//!   (the rest are reserved, not implemented).
+//!   (the rest are not implemented).
 //! - `Error`: the streaming reader's detail errors: the inner codec's reader
 //!   errors, `EndOfStream`, and the framing's own.
 //! - `DecompressError`: the one-shot decoder's errors: `Error` minus
@@ -261,10 +261,9 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Returns a `Host` that writes one container to `output`, with
         /// `buffer` as the compression window and `options` fixed for the
-        /// writer's lifetime. A reserved level is not implemented: it returns
-        /// a poisoned writer whose every write and `finish` returns
-        /// `error.WriteFailed`, matching `streamOne`, which rejects it before
-        /// reading.
+        /// writer's lifetime. An unimplemented level returns a poisoned
+        /// writer whose every write and `finish` returns `error.WriteFailed`,
+        /// matching `streamOne`, which rejects it before reading.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
             var host: Host = .{
                 .writer = .failing,
@@ -393,7 +392,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Reads `in` to its end, writes it to `out` as one complete container
         /// (the stream ending and the trailer included), and returns the
-        /// number of input bytes consumed. A reserved level returns
+        /// number of input bytes consumed. An unimplemented level returns
         /// `error.ReadFailed` before any input is read; a failing `in` returns
         /// `error.ReadFailed` and a failing `out` returns `error.WriteFailed`.
         /// The window is a stack local of `@sizeOf(F.WriterBuffer)` bytes;
@@ -431,7 +430,7 @@ pub fn EncodeHooks(comptime F: type) type {
         /// cannot hold the result: `maxCompressedLength(source.len)` is always
         /// enough, a smaller target may still fit when the body compresses
         /// under the bound, and `target`'s contents are unspecified after a
-        /// failure. Returns `error.Unimplemented` for a reserved level.
+        /// failure. Returns `error.Unimplemented` for an unimplemented level.
         pub fn compress(
             source: []const u8,
             target: []u8,

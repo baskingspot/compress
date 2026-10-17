@@ -55,8 +55,8 @@ one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 encode.Options        // struct { level: u8 = 1 }
                       //   flate's level scale, 1-9: level 1 (the default) and
                       //   level 6 are implemented; levels 2-5 and 7-9, and
-                      //   anything outside 1-9, are reserved seats that return
-                      //   `error.Unimplemented`
+                      //   anything outside 1-9, are not implemented and
+                      //   return `error.Unimplemented`
 encode.maxCompressedLength(input_len: usize) usize
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize

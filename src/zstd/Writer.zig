@@ -133,8 +133,8 @@ pub const default_window_log: usize = 19;
 pub const level3_default_window_log: usize = 21;
 
 /// The default window log for a level: `default_window_log` for level 1,
-/// `level3_default_window_log` for level 3 (and for a reserved level, which
-/// never writes a frame).
+/// `level3_default_window_log` for level 3 (and for an unimplemented level,
+/// which never writes a frame).
 pub fn defaultWindowLog(level: u8) usize {
     return if (level == 3) level3_default_window_log else default_window_log;
 }
@@ -213,7 +213,7 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeTrailer);
 /// Write through `&w.writer`, then call `finish`. `init` writes nothing,
 /// allocates nothing, and zeroes the finder's tables.
 ///
-/// `options.level` must be 1 or 3 (the implemented classes); a reserved level
+/// `options.level` must be 1 or 3 (the implemented classes); any other level
 /// poisons the writer, so every write and `finish` returns
 /// `error.WriteFailed` and `output` sees no byte.
 pub fn init(
@@ -241,8 +241,8 @@ pub fn init(
         .block_len = block_len,
         // The C's streaming class: an unknown source size picks the default
         // row's widths and minMatch, and the caller's window_log replaces
-        // the row's windowLog. A reserved level never compresses (the writer
-        // is poisoned below), so its parameters are the level-1 ones.
+        // the row's windowLog. An unimplemented level never compresses (the
+        // writer is poisoned below), so its parameters are the level-1 ones.
         .params = match_compress.forStreaming(
             if (encode.implemented(options.level)) options.level else 1,
             @intCast(window_log),
@@ -291,9 +291,9 @@ pub fn init(
     };
     fastmem.set(u32, w.tables.long, 0);
     if (w.tables.small.len > 0) fastmem.set(u32, w.tables.small, 0);
-    // A reserved level is not implemented and must not silently alias the
-    // implemented ones: poisoning the interface makes every write and
-    // `finish` return `error.WriteFailed`, before a byte of output.
+    // An unimplemented level must not silently alias the implemented ones:
+    // poisoning the interface makes every write and `finish` return
+    // `error.WriteFailed`, before a byte of output.
     if (!encode.implemented(options.level)) w.writer = .failing;
     return w;
 }
@@ -322,8 +322,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// `Buffer(window_log)` the caller owns (about 2.2 MiB at the default
 /// `window_log`), so this needs no large stack local of its own.
 ///
-/// Returns `error.WriteFailed` if `out` fails or if `options.level` is a
-/// reserved level (the writer is poisoned at `init`, so nothing is written),
+/// Returns `error.WriteFailed` if `out` fails or if `options.level` is not
+/// implemented (the writer is poisoned at `init`, so nothing is written),
 /// and `error.ReadFailed` if `in` fails. Does not allocate.
 pub fn streamAll(
     comptime window_log: usize,
@@ -1141,9 +1141,9 @@ test "Writer: the level-3 pumps take the class's window" {
     try testing.expectEqual(@as(usize, 19), defaultWindowLog(2));
 }
 
-test "Writer: the reserved levels are rejected, never silently aliased" {
-    // Levels 2 and 4-19 are reserved and not implemented: they poison the
-    // writer at `init`, so every write and `finish` returns
+test "Writer: the unimplemented levels are rejected, never silently aliased" {
+    // Levels 2 and 4-19 are not implemented: they poison the writer at
+    // `init`, so every write and `finish` returns
     // `error.WriteFailed` and the sink sees nothing.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);

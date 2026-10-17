@@ -119,7 +119,7 @@ touching one.
 - The 3-byte input buffer. A 16-bit peek can start 7 bits into a byte, and
   `Io.Reader.fill` asserts its capacity, so a narrower buffer cannot show the
   decoder enough bits. Widening any peek raises this floor for every container.
-- A reserved level fails instead of aliasing: `error.Unimplemented` from
+- An unimplemented level fails instead of aliasing: `error.Unimplemented` from
   `compress`, a poisoned `Writer`, `error.ReadFailed` from `Writer.streamAll`
   (levels 1 and 6 are the implemented ones; `encode.levelImplemented` is the
   one predicate, and the containers' shared driver asks through it).

@@ -58,8 +58,8 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
 }
 
 /// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
-/// Huffman). A reserved level is never returned: it is `error.Unimplemented`,
-/// which `fuzzRoundTrip` checks explicitly.
+/// Huffman). An unimplemented level is never returned: it is
+/// `error.Unimplemented`, which `fuzzRoundTrip` checks explicitly.
 fn implementedLevel(smith: *Smith) u8 {
     return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
 }
@@ -358,7 +358,7 @@ fn shapeSeed(
 
 /// Seeds for `fuzzRoundTrip`: the Smith values the shape builder reads, so
 /// each seed pins a structure instead of relying on the fuzzer to grow one.
-/// `1` and `6` are the implemented levels; `5` is reserved.
+/// `1` and `6` are the implemented levels; `5` is not implemented.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -372,7 +372,7 @@ const roundtrip_corpus: []const []const u8 = &.{
     // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
     // fixed block.
     &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
-    // A reserved level: `error.Unimplemented`, never a silent alias.
+    // An unimplemented level: `error.Unimplemented`, never a silent alias.
     &shapeSeed(5, .random, 0, ""),
 };
 
@@ -392,8 +392,8 @@ fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     if (level != 1 and level != 6) {
-        // The level contract: a reserved level is `error.Unimplemented` on
-        // both layers, never silent aliasing.
+        // The level contract: an unimplemented level is `error.Unimplemented`
+        // on both layers, never silent aliasing.
         var tiny: [8]u8 = undefined;
         try testing.expectError(
             error.Unimplemented,

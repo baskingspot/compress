@@ -40,7 +40,7 @@ pub const distance_alphabet_size = 16 + 48;
 pub const Options = struct {
     /// The reference's quality scale (0-11). 3 — the `q3` class — is the
     /// implemented one; every other value, including values outside 0-11,
-    /// is a reserved seat that returns `error.Unimplemented`.
+    /// returns `error.Unimplemented`.
     quality: u8 = 3,
 };
 

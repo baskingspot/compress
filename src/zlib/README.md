@@ -82,8 +82,8 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 zlib.encode.Options        // struct { level: u8 = 1, dict: ?[]const u8 = null }
                            //   flate's level scale, 1-9: level 1 (the default)
                            //   and level 6 are implemented; levels 2-5 and 7-9,
-                           //   and anything outside 1-9, are reserved seats
-                           //   that return `error.Unimplemented`
+                           //   and anything outside 1-9, are not implemented
+                           //   and return `error.Unimplemented`
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize      // the stream's length

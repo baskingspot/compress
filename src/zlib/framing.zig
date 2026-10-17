@@ -21,13 +21,13 @@ const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 
 /// Whether the inner codec implements `level` (flate's rule, re-exported):
-/// 1 and 6 are implemented; the rest are reserved seats.
+/// 1 and 6 are implemented; every other level returns `error.Unimplemented`.
 pub const levelImplemented = flate.encode.levelImplemented;
 
 /// Encoder configuration. `.{}` is the default: level 1, no dictionary.
 pub const Options = struct {
     /// The zlib-scale compression level: 1 or 6 (flate's implemented
-    /// levels). A reserved level selects `error.Unimplemented`.
+    /// levels). Any other level selects `error.Unimplemented`.
     level: u8 = 1,
     /// The stream's preset dictionary or `null` (`§2.2`): on encode it sets
     /// FDICT and writes the Adler-32 of the whole slice as DICTID; on decode
