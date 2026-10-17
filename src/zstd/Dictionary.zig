@@ -23,6 +23,7 @@ const testing = std.testing;
 const fastmem = @import("fastmem");
 
 const common = @import("common.zig");
+const dfast_compress = @import("dfast_compress.zig");
 const fse = @import("fse.zig");
 const fse_compress = @import("fse_compress.zig");
 const golden = @import("golden.zig");
@@ -120,8 +121,15 @@ source_len: usize,
 /// The C's CDict match table (`match_compress.DictTable`): the content's
 /// positions, filled once here the way `ZSTD_fillHashTableForCDict` fills a
 /// `ZSTD_CDict`'s — so a frame that compresses against this dictionary never
-/// re-hashes it. Empty (no entries) for a dictionary with no content.
+/// re-hashes it. Empty (no entries) for a dictionary with no content. The
+/// level-1 finder's table; the level-3 one is `match_dfast`.
 match: match_compress.DictTable,
+/// The C's CDict match tables for the level-3 finder
+/// (`dfast_compress.DictTables`, filled by
+/// `ZSTD_fillDoubleHashTableForCDict`): the long and small tables, both
+/// tagged. A frame at level 3 looks up (attach) or copies (copy path) these
+/// instead of `match`'s.
+match_dfast: dfast_compress.DictTables,
 /// `§5` — "The rest of the dictionary is its content. The content acts as a
 /// 'past' in front of data to be compressed or decompressed, so it can be
 /// referenced in sequence commands." Borrowed from the caller's bytes.
@@ -170,6 +178,7 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
         .sequence_repeat_valid = .empty,
         .repeat_offsets = undefined,
         .content = undefined,
+        .match_dfast = undefined,
         .source_len = source.len,
         .match = undefined,
     };
@@ -216,15 +225,16 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
             dictionary.sequence_repeat_valid.insert(alphabet);
         }
     }
-    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams());
+    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams(1));
+    dfast_compress.fillDictTables(&dictionary.match_dfast, content, dictionary.matchParams(3));
     return dictionary;
 }
 
-/// The dictionary's own level-1 parameters (the C's CDict cParams), which a
-/// frame's window, hash width, and match width are drawn from
+/// The dictionary's own parameters for a level (the C's CDict cParams),
+/// which a frame's window, hash widths, and match width are drawn from
 /// (`ZSTD_resetCCtx_byAttachingCDict` / `..._byCopyingCDict`).
-pub fn matchParams(self: *const Dictionary) match_compress.DictParams {
-    return match_compress.dictParams(self.source_len);
+pub fn matchParams(self: *const Dictionary, level: u8) match_compress.DictParams {
+    return match_compress.dictParams(level, self.source_len);
 }
 
 /// `ZSTD_loadCEntropy`'s literals promotion (`zstd_compress.c:5071-5079`):
@@ -312,8 +322,10 @@ pub fn initRaw(content: []const u8) Dictionary {
         .content = content,
         .source_len = content.len,
         .match = undefined,
+        .match_dfast = undefined,
     };
-    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams());
+    match_compress.fillDictTable(&dictionary.match, content, dictionary.matchParams(1));
+    dfast_compress.fillDictTables(&dictionary.match_dfast, content, dictionary.matchParams(3));
     return dictionary;
 }
 
@@ -474,14 +486,15 @@ test "initRaw is infallible, format-free, and seeds the defaults" {
 }
 
 test "the value's size is the documented tables, no heap" {
-    // The README documents the value's size ("about 158 KiB"): the literals
+    // The README documents the value's size ("about 910 KiB"): the literals
     // tree and decode table, the three fused sequences tables, the repcodes,
     // the content slice, the encode side's entropy tables
-    // (`ZSTD_loadCEntropy`), and the CDict match table the encoder looks up
-    // (`ZSTD_fillHashTableForCDict`) — the one table the C keeps in a
-    // `ZSTD_CDict` rather than a frame. This pins the figure the README
-    // quotes, so a table type that grows fails here.
-    try testing.expectEqual(@as(usize, 161_384), @sizeOf(Dictionary));
+    // (`ZSTD_loadCEntropy`), and the CDict match tables the encoder looks up
+    // (`ZSTD_fillHashTableForCDict` for level 1, the long+small pair of
+    // `ZSTD_fillDoubleHashTableForCDict` for level 3) — the tables the C
+    // keeps in a `ZSTD_CDict` rather than a frame. This pins the figure the
+    // README quotes, so a table type that grows fails here.
+    try testing.expectEqual(@as(usize, 947_824), @sizeOf(Dictionary));
 }
 
 test "parse reads a dictionary the decoder's own parsers built" {

@@ -7,9 +7,9 @@
 
 const std = @import("std");
 
-/// brotli (RFC 7932) decoder: one-shot `decode.decompress` and the streaming
-/// `Reader`. Caller-owned buffers, no heap allocation. API:
-/// `src/brotli/README.md`. Format:
+/// brotli (RFC 7932): one-shot `encode.compress` and `decode.decompress`, and
+/// the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
+/// allocation. API: `src/brotli/README.md`. Format:
 /// docs/research/specs/rfc7932-brotli.txt.
 pub const brotli = @import("brotli/root.zig");
 /// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
@@ -49,14 +49,17 @@ test {
     _ = zstd;
     // The consumer surface, spelled the way a consumer spells it: names are
     // reached through the codec namespaces, and nothing is flat at the root.
+    _ = brotli.encode.compress;
+    _ = brotli.encode.Options;
     _ = brotli.decode.decompress;
     _ = brotli.decode.DecompressError;
     _ = brotli.Reader.streamAll;
-    _ = flate.encode.Level;
+    _ = brotli.Writer.streamAll;
+    _ = flate.encode.Options;
     _ = flate.decode.decompress;
     _ = flate.Reader.streamAll;
     _ = flate.Writer.streamAll;
-    _ = gzip.encode.Level;
+    _ = gzip.encode.Options;
     _ = gzip.decode.decompress;
     _ = gzip.Reader.streamAll;
     _ = gzip.Writer.streamAll;
@@ -64,10 +67,11 @@ test {
     _ = snappy.decode.decompressBlock;
     _ = snappy.Reader.streamAll;
     _ = snappy.Writer.streamAll;
-    _ = zlib.encode.Level;
+    _ = zlib.encode.Options;
     _ = zlib.decode.decompress;
     _ = zlib.Reader.streamAll;
     _ = zlib.Writer.streamAll;
+    _ = zstd.encode.Options;
     _ = zstd.decode.max_block_size;
     _ = zstd.decode.decompress;
     _ = zstd.Reader.streamAll;

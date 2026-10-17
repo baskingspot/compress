@@ -34,6 +34,7 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const block = @import("block.zig");
+const dfast_compress = @import("dfast_compress.zig");
 const Dictionary = @import("Dictionary.zig");
 /// `§3.1.1.2.4` — Block_Maximum_Size's 128 KiB ceiling: the encoder's block
 /// size, and the bound its scratch sizes from.
@@ -52,8 +53,15 @@ const xxh64 = @import("xxh64.zig");
 pub const max_sequences = max_block_size / match_compress.min_match_length + 1;
 
 /// The match finder's table cap: `hashLog = min(class hashLog, windowLog + 1)`
-/// with the ladder's largest class hashLog 15.
+/// with the ladder's largest class hashLog 15. The level-3 finder's own caps
+/// are `dfast_compress.long_table_entries_max` (17) and
+/// `dfast_compress.small_table_entries_max` (16).
 pub const hash_table_max = 1 << 15;
+
+/// The finder's position tables, as the block layer threads them: the long
+/// table is the level-1 finder's single table and dfast's 8-byte-hash one;
+/// `small` is dfast's minMatch-hash table and stays empty at level 1.
+pub const Tables = dfast_compress.Tables;
 
 /// `MIN_CBLOCK_SIZE + 3 + 1 + 1` (`zstd_compress.c:3267-3273`): below this
 /// the C does not even attempt compression.
@@ -85,18 +93,21 @@ pub fn blockSize(params: match_compress.Params) usize {
     return @min(max_block_size, @as(usize, 1) << @intCast(params.window_log));
 }
 
-/// Rebase the finder's table on a window slide: every entry that still
+/// Rebase the finder's tables on a window slide: every entry that still
 /// points into the window drops by `slide`, and every entry that pointed at
-/// a dropped byte becomes zero — the table's "no candidate" value, which the
-/// finder's `candidate_floor` never reads as a position. `slide` is at most
-/// one block, because both callers slide right after an emission (the
-/// Writer's `compact`, the one-shot's per-block base), so it fits the
-/// entries' `u32` positions.
-pub fn rebaseTable(hash_table: []u32, slide: usize) void {
+/// a dropped byte becomes zero — the tables' "no candidate" value, which the
+/// finders' candidate floors never read as a position. `slide` is at most one
+/// block, because both callers slide right after an emission (the Writer's
+/// `compact`, the one-shot's per-block base), so it fits the entries' `u32`
+/// positions.
+pub fn rebaseTable(tables: Tables, slide: usize) void {
     assert(slide > 0);
     assert(slide <= max_block_size);
     const drop: u32 = @intCast(slide);
-    for (hash_table) |*entry| {
+    for (tables.long) |*entry| {
+        entry.* = if (entry.* >= drop) entry.* - drop else 0;
+    }
+    for (tables.small) |*entry| {
         entry.* = if (entry.* >= drop) entry.* - drop else 0;
     }
 }
@@ -157,16 +168,19 @@ pub fn seedFromDict(state: *State, dict: *const Dictionary) void {
 }
 
 /// A frame's dictionary, as its blocks see it: the content (virtual past),
-/// the CDict table the attach scan looks up, and the window arithmetic the
-/// copy path updates per block (`ZSTD_checkDictValidity` and
-/// `ZSTD_window_enforceMaxDist`, `zstd_compress.c:4629-4630`). The zero
-/// value is a frame with no dictionary.
+/// the CDict tables the attach scan looks up (one at level 1, the long+small
+/// pair at level 3), and the window arithmetic the copy path updates per block
+/// (`ZSTD_checkDictValidity` and `ZSTD_window_enforceMaxDist`,
+/// `zstd_compress.c:4629-4630`). The zero value is a frame with no dictionary.
 pub const Dict = struct {
     /// The dictionary content; empty when the frame has none.
     content: []const u8 = &.{},
-    /// The CDict match table for the attach path; `null` when the frame's own
-    /// table was pre-filled instead (the copy path).
+    /// The CDict match table for the level-1 attach path; `null` when the
+    /// frame's own table was pre-filled instead (the copy path).
     table: ?*const match_compress.DictTable = null,
+    /// The CDict match tables for the level-3 attach path; `null` on the copy
+    /// path, as above.
+    dfast: ?*const dfast_compress.DictTables = null,
     /// The frame's declared Window_Size (`§3.1.1.1.2`): past it the content
     /// stops being addressable (`§5`).
     window_size: usize = 0,
@@ -210,19 +224,38 @@ pub const Dict = struct {
     }
 };
 
-/// Scan one block's token stream into `store`: the plain finder, or — with a
-/// dictionary — the attach or copy scan, after the per-block window
-/// arithmetic above.
+/// Scan one block's token stream into `store`: the level's finder — the
+/// plain, attach, or copy scan, after the per-block window arithmetic above.
 fn scanBlock(
     dict: *Dict,
     state: *State,
     params: match_compress.Params,
-    hash_table: []u32,
+    tables: Tables,
     source: []const u8,
     block_start: usize,
     block_size: usize,
     store: *match_compress.Store,
 ) void {
+    switch (params.level) {
+        1 => scanBlockFast(dict, state, params, tables, source, block_start, block_size, store),
+        3 => scanBlockDfast(dict, state, params, tables, source, block_start, block_size, store),
+        else => unreachable,
+    }
+}
+
+/// The level-1 finder's dispatch (`match_compress.find` and its two
+/// dictionary variants).
+fn scanBlockFast(
+    dict: *Dict,
+    state: *State,
+    params: match_compress.Params,
+    tables: Tables,
+    source: []const u8,
+    block_start: usize,
+    block_size: usize,
+    store: *match_compress.Store,
+) void {
+    const hash_table = tables.long;
     if (dict.content.len == 0) {
         match_compress.find(source, block_start, block_size, params, hash_table, &state.rep, store);
         return;
@@ -273,6 +306,80 @@ fn scanBlock(
     );
 }
 
+/// The level-3 finder's dispatch (`dfast_compress.find` and its two
+/// dictionary variants).
+fn scanBlockDfast(
+    dict: *Dict,
+    state: *State,
+    params: match_compress.Params,
+    tables: Tables,
+    source: []const u8,
+    block_start: usize,
+    block_size: usize,
+    store: *match_compress.Store,
+) void {
+    if (dict.content.len == 0) {
+        dfast_compress.find(
+            source,
+            block_start,
+            block_size,
+            params,
+            tables.long,
+            tables.small,
+            &state.rep,
+            store,
+        );
+        return;
+    }
+    dict.advance(block_start, block_start + block_size);
+    if (dict.dfast) |dict_tables| {
+        // The attach path; once the content expires, the C's own dispatch
+        // falls back to the plain scan (`ZSTD_matchState_dictMode`).
+        if (dict.valid) {
+            dfast_compress.findDict(
+                source,
+                block_start,
+                block_size,
+                params,
+                tables.long,
+                tables.small,
+                .{ .content = dict.content, .tables = dict_tables },
+                dict.frame_start,
+                &state.rep,
+                store,
+            );
+        } else {
+            dfast_compress.find(
+                source,
+                block_start,
+                block_size,
+                params,
+                tables.long,
+                tables.small,
+                &state.rep,
+                store,
+            );
+        }
+        return;
+    }
+    // The copy path: the frame's tables already hold the dictionary's
+    // entries (tags stripped), and the scan's floor decides which of them are
+    // still addressable.
+    dfast_compress.findExtDict(
+        source,
+        block_start,
+        block_size,
+        params,
+        tables.long,
+        tables.small,
+        dict.content,
+        dict.dict_limit,
+        dict.candidateFloor(block_start + block_size),
+        &state.rep,
+        store,
+    );
+}
+
 /// Write one block — its 3-byte Block_Header and Block_Content — for
 /// `source[block_start..][0..block_size]` into `target`, folding the block's
 /// source bytes into the frame checksum. Returns the bytes written, which
@@ -285,15 +392,16 @@ fn scanBlock(
 /// block compresses, and fails `error.BufferTooSmall` before any write that
 /// would pass its end.
 ///
-/// `hash_table` is the finder's position table (`1 << params.hash_log`,
-/// zeroed) and belongs to the frame: its entries are frame offsets, so the
-/// caller keeps one table across the frame's blocks.
+/// `tables` are the finder's position tables (`1 << params.hash_log` long
+/// entries, `1 << params.chain_log` small ones at level 3; both zeroed) and
+/// belong to the frame: their entries are frame offsets, so the caller keeps
+/// them across the frame's blocks.
 pub fn writeBlock(
     state: *State,
     dict: *Dict,
     scratch: *Scratch,
     params: match_compress.Params,
-    hash_table: []u32,
+    tables: Tables,
     source: []const u8,
     block_start: usize,
     block_size: usize,
@@ -317,13 +425,21 @@ pub fn writeBlock(
             dict,
             scratch,
             params,
-            hash_table,
+            tables,
             source,
             block_start,
             block_size,
             target,
             last_block,
         );
+    // `ZSTD_compressBlock_internal`'s tail (`zstd_compress.c:4168-4171`):
+    // "We check that dictionaries have offset codes available for the first
+    // block. After the first block, the offcode table might not have large
+    // enough codes to represent the offsets in the data." The offsets
+    // alphabet's dictionary promotion (`FSE_repeat_valid`) lasts exactly one
+    // block; from the second on the ladder sees `FSE_repeat_check` and never
+    // selects Repeat for it.
+    state.sequences.repeat_valid.remove(.offsets);
     state.first_block = false;
     return written;
 }
@@ -335,7 +451,7 @@ fn writeCompressible(
     dict: *Dict,
     scratch: *Scratch,
     params: match_compress.Params,
-    hash_table: []u32,
+    tables: Tables,
     source: []const u8,
     block_start: usize,
     block_size: usize,
@@ -360,7 +476,7 @@ fn writeCompressible(
     const literals_before = state.literals;
     const sequences_before = state.sequences.header();
     const rep_before = state.rep;
-    scanBlock(dict, state, params, hash_table, source, block_start, block_size, &store);
+    scanBlock(dict, state, params, tables, source, block_start, block_size, &store);
     const compressed_size = writeEntropy(
         state,
         &store,
@@ -517,21 +633,26 @@ fn fill(buf: []u8, phrase: []const u8) void {
     }
 }
 
-/// The block-layer test rig: a frame state, the scratch, and the table.
+/// The block-layer test rig: a frame state, the scratch, and the tables.
 const Rig = struct {
     state: State = .{},
     literals: [max_block_size]u8 = undefined,
     sequence_buffer: [max_sequences]sequences_compress.Sequence = undefined,
-    hash_table: [hash_table_max]u32 = @splat(0),
+    long_table: [dfast_compress.long_table_entries_max]u32 = @splat(0),
+    small_table: [dfast_compress.small_table_entries_max]u32 = @splat(0),
     params: match_compress.Params,
 
     fn scratch(rig: *Rig) Scratch {
         return .{ .literals = &rig.literals, .sequences = &rig.sequence_buffer };
     }
 
-    /// The finder's table slice, `1 << hash_log` entries as `find` requires.
-    fn table(rig: *Rig) []u32 {
-        return rig.hash_table[0 .. @as(usize, 1) << @intCast(rig.params.hash_log)];
+    /// The finder's tables, sliced to the parameters' widths as the callers
+    /// slice them.
+    fn tables(rig: *Rig) Tables {
+        return .{
+            .long = rig.long_table[0 .. @as(usize, 1) << @intCast(rig.params.hash_log)],
+            .small = rig.small_table[0 .. @as(usize, 1) << @intCast(rig.params.chain_log)],
+        };
     }
 };
 
@@ -548,7 +669,7 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         source,
         0,
         block_size,
@@ -601,7 +722,7 @@ test "the reps do not advance across a raw or rle block" {
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &block_one,
         0,
         block_one.len,
@@ -627,7 +748,7 @@ test "the reps do not advance across a raw or rle block" {
         &dict,
         &scratch_two,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &noise,
         0,
         noise.len,
@@ -662,7 +783,7 @@ test "the ladder stores tiny and incompressible blocks raw" {
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &tiny,
         0,
         tiny.len,
@@ -697,7 +818,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &source,
         0,
         512,
@@ -714,7 +835,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &source,
         512,
         512,
@@ -733,7 +854,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
         &dict,
         &scratch,
         rig.params,
-        rig.table(),
+        rig.tables(),
         &source,
         1024,
         4096,
@@ -769,7 +890,7 @@ test "a compressible block is Compressed and decodes back" {
         &dict,
         &scratch,
         fresh.params,
-        fresh.table(),
+        fresh.tables(),
         &source,
         0,
         source.len,
@@ -818,7 +939,7 @@ test "the checksum funnel folds every block exactly once" {
             &dict,
             &scratch,
             rig.params,
-            rig.table(),
+            rig.tables(),
             &source,
             offset,
             size,

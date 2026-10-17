@@ -30,8 +30,9 @@ fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
 ```
 
 A dictionary (§5) is parsed once and handed to either direction. The
-`Dictionary` borrows the file bytes — keep them alive — and is about 158 KiB,
-mostly the match table the encoder looks up:
+`Dictionary` borrows the file bytes — keep them alive — and is about 925 KiB,
+mostly the match tables the encoder looks up (level 1's, and the level-3
+pair):
 
 ```zig
 // dict_file: the bytes of a `zstd --train` output, or any formatted
@@ -48,8 +49,9 @@ fn withDictionary(gpa: std.mem.Allocator, dict_file: []const u8, data: []const u
 }
 ```
 
-Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 1.5 MiB and
-`Reader.Buffer(1 MiB)` 1.25 MiB: keep them in static or heap storage.
+Streaming, through the `std.Io` interfaces. `Writer.Buffer(19)` is 2.2 MiB
+(`Buffer(21)` for level 3, 3.6 MiB) and `Reader.Buffer(1 MiB)` 1.25 MiB: keep
+them in static or heap storage.
 
 ```zig
 fn compressTo(out: *std.Io.Writer, bytes: []const u8, buffer: *zstd.Writer.Buffer(19)) !void {
@@ -86,11 +88,12 @@ const zstd = @import("compress").zstd;
 // the 12 repcode bytes, then the content) and builds both directions'
 // tables from that one parse, with `ZSTD_loadCEntropy`'s promotion rules
 // deciding what a frame may reuse; `initRaw` takes format-free content. The
-// value borrows `source` — no copy, no allocation — and is about 158 KiB:
+// value borrows `source` — no copy, no allocation — and is about 925 KiB:
 // the parsed tree, the decode and encode tables (the four built tables
-// twice over), the repcodes, the content slice, and the match table the
-// encoder looks up (the C keeps that one in a `ZSTD_CDict`; here it is the
-// dictionary's, so no frame pays to rebuild it).
+// twice over), the repcodes, the content slice, and the match tables the
+// encoder looks up — level 1's single table and level 3's long+small pair
+// (the C keeps those in a `ZSTD_CDict` per level; here one dictionary
+// value carries both, so no frame pays to rebuild them).
 zstd.Dictionary
 zstd.Dictionary.parse(source: []const u8) ParseError!Dictionary
 zstd.Dictionary.initRaw(content: []const u8) Dictionary
@@ -110,7 +113,9 @@ zstd.encode.compress(source: []const u8, target: []u8, options: Options)
     error{ BufferTooSmall, Unimplemented }!usize
 zstd.encode.compressBuffered(source: []const u8, target: []u8, buffer: *Buffer,
     options: Options) error{ BufferTooSmall, Unimplemented }!usize
-zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + hash table 128 KiB; 768 KiB
+zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + the long table 512 KiB
+    // (1 << 17 entries, level 3's widest hashLog) + the small table 256 KiB
+    // (1 << 16 entries, its widest chainLog); 1.375 MiB
 zstd.encode.maxCompressedLength(input_len: usize) usize // 18-byte header cap + 3/block + input_len + 4
 zstd.encode.Options = struct { level: u8 = 1, dict: ?*const Dictionary = null }
     // level: 1-19, the CLI's scale (1 is the default):
@@ -150,15 +155,21 @@ zstd.decode.DecompressError = error{
 };
 
 // Streaming encode. One `Writer` writes one frame; `finish` is required.
+// `streamAllAlloc` takes the level's default window: 19 for level 1, 21 for
+// level 3 (`Buffer(21)`, about 3.6 MiB).
 zstd.Writer.Buffer(comptime window_log: usize) type
     // history (1 << window_log) + block min(128 KiB, 1 << window_log)
     // + literals (the block) + the block's output (the block + 3)
-    // + hash table 128 KiB (1 << 15 entries, the widest hashLog a frame
-    //   takes when it attaches a dictionary; the frame's own slice is
-    //   narrower when no dictionary is in play)
+    // + the finder's tables: the long table 512 KiB (1 << 17 entries) and
+    //   the small table 256 KiB (1 << 16) — the widest widths a frame takes
+    //   when it attaches a dictionary at level 3 (level 1 uses the long
+    //   table alone); the frame's own slices are narrower when no
+    //   dictionary is in play
     // + sequences 12 * (block / 3 + 1); window_log must be 10 to 31
 zstd.Writer.default_window_log: usize // 19: a 512 KiB window, the largest level 1 declares
-zstd.Writer.DefaultBuffer // Buffer(default_window_log): 1.44 MiB
+zstd.Writer.defaultWindowLog(level: u8) usize // 19 for level 1, 21 for level 3
+zstd.Writer.level3_default_window_log: usize // 21: the dfast class's window (2 MiB)
+zstd.Writer.DefaultBuffer // Buffer(default_window_log): 2.2 MiB
 zstd.Writer.init(comptime window_log: usize, output: *Io.Writer, buffer: *Buffer(window_log),
     options: encode.Options) Writer // write through `&w.writer`, then call `finish`
 zstd.Writer.finish(w: *Writer) Io.Writer.Error!void // writes the last block and the checksum
@@ -229,23 +240,32 @@ state — so `encode` exposes only the names above.
   `(size >> 6) + 2` bytes is stored raw; a block of one repeated byte becomes an
   RLE block, except the frame's first block, which is never RLE (a zstd ≤ 1.4.3
   CLI convention); literals and sequences pick their entropy modes by the
-  level-1 heuristics. Every frame is valid zstd that the CLI, libzstd, and this
-  package's decoder accept, and the whole frame reproduces the pinned CLI
-  v1.5.7's `zstd -1` bytes on the corpus shapes, on the tests' fixtures, and
-  on the `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. With a
-  dictionary the target is the CLI's `zstd -D dict -1`: the same
-  form-matched parity, one-shot against the file form and `Writer` against
-  the pipe form, over CLI-trained dictionaries — including the
-  attach/copy switch at the 8-KiB source cutoff and the frames for
-  incomplete-statistics dictionaries, whose unpromoted tables degrade
-  exactly as the C's do. Three
+  level-1 heuristics. The finder above the ladder is the level's: level 3's
+  dfast scan feeds the same entropy writers. Every frame is valid zstd that
+  the CLI, libzstd, and this package's decoder accept, and the whole frame
+  reproduces the pinned CLI v1.5.7's `zstd -1` bytes (level 1) and `zstd -3`
+  bytes (level 3) on the corpus shapes, on the tests' fixtures, and on the
+  `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. The level-3 pin
+  is the CLI's file form with default threading, over inputs up to the level's
+  8-MiB job size: above it the CLI's multithreaded form splits the input into
+  jobs whose boundary blocks no single-call encoder produces, so the pin there
+  is round-trip-only (the same shape the level-1 exclusions document). With a
+  dictionary the target is the CLI's `zstd -D dict -1` and `zstd -D dict -3`:
+  the same form-matched parity, one-shot against the file form and `Writer`
+  against the pipe form (level 1), over CLI-trained dictionaries — including
+  the attach/copy switches at the 8-KiB (level 1) and 16-KiB (level 3) source
+  cutoffs and the frames for incomplete-statistics dictionaries, whose
+  unpromoted tables degrade exactly as the C's do. Three
   deliberate differences can show up outside that set, all of them the C's
   own heuristics: a Huffman tree's equal-count symbols keep natural order
   here, where the C's sort is unstable (a tree description's bytes can differ
   while decoding identically); the C's two literals heuristics are not
   ported, so a block the C stores as raw literals may come out Huffman-coded
-  here (a smaller frame); and the C v1.5.7's optional pre-block splitter is
-  not ported, so a compressible block can stay whole where the CLI cuts it.
+  here (a smaller frame); and the level-1 class's optional pre-block splitter
+  (`ZSTD_splitBlock_fromBorders`) is not ported, so a level-1 compressible
+  block can stay whole where the CLI cuts it. Level 3's splitter *is* ported —
+  the dfast class resolves to a different one (`ZSTD_splitBlock_byChunks`,
+  the C's own `splitLevels` row for it) — so level-3 blocks follow the CLI's.
 - **Encode streaming.** Nothing reaches `output` until the block region fills,
   you call `w.writer.flush()`, or `finish`; the frame header goes out with the
   first of those, and a `flush` with nothing buffered emits the header alone.
@@ -257,19 +277,24 @@ state — so `encode` exposes only the names above.
   and the checksum — 13 bytes. Blocks are `min(128 KiB, 1 << window_log)` bytes
   and the splits follow the block region, never the caller's write sizes; a
   `writableSliceGreedy` write onto a full region emits the block, never drops
-  it. The frames match the zstd CLI's own `zstd -1` output over a pipe byte for
-  byte up to about 2 MiB, and the finder's parameters are that CLI class:
-  windowLog 19, hashLog 14, and 7-byte hashing at the default `window_log`.
-  Above 2 MiB the CLI's own pipe output splits its streaming jobs (its
-  multi-threaded workers cut different blocks), so the pipe comparison stops
-  there; the frames remain valid and every strict decoder accepts them.
+  it. At level 1 the frames match the zstd CLI's own `zstd -1` output over a
+  pipe byte for byte up to about 2 MiB, and the finder's parameters are that
+  CLI class: windowLog 19, hashLog 14, and 7-byte hashing at the default
+  `window_log`. Above 2 MiB the CLI's own pipe output splits its streaming
+  jobs (its multi-threaded workers cut different blocks), so the pipe
+  comparison stops there; the frames remain valid and every strict decoder
+  accepts them. At level 3 the `Writer` runs the same class the CLI's pipe
+  form declares (windowLog 21, hashLog 17, chainLog 16, 5-byte hashing at
+  `level3_default_window_log`), but the CLI's pipe form chunks its input
+  through the multithreaded path, so those frames are valid streams rather
+  than a byte pin: every decoder accepts them and the oracle checks them.
 - **Buffers.** You own every buffer, and neither direction keeps anything
   between calls. `decompress` writes only into `target`, leaves the bytes past
   the returned length untouched, and returns `error.BufferTooSmall` before any
   write that would pass the end; a declared Frame_Content_Size is checked
   against the output, never used to size anything. `encode.compressBuffered`
   and `Writer` put the encoder's heavy per-block arrays in the `Buffer` you
-  provide (`encode.Buffer`, 768 KiB; `Writer.Buffer(window_log)`, 1.5 MiB at
+  provide (`encode.Buffer`, 1.375 MiB; `Writer.Buffer(window_log)`, 2.2 MiB at
   the default) instead of on the stack.
 - **Windows.** The decoder's one-shot needs no window: a match can reach back
   into the output already in `target`, and — with a dictionary — into the
@@ -330,19 +355,20 @@ state — so `encode` exposes only the names above.
 - **Stack.** A compressed block decodes its literals into a 128 KiB buffer on
   the stack. Measured on aarch64 Linux, `decompress` and `Reader` need about
   160 KiB of thread stack in release builds and 210 KiB in Debug, so give
-  decoding threads 256 KiB or more. `encode.compress` needs about 830 KiB
-  (Debug and release alike): the match finder's table (128 KiB), the literals
-  buffer (128 KiB), and the sequence list (512 KiB) are stack scratch, the
-  price of a one-shot with no allocator — give encoding threads 1 MiB or more.
+  decoding threads 256 KiB or more. `encode.compress` needs about 1.5 MiB
+  (Debug and release alike): the match finder's tables (512 KiB + 256 KiB),
+  the literals buffer (128 KiB), and the sequence list (512 KiB) are stack
+  scratch, the price of a one-shot with no allocator — give encoding threads
+  2 MiB or more.
   `encode.compressBuffered` and `Writer.streamAll` are the same encoders over a
   caller-owned `Buffer`, and need about 64 KiB of thread stack (measured by the
   same bisect: 37-48 KiB release, 41-57 KiB Debug, flat from 600 KiB to 1.5 MiB
   of input; give them 64 KiB and keep the thread's own frames small).
 - **Allocation.** None while encoding or decoding. `Reader.streamFrameAlloc`
   and `Reader.streamAllAlloc` allocate one `Reader.DefaultBuffer` (8 MiB + 256
-  KiB), and `Writer.streamAllAlloc` one `Writer.DefaultBuffer` (1.44 MiB), from
-  your allocator for the call, and free it before returning; a failed
-  allocation is `error.OutOfMemory`.
+  KiB), and `Writer.streamAllAlloc` one `Writer.DefaultBuffer` (2.2 MiB, or a
+  level-3 `Buffer(21)` at about 3.6 MiB), from your allocator for the call,
+  and free it before returning; a failed allocation is `error.OutOfMemory`.
 - **Reader input.** `input` needs a buffer of at least 4 bytes; `Io.Reader.fixed`
   always qualifies. A contiguous `peek` or `take` of up to 128 KiB is served; a
   larger one fails with `StreamTooLong` when the window cannot hold it at the
@@ -354,7 +380,9 @@ state — so `encode` exposes only the names above.
   class; levels 2 and 4-19, and anything outside 1-19, are reserved seats
   that return `error.Unimplemented` (a `Writer` made with one fails every
   write and `finish`). Each of the CLI's other levels is a distinct output
-  class this package cannot produce.
+  class this package cannot produce. Level 3's byte pin is the CLI's file
+  form only: a level-3 `Writer`'s frames are the same class (windowLog 21,
+  the dfast tables) but not byte-pinned against the CLI's pipe form.
 - No trainer: a dictionary is an input. `zstd --train` (the CLI's fastCover)
   or any other tool produces the file, and `zstd.Dictionary` consumes it; an
   in-repo trainer is out of scope. Content-only dictionaries work through
@@ -368,15 +396,18 @@ state — so `encode` exposes only the names above.
 
 `just test` runs the unit tests: frames built by hand or produced by `zstd`
 1.5.7 and checked against it — including the encoder's own output, which
-reproduces the CLI's `zstd -1` bytes on the recorded fixtures — tables from the
-RFC, encode and decode round trips, and a check on every decode that no byte
-past the output was written.
+reproduces the CLI's `zstd -1` and `zstd -3` bytes on the recorded fixtures —
+tables from the RFC, encode and decode round trips at both levels (with and
+without a dictionary), and a check on every decode that no byte past the
+output was written.
 `just zstd-oracle` cross-checks both directions against the reference CLI and
-klauspost/compress on non-ASCII and over-512-KiB inputs, including the strict
-Window_Size check the C decoder does not make, plus the dictionary rows: a
-CLI-trained dictionary over the corpus shapes, every `-D` frame decoded here
-and by klauspost's `WithDecoderDicts`, the mismatch matrix, and the §5
-boundary pair with the CLI's own verdicts recorded.
+klauspost/compress at levels 1 and 3 on non-ASCII and over-512-KiB inputs —
+including one above level 3's 8-MiB job size, where the pin is round-trip-only
+— including the strict Window_Size check the C decoder does not make, plus the
+dictionary rows: a CLI-trained dictionary over the corpus shapes, every `-D`
+frame decoded here and by klauspost's `WithDecoderDicts` at both levels, the
+mismatch matrix, and the §5 boundary pair with the CLI's own verdicts
+recorded.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and `just check-32`
 runs a large-frame probe on wasm32-wasi under wasmtime. `just corpus` generates
 the hash-checked benchmark corpus, and `just bench` runs the local benchmarks;

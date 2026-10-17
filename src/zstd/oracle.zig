@@ -5,9 +5,9 @@
 //! allocator, which the codec itself never does.
 //!
 //! Usage:
-//!   zstd-oracle encode-oneshot <input-file> > frame
-//!   zstd-oracle encode-stream <input-file> > frame
-//!   zstd-oracle encode-dict <input-file> <dict-file> > frame
+//!   zstd-oracle encode-oneshot <input-file> [level] > frame
+//!   zstd-oracle encode-stream <input-file> [level] > frame
+//!   zstd-oracle encode-dict <input-file> <dict-file> [level] > frame
 //!   zstd-oracle encode-raw-dict <input-file> <content-file> > frame
 //!   zstd-oracle encode-stream-dict <input-file> <dict-file> > frame
 //!   zstd-oracle decode <frame-file> <cap-bytes> > out
@@ -17,11 +17,12 @@
 //! `encode-oneshot` writes `zstd.encode.compress`'s frame (the exact
 //! Frame_Content_Size header); `encode-stream` writes
 //! `zstd.Writer.streamAll`'s frame (the FCS-unknown header the CLI writes
-//! over a pipe). `decode` writes the decoded bytes of one frame, capped at
-//! `cap-bytes`; `decode-dict` is the same with a formatted dictionary (`§5`)
-//! parsed from the third file, `decode-raw` with format-free content handed
-//! to `Dictionary.initRaw`. Exit 1 on a codec error, with the error name on
-//! stderr.
+//! over a pipe). The optional `level` is the CLI's scale (1 by default); a
+//! level-3 `encode-stream` takes the class's window (21). `decode` writes the
+//! decoded bytes of one frame, capped at `cap-bytes`; `decode-dict` is the
+//! same with a formatted dictionary (`§5`) parsed from the third file,
+//! `decode-raw` with format-free content handed to `Dictionary.initRaw`.
+//! Exit 1 on a codec error, with the error name on stderr.
 
 const std = @import("std");
 const Io = std.Io;
@@ -60,10 +61,11 @@ pub fn main(init: std.process.Init) !u8 {
         std.mem.eql(u8, args[1], "encode-raw-dict") or
         std.mem.eql(u8, args[1], "encode-stream-dict"))
     {
-        if (args.len != 4) {
-            print("zstd-oracle: {s} needs <input-file> <dict-file>\n", .{args[1]});
+        if (args.len != 4 and args.len != 5) {
+            print("zstd-oracle: {s} needs <input-file> <dict-file> [level]\n", .{args[1]});
             return 1;
         }
+        const level: u8 = if (args.len == 5) try parseLevel(args[4]) else 1;
         const dict_file = try Io.Dir.cwd().openFile(io, args[3], .{
             .allow_directory = false,
             .follow_symlinks = true,
@@ -84,7 +86,10 @@ pub fn main(init: std.process.Init) !u8 {
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         if (!std.mem.eql(u8, args[1], "encode-stream-dict")) {
             const target = try arena.alloc(u8, zstd.encode.maxCompressedLength(source.len));
-            const frame_len = zstd.encode.compress(source, target, .{ .dict = &dict }) catch |err| {
+            const frame_len = zstd.encode.compress(source, target, .{
+                .level = level,
+                .dict = &dict,
+            }) catch |err| {
                 print("zstd-oracle: {s}\n", .{@errorName(err)});
                 return 1;
             };
@@ -107,13 +112,14 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (std.mem.eql(u8, args[1], "encode-oneshot")) {
-        if (args.len != 3) {
-            print("zstd-oracle: encode-oneshot needs <input-file>\n", .{});
+        if (args.len != 3 and args.len != 4) {
+            print("zstd-oracle: encode-oneshot needs <input-file> [level]\n", .{});
             return 1;
         }
+        const level = if (args.len == 4) try parseLevel(args[3]) else 1;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, zstd.encode.maxCompressedLength(source.len));
-        const frame_len = zstd.encode.compress(source, target, .{}) catch |err| {
+        const frame_len = zstd.encode.compress(source, target, .{ .level = level }) catch |err| {
             print("zstd-oracle: {s}\n", .{@errorName(err)});
             return 1;
         };
@@ -122,23 +128,41 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     if (std.mem.eql(u8, args[1], "encode-stream")) {
-        if (args.len != 3) {
-            print("zstd-oracle: encode-stream needs <input-file>\n", .{});
+        if (args.len != 3 and args.len != 4) {
+            print("zstd-oracle: encode-stream needs <input-file> [level]\n", .{});
             return 1;
         }
+        const level = if (args.len == 4) try parseLevel(args[3]) else 1;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
-        const buffer = try arena.create(zstd.Writer.DefaultBuffer);
+        const options: zstd.encode.Options = .{ .level = level };
         var in: Io.Reader = .fixed(source);
-        _ = zstd.Writer.streamAll(
-            zstd.Writer.default_window_log,
-            &in,
-            &stdout_writer.interface,
-            buffer,
-            .{},
-        ) catch |err| {
-            print("zstd-oracle: {s}\n", .{@errorName(err)});
-            return 1;
-        };
+        if (level == 3) {
+            const buffer = try arena.create(
+                zstd.Writer.Buffer(zstd.Writer.level3_default_window_log),
+            );
+            _ = zstd.Writer.streamAll(
+                zstd.Writer.level3_default_window_log,
+                &in,
+                &stdout_writer.interface,
+                buffer,
+                options,
+            ) catch |err| {
+                print("zstd-oracle: {s}\n", .{@errorName(err)});
+                return 1;
+            };
+        } else {
+            const buffer = try arena.create(zstd.Writer.DefaultBuffer);
+            _ = zstd.Writer.streamAll(
+                zstd.Writer.default_window_log,
+                &in,
+                &stdout_writer.interface,
+                buffer,
+                options,
+            ) catch |err| {
+                print("zstd-oracle: {s}\n", .{@errorName(err)});
+                return 1;
+            };
+        }
         return 0;
     }
 
@@ -199,4 +223,12 @@ pub fn main(init: std.process.Init) !u8 {
 
     print("zstd-oracle: unknown mode '{s}'\n", .{args[1]});
     return 1;
+}
+
+/// Parse a CLI-scale level argument (1-19; `encode` gates the reserved ones).
+fn parseLevel(text: []const u8) !u8 {
+    return std.fmt.parseInt(u8, text, 10) catch {
+        print("zstd-oracle: level must be 1-19, got '{s}'\n", .{text});
+        return error.BadLevel;
+    };
 }

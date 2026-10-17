@@ -1,19 +1,27 @@
 """Check zstd against the reference CLI and klauspost/compress.
 
-The encoder's class is the CLI v1.5.7's level 1, so every input is encoded
-through both public forms — the one-shot (`encode.compress`) and the
-streaming Writer — and every frame is checked all the way around: it must
-decode through the CLI, through klauspost/compress, and through our own
-decoder, and it must be byte-identical to the CLI's own frame for the same
-input (the one-shot against `zstd -1` on a file, whose header declares the
-exact Frame_Content_Size; the Writer against `zstd -1` on a pipe, whose
-header declares the window instead). The CLI's frames decode through our
-decoder too.
+The encoder's classes are the CLI v1.5.7's levels 1 and 3, so every input is
+encoded through both public forms at both levels — the one-shot
+(`encode.compress`) and the streaming Writer — and every frame is checked all
+the way around: it must decode through the CLI, through klauspost/compress,
+and through our own decoder, and at level 1 it must be byte-identical to the
+CLI's own frame for the same input (the one-shot against `zstd -1` on a file,
+whose header declares the exact Frame_Content_Size; the Writer against
+`zstd -1` on a pipe, whose header declares the window instead). The CLI's
+frames decode through our decoder too.
+
+Level 3 (dfast) is pinned the same way for the one-shot, against `zstd -3` on
+a file with default threading: byte-identical for inputs up to the level's
+8-MiB job size, and round-trip-only above it (the CLI's multithreaded form
+splits jobs there) and on the TE8 rows below. Its Writer frames are the
+streaming class: the CLI's pipe form at level 3 reaches the same window and
+tables but its own chunking (the multithreaded path's 512-KiB chunks), so
+those frames are checked all the way around, not byte-pinned.
 
 The two forms are two different classes and must not be compared across:
 a pipe's length is unknown when the header goes out, so the CLI's pipe frame
-carries the FCS-unknown header and its streaming parameters (windowLog 19,
-hashLog 14, 7-byte hashing), while its file frame is single-segment with the
+carries the FCS-unknown header and its streaming parameters (windowLog 19 at
+level 1, 21 at level 3), while its file frame is single-segment with the
 exact Frame_Content_Size under the window cap and the source-size parameter
 class. On a 3.4-KiB file the CLI's own two forms differ by 102 bytes
 (`README.md`: 1767 against 1869); our one-shot is the file form byte for byte
@@ -36,7 +44,9 @@ The dictionary rows (RFC 8878 §5) train a dictionary with the CLI itself
 `decode-dict` harness mode) and klauspost's `WithDecoderDicts`; the
 mismatch rows pin the error names (no dictionary, a second trained
 dictionary), and the hand-built §5 boundary pair records the pinned CLI's
-verdict against ours (it decodes the late reach, we refuse it — DT1).
+verdict against ours (it decodes the late reach, we refuse it — DT1). The
+encode parity rows run at both levels: `zstd -D dict -1` and
+`zstd -D dict -3`.
 """
 
 import base64
@@ -96,6 +106,16 @@ def _inputs() -> list[tuple[str, bytes, bool]]:
             b"the quick brown fox jumps over the lazy dog. " * 44_000,
             True,
         ),
+        # Above the level's multithreaded job size (8 MiB at -3, 2 MiB at -1):
+        # the CLI's default threading splits the input into jobs, and each
+        # job's frames carry boundary blocks no single-call encoder produces,
+        # so the pin there is round-trip-only (the same shape the README's
+        # parity exclusions document).
+        (
+            "long text (9 MiB, above the -3 job size)",
+            b"the quick brown fox jumps over the lazy dog. " * 220_000,
+            False,
+        ),
         (
             "RFC 8878 text",
             (root / "docs/research/specs/rfc8878-zstd.txt").read_bytes(),
@@ -127,35 +147,35 @@ def run(argv: list[str], data: bytes | None = None) -> subprocess.CompletedProce
     return subprocess.run(argv, input=data, capture_output=True, check=False)
 
 
-def our_oneshot(data: bytes) -> bytes:
-    return common.harness_output(harness, "encode-oneshot", data)
+def our_oneshot(data: bytes, level: int = 1) -> bytes:
+    return common.harness_output(harness, "encode-oneshot", data, str(level))
 
 
-def our_stream(data: bytes) -> bytes:
-    return common.harness_output(harness, "encode-stream", data)
+def our_stream(data: bytes, level: int = 1) -> bytes:
+    return common.harness_output(harness, "encode-stream", data, str(level))
 
 
 def our_decode(frame: bytes, cap: int) -> bytes:
     return common.harness_output(harness, "decode", frame, str(cap))
 
 
-def cli_oneshot(data: bytes) -> bytes:
-    """`zstd -1` on a file: the exact-Frame_Content_Size header form."""
+def cli_oneshot(data: bytes, level: int = 1) -> bytes:
+    """`zstd -<level>` on a file: the exact-Frame_Content_Size header form."""
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / "in"
         target = Path(tmp) / "out.zst"
         source.write_bytes(data)
-        result = run(["zstd", "-1", "-q", "-f", str(source), "-o", str(target)])
+        result = run(["zstd", f"-{level}", "-q", "-f", str(source), "-o", str(target)])
         if result.returncode != 0:
-            raise AssertionError(f"zstd -1 failed: {result.stderr.decode().strip()}")
+            raise AssertionError(f"zstd -{level} failed: {result.stderr.decode().strip()}")
         return target.read_bytes()
 
 
-def cli_stream(data: bytes) -> bytes:
-    """`zstd -1` on a pipe: the FCS-unknown header form the Writer writes."""
-    result = run(["zstd", "-1", "-q", "-c"], data)
+def cli_stream(data: bytes, level: int = 1) -> bytes:
+    """`zstd -<level>` on a pipe: the FCS-unknown header form the Writer writes."""
+    result = run(["zstd", f"-{level}", "-q", "-c"], data)
     if result.returncode != 0:
-        raise AssertionError(f"zstd -1 -c failed: {result.stderr.decode().strip()}")
+        raise AssertionError(f"zstd -{level} -c failed: {result.stderr.decode().strip()}")
     return result.stdout
 
 
@@ -184,14 +204,20 @@ def klauspost_decode(frame: bytes, expected: bytes) -> None:
             raise AssertionError(f"klauspost rejected the frame: {result.stderr.decode().strip()}")
 
 
-def our_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
+def our_dict_frame(data: bytes, dict: bytes, pipe: bool = False, level: int = 1) -> bytes:
     """Our with-dictionary frame: the one-shot (the file class) or the Writer
-    (the pipe class the CLI writes for `zstd -D dict -1 -c`)."""
+    (the pipe class the CLI writes for `zstd -D dict -1 -c`). The harness's
+    dictionary modes are level 1; level 3 is the one-shot's level option over
+    the same dictionary, so the frame goes through `encode.compress` directly
+    (a temp input file and the harness's `encode-oneshot` with a level)."""
     with tempfile.TemporaryDirectory() as tmp:
         dict_path = Path(tmp) / "dict.bin"
         dict_path.write_bytes(dict)
         mode = "encode-stream-dict" if pipe else "encode-dict"
-        return common.harness_output(harness, mode, data, str(dict_path))
+        if level == 1:
+            return common.harness_output(harness, mode, data, str(dict_path))
+        assert not pipe, "the level-3 dictionary rows are the file form"
+        return common.harness_output(harness, "encode-dict", data, str(dict_path), str(level))
 
 
 def our_raw_dict_frame(data: bytes, content: bytes) -> bytes:
@@ -242,16 +268,18 @@ def our_decode_nodict(frame: bytes, cap: int) -> subprocess.CompletedProcess:
         return run([str(harness), "decode", str(frame_path), str(cap)])
 
 
-def cli_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
-    """The CLI's `-D dict -1` frame: the file form (exact FCS) or the pipe
-    form (the FCS-unknown header)."""
+def cli_dict_frame(data: bytes, dict: bytes, pipe: bool = False, level: int = 1) -> bytes:
+    """The CLI's `-D dict -<level>` frame: the file form (exact FCS) or the
+    pipe form (the FCS-unknown header)."""
     if pipe:
         with tempfile.TemporaryDirectory() as tmp:
             dict_path = Path(tmp) / "dict.bin"
             dict_path.write_bytes(dict)
-            result = run(["zstd", "-D", str(dict_path), "-1", "-q", "-c"], data)
+            result = run(["zstd", "-D", str(dict_path), f"-{level}", "-q", "-c"], data)
             if result.returncode != 0:
-                raise AssertionError(f"zstd -D -1 -c failed: {result.stderr.decode().strip()}")
+                raise AssertionError(
+                    f"zstd -D -{level} -c failed: {result.stderr.decode().strip()}"
+                )
             return result.stdout
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / "in"
@@ -264,7 +292,7 @@ def cli_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
                 "zstd",
                 "-D",
                 str(dict_path),
-                "-1",
+                f"-{level}",
                 "-q",
                 "-f",
                 str(source),
@@ -273,7 +301,7 @@ def cli_dict_frame(data: bytes, dict: bytes, pipe: bool = False) -> bytes:
             ]
         )
         if result.returncode != 0:
-            raise AssertionError(f"zstd -D -1 failed: {result.stderr.decode().strip()}")
+            raise AssertionError(f"zstd -D -{level} failed: {result.stderr.decode().strip()}")
         return target.read_bytes()
 
 
@@ -390,12 +418,14 @@ def check_dictionary_rows() -> int:
         assert raw.returncode != 0 and b"DictionaryMismatch" in raw.stderr, raw.stderr
         checked += 3
 
-    # The encode rows: the parity target is `zstd -D dict -1`, form-matched —
-    # the one-shot against the CLI's file form (the exact
-    # Frame_Content_Size), the Writer against its pipe form (`-c`, the
-    # FCS-unknown header). The CLI's own frame is the reference, byte for
-    # byte; `zstd -t -D` and our own decoder verify every frame. The 8-KiB
-    # boundary is the C's attach/copy switch, so the rows bracket it.
+    # The encode rows: the parity target is `zstd -D dict -1` at level 1 and
+    # `zstd -D dict -3` at level 3, form-matched — the one-shot against the
+    # CLI's file form (the exact Frame_Content_Size), the Writer against its
+    # pipe form (`-c`, the FCS-unknown header; level 1 only, since level 3's
+    # pipe form carries the CLI's own multithreaded chunking). The CLI's own
+    # frame is the reference, byte for byte; `zstd -t -D` and our own decoder
+    # verify every frame. The level-1 8-KiB and level-3 16-KiB boundaries are
+    # the C's attach/copy switches, so the rows bracket them.
     for desc, data, _ in rows:
         if not data:
             continue
@@ -414,6 +444,20 @@ def check_dictionary_rows() -> int:
                     f"{decoded.stderr.decode().strip()}"
                 )
             checked += 1
+        frame = cli_dict_frame(data, dictionary, level=3)
+        ours = our_dict_frame(data, dictionary, level=3)
+        assert ours == frame, (
+            f"level-3 with-dictionary parity ({desc}): "
+            f"{len(ours)} bytes against the CLI's {len(frame)}"
+        )
+        cli_test_dict(frame, dictionary)
+        decoded = our_decode_dict(frame, len(data), dictionary)
+        if decoded.returncode != 0 or decoded.stdout != data:
+            raise AssertionError(
+                f"our decode of the level-3 parity frame ({desc}): "
+                f"{decoded.stderr.decode().strip()}"
+            )
+        checked += 1
 
     # A raw dictionary (`§5`'s format-free form): the CLI takes any file with
     # `-D`, and the frame names no ID. The parity target is the same switch.
@@ -506,36 +550,67 @@ def check_dictionary_rows() -> int:
 
 
 def check(desc: str, data: bytes, parity: bool) -> None:
-    """Every row for one input, all three decoders and the byte parity."""
-    frames = {"one-shot": our_oneshot(data), "Writer": our_stream(data)}
+    """Every row for one input at both levels, all three decoders and the
+    byte parity."""
+    for level in (1, 3):
+        check_level(desc, data, parity, level)
+
+
+def check_level(desc: str, data: bytes, parity: bool, level: int) -> None:
+    """One input at one level: our two forms all the way around the decoders,
+    then the CLI's own frames back through ours.
+
+    The one-shot's byte parity is the pin at both levels (the file form). The
+    Writer's frames are the streaming class: at level 1 they are byte-pinned
+    against the CLI's pipe form; at level 3 the CLI's pipe form reaches the
+    same window and tables but its own multithreaded chunking, so the frames
+    are round-trip-checked instead. The empty stream is the one recorded
+    divergence: the CLI knows the length by the time it ends the frame, so
+    its empty pipe frame is the one-shot's single-segment form.
+    """
+    frames = {
+        "one-shot": our_oneshot(data, level),
+        "Writer": our_stream(data, level),
+    }
     for form, frame in frames.items():
         cli_test(frame)
         got = cli_decode(frame)
-        assert got == data, f"CLI decode ({desc}, {form}): {len(got)} bytes, want {len(data)}"
+        assert got == data, (
+            f"CLI decode ({desc}, level {level}, {form}): {len(got)} bytes, want {len(data)}"
+        )
         klauspost_decode(frame, data)
         got = our_decode(frame, len(data))
-        assert got == data, f"our decode ({desc}, {form}): {len(got)} bytes, want {len(data)}"
+        assert got == data, (
+            f"our decode ({desc}, level {level}, {form}): {len(got)} bytes, want {len(data)}"
+        )
 
-    # The class reference, both header forms. The empty stream is the one
-    # recorded divergence: the CLI knows the length by the time it ends the
-    # frame, so its empty pipe frame is the one-shot's single-segment form.
-    cli_one = cli_oneshot(data)
+    # The class reference, both header forms.
+    cli_one = cli_oneshot(data, level)
     if parity:
-        assert frames["one-shot"] == cli_one, f"one-shot byte parity ({desc})"
-        if data:
-            assert frames["Writer"] == cli_stream(data), f"Writer byte parity ({desc})"
-        else:
-            assert cli_stream(data) == cli_one
+        assert frames["one-shot"] == cli_one, f"one-shot byte parity ({desc}, level {level})"
+        if level == 1:
+            if data:
+                assert frames["Writer"] == cli_stream(data, level), (
+                    f"Writer byte parity ({desc}, level {level})"
+                )
+            else:
+                assert cli_stream(data, level) == cli_one
 
     # The CLI's frames, back through our decoder: the exact-FCS form through
     # the one-shot, the pipe form through the streaming Reader (the example
     # CLI is the streaming pump's public surface).
-    assert our_decode(cli_one, len(data)) == data, f"our decode of the CLI's frame ({desc})"
+    assert our_decode(cli_one, len(data)) == data, (
+        f"our decode of the CLI's frame ({desc}, level {level})"
+    )
     if data:
-        result = common.run_example("zstd", ["decode", "-"], cli_stream(data))
+        result = common.run_example("zstd", ["decode", "-"], cli_stream(data, level))
         if result.returncode != 0:
-            raise AssertionError(f"example decode ({desc}): {result.stderr.decode().strip()}")
-        assert result.stdout == data, f"example decode of the CLI's pipe frame ({desc})"
+            raise AssertionError(
+                f"example decode ({desc}, level {level}): {result.stderr.decode().strip()}"
+            )
+        assert result.stdout == data, (
+            f"example decode of the CLI's pipe frame ({desc}, level {level})"
+        )
 
 
 if not harness.exists():
@@ -550,8 +625,10 @@ parity_rows = sum(1 for _, _, parity in rows if parity)
 dict_rows = check_dictionary_rows()
 
 print(
-    f"zstd-oracle: {len(rows)} inputs x 2 encoder forms -> zstd -t, zstd -d, "
-    "klauspost DecodeAll + stream, our decode; byte parity with zstd -1 on "
-    f"both header forms for {parity_rows} of them; {dict_rows} dictionary "
-    "rows (CLI-trained, the mismatch matrix, and the §5 boundary): OK"
+    f"zstd-oracle: {len(rows)} inputs x 2 encoder forms x levels 1 and 3 -> "
+    "zstd -t, zstd -d, klauspost DecodeAll + stream, our decode; one-shot byte "
+    f"parity with zstd -1 and zstd -3 on the file form for {parity_rows} of "
+    "them, Writer byte parity with the zstd -1 pipe form; "
+    f"{dict_rows} dictionary rows (CLI-trained, the mismatch matrix, the §5 "
+    "boundary, both levels): OK"
 )

@@ -48,16 +48,21 @@ const sequences_compress = @import("sequences_compress.zig");
 /// or above this.
 pub const min_match_length: u32 = sequences_compress.min_match_length;
 
+/// `ZSTD_hash4`'s prime (`zstd_compress_internal.h:902`).
+const prime4bytes: u32 = 2654435761;
 /// `ZSTD_hash5`'s prime (`zstd_compress_internal.h:933`).
 const prime5bytes: u64 = 889523592379;
 /// `ZSTD_hash6`'s prime (`zstd_compress_internal.h:936`).
 const prime6bytes: u64 = 227718039650203;
 /// `ZSTD_hash7`'s prime (`zstd_compress_internal.h:939`).
 const prime7bytes: u64 = 58295818150454627;
+/// `ZSTD_hash8`'s prime (`zstd_compress_internal.h:942`): the dfast long
+/// table's hash width, 8 bytes at every level of the class.
+const prime8bytes: u64 = 0xCF1BBCDCB7A56463;
 
 /// `HASH_READ_SIZE` (`zstd_compress_internal.h:33`): the bytes a hash reads
 /// and the scan loop's trailing margin.
-const hash_read_size: usize = 8;
+pub const hash_read_size: usize = 8;
 
 /// `kSearchStrength` (`zstd_compress_internal.h:32`): the scan accelerates by
 /// one byte every `1 << (kSearchStrength - 1)` unmatched bytes.
@@ -74,70 +79,94 @@ const repcode1_off_base: u32 = 1;
 
 /// The finder's parameters, from the block layer's size ladder.
 pub const Params = struct {
+    /// The compression level that selected the scan: 1 is the `ZSTD_fast`
+    /// class, 3 the `ZSTD_dfast` one. The block layer dispatches on it;
+    /// levels 2 and 4-19 never reach a frame (the option gates them).
+    level: u8 = 1,
     /// The frame's Window_Log (`§3.1.1.1.2`): the finder's reach.
     window_log: u6,
-    /// The position table's width: `min(hashLog, windowLog + 1)`
+    /// The long table's width: `min(hashLog, windowLog + 1)`
     /// (`zstd_compress.c:1564`).
     hash_log: u6,
-    /// The hash width in bytes — 5, 6, or 7 by the size class (the C's
+    /// The dfast small table's width: `chainLog`, clamped to the window the
+    /// same way (`cycleLog > windowLog ⇒ chainLog -= cycleLog - windowLog`,
+    /// `zstd_compress.c:1563-1567`). The fast finder has one table and never
+    /// reads it.
+    chain_log: u6 = 0,
+    /// The hash width in bytes — 4 to 7 by the size class (the C's
     /// `minMatch`, `clevels.h`).
     mls: u3,
 
-    /// The C's level-1 ladder for a one-shot with a known source size: the
-    /// size class picks (windowLog, hashLog, minMatch) from `clevels.h`'s
-    /// level-1 rows, then `ZSTD_adjustCParams_internal`
+    /// The C's level ladder for a one-shot with a known source size: the
+    /// size class picks (windowLog, chainLog, hashLog, minMatch) from
+    /// `clevels.h`'s row for the level, then `ZSTD_adjustCParams_internal`
     /// (`zstd_compress.c:1473-1586`) shrinks the window to the next power of
-    /// two covering the source, clamps the hash to that window plus one, and
-    /// floors the window at 10.
-    pub fn forSource(source_len: usize) Params {
-        // `ZSTD_getCParams_internal` (`zstd_compress.c:7759-7780`): the
-        // class is `(rSize <= 256 KB) + (rSize <= 128 KB) + (rSize <= 16
-        // KB)`, and level 1 is `ZSTD_fast` in every class.
-        const window_log_class: u6 = if (source_len > 256 * 1024)
-            19
-        else if (source_len > 128 * 1024)
-            18
-        else if (source_len > 16 * 1024)
-            17
-        else
-            14;
-        const hash_log_class: u6 = if (source_len > 128 * 1024)
-            14
-        else if (source_len > 16 * 1024)
-            13
-        else
-            15;
-        // `mls` per the class: 5 under 16 KB, 6 up to 256 KB, 7 above
-        // (`clevels.h`'s `L` column). The ≤ 16-KB class's 5 is what the C
-        // uses, and it is the difference between the CLI's bytes and a
-        // near-miss on inputs under 16 KB.
-        const mls: u3 = if (source_len > 256 * 1024)
-            7
-        else if (source_len > 16 * 1024)
-            6
-        else
-            5;
+    /// two covering the source, clamps the hash to that window plus one and
+    /// the chain to the window, and floors the window at 10.
+    pub fn forSource(level: u8, source_len: usize) Params {
+        const row = classRow(level, source_len);
         // The adjust step's order (`ZSTD_adjustCParams_internal`,
         // `zstd_compress.c:1548-1580`): the window first shrinks to the
-        // source's own log, the hash is clamped to that window plus one, and
-        // only then is the window floored to 10 (`ZSTD_WINDOWLOG_ABSOLUTEMIN`)
-        // for the frame header. Clamping the hash after the floor would leave
-        // it wider than the C's for sources of at most 512 bytes, where the
-        // floor is what moves the window.
+        // source's own log, the hash and chain are clamped to that window,
+        // and only then is the window floored to 10
+        // (`ZSTD_WINDOWLOG_ABSOLUTEMIN`) for the frame header. Clamping after
+        // the floor would leave the tables wider than the C's for sources of
+        // at most 512 bytes, where the floor is what moves the window.
         const source_log = nextPow2Log(source_len);
-        const shrunk_window_log = @min(window_log_class, source_log);
+        const shrunk_window_log = @min(row.window_log, source_log);
         return .{
+            .level = level,
             .window_log = @max(shrunk_window_log, 10),
-            .hash_log = @min(hash_log_class, shrunk_window_log + 1),
-            .mls = mls,
+            .hash_log = @min(row.hash_log, shrunk_window_log + 1),
+            .chain_log = @min(row.chain_log, shrunk_window_log),
+            .mls = row.mls,
         };
     }
 };
 
+/// One level's row of `clevels.h`'s four size-class tables: the columns the
+/// finder reads (W, C, H, L — window, chain, hash, minMatch).
+const Row = struct {
+    window_log: u6,
+    chain_log: u6,
+    hash_log: u6,
+    mls: u3,
+};
+
+/// `ZSTD_defaultCParameters[tableID][level]` (`clevels.h`): the row for a
+/// size class. The class is `(rSize <= 256 KB) + (rSize <= 128 KB) +
+/// (rSize <= 16 KB)` (`ZSTD_getCParams_internal`, `zstd_compress.c:7759`).
+/// Only levels 1 (`ZSTD_fast`) and 3 (`ZSTD_dfast`) have a scan here; the
+/// option gate rejects every other level before a frame starts.
+fn classRow(level: u8, size: usize) Row {
+    const big = size > 256 * 1024;
+    const medium = size > 128 * 1024;
+    const small = size > 16 * 1024;
+    return switch (level) {
+        1 => if (big)
+            .{ .window_log = 19, .chain_log = 13, .hash_log = 14, .mls = 7 }
+        else if (medium)
+            .{ .window_log = 18, .chain_log = 13, .hash_log = 14, .mls = 6 }
+        else if (small)
+            .{ .window_log = 17, .chain_log = 12, .hash_log = 13, .mls = 6 }
+        else
+            .{ .window_log = 14, .chain_log = 14, .hash_log = 15, .mls = 5 },
+        3 => if (big)
+            .{ .window_log = 21, .chain_log = 16, .hash_log = 17, .mls = 5 }
+        else if (medium)
+            .{ .window_log = 18, .chain_log = 16, .hash_log = 16, .mls = 4 }
+        else if (small)
+            .{ .window_log = 17, .chain_log = 15, .hash_log = 16, .mls = 5 }
+        else
+            .{ .window_log = 14, .chain_log = 14, .hash_log = 15, .mls = 4 },
+        else => unreachable,
+    };
+}
+
 /// `ZSTD_highbit32(srcSize - 1) + 1` (`zstd_compress.c:1557-1558`): the
 /// smallest power-of-two window log that covers `source_len`, floor 6 (the
 /// C's `ZSTD_HASHLOG_MIN`).
-fn nextPow2Log(source_len: usize) u6 {
+pub fn nextPow2Log(source_len: usize) u6 {
     const usize_len = @bitSizeOf(usize);
     return switch (source_len) {
         0, 1 => 6,
@@ -159,7 +188,7 @@ pub const Store = struct {
 
     /// Append one sequence: its `literals_length` literals from
     /// `source[anchor..position]`, then the match.
-    fn append(
+    pub fn append(
         store: *Store,
         source: []const u8,
         anchor: usize,
@@ -189,7 +218,7 @@ pub const Store = struct {
     /// Append the block's trailing literals (`ZSTD_storeLastLiterals`,
     /// `zstd_compress.c:3423-3424`): the bytes after the last match, which
     /// close the block's literal run.
-    fn appendTrailing(store: *Store, source: []const u8, anchor: usize, iend: usize) void {
+    pub fn appendTrailing(store: *Store, source: []const u8, anchor: usize, iend: usize) void {
         const literals_length = iend - anchor;
         assert(store.literals_len + literals_length <= store.literals.len);
         fastmem.copy(
@@ -311,7 +340,7 @@ pub const dict_table_entries_max = 1 << 15;
 
 /// `ZSTD_SHORT_CACHE_TAG_BITS` (`zstd_compress_internal.h:1482`): the low 8
 /// bits of a CDict table entry hold a hash tag, not part of the position.
-const short_cache_tag_bits: u5 = 8;
+pub const short_cache_tag_bits: u5 = 8;
 const short_cache_tag_mask: u32 = (1 << short_cache_tag_bits) - 1;
 
 /// The attach scan's step increment: the C's `1 << kSearchStrength` (`= 256`,
@@ -361,22 +390,15 @@ pub const DictParams = struct {
     mls: u3,
 };
 
-/// The level-1 row for a size class: (windowLog, chainLog, hashLog, minMatch)
-/// from `clevels.h`.
-fn classRow(size: usize) DictParams {
-    return if (size > 256 * 1024)
-        .{ .window_log = 19, .hash_log = 14, .chain_log = 13, .mls = 7 }
-    else if (size > 128 * 1024)
-        .{ .window_log = 18, .hash_log = 14, .chain_log = 13, .mls = 6 }
-    else if (size > 16 * 1024)
-        .{ .window_log = 17, .hash_log = 13, .chain_log = 12, .mls = 6 }
-    else
-        .{ .window_log = 14, .hash_log = 15, .chain_log = 14, .mls = 5 };
-}
-
 /// The dictionary's own parameters, from its whole file length.
-pub fn dictParams(dict_source_len: usize) DictParams {
-    const row = classRow(dict_source_len +% 499);
+pub fn dictParams(level: u8, dict_source_len: usize) DictParams {
+    const class = classRow(level, dict_source_len +% 499);
+    const row: DictParams = .{
+        .window_log = class.window_log,
+        .hash_log = @intCast(class.hash_log),
+        .chain_log = @intCast(class.chain_log),
+        .mls = class.mls,
+    };
     // `ZSTD_adjustCParams_internal` (`zstd_compress.c:1520-1586`): the
     // window shrinks to cover the 513-byte source and the dictionary, the
     // hash clamps to that window plus one, the chain log to the window.
@@ -407,46 +429,93 @@ fn dictAndWindowLog(window_log: u6, source_len: usize, dict_size: usize) u6 {
 
 /// The frame's parameters with the dictionary attached
 /// (`ZSTD_resetCCtx_byAttachingCDict`, `zstd_compress.c:2343-2350`): the
-/// source-size ladder for the window, the dictionary's own hash width, and
-/// the frame's hash clamped to the window plus one.
-pub fn forSourceAttached(source_len: usize, dict: DictParams) Params {
-    const plain = Params.forSource(source_len);
+/// source-size ladder for the window, and the frame's tables clamped to the
+/// window the dictionary's own parameters shrink to
+/// (`ZSTD_adjustCParams_internal` with the source size, before its floor) —
+/// the dictionary's widths, in the C's own order.
+pub fn forSourceAttached(level: u8, source_len: usize, dict: DictParams) Params {
+    const plain = Params.forSource(level, source_len);
+    const adjusted_window_log = @min(dict.window_log, nextPow2Log(source_len));
     return .{
+        .level = level,
         .window_log = plain.window_log,
-        .hash_log = @intCast(@min(dict.hash_log, plain.window_log + 1)),
+        .hash_log = @intCast(@min(dict.hash_log, adjusted_window_log + 1)),
+        .chain_log = @intCast(@min(dict.chain_log, adjusted_window_log)),
         .mls = dict.mls,
     };
 }
 
 /// The frame's parameters with the dictionary copied
 /// (`ZSTD_resetCCtx_byCopyingCDict`, `zstd_compress.c:2404-2416`): the
-/// window from `srcSize + dictSize`'s class, the dictionary's own hash width
-/// and `minMatch`.
-pub fn forSourceCopied(source_len: usize, dict_source_len: usize, dict: DictParams) Params {
+/// window from `srcSize + dictSize`'s class, the dictionary's own table
+/// widths and `minMatch`.
+pub fn forSourceCopied(
+    level: u8,
+    source_len: usize,
+    dict_source_len: usize,
+    dict: DictParams,
+) Params {
     const total = source_len + dict_source_len;
-    const row = classRow(total);
+    const row = classRow(level, total);
     const window_log = @max(@min(row.window_log, nextPow2Log(total)), 10);
-    return .{ .window_log = window_log, .hash_log = dict.hash_log, .mls = dict.mls };
+    return .{
+        .level = level,
+        .window_log = window_log,
+        .hash_log = dict.hash_log,
+        .chain_log = dict.chain_log,
+        .mls = dict.mls,
+    };
+}
+
+/// `attachDictSizeCutoffs` (`zstd_compress.c:2296-2307`): the source size at
+/// or below which a dictionary is attached as a separate match state rather
+/// than copied into the frame's own tables. The CLI's `-D` path builds a
+/// CDict from the level's parameters, so the cutoff follows the strategy:
+/// 8 KB for `ZSTD_fast` (level 1), 16 KB for `ZSTD_dfast` (level 3).
+pub fn attachCutoff(level: u8) usize {
+    return switch (level) {
+        1 => 8 * 1024,
+        3 => 16 * 1024,
+        else => unreachable,
+    };
+}
+
+/// The C's streaming class for an unknown source size
+/// (`ZSTD_getCParams(level, ZSTD_CONTENTSIZE_UNKNOWN, 0)`): the default
+/// row's widths and `minMatch`, with the caller's window log in place of the
+/// row's (the `Writer`'s class; a source size would shrink the window).
+pub fn forStreaming(level: u8, window_log: u6) Params {
+    const row = classRow(level, std.math.maxInt(usize));
+    return .{
+        .level = level,
+        .window_log = window_log,
+        .hash_log = @intCast(@min(row.hash_log, window_log + 1)),
+        .chain_log = @intCast(@min(row.chain_log, window_log)),
+        .mls = row.mls,
+    };
 }
 
 /// `ZSTD_hashPtr` at a runtime width: the dictionary table's hash is the
 /// dictionary's own `minMatch` and `hashLog + 8` bits, which need not match
 /// the frame's (`zstd_fast.c:512,547`).
-inline fn hashAtWidth(source: []const u8, position: usize, hash_bits: u5, mls: u3) usize {
+pub inline fn hashAtWidth(source: []const u8, position: usize, hash_bits: u5, mls: u4) usize {
     assert(position + hash_read_size <= source.len);
     const word = readInt(u64, source[position..][0..8]);
     const shift: u6 = @intCast(64 - @as(u7, hash_bits));
     return switch (mls) {
+        4 => @intCast((read32(source, position) *% prime4bytes) >>
+            @intCast(32 - @as(u7, hash_bits))),
         5 => @intCast(((word << 24) *% prime5bytes) >> shift),
         6 => @intCast(((word << 16) *% prime6bytes) >> shift),
         7 => @intCast(((word << 8) *% prime7bytes) >> shift),
+        8 => @intCast((word *% prime8bytes) >> shift),
         else => unreachable,
     };
 }
 
 /// `ZSTD_writeTaggedIndex`: the position in the high bits, the hash's tag in
 /// the low 8.
-inline fn writeTaggedIndex(table: []u32, hash_and_tag: usize, position: usize) void {
+pub inline fn writeTaggedIndex(table: []u32, hash_and_tag: usize, position: usize) void {
     assert(position >> (@as(u6, 32) - short_cache_tag_bits) == 0);
     const slot = hash_and_tag >> short_cache_tag_bits;
     const tag: u32 = @intCast(hash_and_tag & short_cache_tag_mask);
@@ -454,7 +523,7 @@ inline fn writeTaggedIndex(table: []u32, hash_and_tag: usize, position: usize) v
 }
 
 /// `ZSTD_comparePackedTags`: whether a table entry's tag is the hash's.
-inline fn tagsMatch(entry: u32, hash_and_tag: usize) bool {
+pub inline fn tagsMatch(entry: u32, hash_and_tag: usize) bool {
     const tag: u32 = @intCast(hash_and_tag & short_cache_tag_mask);
     return (entry & short_cache_tag_mask) == tag;
 }
@@ -462,14 +531,14 @@ inline fn tagsMatch(entry: u32, hash_and_tag: usize) bool {
 /// `ZSTD_index_overlap_check` (`zstd_compress_internal.h:1429-1431`): whether
 /// the 4 bytes at `index` stay inside one region — false when they would
 /// straddle the dictionary's end, where the C would read across two buffers.
-inline fn indexOverlapCheck(prefix_lowest_index: usize, index: usize) bool {
+pub inline fn indexOverlapCheck(prefix_lowest_index: usize, index: usize) bool {
     return (prefix_lowest_index -% 1) -% index >= 3;
 }
 
 /// `ZSTD_loadDictionaryContent`'s truncation (`zstd_compress.c:4944-4949`):
 /// the table is filled from the last `1 << MIN(MAX(hashLog + 3, chainLog +
 /// 1), 31)` content bytes only; the whole content stays addressable.
-fn maxLoadedContent(params: DictParams) usize {
+pub fn maxLoadedContent(params: DictParams) usize {
     const bits = @min(@max(@as(u6, params.hash_log) + 3, @as(u6, params.chain_log) + 1), 31);
     return @as(usize, 1) << @intCast(bits);
 }
@@ -510,7 +579,7 @@ pub fn fillDictTable(table: *DictTable, content: []const u8, params: DictParams)
 /// The 4 bytes at virtual index `index`: the dictionary's content below
 /// `dict_len`, the source at or above it. Callers guard the read with
 /// `indexOverlapCheck` so it never straddles the boundary.
-inline fn read32At(dict: []const u8, source: []const u8, index: usize) u32 {
+pub inline fn read32At(dict: []const u8, source: []const u8, index: usize) u32 {
     if (index < dict.len) {
         assert(index + 4 <= dict.len);
         return read32(dict, index);
@@ -519,12 +588,24 @@ inline fn read32At(dict: []const u8, source: []const u8, index: usize) u32 {
     return read32(source, index - dict.len);
 }
 
+/// The 8 bytes at virtual index `index`: the dictionary's content below its
+/// length, the source at or above it. The caller keeps the read inside one
+/// region.
+pub inline fn read64At(dict: []const u8, source: []const u8, index: usize) u64 {
+    if (index < dict.len) {
+        assert(index + 8 <= dict.len);
+        return read64(dict, index);
+    }
+    assert(index - dict.len + 8 <= source.len);
+    return read64(source, index - dict.len);
+}
+
 /// `ZSTD_count_2segments` (`zstd_compress_internal.h:1000-1013`): the common
 /// bytes between the source at `ip_start` and a match that begins in the
 /// dictionary at `dict_start`, up to `iend` — the dictionary's tail first,
 /// then the source's own start once the match runs off the dictionary's end
 /// (the layout the decoder's `copyMatchDict` mirrors).
-fn countTwoSegments(
+pub fn countTwoSegments(
     source: []const u8,
     ip_start: usize,
     dict: []const u8,
@@ -587,7 +668,7 @@ const DictFound = struct {
 
 /// The byte at virtual index `index`: the dictionary's content below its
 /// length, the source at or above it.
-inline fn byteAt(dict: []const u8, source: []const u8, index: usize) u8 {
+pub inline fn byteAt(dict: []const u8, source: []const u8, index: usize) u8 {
     return if (index < dict.len) dict[index] else source[index - dict.len];
 }
 
@@ -649,7 +730,7 @@ fn countFromDict(
 /// `source[p]`: the dictionary's content below its length, the frame's output
 /// above it. The callers guard the read with `indexOverlapCheck` so it never
 /// straddles the dictionary's end.
-inline fn read32Virtual(
+pub inline fn read32Virtual(
     dict: []const u8,
     source: []const u8,
     index: usize,
@@ -1464,12 +1545,13 @@ inline fn match4Found(
 
 /// `ZSTD_hashPtr` (`zstd_compress_internal.h:930-948`): the `mls` bytes at
 /// `position` shifted into the word's top, multiplied by the width's prime,
-/// keeping the top `hash_log` bits.
-inline fn hashAt(
+/// keeping the top `hash_log` bits. `mls` 8 is the dfast long table's own
+/// width (`ZSTD_hash8Ptr`), hashed at every level of the class.
+pub inline fn hashAt(
     source: []const u8,
     position: usize,
     hash_log: u6,
-    comptime mls: u3,
+    comptime mls: u4,
 ) usize {
     assert(position + hash_read_size <= source.len);
     const word = readInt(u64, source[position..][0..8]);
@@ -1478,17 +1560,26 @@ inline fn hashAt(
     // instantiations, `zstd_fast.c:436-439`), so the prime is a loop-invariant
     // constant in a register, not a per-probe table load.
     return switch (mls) {
+        4 => @intCast((read32(source, position) *% prime4bytes) >>
+            @intCast(32 - @as(u7, hash_log))),
         5 => @intCast(((word << 24) *% prime5bytes) >> shift),
         6 => @intCast(((word << 16) *% prime6bytes) >> shift),
         7 => @intCast(((word << 8) *% prime7bytes) >> shift),
+        8 => @intCast((word *% prime8bytes) >> shift),
         else => unreachable,
     };
 }
 
 /// A 4-byte read, the C's `MEM_read32`. The caller keeps the 4-byte margin.
-inline fn read32(source: []const u8, position: usize) u32 {
+pub inline fn read32(source: []const u8, position: usize) u32 {
     assert(position + 4 <= source.len);
     return readInt(u32, source[position..][0..4]);
+}
+
+/// An 8-byte read, the C's `MEM_read64`. The caller keeps the 8-byte margin.
+pub inline fn read64(source: []const u8, position: usize) u64 {
+    assert(position + 8 <= source.len);
+    return readInt(u64, source[position..][0..8]);
 }
 
 /// The forward-extension vector width: the CPU's byte-vector suggestion, so
@@ -1503,7 +1594,7 @@ const CountVec = @Vector(count_vec_len, u8);
 /// `iend`. Long matches dominate the compressible shapes (a 32 KiB html
 /// block is one extension), so the stripe width is what matters; the first
 /// difference is the lowest set mask bit (lane i is bit i, bytes in order).
-fn count(source: []const u8, current_start: usize, match_start: usize, iend: usize) usize {
+pub fn count(source: []const u8, current_start: usize, match_start: usize, iend: usize) usize {
     return countTwo(source, current_start, source, match_start, iend - current_start);
 }
 
@@ -1574,8 +1665,9 @@ fn countTwo(
 /// Execute a token stream the way `§3.1.1.4` says: literals first, then the
 /// match at the resolved offset, whose copy may overlap the bytes it writes
 /// (the copy reads bytes this execution has already written). Proves the
-/// stream is a faithful encoding of the block, offsets and all.
-fn expectTokensReproduce(
+/// stream is a faithful encoding of the block, offsets and all. Shared with
+/// the dfast finder's tests (`dfast_compress.zig`).
+pub fn expectTokensReproduce(
     source: []const u8,
     block_start: usize,
     block_size: usize,
@@ -1827,7 +1919,7 @@ test "every emission stays strictly below the declared Window_Size" {
     // starts at 512 KiB, at block offset 200.
     const marker = source[100..164];
     fastmem.copy(u8, source[512 * 1024 + 200 ..][0..64], marker);
-    const params: Params = .forSource(total);
+    const params: Params = .forSource(1, total);
     const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
     const hash_table = try allocator.alloc(u32, @as(usize, 1) << @intCast(params.hash_log));
     defer allocator.free(hash_table);

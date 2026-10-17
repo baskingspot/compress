@@ -34,6 +34,7 @@ const sentinel = internal.sentinel;
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
 const decode = @import("decode.zig");
+const dfast_compress = @import("dfast_compress.zig");
 const Dictionary = @import("Dictionary.zig");
 const encode = @import("encode.zig");
 const frame = @import("frame.zig");
@@ -41,6 +42,7 @@ const golden = @import("golden.zig");
 const match_compress = @import("match_compress.zig");
 const Reader = @import("Reader.zig");
 const sequences_compress = @import("sequences_compress.zig");
+const split_compress = @import("split_compress.zig");
 const common = @import("common.zig");
 const writeInt = common.writeInt;
 
@@ -58,19 +60,22 @@ fn blockLength(comptime window_log: usize) usize {
     return @min(block.max_block_size, historyLength(window_log));
 }
 
-/// The finder's table capacity: `1 << 15`, the widest `hashLog` a frame's
-/// own table can take. Without a dictionary that is 14 — the C's level-1
-/// `hashLog` for an unknown source size (`ZSTD_getCParams(1,
-/// ZSTD_CONTENTSIZE_UNKNOWN, 0)`, `clevels.h`'s default row), clamped to
-/// `windowLog + 1` (`zstd_compress.c:1564`) — but a frame that attaches a
-/// dictionary uses the *dictionary's* width (`ZSTD_resetCCtx_byAttachingCDict`
-/// adjusts the CDict's parameters, and an unknown source size clamps
-/// nothing), which is 15 for every dictionary up to 16 KiB and can be 15 at
-/// any window. The scans slice the table to the frame's own width; the
-/// capacity is the dictionary's.
-fn tableEntries(comptime window_log: usize) usize {
+/// The finder's long-table capacity: `1 << 17`, the widest long `hashLog` a
+/// frame's own table can take — the level-3 rows' default class width, which
+/// a frame that attaches a level-3 dictionary takes even under a small window
+/// (an unknown source size clamps nothing in
+/// `ZSTD_resetCCtx_byAttachingCDict`). The scans slice the table to the
+/// frame's own width; the capacity is the dictionary's.
+fn longTableEntries(comptime window_log: usize) usize {
     _ = window_log;
-    return @as(usize, 1) << 15;
+    return dfast_compress.long_table_entries_max;
+}
+
+/// The finder's small-table capacity: `1 << 16`, the level-3 rows' widest
+/// `chainLog`, on the same reasoning as `longTableEntries`.
+fn smallTableEntries(comptime window_log: usize) usize {
+    _ = window_log;
+    return dfast_compress.small_table_entries_max;
 }
 
 /// The sequence list's capacity: every sequence carries a match of at least
@@ -103,11 +108,14 @@ pub fn Buffer(comptime window_log: usize) type {
         /// (`blockLength(window_log) + block.block_header_len` bytes), so
         /// no block can outgrow it.
         target: [blockLength(window_log) + block.block_header_len]u8,
-        /// The finder's position table, one `u32` per hash, zeroed at
+        /// The finder's position tables, one `u32` per hash, zeroed at
         /// `init`; a zeroed slot means "no candidate". A frame that attaches
-        /// a dictionary uses the dictionary's own `hashLog` (up to 15), so
-        /// the capacity covers that width at every window.
-        hash_table: [tableEntries(window_log)]u32,
+        /// a dictionary uses the dictionary's own widths (up to 17 long and
+        /// 16 small at level 3), so the capacity covers them at every
+        /// window; the scans slice the live width.
+        long_table: [longTableEntries(window_log)]u32,
+        /// dfast's small table; the level-1 finder leaves it unused.
+        small_table: [smallTableEntries(window_log)]u32,
         /// The block's sequence list.
         sequences: [sequenceCapacity(window_log)]sequences_compress.Sequence,
     };
@@ -119,7 +127,19 @@ pub fn Buffer(comptime window_log: usize) type {
 /// this writer produces.
 pub const default_window_log: usize = 19;
 
-/// `Buffer(default_window_log)`: about 1.4 MiB, larger than a typical thread
+/// The level-3 default window log, 21: the dfast class's own window (the
+/// `clevels.h` default row's `W`), which the CLI's `zstd -3` declares. A
+/// level-3 `Writer` needs `Buffer(21)` to reach the class's window.
+pub const level3_default_window_log: usize = 21;
+
+/// The default window log for a level: `default_window_log` for level 1,
+/// `level3_default_window_log` for level 3 (and for a reserved level, which
+/// never writes a frame).
+pub fn defaultWindowLog(level: u8) usize {
+    return if (level == 3) level3_default_window_log else default_window_log;
+}
+
+/// `Buffer(default_window_log)`: about 2.2 MiB, larger than a typical thread
 /// stack, so allocate it, as `streamAllAlloc` does.
 pub const DefaultBuffer = Buffer(default_window_log);
 
@@ -133,11 +153,11 @@ output: *Io.Writer,
 options: encode.Options,
 /// The caller's buffer, as slices: the finder's source (history then the
 /// accumulating block), the block's literals, the compressed-block scratch,
-/// the position table, and the sequence list.
+/// the position tables, and the sequence list.
 window: []u8,
 literals: []u8,
 target: []u8,
-hash_table: []u32,
+tables: block_compress.Tables,
 sequences: []sequences_compress.Sequence,
 /// The frame's window size, `1 << window_log`, stored at `init`.
 window_len: usize,
@@ -163,9 +183,21 @@ dict: block_compress.Dict = .{},
 frame_start: usize = 0,
 /// The frame header goes out with the first emission, never at `init`.
 header_written: bool = false,
+/// The frame's block bytes emitted so far and the frame bytes produced so
+/// far (the header and every block); the pre-splitter's `savings` is their
+/// difference (`zstd_compress.c:4602,4837`).
+block_consumed: i64 = 0,
+block_produced: i64 = 0,
 /// Set by `finish`: the next block emitted carries Last_Block
 /// (`§3.1.1.2.1`).
 final: bool = false,
+
+/// The C's running `savings` (`consumed - produced`): the frame's input
+/// consumed minus its output produced, the header included. The dfast
+/// pre-splitter runs only once it is at least 3.
+fn savings(w: *const Writer) i64 {
+    return w.block_consumed - w.block_produced;
+}
 
 /// The shared writer machinery (`src/internal/writer.zig`): the generated
 /// `drain`, `flush`, and `rebase` entries and the poisoned `finish`, over
@@ -179,11 +211,11 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeTrailer);
 /// (`§3.1.1.1.2`). `window_log` must be 10 to 31. `options` are fixed for
 /// the stream's lifetime; changing `w.options` afterwards is not supported.
 /// Write through `&w.writer`, then call `finish`. `init` writes nothing,
-/// allocates nothing, and zeroes the finder's table.
+/// allocates nothing, and zeroes the finder's tables.
 ///
-/// `options.level == .ratio` is not implemented: the returned writer is
-/// poisoned, so every write and `finish` returns `error.WriteFailed` and
-/// `output` sees no byte.
+/// `options.level` must be 1 or 3 (the implemented classes); a reserved level
+/// poisons the writer, so every write and `finish` returns
+/// `error.WriteFailed` and `output` sees no byte.
 pub fn init(
     comptime window_log: usize,
     output: *Io.Writer,
@@ -203,57 +235,66 @@ pub fn init(
         .window = &buffer.window,
         .literals = &buffer.literals,
         .target = &buffer.target,
-        .hash_table = &buffer.hash_table,
+        .tables = .{ .long = &.{} },
         .sequences = &buffer.sequences,
         .window_len = window_len,
         .block_len = block_len,
-        .params = .{
-            .window_log = @intCast(window_log),
-            // The C's level-1 streaming class: an unknown source size picks
-            // the default row's minMatch 7, and the caller's window_log
-            // replaces the row's windowLog 19.
-            .hash_log = @intCast(@min(14, window_log + 1)),
-            .mls = 7,
-        },
+        // The C's streaming class: an unknown source size picks the default
+        // row's widths and minMatch, and the caller's window_log replaces
+        // the row's windowLog. A reserved level never compresses (the writer
+        // is poisoned below), so its parameters are the level-1 ones.
+        .params = match_compress.forStreaming(
+            if (encode.implemented(options.level)) options.level else 1,
+            @intCast(window_log),
+        ),
     };
-    // The table holds window-relative positions and starts zeroed; a zeroed
-    // slot is "no candidate" (the finder's `candidate_floor`), as the C
-    // zeroes its table at reset.
-    fastmem.set(u32, w.hash_table, 0);
     // The dictionary, when one is given: its entropy tables seed the frame's
-    // state, its CDict table is filled for the attach scan, and its ID goes
-    // into the header. A dictionary with no content attaches nothing but
+    // state, its CDict tables are looked up by the attach scan, and its ID
+    // goes into the header. A dictionary with no content attaches nothing but
     // still seeds the state and names the ID (the C's `cdictLen == 0`
     // carve-out).
     w.dictionary = options.dict;
     if (options.dict) |d| {
         block_compress.seedFromDict(&w.state, d);
         if (d.content.len > 0) {
-            const dict_params = d.matchParams();
+            const dict_params = d.matchParams(options.level);
             w.dict = .{
                 .content = d.content,
-                .table = &d.match,
+                .table = if (options.level == 1) &d.match else null,
+                .dfast = if (options.level == 3) &d.match_dfast else null,
                 .window_size = window_len,
                 .low_limit = d.content.len,
                 .dict_limit = d.content.len,
                 .valid = true,
             };
-            // The C's attach path takes the dictionary's own hash width and
+            // The C's attach path takes the dictionary's own table widths and
             // `minMatch` for the frame (`ZSTD_resetCCtx_byAttachingCDict`
             // adjusts the CDict's parameters; with an unknown source size
             // nothing clamps them), keeping only the caller's window.
             w.params.hash_log = dict_params.hash_log;
+            w.params.chain_log = dict_params.chain_log;
             w.params.mls = dict_params.mls;
         }
     }
-    // The scans take the table as the frame's own width, whatever the
-    // buffer's capacity covers.
-    assert(w.params.hash_log <= 15);
-    w.hash_table = buffer.hash_table[0 .. @as(usize, 1) << @intCast(w.params.hash_log)];
-    // `.ratio` is reserved and not implemented, and must not silently alias
-    // `.fast`: poisoning the interface makes every write and `finish` return
-    // `error.WriteFailed`, before a byte of output.
-    if (options.level != .fast) w.writer = .failing;
+    // The tables hold window-relative positions and start zeroed; a zeroed
+    // slot is "no candidate" (the finders' candidate floors), as the C
+    // zeroes its tables at reset. The scans take the frame's own widths,
+    // whatever the buffer's capacity covers.
+    assert(w.params.hash_log <= 17);
+    assert(w.params.chain_log <= 16);
+    w.tables = .{
+        .long = buffer.long_table[0 .. @as(usize, 1) << @intCast(w.params.hash_log)],
+        .small = if (options.level == 3)
+            buffer.small_table[0 .. @as(usize, 1) << @intCast(w.params.chain_log)]
+        else
+            &.{},
+    };
+    fastmem.set(u32, w.tables.long, 0);
+    if (w.tables.small.len > 0) fastmem.set(u32, w.tables.small, 0);
+    // A reserved level is not implemented and must not silently alias the
+    // implemented ones: poisoning the interface makes every write and
+    // `finish` return `error.WriteFailed`, before a byte of output.
+    if (!encode.implemented(options.level)) w.writer = .failing;
     return w;
 }
 
@@ -278,12 +319,12 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// `out`, and return the number of input bytes consumed. The frame is
 /// finished and `out` is flushed before the call returns; `in` is consumed
 /// exactly through its end. Writes through `buffer`, a
-/// `Buffer(window_log)` the caller owns (about 1.4 MiB at the default
+/// `Buffer(window_log)` the caller owns (about 2.2 MiB at the default
 /// `window_log`), so this needs no large stack local of its own.
 ///
-/// Returns `error.WriteFailed` if `out` fails or if `options.level` is
-/// `.ratio` (the writer is poisoned at `init`, so nothing is written), and
-/// `error.ReadFailed` if `in` fails. Does not allocate.
+/// Returns `error.WriteFailed` if `out` fails or if `options.level` is a
+/// reserved level (the writer is poisoned at `init`, so nothing is written),
+/// and `error.ReadFailed` if `in` fails. Does not allocate.
 pub fn streamAll(
     comptime window_log: usize,
     in: *Io.Reader,
@@ -301,18 +342,24 @@ pub fn streamAll(
 /// `error.WriteFailed`) plus `error.OutOfMemory` from the buffer allocation.
 pub const StreamAllocError = Io.Reader.StreamRemainingError || error{OutOfMemory};
 
-/// `streamAll` with the default window log. Allocates one `DefaultBuffer`
-/// (about 1.4 MiB) from `allocator` for the call and frees it before
-/// returning; the writer itself allocates nothing. Returns
-/// `error.OutOfMemory`, before reading any input, if the allocation fails. A
-/// caller who wants a different window, or no allocation, uses `streamAll`
-/// with its own `Buffer(window_log)`.
+/// `streamAll` with the default window log for the level: 19 for level 1,
+/// 21 for level 3 (the dfast class's window). Allocates one `DefaultBuffer`
+/// (about 2.2 MiB) or `Buffer(level3_default_window_log)` (about 3.6 MiB)
+/// from `allocator` for the call and frees it before returning; the writer
+/// itself allocates nothing. Returns `error.OutOfMemory`, before reading any
+/// input, if the allocation fails. A caller who wants a different window, or
+/// no allocation, uses `streamAll` with its own `Buffer(window_log)`.
 pub fn streamAllAlloc(
     allocator: mem.Allocator,
     in: *Io.Reader,
     out: *Io.Writer,
     options: encode.Options,
 ) StreamAllocError!usize {
+    if (options.level == 3) {
+        const buffer = try allocator.create(Buffer(level3_default_window_log));
+        defer allocator.destroy(buffer);
+        return streamAll(level3_default_window_log, in, out, buffer, options);
+    }
     const buffer = try allocator.create(DefaultBuffer);
     defer allocator.destroy(buffer);
     return streamAll(default_window_log, in, out, buffer, options);
@@ -323,6 +370,12 @@ pub fn streamAllAlloc(
 /// nothing moves until the history grows past `window_len` (`compact`). The
 /// generated entries in `src/internal/writer.zig` rely on the unemitted tail
 /// ending up at the front of the block region (`writer.end -= emit_len`).
+///
+/// A full 128-KiB block whose frame has already saved at least 3 bytes is
+/// offered to the dfast pre-splitter (`split_compress`), which can cut it
+/// into several blocks — the C's own `ZSTD_compress_frameChunk` loop — so one
+/// call may write more than one block; every emitted byte still leaves
+/// `writer.end -= emit_len`.
 ///
 /// A zero-length emission still writes the frame header if it is not out
 /// yet — a `flush` with nothing buffered emits the header alone — and, when
@@ -340,23 +393,38 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
         .sequences = w.sequences,
     };
     w.dict.frame_start = w.frame_start;
-    const written = block_compress.writeBlock(
-        &w.state,
-        &w.dict,
-        &scratch,
-        w.params,
-        w.hash_table,
-        // The finder's source: the retained history, then the block. Its
-        // prefix bounds every emitted offset to the declared window
-        // (`§3.1.1.4`).
-        w.window[0 .. w.block_start + emit_len],
-        w.block_start,
-        emit_len,
-        w.target,
-        w.final,
-    ) catch unreachable; // `target` is the raw form's worst case
-    assert(written <= w.target.len);
-    try w.output.writeAll(w.target[0..written]);
+    var emitted: usize = 0;
+    while (emitted < emit_len) {
+        const remaining = emit_len - emitted;
+        const size = split_compress.optimalBlockSize(
+            w.params.level,
+            w.window[0 .. w.block_start + emit_len],
+            w.block_start + emitted,
+            remaining,
+            w.block_len,
+            w.savings(),
+        );
+        const written = block_compress.writeBlock(
+            &w.state,
+            &w.dict,
+            &scratch,
+            w.params,
+            w.tables,
+            // The finder's source: the retained history, then the block. Its
+            // prefix bounds every emitted offset to the declared window
+            // (`§3.1.1.4`).
+            w.window[0 .. w.block_start + emit_len],
+            w.block_start + emitted,
+            size,
+            w.target,
+            w.final and emitted + size == emit_len,
+        ) catch unreachable; // `target` is the raw form's worst case
+        assert(written <= w.target.len);
+        try w.output.writeAll(w.target[0..written]);
+        w.block_consumed += @intCast(size);
+        w.block_produced += @intCast(written);
+        emitted += size;
+    }
 
     w.writer.end -= emit_len;
     w.block_start += emit_len;
@@ -399,6 +467,9 @@ fn writeHeader(w: *Writer) Io.Writer.Error!void {
     }
     try w.output.writeAll(header[0..cursor]);
     w.header_written = true;
+    // The C counts the frame header in the frame's produced bytes with the
+    // first block (`ZSTD_compress_frameChunk`'s `cSize + fhSize`).
+    w.block_produced += @intCast(cursor);
 }
 
 /// `§3.1.1.2` — "Each frame must have at least 1 block": the frame an empty
@@ -440,7 +511,7 @@ fn compact(w: *Writer) void {
             w.window[keep..][0..w.writer.end],
             w.window[w.block_start..][0..w.writer.end],
         );
-        block_compress.rebaseTable(w.hash_table, slide);
+        block_compress.rebaseTable(w.tables, slide);
         w.frame_start += slide;
     }
     w.block_start = keep;
@@ -470,12 +541,23 @@ fn makeReaderBuffer(comptime window_len: usize) !*Reader.Buffer(window_len) {
 /// landed `Reader` at the same window log, and require identity with the
 /// sentinel rule. Returns the frame's length.
 fn expectRoundTrip(comptime window_log: usize, source: []const u8, chunk: usize) !usize {
+    return expectRoundTripLevel(window_log, source, chunk, .{});
+}
+
+/// `expectRoundTrip` at an explicit level: the frame's options are threaded
+/// through, so a level-3 writer (and a dictionary) round-trips the same way.
+fn expectRoundTripLevel(
+    comptime window_log: usize,
+    source: []const u8,
+    chunk: usize,
+    options: encode.Options,
+) !usize {
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const buffer = try makeBuffer(window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(window_log, &out.writer, buffer, .{});
+    var w: Writer = .init(window_log, &out.writer, buffer, options);
     var pos: usize = 0;
     const step = if (chunk == 0) @max(source.len, 1) else chunk;
     while (pos < source.len) {
@@ -491,7 +573,7 @@ fn expectRoundTrip(comptime window_log: usize, source: []const u8, chunk: usize)
     const rbuffer = try makeReaderBuffer(historyLength(window_log));
     defer gpa.destroy(rbuffer);
     var fixed: Io.Reader = .fixed(out.written());
-    var r: Reader = .init(historyLength(window_log), &fixed, rbuffer, null);
+    var r: Reader = .init(historyLength(window_log), &fixed, rbuffer, options.dict);
     var plain_out: Io.Writer = .fixed(plain);
     const written = try r.reader.streamRemaining(&plain_out);
     try testing.expectEqual(source.len, written);
@@ -974,19 +1056,106 @@ test "Writer: a finished or failed writer never reports a false success" {
     try testing.expectError(error.WriteFailed, w2.finish());
 }
 
-test "Writer: the ratio level is rejected, never silently aliased" {
-    // `.ratio` is reserved and not implemented: it poisons the writer at
-    // `init`, so every write and `finish` returns `error.WriteFailed` and
-    // the sink sees nothing.
+test "Writer: level 3 round-trips through the landed Reader" {
+    // RFC 8878 §3.1.1 — the dfast class's streaming frames decode to the
+    // source through the landed `Reader`, over the shapes and the sizes that
+    // straddle the block and window boundaries.
+    var source: [600 * 1024]u8 = undefined;
+    const sizes = [_]usize{
+        0,      1,      6,      7,      8,      31,     32,     100,
+        255,    256,    1024,   4096,   16384,  32768,  65536,  131071,
+        131072, 131073, 200000, 262144, 300000, 524288, 524289, 600 * 1024,
+    };
+    for ([_]golden.Shape{ .text, .rle, .random, .skewlit }) |shape| {
+        for (sizes) |size| {
+            golden.fillShape(shape, source[0..size]);
+            _ = try expectRoundTripLevel(
+                level3_default_window_log,
+                source[0..size],
+                0,
+                .{ .level = 3 },
+            );
+        }
+    }
+    for ([_]golden.Shape{ .html, .mixed, .words, .zeros }) |shape| {
+        for ([_]usize{ 100, 4096, 65536, 131072, 300000 }) |size| {
+            golden.fillShape(shape, source[0..size]);
+            _ = try expectRoundTripLevel(
+                level3_default_window_log,
+                source[0..size],
+                0,
+                .{ .level = 3 },
+            );
+        }
+    }
+    // Chunked writes, the single-byte path included.
+    golden.fillShape(.text, &source);
+    _ = try expectRoundTripLevel(level3_default_window_log, source[0..37], 1, .{ .level = 3 });
+    _ = try expectRoundTripLevel(level3_default_window_log, source[0..4096], 1, .{ .level = 3 });
+    golden.fillShape(.mixed, &source);
+    inline for (.{ 14, 17, 21 }) |window_log| {
+        _ = try expectRoundTripLevel(window_log, source[0..3000], 1, .{ .level = 3 });
+        _ = try expectRoundTripLevel(window_log, &source, 997, .{ .level = 3 });
+    }
+}
+
+test "Writer: level 3 attaches a dictionary and round-trips it" {
+    // RFC 8878 §5 — a streaming writer never knows its length, so a level-3
+    // writer always attaches the dictionary as a separate match state
+    // (`ZSTD_shouldAttachDict`), at the dictionary's own table widths.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    var source: [300 * 1024]u8 = undefined;
+    for ([_]golden.Shape{ .text, .rle, .random, .words }) |shape| {
+        for ([_]usize{ 0, 100, 4096, 8192, 16385, 65536, 200000 }) |size| {
+            golden.fillShape(shape, source[0..size]);
+            _ = try expectRoundTripLevel(
+                level3_default_window_log,
+                source[0..size],
+                0,
+                .{ .level = 3, .dict = &trained },
+            );
+        }
+    }
+}
+
+test "Writer: the level-3 pumps take the class's window" {
+    // `streamAllAlloc` at level 3 allocates `Buffer(21)` — the dfast class's
+    // own window, the `clevels.h` default row's `W` — and the frame declares
+    // it: 2 MiB, the window the CLI's `zstd -3` pipe form declares.
+    const gpa = testing.allocator;
+    var source: [64 * 1024]u8 = undefined;
+    golden.fillShape(.text, &source);
+    var out: Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    var in: Io.Reader = .fixed(&source);
+    const consumed = try streamAllAlloc(gpa, &in, &out.writer, .{ .level = 3 });
+    try testing.expectEqual(source.len, consumed);
+    const header = try frame.parseHeader(out.written()[frame.magic_len..]);
+    try testing.expectEqual(@as(u64, 1) << 21, header.window_size);
+    try testing.expectEqual(@as(?u64, null), header.content_size);
+    try testing.expectEqual(
+        @as(usize, 21),
+        defaultWindowLog(3),
+    );
+    try testing.expectEqual(@as(usize, 19), defaultWindowLog(1));
+    try testing.expectEqual(@as(usize, 19), defaultWindowLog(2));
+}
+
+test "Writer: the reserved levels are rejected, never silently aliased" {
+    // Levels 2 and 4-19 are reserved and not implemented: they poison the
+    // writer at `init`, so every write and `finish` returns
+    // `error.WriteFailed` and the sink sees nothing.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &out.writer, buffer, .{ .level = .ratio });
-    try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
-    try testing.expectError(error.WriteFailed, w.finish());
-    try testing.expectEqual(@as(usize, 0), out.written().len);
+    for ([_]u8{ 0, 2, 4, 19, 20 }) |level| {
+        var w: Writer = .init(default_window_log, &out.writer, buffer, .{ .level = level });
+        try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
+        try testing.expectError(error.WriteFailed, w.finish());
+        try testing.expectEqual(@as(usize, 0), out.written().len);
+    }
 }
 
 test "Writer: random write machinery sequences stay correct" {
@@ -1101,26 +1270,28 @@ test "Writer: the streamAll pumps round-trip a whole input" {
 test "Writer: the buffer sizes are the documented ones" {
     // The caller sizes thread stacks and allocations from these figures
     // (the README's), so they are pinned here: the history, the block
-    // region, the literals, the emission target, the finder's table, and
+    // region, the literals, the emission target, the finder's tables, and
     // the sequence list, all from `window_log`.
     try testing.expectEqual(@as(usize, 1024), historyLength(10));
     try testing.expectEqual(@as(usize, 1024), blockLength(10));
     try testing.expectEqual(@as(usize, 128 * 1024), blockLength(19));
-    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(19));
-    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(10));
+    try testing.expectEqual(@as(usize, 1) << 17, longTableEntries(19));
+    try testing.expectEqual(@as(usize, 1) << 16, smallTableEntries(19));
     try testing.expectEqual(@as(usize, 131072 / 3 + 1), sequenceCapacity(19));
     // The default buffer, field by field, plus whatever alignment pads.
     const expected = 1024 * 1024 / 2 + 128 * 1024 + // history | block
         128 * 1024 + // literals
         128 * 1024 + 3 + // target
-        (1 << 15) * 4 + // hash table (the dictionary's widest hashLog)
+        (1 << 17) * 4 + // long table (the level-3 dictionary's widest hashLog)
+        (1 << 16) * 4 + // small table (the level-3 dictionary's widest chainLog)
         (131072 / 3 + 1) * @sizeOf(sequences_compress.Sequence); // sequences
-    // The sum, plus the alignment padding before the u32 table.
+    // The sum, plus the alignment padding before the u32 tables.
     try testing.expectEqual(expected + 1, @sizeOf(DefaultBuffer));
-    try testing.expectEqual(@as(usize, 1_572_872), @sizeOf(DefaultBuffer));
-    // A small window keeps the same table capacity: the dictionary's width
-    // does not follow the window.
-    try testing.expectEqual(@as(usize, 1) << 15, tableEntries(10));
+    try testing.expectEqual(@as(usize, 2_228_232), @sizeOf(DefaultBuffer));
+    // A small window keeps the same table capacity: the dictionary's widths
+    // do not follow the window.
+    try testing.expectEqual(@as(usize, 1) << 17, longTableEntries(10));
+    try testing.expectEqual(@as(usize, 1) << 16, smallTableEntries(10));
 }
 
 /// The frame header's length, from the parsed descriptor: the magic, the

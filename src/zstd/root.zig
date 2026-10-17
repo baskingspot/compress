@@ -29,6 +29,7 @@ const bits = @import("bits.zig");
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
 const common = @import("common.zig");
+const dfast_compress = @import("dfast_compress.zig");
 const fse = @import("fse.zig");
 const fse_compress = @import("fse_compress.zig");
 const frame = @import("frame.zig");
@@ -39,6 +40,7 @@ const literals_compress = @import("literals_compress.zig");
 const match_compress = @import("match_compress.zig");
 const sequences = @import("sequences.zig");
 const sequences_compress = @import("sequences_compress.zig");
+const split_compress = @import("split_compress.zig");
 const xxh64 = @import("xxh64.zig");
 
 /// The one-shot encoder: `compress`, `maxCompressedLength`, and their
@@ -70,6 +72,7 @@ test {
     _ = block;
     _ = block_compress;
     _ = common;
+    _ = dfast_compress;
     _ = fse;
     _ = fse_compress;
     _ = frame;
@@ -80,6 +83,7 @@ test {
     _ = match_compress;
     _ = sequences;
     _ = sequences_compress;
+    _ = split_compress;
     _ = xxh64;
     _ = encode;
     _ = decode;

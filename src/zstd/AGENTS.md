@@ -205,6 +205,68 @@ sets can still hit the deliberate differences (TE8, TE11 below).
   matching (the C's lazy starts at level 5-6); the rep pre-check and the
   offset-2 chain are the only lookahead. The extension reuses the flate port's
   word-XOR machinery.
+- **The dfast level (level 3), landed as `dfast_compress.zig` +
+  `split_compress.zig`.** The C's `ZSTD_dfast` (`zstd_double_fast.c`): two
+  position tables (the long one keyed on 8 bytes at `hashLog`, the small on the
+  class's `minMatch` at `chainLog`), a greedy scan that checks both candidates
+  per probe and arbitrates a long match at `ip + 1` against a short match found
+  at `ip` (`_search_next_long`), a repcode pre-check at `ip + 1` (no backward
+  extension, no rep shift), the complementary insertion (`curr+2`, `ip-2` into
+  the long table and `curr+2`, `ip-1` into the small), and a step that grows by
+  one per 256 unmatched bytes (`1 << kSearchStrength`, twice level 1's). The
+  three variants are the C's three: `find` (noDict), `findDict` (the attach
+  path — the CDict's tagged tables consulted only where the frame's own table
+  has no candidate, the C's `else if`, not a byte-mismatch fallback), and
+  `findExtDict` (the copy path, virtual indices and split reads). The frame
+  parameters are the level-3 rows of `clevels.h` (`W21 C16 H17 L5` above
+  256 KB, `W18 C16 H16 L4`, `W17 C15 H16 L5`, `W14 C14 H15 L4`) with the same
+  adjust order as level 1 plus the `chainLog` clamp
+  (`zstd_compress.c:1563-1567`); the attach cutoff is
+  `attachDictSizeCutoffs[dfast]` = 16 KB (level 1's 8 KB was the fast row of
+  the same table). One table convention does not carry over from the level-1
+  port: the noDict and extDict scans keep frame offsets (the 0 = "never
+  written" sentinel, the `max(prefix_start, 1)` floor), while the *attach* scan
+  stores *virtual* indices (`dict.len + frame position` — the C's
+  `curr = ip - base`, whose base sits at the dictionary's end), because the
+  C's `matchIndexL >= prefixLowestIndex` accepts the frame's position 0 there
+  and a frame-offset table with a 0 sentinel cannot. The dict tables live in
+  the `Dictionary` value (the C's CDict shape): `match_dfast` is the long+small
+  tagged pair, filled by `ZSTD_fillDoubleHashTableForCDict`'s
+  every-third-position rule (the small table only at `i == 0`; the long table
+  also at `i == 1, 2` when its slot is still empty) and copied tag-stripped on
+  the copy path.
+- **The dfast pre-splitter, landed as `split_compress.zig`.** The C's
+  `ZSTD_optimalBlockSize` (`zstd_compress.c:4550-4583`) resolves
+  `splitLevels[strategy]`: level 1 (`ZSTD_fast`) is 0 →
+  `ZSTD_splitBlock_fromBorders`, which this port does not carry (TE8); level 3
+  (`ZSTD_dfast`) is 1 → `ZSTD_splitBlock_byChunks` at level 0 — the fingerprint
+  splitter, 43-byte sampling at `hashLog` 8, an 8-KiB chunk grid, the C's
+  `THRESHOLD_BASE + penalty` comparison. The level-ratio notes' claim that fast
+  and dfast share the entry is wrong: dfast's splitter fires on inputs level
+  1's never touches (the 520-KiB period row's level-3 frame splits where its
+  level-1 frame does not), so a level-3 port without it is not the CLI's bytes.
+  It is gated exactly as the C gates it (`srcSize >= 128 KB`,
+  `blockSizeMax >= 128 KB`, `savings >= 3`), and the one-shot also models the
+  CLI's *chunking*, because the gate's `remaining` is the chunk's, not the
+  frame's: at or below `ZSTDMT_JOBSIZE_MIN` (512 KB) the CLI reads
+  `ZSTD_CStreamInSize` = 128-KB chunks; above it the multithreaded path
+  compresses each job in 512-KB chunks (`zstdmt_compress.c:765`), which for a
+  single job (input at or below the level's 8-MiB job size) is the whole input.
+  `savings` is the C's `consumedSrcSize - producedCSize`, the frame header
+  counted with the first block.
+- **The offsets-table promotion lasts one block (found landing level 3).**
+  `ZSTD_compressBlock_internal`'s tail (`zstd_compress.c:4168-4171`) demotes a
+  dictionary-promoted `offcode_repeatMode` from `FSE_repeat_valid` to
+  `FSE_repeat_check` after every block — "After the first block, the offcode
+  table might not have large enough codes to represent the offsets in the
+  data" — so Repeat_Mode for the offsets alphabet is a first-block-only seat
+  even with a dictionary. The level-1 port did not carry the demotion; the
+  symptom that found it was a skewlit-with-dictionary level-3 frame whose
+  second block used Predefined in the C and Repeat here. It is a fix for
+  level 1 too, and the committed level-1 fixtures and oracle rows are
+  unchanged by it (the port's own level-1 words-8192 dictionary frame still
+  differs from the CLI's, with or without the demotion — a separate,
+  pre-existing level-1 divergence outside the pinned sets).
 - **The block layer (EQ3), landed as `block_compress.zig`.** Blocks of
   `min(128 KiB, 1 << windowLog)` (`zstd_compress.c:1816`; TE2). The C's
   fallback ladder: inputs under 7 bytes are stored raw (`:3273`); a compressed
@@ -294,19 +356,23 @@ sets can still hit the deliberate differences (TE8, TE11 below).
   caller-owned `Buffer(window_log)` holding the retained history
   (`1 << window_log`), the accumulating block (`min(128 KiB, 1 << window_log)`),
   the block's literals and its compressed output, the finder's table
-  (`4 << min(14, window_log + 1)` bytes), and the sequence list
+  (`4 << min(17, window_log + 1)` bytes) plus the small table
+  (`4 << min(16, window_log)`), and the sequence list
   (`12 * (block / 3 + 1)` bytes) — all comptime from `window_log`, the
   exact-pointer `init`. Two deviations from the sketch's byte figures, both
-  deliberate: the table is `min(14, ...)` entries, not `min(15, ...)`, because
-  the writer is always the *streaming* class (14 is level 1's `hashLog` for an
-  unknown size, and the sketch's 15 was the one-shot ladder's cap), and the
-  Buffer also carries the literals, the emission target, and the sequence list
-  so the writer's own frame stays KiB-scale (the sketch listed only the first
-  three; the stack measurement below is why). The finder's parameters are the
-  C's streaming class, `ZSTD_getCParams(1, ZSTD_CONTENTSIZE_UNKNOWN, 0)`:
-  windowLog = the caller's, hashLog 14 (clamped to `window_log + 1`), minMatch
-  7 — which is what makes the CLI's `zstd -1`-over-a-pipe frames byte-identical
-  (the `encode_stream_*` fixtures). The finder's table entries are
+  deliberate: the tables are sized for the widest widths a frame can take when
+  it attaches a dictionary (17/16 at level 3, 15 at level 1), not for the
+  writer's own slice, and the Buffer also carries the literals, the emission
+  target, and the sequence list so the writer's own frame stays KiB-scale (the
+  sketch listed only the first three; the stack measurement below is why).
+  `streamAllAlloc` takes the level's default window (19, or 21 at level 3). The
+  finder's parameters are the C's streaming class
+  (`ZSTD_getCParams(level, ZSTD_CONTENTSIZE_UNKNOWN, 0)`): windowLog = the
+  caller's, hashLog 14 and minMatch 7 at level 1, hashLog 17, chainLog 16, and
+  minMatch 5 at level 3 — which is what makes the CLI's `zstd -1`-over-a-pipe
+  frames byte-identical (the `encode_stream_*` fixtures). The level-3 pipe
+  form is the same class but not a byte pin (the CLI's pipe form chunks
+  through its multithreaded path). The finder's table entries are
   window-relative, so a window slide rebases them (`correctTable`, the C's
   `ZSTD_window_correctOffsets` shape) — a slide costs one pass over the table
   per `min(128 KiB, window)` emitted. The flush contract, the lazy header, and
@@ -331,37 +397,46 @@ sets can still hit the deliberate differences (TE8, TE11 below).
   `ZSTD_COMPRESSBOUND` (`zstd.h:249`). `compress` is the convenience form:
   the heavy per-block arrays (the literals, the sequence list, the finder's
   table) are a stack local, which is the 830-KiB figure the README cites.
-  `compressBuffered` is the same encoder over `encode.Buffer` (768 KiB,
+  `compressBuffered` is the same encoder over `encode.Buffer` (1.375 MiB,
   caller-owned), so its thread stack is about 40 KiB; the pair exists because
   the stack local violated the house's KiB-scale rule and survived only the
   8-MiB default `ulimit -s`. The block layer stays internal: no zstd
   block function is self-contained (cross-block entropy and repeat-offset
-  state), unlike snappy's and flate's. `Level = enum { fast, ratio }`: `.fast`
-  is the level-1 class, `.ratio` is reserved and returns
-  `error.Unimplemented` (the flate pattern, never a silent alias); the numeric
-  CLI ladder gets no seats — each of levels 2-22 is a distinct output class
-  this package cannot produce. The barrel is complete: `{encode, decode,
+  state), unlike snappy's and flate's. `Options.level` is the CLI's numeric
+  scale: 1 is the level-1 class, 3 the dfast class, and every other level
+  (2, 4-19, and anything outside 1-19) returns `error.Unimplemented` — the
+  flate pattern, never a silent alias (the enum seat became the number in the
+  level-APIs commit; the dfast class filled level 3). The barrel is complete: `{encode, decode,
   Writer, Reader}`. `Writer.streamAll` and `Writer.streamAllAlloc` mirror the
   Reader's pumps (the caller-buffered pair first, then the default-window
   allocation); there is no stack-buffered default pump — `Writer.Buffer(19)`
   is 1.4 MiB, so a stack-buffered default is out (the `ulimit -s 8192` lesson).
 - **The scratch.** Per-block scratch (the entropy writers' workspaces) is
   comptime stack in the emission path; the caller's `Buffer` holds the
-  window, the staging, the finder's table, and the block's literals and
+  window, the staging, the finder's tables, and the block's literals and
   sequence list (EQ7). The
-  one-shot's measured need on aarch64 Linux is about 830 KiB of thread stack
-  (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of literals, 512
-  KiB of sequence list — `max_block_size / 3 + 1` twelve-byte sequences, the
-  `min_match_length` bound — plus the writers' workspaces); the README carries
-  the figure. The bisect (ReleaseFast, 600 KiB and 1.5 MiB inputs, a thread
+  one-shot's measured need on aarch64 Linux was about 830 KiB of thread stack
+  before level 3 (Debug and ReleaseFast alike: 128 KiB of table, 128 KiB of
+  literals, 512 KiB of sequence list — `max_block_size / 3 + 1` twelve-byte
+  sequences, the `min_match_length` bound — plus the writers' workspaces); the
+  level-3 tables (`encode.Buffer`: the long table 512 KiB + the small 256 KiB
+  in place of level 1's 128 KiB) raise it for *both* levels, because the
+  `Buffer` is level-independent: the 2026-10-16 re-bisect on aarch64 Linux
+  (ReleaseFast, a 600-KiB input, a thread per stack size) crashes at 1.25 MiB
+  and passes at 1.5 MiB at level 1 and level 3 alike, so the README says
+  about 1.5 MiB and 2 MiB or more of thread stack. (The old 805-830 KiB
+  figure was the same box and method; only the tables grew.) The bisect (ReleaseFast, 600 KiB and 1.5 MiB inputs, a thread
   spawned at a given `stack_size`): `compress` was 805 KiB on aarch64 macOS,
   re-measured at 810 KiB on aarch64 Linux after the four-lane histogram
   added its 4 KiB workspace; `compressBuffered` 37 KiB (41 KiB Debug),
   `Writer.streamAll` 37 KiB (57 KiB Debug), against a 3-KiB floor for an empty
   thread — so the two buffered forms are the KiB-scale paths, and the figure is
-  flat in the input size. `Writer.Buffer(19)` is 1507336 bytes (1.44 MiB):
-  512 KiB history, 128 KiB block, 128 KiB literals, 128 KiB + 3 output, 64 KiB
-  table, 512 KiB sequences, one byte of padding. On macOS a thread stack below
+  flat in the input size. `Writer.Buffer(19)` is 2228232 bytes (2.2 MiB):
+  512 KiB history, 128 KiB block, 128 KiB literals, 128 KiB + 3 output, the
+  long table 512 KiB + the small table 256 KiB (the level-3 dictionary's
+  widest widths; a level-1 frame slices the long one alone), 512 KiB
+  sequences, one byte of padding. `Buffer(21)` — the level-3 default — is
+  about 3.6 MiB. On macOS a thread stack below
   ~772 KiB crashes even with an empty thread body when the caller's frame is
   large (the bisect needs each path in its own `noinline` frame, and the
   ReleaseFast floor only resolves needs above ~772 KiB).
@@ -400,7 +475,8 @@ klauspost's ID-assigning raw form is not ported) **[sketch call 5]**. The
 value borrows `source` and carries both directions' tables — the decode
 side's three `fse.Table`s and the literals `Tree`/`DecodeTable`, the encode
 side's three `fse_compress.Table`s and the `huff0_compress.Table`, the
-repcodes, and the content slice — about 21 KiB, comptime-sized, no heap.
+repcodes, and the content slice — about 13 KiB of entropy tables,
+comptime-sized, no heap (the match tables beside them are the encoder's).
 `decode.decompress` takes `dict: ?*const Dictionary` as its third parameter
 and `Reader.init`
 plus the four pumps as their last **[sketch calls 1, 3]**; `encode.Options`
@@ -427,10 +503,12 @@ encode side's tables from the same parse: the literals tree in its
 `ZSTD_loadCEntropy` promotions (`literals_repeat_valid`, the per-alphabet
 `sequence_repeat_valid`), the whole file's length (`source_len`, the C's
 `cdict->dictContentSize`, which the parameters are sized from), and the
-CDict match table (`match_compress.DictTable`: `dtlm_full` over the content
-with the short-cache tags, `ZSTD_fillHashTableForCDict`). `@sizeOf(Dictionary)`
-is pinned at 161,384 bytes — the entropy tables are ~13 KiB and the match
-table 128 KiB — and the README's figure says so. The sketch's "about 21 KiB"
+CDict match tables: level 1's `match_compress.DictTable` (`dtlm_full` over
+the content with the short-cache tags, `ZSTD_fillHashTableForCDict`) and level
+3's `dfast_compress.DictTables` (`ZSTD_fillDoubleHashTableForCDict`'s
+long+small tagged pair). `@sizeOf(Dictionary)` is pinned at 947,824 bytes —
+the entropy tables are ~13 KiB and the match tables 128 KiB + 768 KiB — and
+the README's figure says so. The sketch's "about 21 KiB"
 line predated the match-region research and is superseded: the C keeps the
 match table in a `ZSTD_CDict` because a frame that attaches one reuses it;
 this package has one dictionary value, so the table lives there rather than
@@ -703,13 +781,17 @@ the record of what the divergence was.
   window floor (`ZSTD_adjustCParams_internal`, `zstd_compress.c:1548-1580`),
   which is what keeps sources of at most 512 bytes in the CLI's class
   (`Params.forSource`).
-- **TE8 — no pre-block splitter.** The C v1.5.7's `ZSTD_optimalBlockSize`
-  (`zstd_compress.c:4550-4583`) runs `ZSTD_splitBlock` on full 128-KB blocks
-  once a frame has saved 3 bytes, which at level 1 can cut a block to 32/64/96
-  KiB (`zstd_preSplit.c:198-226`). The port splits at exactly `min(128 KiB, 1
-  << windowLog)`, the C's pre-1.5.7 shape and the survey's 1-MiB observation
-  (8 blocks of 128 KiB); a frame may therefore carry fewer, larger blocks
-  than the CLI's on split-triggering data.
+- **TE8 — level 1's pre-block splitter is not ported (level 3's is).** The C
+  v1.5.7's `ZSTD_optimalBlockSize` (`zstd_compress.c:4550-4583`) runs
+  `ZSTD_splitBlock` on full 128-KB blocks once a frame has saved 3 bytes,
+  which at level 1 resolves to `ZSTD_splitBlock_fromBorders` and can cut a
+  block to 32/64/96 KiB (`zstd_preSplit.c:198-226`). The level-1 port splits
+  at exactly `min(128 KiB, 1 << windowLog)`, the C's pre-1.5.7 shape and the
+  survey's 1-MiB observation (8 blocks of 128 KiB); a level-1 frame may
+  therefore carry fewer, larger blocks than the CLI's on split-triggering
+  data. Level 3 resolves to the *other* splitter
+  (`ZSTD_splitBlock_byChunks`, `split_compress.zig`) and that one is ported,
+  so the level-3 byte pin inherits no such hole.
 - **TE9 — the literals heuristics (resolved: the bails are ported).** The
   divergence was that `literals_compress` carried the C's ladder without
   `HUF_compress_internal`'s two early bails — the `largest <= (srcSize >> 7)

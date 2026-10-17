@@ -23,6 +23,7 @@ const fastmem = @import("fastmem");
 const internal = @import("../internal/root.zig");
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
+const dfast_compress = @import("dfast_compress.zig");
 const Dictionary = @import("Dictionary.zig");
 const common = @import("common.zig");
 const writeInt = common.writeInt;
@@ -33,15 +34,14 @@ const literals = @import("literals.zig");
 const match_compress = @import("match_compress.zig");
 const sequences = @import("sequences.zig");
 const sequences_compress = @import("sequences_compress.zig");
-
-/// The compression level. `.fast` is the CLI's level-1 byte class; `.ratio`
-/// is a reserved seat that returns `error.Unimplemented` (the flate
-/// pattern — never a silent alias for `.fast`).
-pub const Level = enum { fast, ratio };
+const split_compress = @import("split_compress.zig");
 
 /// `compress`'s options.
 pub const Options = struct {
-    level: Level = .fast,
+    /// The compression level on the CLI's 1-19 scale: 1 is the level-1 class
+    /// (`ZSTD_fast`), 3 the dfast class (`ZSTD_dfast`). Every other level is
+    /// a reserved seat: `error.Unimplemented`, never a silent alias.
+    level: u8 = 1,
     /// The dictionary the frame is compressed against (`§5`): its tables seed
     /// the frame's entropy state (with `ZSTD_loadCEntropy`'s promotions) and
     /// its content is the match region's virtual past. The frame names the
@@ -50,31 +50,39 @@ pub const Options = struct {
     dict: ?*const Dictionary = null,
 };
 
-/// `ZSTD_USE_CDICT_PARAMS_SRCSIZE_CUTOFF` (`zstd_compress.c:5232`): at or
-/// below this source size the C attaches the dictionary as a separate match
-/// state; above it, the dictionary's table is copied into the frame's own.
-/// The CLI's `-D` path is the C's, so the parity fixtures depend on the same
-/// switch.
-pub const dict_attach_cutoff = 8 * 1024;
+/// The levels with a finder behind them: 1 (`ZSTD_fast`) and 3
+/// (`ZSTD_dfast`). The other numbers of the CLI's 1-19 scale are distinct
+/// output classes this package cannot produce, and return
+/// `error.Unimplemented`.
+pub fn implemented(level: u8) bool {
+    return level == 1 or level == 3;
+}
 
 /// Everything `compress` reports.
 pub const Error = error{
     /// `target` cannot hold the frame. Its contents are then unspecified.
     BufferTooSmall,
-    /// The option is not implemented (`Level.ratio`).
+    /// The option is not implemented (a reserved level).
     Unimplemented,
 };
 
 /// The one-shot's heavy per-block arrays: the literals buffer, the sequence
-/// list, and the match finder's position table. Sized by the block layer's
-/// worst cases, so no allocation is needed. `compress` puts one on the stack
-/// (see the README's stack figure); `compressBuffered` takes a pointer to
-/// one the caller owns, which keeps that stack out of the caller's thread.
+/// list, and the match finder's position tables (the long one, and dfast's
+/// small one). Sized by the block layer's worst cases, so no allocation is
+/// needed. `compress` puts one on the stack (see the README's stack figure);
+/// `compressBuffered` takes a pointer to one the caller owns, which keeps
+/// that stack out of the caller's thread.
 pub const Buffer = struct {
     literals: [block_compress.max_block_size]u8 = undefined,
     sequences: [block_compress.max_sequences]sequences_compress.Sequence = undefined,
-    hash_table: [block_compress.hash_table_max]u32 = undefined,
+    long_table: [dfast_compress.long_table_entries_max]u32 = undefined,
+    small_table: [dfast_compress.small_table_entries_max]u32 = undefined,
 };
+
+/// `ZSTDMT_JOBSIZE_MIN` (`zstdmt_compress.h:33`): a source at or below it
+/// never enters the multithreaded path, so the CLI's file form reads it in
+/// `ZSTD_CStreamInSize` chunks instead of job-sized ones.
+const zstdmt_jobsize_min = 512 * 1024;
 
 /// The largest frame `compress` can write for a `source_len`-byte source:
 /// the 18-byte header cap (the 14 no-dictionary bytes plus the 4-byte
@@ -122,7 +130,8 @@ pub fn compressBuffered(
     buffer: *Buffer,
     options: Options,
 ) Error!usize {
-    if (options.level != .fast) return error.Unimplemented;
+    if (!implemented(options.level)) return error.Unimplemented;
+    const level = options.level;
     // The dictionary's shape: which scan the frame runs and how its
     // parameters are sized (the C's `ZSTD_shouldAttachDict` switch,
     // `zstd_compress.c:2309-2323`). An empty content attaches nothing and
@@ -130,46 +139,60 @@ pub fn compressBuffered(
     // its entropy state — the C's `cdictLen == 0` carve-out.
     var dict: block_compress.Dict = .{};
     const params: match_compress.Params = if (options.dict) |d| p: {
-        if (d.content.len == 0) break :p .forSource(source.len);
-        const dict_params = d.matchParams();
-        if (source.len <= dict_attach_cutoff) {
+        if (d.content.len == 0) break :p .forSource(level, source.len);
+        const dict_params = d.matchParams(level);
+        if (source.len <= match_compress.attachCutoff(level)) {
             dict = .{
                 .content = d.content,
-                .table = &d.match,
+                .table = if (level == 1) &d.match else null,
+                .dfast = if (level == 3) &d.match_dfast else null,
                 .low_limit = d.content.len,
                 .dict_limit = d.content.len,
                 .valid = true,
             };
-            break :p match_compress.forSourceAttached(source.len, dict_params);
+            break :p match_compress.forSourceAttached(level, source.len, dict_params);
         }
-        // The copy path: the frame's own table starts as the dictionary's
-        // (`copyDictTable` below), and the content runs as the window's
-        // extDict, whose addressable span the block loop's arithmetic
-        // narrows as the output grows.
+        // The copy path: the frame's own tables start as the dictionary's
+        // (`copyDictTable`/`copyDictTables` below), and the content runs as
+        // the window's extDict, whose addressable span the block loop's
+        // arithmetic narrows as the output grows.
         dict = .{
             .content = d.content,
             .table = null,
+            .dfast = null,
             .low_limit = 0,
             .dict_limit = d.content.len,
             .valid = true,
         };
-        break :p match_compress.forSourceCopied(source.len, d.source_len, dict_params);
-    } else .forSource(source.len);
+        break :p match_compress.forSourceCopied(level, source.len, d.source_len, dict_params);
+    } else .forSource(level, source.len);
     const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
     dict.window_size = window_size;
     var cursor = try writeFrameHeader(source.len, params, options.dict, target);
     var state: block_compress.State = .{};
     if (options.dict) |d| block_compress.seedFromDict(&state, d);
-    // The finder's table holds frame offsets and starts zeroed; only the
-    // ladder's chosen width is touched, as the C zeroes its allocated table
+    // The finder's tables hold frame offsets and start zeroed; only the
+    // ladder's chosen widths are touched, as the C zeroes its allocated table
     // width at reset. The copy path instead starts from the dictionary's own
-    // table, tags stripped (`ZSTD_copyCDictTableIntoCCtx`): its entries are
+    // tables, tags stripped (`ZSTD_copyCDictTableIntoCCtx`): their entries are
     // the content's positions, and the scan writes the frame's over them.
-    const hash_table = buffer.hash_table[0 .. @as(usize, 1) << @intCast(params.hash_log)];
-    if (dict.content.len > 0 and dict.table == null) {
-        match_compress.copyDictTable(hash_table, &options.dict.?.match);
+    const tables: block_compress.Tables = .{
+        .long = buffer.long_table[0 .. @as(usize, 1) << @intCast(params.hash_log)],
+        .small = if (level == 3)
+            buffer.small_table[0 .. @as(usize, 1) << @intCast(params.chain_log)]
+        else
+            &.{},
+    };
+    if (dict.content.len > 0 and dict.table == null and dict.dfast == null) {
+        const d = options.dict.?;
+        if (level == 3) {
+            dfast_compress.copyDictTables(tables.long, tables.small, &d.match_dfast);
+        } else {
+            match_compress.copyDictTable(tables.long, &d.match);
+        }
     } else {
-        fastmem.set(u32, hash_table, 0);
+        fastmem.set(u32, tables.long, 0);
+        if (tables.small.len > 0) fastmem.set(u32, tables.small, 0);
     }
     if (source.len == 0) {
         // `§3.1.1.2` — "Each frame must have at least 1 block": the empty
@@ -184,6 +207,12 @@ pub fn compressBuffered(
         };
         const block_size = block_compress.blockSize(params);
         assert(block_size <= block_compress.max_block_size);
+        const header_len = cursor;
+        // The C's `savings` (`zstd_compress.c:4602,4837`): the frame's input
+        // consumed minus its output produced, the header counted with the
+        // first block. It is the pre-splitter's gate (only the dfast level
+        // splits; see `split_compress`).
+        var savings: i64 = 0;
         // The finder's table holds positions relative to `base`, and `find`
         // sees `source[base..]`. The base slides when the block start drifts
         // a whole window past it — the Writer's `compact` condition — so no
@@ -194,26 +223,53 @@ pub fn compressBuffered(
         // no byte of the frame.
         var base: usize = 0;
         var offset: usize = 0;
+        // The CLI's file form reaches `ZSTD_compress_frameChunk` in chunks,
+        // and the pre-splitter's `remaining` is the chunk's, not the frame's
+        // (`ZSTD_optimalBlockSize`'s `srcSize` gate). A source at or below
+        // `ZSTDMT_JOBSIZE_MIN` (512 KB) runs the single-thread path, whose
+        // chunks are `ZSTD_CStreamInSize` = 128 KB (`fileio.c`'s read pool);
+        // a larger one runs the multithreaded path even with one job, and
+        // that path compresses each job in chunks of `4 * ZSTD_BLOCKSIZE_MAX`
+        // = 512 KB (`zstdmt_compress.c:765`). Both agree with the library
+        // one-shot whenever no split fires, and the pin is the CLI's file
+        // form.
+        const chunk_size = if (source.len <= zstdmt_jobsize_min)
+            block_compress.max_block_size
+        else
+            4 * block_compress.max_block_size;
         while (offset < source.len) {
-            const size = @min(block_size, source.len - offset);
-            if (offset - base > window_size) {
-                const slide = offset - base - window_size;
-                base += slide;
-                block_compress.rebaseTable(hash_table, slide);
+            const chunk_end = @min(offset + chunk_size, source.len);
+            while (offset < chunk_end) {
+                const size = split_compress.optimalBlockSize(
+                    level,
+                    source[base..],
+                    offset - base,
+                    chunk_end - offset,
+                    block_size,
+                    savings,
+                );
+                if (offset - base > window_size) {
+                    const slide = offset - base - window_size;
+                    base += slide;
+                    block_compress.rebaseTable(tables, slide);
+                }
+                const written = try block_compress.writeBlock(
+                    &state,
+                    &dict,
+                    &blocks,
+                    params,
+                    tables,
+                    source[base..],
+                    offset - base,
+                    size,
+                    target[cursor..],
+                    offset + size == source.len,
+                );
+                cursor += written;
+                savings += @as(i64, @intCast(size)) -
+                    @as(i64, @intCast(written + if (offset == 0) header_len else 0));
+                offset += size;
             }
-            cursor += try block_compress.writeBlock(
-                &state,
-                &dict,
-                &blocks,
-                params,
-                hash_table,
-                source[base..],
-                offset - base,
-                size,
-                target[cursor..],
-                offset + size == source.len,
-            );
-            offset += size;
         }
     }
     // `§3.1.1` — "The low 4 bytes of the checksum are stored in
@@ -525,7 +581,318 @@ test "maxCompressedLength bounds every emission" {
 
 test "the level seat is reserved, never aliased" {
     var target: [64]u8 = undefined;
-    try testing.expectError(error.Unimplemented, compress(&.{}, &target, .{ .level = .ratio }));
+    for ([_]u8{ 0, 2, 4, 5, 19, 20 }) |level| {
+        try testing.expectError(
+            error.Unimplemented,
+            compress(&.{}, &target, .{ .level = level }),
+        );
+    }
+    // The two implemented levels are accepted (an empty frame either way).
+    try testing.expectEqual(@as(usize, 13), try compress(&.{}, &target, .{ .level = 1 }));
+    try testing.expectEqual(@as(usize, 13), try compress(&.{}, &target, .{ .level = 3 }));
+}
+
+test "level 3 round-trips through the landed decoder" {
+    // RFC 8878 §3.1.1 — the dfast class's frames decode to the source, byte
+    // for byte, over every shape and across the parameter ladder's classes:
+    // the mls-4 tiny classes, the 128-KB and 256-KB classes, and the
+    // windowed path above 512 KB.
+    var source: [600 * 1024]u8 = undefined;
+    const sizes = [_]usize{
+        0,      1,      6,      7,      8,      31,     32,     100,
+        255,    256,    1024,   4096,   16384,  32768,  65536,  131071,
+        131072, 131073, 200000, 262144, 300000, 524288, 524289, 600 * 1024,
+    };
+    for ([_]golden.Shape{ .text, .rle, .random, .skewlit }) |shape| {
+        for (sizes) |size| {
+            golden.fillShape(shape, source[0..size]);
+            const frame_buffer = try testing.allocator.alloc(
+                u8,
+                maxCompressedLength(size),
+            );
+            defer testing.allocator.free(frame_buffer);
+            const written = try compress(source[0..size], frame_buffer, .{ .level = 3 });
+            const plain = try testing.allocator.alloc(u8, size);
+            defer testing.allocator.free(plain);
+            internal.sentinel.fill(plain);
+            const decoded = try decode.decompress(frame_buffer[0..written], plain, null);
+            try testing.expectEqual(size, decoded);
+            try testing.expectEqualSlices(u8, source[0..size], plain[0..decoded]);
+            try internal.sentinel.expect(plain, decoded);
+        }
+    }
+    for ([_]golden.Shape{ .html, .mixed, .words, .zeros }) |shape| {
+        for ([_]usize{ 100, 4096, 65536, 131072, 300000 }) |size| {
+            golden.fillShape(shape, source[0..size]);
+            const frame_buffer = try testing.allocator.alloc(
+                u8,
+                maxCompressedLength(size),
+            );
+            defer testing.allocator.free(frame_buffer);
+            const written = try compress(source[0..size], frame_buffer, .{ .level = 3 });
+            const plain = try testing.allocator.alloc(u8, size);
+            defer testing.allocator.free(plain);
+            internal.sentinel.fill(plain);
+            const decoded = try decode.decompress(frame_buffer[0..written], plain, null);
+            try testing.expectEqual(size, decoded);
+            try testing.expectEqualSlices(u8, source[0..size], plain[0..decoded]);
+            try internal.sentinel.expect(plain, decoded);
+        }
+    }
+}
+
+test "our level-3 frame is the CLI's own bytes" {
+    // RFC 8878 §3.1 — the whole emission, header through trailer, for every
+    // fixture class: our level-3 (dfast) frame reproduces the pinned CLI
+    // v1.5.7's `zstd -3` bytes exactly, and each CLI frame decodes back
+    // through our decoder to the input. The fixture bytes and their verdicts
+    // are `golden.zig`'s `encode3_*` group. The set straddles every
+    // `clevels.h` size class: the mls-4 tiny and 128-256-KB rows, the
+    // mls-5 16-128-KB and default rows.
+    var source: [600 * 1024]u8 = undefined;
+    const cases = [_]struct {
+        name: []const u8,
+        shape: golden.Shape,
+        size: usize,
+        expected: []const u8,
+    }{
+        .{ .name = "text-100", .shape = .text, .size = 100, .expected = &golden.encode3_text_100 },
+        .{
+            .name = "text-1024",
+            .shape = .text,
+            .size = 1024,
+            .expected = &golden.encode3_text_1024,
+        },
+        .{
+            .name = "text-32768",
+            .shape = .text,
+            .size = 32768,
+            .expected = &golden.encode3_text_32768,
+        },
+        .{
+            .name = "html-32768",
+            .shape = .html,
+            .size = 32768,
+            .expected = &golden.encode3_html_32768,
+        },
+        .{
+            .name = "rle-32768",
+            .shape = .rle,
+            .size = 32768,
+            .expected = &golden.encode3_rle_32768,
+        },
+        .{
+            .name = "words-4096",
+            .shape = .words,
+            .size = 4096,
+            .expected = &golden.encode3_words_4096,
+        },
+        .{
+            .name = "skewlit-4096",
+            .shape = .skewlit,
+            .size = 4096,
+            .expected = &golden.encode3_skewlit_4096,
+        },
+        .{
+            .name = "rle-133005",
+            .shape = .rle,
+            .size = 133005,
+            .expected = &golden.encode3_rle_133005,
+        },
+        .{
+            .name = "text-600000",
+            .shape = .text,
+            .size = 600000,
+            .expected = &golden.encode3_text_600000,
+        },
+    };
+    for (cases) |case| {
+        const input = source[0..case.size];
+        golden.fillShape(case.shape, input);
+        const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
+        defer testing.allocator.free(target);
+        const written = try compress(input, target, .{ .level = 3 });
+        try testing.expectEqual(case.expected.len, written);
+        try testing.expectEqualSlices(u8, case.expected, target[0..written]);
+        // The CLI's frame decodes through our decoder to the input.
+        const plain = try testing.allocator.alloc(u8, input.len);
+        defer testing.allocator.free(plain);
+        internal.sentinel.fill(plain);
+        const decoded = try decode.decompress(case.expected, plain, null);
+        try testing.expectEqual(input.len, decoded);
+        try testing.expectEqualSlices(u8, input, plain[0..decoded]);
+        try internal.sentinel.expect(plain, decoded);
+    }
+}
+
+test "the level-3 pre-splitter cuts a full block at a chunk boundary" {
+    // The dfast class's pre-block splitter (`split_compress`, the C's
+    // `ZSTD_optimalBlockSize` over `ZSTD_splitBlock_byChunks`): once a frame
+    // has saved at least 3 bytes, a full 128-KiB block whose byte fingerprints
+    // change partway through is cut at an 8-KiB chunk boundary, so the frame
+    // carries more blocks than the block size alone implies. This input is a
+    // compressible first block (so the savings gate opens), then one full
+    // block of an RLE run followed by random bytes: the regime change at
+    // 64 KiB is the split point. The CLI's own `zstd -3` frame splits there
+    // too (the `just zstd-oracle` lane pins the bytes).
+    var source: [3 * block_compress.max_block_size]u8 = undefined;
+    const total = 131072 + 65536 + 65536 + 1000;
+    golden.fillShape(.text, source[0..131072]);
+    fastmem.set(u8, source[131072..][0..65536], 0x41);
+    golden.fillShape(.random, source[196608..][0..65536]);
+    fastmem.copy(u8, source[262144..][0..1000], source[0..1000]);
+    const target = try testing.allocator.alloc(u8, maxCompressedLength(total));
+    defer testing.allocator.free(target);
+    const written = try compress(source[0..total], target, .{ .level = 3 });
+    var cursor = headerLenFor(target, written);
+    var blocks: usize = 0;
+    var split_seen = false;
+    while (true) {
+        const header = try block.parseHeader(target[cursor..]);
+        blocks += 1;
+        if (header.block_size == 65536) split_seen = true;
+        cursor += block.block_header_len + block.contentLength(header);
+        if (header.last_block) break;
+    }
+    try testing.expectEqual(written - frame.checksum_len, cursor);
+    // The 128-KiB block was cut at the 64-KiB regime change: the frame has
+    // more blocks than the block size alone would produce (three full blocks
+    // and the tail here), and one of them is the 64-KiB piece.
+    try testing.expect(split_seen);
+    try testing.expect(blocks > total / block_compress.max_block_size);
+    // The frame still decodes to the source.
+    const plain = try testing.allocator.alloc(u8, total);
+    defer testing.allocator.free(plain);
+    internal.sentinel.fill(plain);
+    const decoded = try decode.decompress(target[0..written], plain, null);
+    try testing.expectEqual(total, decoded);
+    try testing.expectEqualSlices(u8, source[0..total], plain[0..decoded]);
+    try internal.sentinel.expect(plain, decoded);
+}
+
+test "compress round-trips at level 3 with a dictionary, both match-region shapes" {
+    // RFC 8878 §5 — the dictionary is virtual past at level 3 too: the attach
+    // path (a source at or below the 16-KiB dfast cutoff) and the copy path
+    // (a larger source, its tables copied into the frame's own).
+    const trained = try Dictionary.parse(golden.dict_trained);
+    const raw = Dictionary.initRaw(golden.dict_trained[115..]);
+    var source: [600 * 1024]u8 = undefined;
+    const sizes = [_]usize{
+        0,      1,      6,          7,    8,     31,    100,   255,
+        256,    1024,   4096,       8192, 16384, 16385, 65536, 131072,
+        300000, 524289, 600 * 1024,
+    };
+    for ([_]golden.Shape{ .text, .rle, .random, .skewlit }) |shape| {
+        for (sizes) |size| {
+            golden.fillShape(shape, source[0..size]);
+            const frame_buffer = try testing.allocator.alloc(
+                u8,
+                maxCompressedLength(size),
+            );
+            defer testing.allocator.free(frame_buffer);
+            const written = try compress(source[0..size], frame_buffer, .{
+                .level = 3,
+                .dict = &trained,
+            });
+            const plain = try testing.allocator.alloc(u8, size);
+            defer testing.allocator.free(plain);
+            internal.sentinel.fill(plain);
+            const decoded = try decode.decompress(frame_buffer[0..written], plain, &trained);
+            try testing.expectEqual(size, decoded);
+            try testing.expectEqualSlices(u8, source[0..size], plain[0..decoded]);
+            try internal.sentinel.expect(plain, decoded);
+        }
+    }
+    // A raw dictionary: content only, no entropy tables, the default
+    // repcodes, no ID.
+    for ([_]usize{ 0, 100, 16385, 300000 }) |size| {
+        golden.fillShape(.text, source[0..size]);
+        const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(size));
+        defer testing.allocator.free(frame_buffer);
+        const written = try compress(source[0..size], frame_buffer, .{
+            .level = 3,
+            .dict = &raw,
+        });
+        const header = try frame.parseHeader(frame_buffer[frame.magic_len..written]);
+        try testing.expectEqual(@as(?u32, null), header.dictionary_id);
+        const plain = try testing.allocator.alloc(u8, size);
+        defer testing.allocator.free(plain);
+        internal.sentinel.fill(plain);
+        const decoded = try decode.decompress(frame_buffer[0..written], plain, &raw);
+        try testing.expectEqual(size, decoded);
+        try testing.expectEqualSlices(u8, source[0..size], plain[0..decoded]);
+        try internal.sentinel.expect(plain, decoded);
+    }
+}
+
+test "the level-3 with-dictionary frames are the CLI's own bytes" {
+    // RFC 8878 §3.1 + §5 — the whole emission with a dictionary at level 3:
+    // our frame reproduces the pinned CLI v1.5.7's
+    // `zstd -D dict-trained.bin -3` bytes exactly on every corpus shape, and
+    // each CLI frame decodes back through our decoder with the dictionary.
+    // The fixtures and their CLI verdicts are `golden.zig`'s `dict3_encode_*`
+    // group; the 16-KiB pair brackets dfast's attach/copy switch.
+    const trained = try Dictionary.parse(golden.dict_trained);
+    var source: [600 * 1024]u8 = undefined;
+    const cases = [_]struct {
+        name: []const u8,
+        shape: golden.Shape,
+        size: usize,
+        expected: []const u8,
+    }{
+        .{
+            .name = "text-100",
+            .shape = .text,
+            .size = 100,
+            .expected = &golden.dict3_encode_text_100,
+        },
+        .{
+            .name = "text-8192",
+            .shape = .text,
+            .size = 8192,
+            .expected = &golden.dict3_encode_text_8192,
+        },
+        .{
+            .name = "text-16385",
+            .shape = .text,
+            .size = 16385,
+            .expected = &golden.dict3_encode_text_16385,
+        },
+        .{
+            .name = "html-65536",
+            .shape = .html,
+            .size = 65536,
+            .expected = &golden.dict3_encode_html_65536,
+        },
+        .{
+            .name = "rle-133005",
+            .shape = .rle,
+            .size = 133005,
+            .expected = &golden.dict3_encode_rle_133005,
+        },
+        .{
+            .name = "words-4096",
+            .shape = .words,
+            .size = 4096,
+            .expected = &golden.dict3_encode_words_4096,
+        },
+    };
+    for (cases) |case| {
+        const input = source[0..case.size];
+        golden.fillShape(case.shape, input);
+        const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
+        defer testing.allocator.free(target);
+        const written = try compress(input, target, .{ .level = 3, .dict = &trained });
+        try testing.expectEqual(case.expected.len, written);
+        try testing.expectEqualSlices(u8, case.expected, target[0..written]);
+        const plain = try testing.allocator.alloc(u8, input.len);
+        defer testing.allocator.free(plain);
+        internal.sentinel.fill(plain);
+        const decoded = try decode.decompress(case.expected, plain, &trained);
+        try testing.expectEqual(input.len, decoded);
+        try testing.expectEqualSlices(u8, input, plain[0..decoded]);
+        try internal.sentinel.expect(plain, decoded);
+    }
 }
 
 test "compress is deterministic" {

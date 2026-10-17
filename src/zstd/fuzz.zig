@@ -1449,11 +1449,26 @@ fn checkOneShot(mutated: []const u8, expected_output: []const u8, meta: Mutated,
 /// frame-layer detail must hold unless the mutated frame's declared window
 /// exceeds the reader buffer's, where `WindowTooLarge` is the reader's
 /// answer and the pinned detail remains the one-shot's.
-fn expectReaderDetail(detail: Reader.Error, want: Reader.Error, info: ?FrameInfo) !void {
-    if (info) |i| {
-        if (i.header.window_size > fixture_window_len) {
-            try testing.expectEqual(Reader.Error.WindowTooLarge, detail);
-            return;
+fn expectReaderDetail(
+    detail: Reader.Error,
+    want: Reader.Error,
+    info: ?FrameInfo,
+    expected: Expected,
+) !void {
+    // The reader's own refusal is the window cap, but it is checked after the
+    // header's own refusals (the magic, the reserved bit, the Dictionary_ID):
+    // a mutation that pins one of those keeps its name even when the mutated
+    // header also declares a window past the buffer.
+    const header_stage = switch (expected) {
+        .fail_bad_magic, .fail_reserved_bit, .fail_dictionary => true,
+        else => false,
+    };
+    if (!header_stage) {
+        if (info) |i| {
+            if (i.header.window_size > fixture_window_len) {
+                try testing.expectEqual(Reader.Error.WindowTooLarge, detail);
+                return;
+            }
         }
     }
     try testing.expectEqual(want, detail);
@@ -1513,37 +1528,53 @@ fn checkReader(
             try testing.expect(meta.expected != .exact_source);
             const detail = r.err.?;
             switch (meta.expected) {
-                .fail_truncated => try expectReaderDetail(detail, Reader.Error.Truncated, info),
-                .fail_bad_magic => try expectReaderDetail(detail, Reader.Error.BadMagic, info),
+                .fail_truncated => try expectReaderDetail(
+                    detail,
+                    Reader.Error.Truncated,
+                    info,
+                    meta.expected,
+                ),
+                .fail_bad_magic => try expectReaderDetail(
+                    detail,
+                    Reader.Error.BadMagic,
+                    info,
+                    meta.expected,
+                ),
                 .fail_reserved_bit => try expectReaderDetail(
                     detail,
                     Reader.Error.ReservedBitSet,
                     info,
+                    meta.expected,
                 ),
                 .fail_dictionary => try expectReaderDetail(
                     detail,
                     Reader.Error.DictionaryRequired,
                     info,
+                    meta.expected,
                 ),
                 .fail_block_oversize => try expectReaderDetail(
                     detail,
                     Reader.Error.BlockOversize,
                     info,
+                    meta.expected,
                 ),
                 .fail_reserved_block => try expectReaderDetail(
                     detail,
                     Reader.Error.ReservedBlock,
                     info,
+                    meta.expected,
                 ),
                 .fail_content_size => try expectReaderDetail(
                     detail,
                     Reader.Error.ContentSizeMismatch,
                     info,
+                    meta.expected,
                 ),
                 .fail_wrong_checksum => try expectReaderDetail(
                     detail,
                     Reader.Error.WrongChecksum,
                     info,
+                    meta.expected,
                 ),
                 // An unpinned mutation (`unknown`) or a cut frame
                 // (`fail_any`): the detail is the mutation's business. The
@@ -2718,22 +2749,25 @@ fn fuzzEncodeRoundTrip(_: void, smith: *Smith) anyerror!void {
     var size = ladderSize(smith, &encode_sizes, encode_max);
     const content = smith.value(u64);
     const mode = rangeAtMost(smith, 0, 3);
+    // The implemented levels: 1 (fast) and 3 (dfast). Both round-trip; only
+    // the bytes differ.
+    const level: u8 = if (smith.boolWeighted(1, 1)) 3 else 1;
     // Single-byte writes only where the loop stays cheap.
     if (mode == 2) size = @min(size, 4096);
 
     var source: [encode_max]u8 = undefined;
     fillEncodeInput(kind, content, source[0..size]);
 
-    try expectOneShotEncodeRoundTrip(smith, source[0..size]);
-    try expectWriterEncodeRoundTrip(smith, source[0..size], mode);
+    try expectOneShotEncodeRoundTrip(smith, source[0..size], level);
+    try expectWriterEncodeRoundTrip(smith, source[0..size], mode, level);
 }
 
 /// The one-shot's frame for `source`: the bound, the trailer, identity at the
 /// exact cap and with slack, and a Smith-chosen smaller cap.
-fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
+fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: u8) !void {
     var compressed: [encode_bound]u8 = undefined;
     const bound = encode.maxCompressedLength(source.len);
-    const written = try encode.compress(source, compressed[0..bound], .{});
+    const written = try encode.compress(source, compressed[0..bound], .{ .level = level });
     try testing.expect(written <= bound);
     try expectTrailerConsistent(compressed[0..written], written, source, true);
 
@@ -2754,7 +2788,7 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
     // the cap held.
     const cap = rangeAtMost(smith, 0, written);
     sentinel.fill(&compressed);
-    if (encode.compress(source, compressed[0..cap], .{})) |short| {
+    if (encode.compress(source, compressed[0..cap], .{ .level = level })) |short| {
         // A successful emission writes its frame into the target's front; a
         // block whose entropy attempt fails partway can leave bytes past the
         // returned length inside the target (the C's encoder does the same),
@@ -2774,7 +2808,7 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8) !void {
 
 /// The Writer's frame for `source`, in `mode`'s write pattern: the empty
 /// writer's 13-byte frame, the bound, the trailer, and identity.
-fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !void {
+fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize, level: u8) !void {
     var out: [writer_out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&out);
     var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
@@ -2784,7 +2818,7 @@ fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !
     {
         var empty: [32]u8 = undefined;
         var efw: Io.Writer = .fixed(&empty);
-        var ew: Writer = .init(Writer.default_window_log, &efw, &buffer, .{});
+        var ew: Writer = .init(Writer.default_window_log, &efw, &buffer, .{ .level = level });
         try ew.finish();
         try expectTrailerConsistent(empty[0..efw.end], efw.end, "", true);
         var nothing: [guard_len]u8 = undefined;
@@ -2794,7 +2828,7 @@ fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize) !
         try sentinel.expect(&nothing, 0);
     }
 
-    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{});
+    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{ .level = level });
     var pos: usize = 0;
     var flushes: usize = 0;
     switch (mode) {
@@ -3365,6 +3399,23 @@ const encode_corruption_corpus: []const []const u8 = &.{
     &corruptionSeed(.corpus, 131073, shapeContent(.words), true, .last_block_first, 0),
     &corruptionSeed(.corpus, 4096, shapeContent(.text), true, .poke_fcs, 0),
     &corruptionSeed(.corpus, 4096, shapeContent(.text), true, .flip_trailer, 0),
+    // Regression seed (the fuzzer's own input, the raw Smith data): a Writer
+    // frame for an alphabet-shaped 150-KB source whose DID flag is forced on.
+    // The DID poke shifts the header, so the mutated header also parses a
+    // window past the reader's buffer — and the reader's Dictionary_ID check
+    // precedes its window check, so the detail is `DictionaryRequired`, not
+    // the window override's `WindowTooLarge`.
+    &corruption_did_seed,
+};
+
+/// The fuzz-found regression input behind the corpus row above
+/// (`fuzzEncodeCorruption`'s Smith data, verbatim).
+const corruption_did_seed = [_]u8{
+    0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0e, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0xca, 0xb5, 0xe7, 0xdf, 0x1a, 0x77, 0x95, 0x0b, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 };
 
 test "zstd fuzz: encode corruption" {
@@ -3400,7 +3451,7 @@ const WriteOp = enum(u8) {
 /// boundary through the streaming reader. The window log is Smith-chosen from
 /// the small classes to the default, so the block region, the slide, and the
 /// emission cadence all vary. The poison lifecycle runs after the frame: a
-/// `.ratio` writer, a sink that fills mid-frame, `finish` twice, and a write
+/// reserved-level writer, a sink that fills mid-frame, `finish` twice, and a write
 /// after `finish` must all report `error.WriteFailed`, and a finished or
 /// failed writer never reports a false success.
 fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
@@ -3542,19 +3593,19 @@ fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
     try expectStickyEnd(&r);
 }
 
-/// The poison lifecycle: a `.ratio` writer, a sink that fills mid-frame,
+/// The poison lifecycle: a reserved-level writer, a sink that fills mid-frame,
 /// `finish` twice, and a write after `finish` — every one reports
 /// `error.WriteFailed`, and no false success.
 fn writerPoison(smith: *Smith) !void {
     var buffer: Writer.Buffer(10) = undefined;
     switch (rangeAtMost(smith, 0, 3)) {
-        // `.ratio` is poisoned at `init`: every write and `finish` fails and
+        // A reserved level is poisoned at `init`: every write and `finish` fails and
         // the sink sees nothing. The one-shot's seat returns `Unimplemented`
         // before any byte.
         0 => {
             var out: [64]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
-            var w: Writer = .init(10, &fw, &buffer, .{ .level = .ratio });
+            var w: Writer = .init(10, &fw, &buffer, .{ .level = 2 });
             try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
             try testing.expectError(error.WriteFailed, w.finish());
             try testing.expectEqual(@as(usize, 0), fw.end);
@@ -3562,7 +3613,7 @@ fn writerPoison(smith: *Smith) !void {
             sentinel.fill(&target);
             try testing.expectError(
                 error.Unimplemented,
-                encode.compress("hello, zstd", &target, .{ .level = .ratio }),
+                encode.compress("hello, zstd", &target, .{ .level = 2 }),
             );
             try sentinel.expect(&target, 0);
         },
@@ -3711,7 +3762,7 @@ test "zstd fuzz: writer machinery" {
 /// `maxCompressedLength` must cover it on every size, or the encoder has an
 /// input it cannot encode at its own bound.
 fn rawWorstCase(source_len: usize) usize {
-    const params = match_compress.Params.forSource(source_len);
+    const params = match_compress.Params.forSource(1, source_len);
     const block_size = block_compress.blockSize(params);
     const single_segment = (@as(u64, 1) << params.window_log) >= source_len;
     const fcs_len: usize = if (source_len < 256)
@@ -3758,6 +3809,14 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
     const written = try encode.compress(source[0..size], target[0..bound], .{});
     try testing.expect(written <= bound);
     try expectTrailerConsistent(target[0..written], written, source[0..size], true);
+    // The dfast class's frames stay inside the same bound (its block size is
+    // the same or larger, and its header form no larger).
+    {
+        var level3: [encode_bound + guard_len]u8 = undefined;
+        const written3 = try encode.compress(source[0..size], level3[0..bound], .{ .level = 3 });
+        try testing.expect(written3 <= bound);
+        try expectTrailerConsistent(level3[0..written3], written3, source[0..size], true);
+    }
 
     // The raw need of this frame: the header, one 3-byte Block_Header per
     // block, the source bytes, and the trailer. No emission exceeds it — the
