@@ -13,4 +13,4 @@ jobs:
       security-events: write
       contents: read
       actions: read
-    uses: baskingspot/gh-actions/.github/workflows/zizmor.yml@493673603fc4fb664187e0be455b580d9e7ea5dc # v0.6.0
+    uses: baskingspot/gh-actions/.github/workflows/zizmor.yml@79e6fa0dd9aea0cb438ff7dcb74c987885ecfe77 # v0.7.0
