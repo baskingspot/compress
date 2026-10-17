@@ -397,6 +397,37 @@ above-1.0 rows are the entropy rows on both codecs, each with ranked
 algorithmic evidence in the wave's file — the zstd match finder's
 literal count, the bit-reader's consume model — not unnamed gaps.
 
+M9 — the second encoder seats: flate level 6, zstd level 3, brotli q3.
+The three seats land in order — brotli's q3 encoder, flate's level-6
+klauspost port, zstd's dfast level 3 — then the level APIs go numeric
+(the community scheme) and the zstd Reader test's dictionaries come off
+the stack.
+Acceptance, met 2026-10-17: each seat is byte-pinned to its reference —
+brotli q3 to the pinned CLI's `brotli -q 3` (the oracle's encode rows,
+the one-shot and the `Writer`, with the 22-size boundary ladder and a
+sweep across Debug, ReleaseSafe, and ReleaseFast; `a0fe8fc`), flate
+level 6 to klauspost/compress's flate at level 6 (the oracle's 30
+parity rows and 12 dictionary rows both directions, a 351-row sweep,
+and level 1's 14 frozen hashes; `c60a6b5`), and zstd level 3 to the
+pinned CLI's `zstd -3` file form up to the 8 MiB job size (the oracle's
+parity rows across both encoder forms and 38 dictionary rows at both
+levels; `aa66eed`). Every other level is `error.Unimplemented`, never a
+silent alias; level 1's bytes are unchanged. The numeric level scheme
+retires the `Level` enum across the barrel and the containers
+(`ff22a95`), and the macOS-26 test segfault is fixed by holding the
+947,824-byte `Dictionary` values off the test's stack (`9b0db3d`). The
+fleet grid gains the seats' rows (`9ed24a0`): flate level-6 encode
+against klauspost level 6, libdeflate level 6, and zlib-ng level 6;
+zstd level-3 encode against zstd-c level 3 and klauspost SpeedDefault;
+brotli q3 encode against the brotli-c arm's first encoder surface, plus
+the streaming `Writer` row — 7/7 targets, 8 arms, 5 rounds, 1,440
+comparison rows per target, exact size parity on every seat, and the
+level-1 and decode rows re-measured as controls
+(`docs/results/encoder-seats-fleet-20261017.md`). The ranked open gaps:
+the flate level-6 literal-heavy rows (2.3-3.1x behind zlib-ng's level 6,
+1.2-2.0x behind libdeflate's on the 32K shapes) and the zstd level-3 C
+gap (1.04-2.39x, worst on the Intel targets).
+
 ## Decisions made
 
 - Zig 0.16.0 only (2026-10-08). Revisit at 0.18: LLVM 23 restores loop
