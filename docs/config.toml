@@ -8,6 +8,9 @@ description = "Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and 
 generate_feeds = false
 build_search_index = false
 
+[markdown]
+insert_anchor_links = "heading"
+
 [markdown.highlighting]
 # An unknown fence language is a build error, not an unhighlighted block.
 error_on_missing_language = true
