@@ -349,3 +349,18 @@ Good (illustrative):
 
 Bad: `zstd perf wave 2: the lean backward reader, the corpus revision, the X2
 answer`. It names a plan, not a change.
+
+## Changelog
+
+`CHANGELOG.md` is one file, Keep a Changelog format, newest first. Add a bullet
+under `## [Unreleased]` in the same change that alters something a user can
+notice: the public API, expected behavior, performance a benchmark row would
+show, a supported backend, or the build requirements. Docs, CI, and internal
+refactors do not need one unless they change how someone uses the package.
+
+Write from the user's side: what changed, and what they must do about it. Name
+the symbol, flag, or error. One line, under Added, Changed, Fixed, or Removed.
+
+To release, dispatch the repo's `release.yml` with the version. The workflow
+moves the Unreleased section into a dated heading, sets `.version` in
+`build.zig.zon`, commits, tags, and opens the GitHub release. Do not tag by hand.
