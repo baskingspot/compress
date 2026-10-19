@@ -3,7 +3,7 @@
 base_url = "https://baskingspot.dev/compress"
 theme = "baskingspot"
 title = "compress"
-description = "Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brotli."
+description = "Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and Zstandard, plus a Brotli decoder."
 
 generate_feeds = false
 build_search_index = false
