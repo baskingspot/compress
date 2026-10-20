@@ -121,7 +121,20 @@ A `Writer` compresses into an `Io.Writer`, and a `Reader` decompresses from an `
 {{ load_data(path="examples/streaming_pump.zig", format="plain") | trim_end }}
 ```
 
-The streaming buffers are named types the caller owns. `gzip`'s is `[98303]u8` — a stack local. zstd's are not: the `Reader` window is 8 MiB and `Writer.Buffer(19)` is 2.2 MiB, so its `*Alloc` pumps take an allocator for exactly those buffers. Keep every streaming buffer in static or heap storage, not on the stack, unless its type is small enough to prove otherwise.
+## Who allocates
+
+The codec holds no allocator, and every call that allocates says so in its name. This table is the whole contract:
+
+| Call                                                    | Allocates                                                                             |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| One-shot `encode` and `decode`                          | Nothing. The caller passes both buffers.                                              |
+| `Writer.init` and `Reader.init`                         | Nothing. The caller passes the named `Buffer` type.                                   |
+| `Writer.streamAllAlloc` and the `Reader` `*Alloc` pumps | One `DefaultBuffer` from the caller's allocator. It is freed before the call returns. |
+| `Io.Writer.Allocating` and `allocRemaining` in examples | Caller-side scaffolding. These belong to the example, not to the codec.               |
+
+A `Buffer` is storage that the codec writes into, not state that it owns. The type's size decides where it lives. `gzip.Writer.Buffer` is `[98303]u8`, so a stack local is fine. The zstd types are too large for that: `zstd.Reader.DefaultBuffer` is 8 MiB + 256 KiB and `zstd.Writer.DefaultBuffer` is 2.2 MiB, so keep those in static or heap storage. The `*Alloc` pumps take an allocator for exactly that buffer.
+
+A failed allocation from a `*Alloc` pump is `error.OutOfMemory`.
 
 The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming framing is this package's own length-prefixed form, not Google's: it has no end marker and no checksum, so a stream cut at a block boundary reads as complete. Snappy framing is a decision to make with that in mind.
 
