@@ -10,7 +10,7 @@ test "a raw dictionary round-trips both directions" {
     const dict_file = "a small dictionary of bytes the input will resemble";
     const data = "the input resembles the dictionary of bytes";
 
-    const dict = zstd.Dictionary.initRaw(dict_file);
+    const dict: zstd.Dictionary = .initRaw(dict_file);
 
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
     const frame_len = try zstd.encode.compress(data, &frame, .{ .dict = &dict });
@@ -28,7 +28,7 @@ test "a raw dictionary round-trips both directions" {
 // a DICTID: its frames fail DictionaryRequired with none supplied and
 // DictionaryMismatch for the wrong one.
 test "a raw dictionary frame is honest about what it needs" {
-    const right = zstd.Dictionary.initRaw("the dictionary the frame was made with");
+    const right: zstd.Dictionary = .initRaw("the dictionary the frame was made with");
     const data = "the dictionary the frame was made with, and the data";
 
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
