@@ -58,7 +58,7 @@ const fixtures = [_]Fixture{
 /// path's base name minus the `.base64` suffix.
 fn fixtureName(comptime path: []const u8) []const u8 {
     @setEvalBranchQuota(100_000);
-    const base = std.fs.path.basename(path);
+    const base = std.Io.Dir.path.basename(path);
     return base[0 .. base.len - ".base64".len];
 }
 
@@ -227,21 +227,6 @@ pub fn build(b: *Build) void {
     });
     const example_tests = b.addTest(.{ .root_module = examples_mod });
     test_step.dependOn(&b.addRunArtifact(example_tests).step);
-
-    // The site serves the API reference under /api/, and Zola copies
-    // docs/static as is, so the reference installs there. `zig-out` is not
-    // the destination because Zola owns the site output directory.
-    const mod_docs = b.addObject(.{
-        .name = "compress",
-        .root_module = compress_mod,
-    });
-    const docs_install = b.addInstallDirectory(.{
-        .source_dir = mod_docs.getEmittedDocs(),
-        .install_dir = .{ .custom = "../docs/static/api" },
-        .install_subdir = "",
-    });
-    const docs_step = b.step("docs", "Generate API docs into docs/static/api");
-    docs_step.dependOn(&docs_install.step);
 
     // Compile-only gate: compiles the module's test binary without running
     // it, for cross-target checks (the portable fallbacks only compile on
