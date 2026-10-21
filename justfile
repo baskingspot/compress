@@ -68,15 +68,18 @@ check-32:
 [group("ci")]
 ci: test lint check-baseline doc
 
-[doc("Build the site into zig-out/site/compress/: the guide (Zola, from docs/), the API reference (the wasm viewer `zig std` uses) under api/, and the static marks. The router in baskingspot/site serves /compress/... from it")]
+[private]
+api:
+    docgen --root src/root.zig --title compress --repo-url https://github.com/baskingspot/compress --rev main --format json --out docs/data
+
+[doc("Build the site into zig-out/site/compress/: the guide (Zola, from docs/), the API reference (docgen JSON rendered by the theme's api.html) under api/, and the static marks. The router in baskingspot/site serves /compress/... from it")]
 [group("docs")]
-doc:
-    zig build docs
+doc: api
     baskingspot-docs build compress
 
 [doc("Edit the site with live reload (http://127.0.0.1:1111)")]
 [group("docs")]
-guide:
+guide: api
     baskingspot-docs serve compress
 
 [doc("Deploy the rendered site to Cloudflare as an assets-only Worker (config in wrangler.jsonc). Needs CLOUDFLARE_API_TOKEN in the environment, plus CLOUDFLARE_ACCOUNT_ID if the token can see more than one account")]
