@@ -6,6 +6,7 @@ Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brot
 
 One module, a namespace per codec, the same buffer discipline everywhere: the caller owns every buffer, the default APIs do not allocate, and every failure has a name. Streaming goes through `std.Io`. The encoders target the speed class — the zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3 — and the zstd decoder verifies what the C library does not.
 
+- [Codecs](#codecs): one namespace per format, and which of them are containers over `flate`.
 - [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.16, and what this package adds. gzip, zlib, and Snappy are missing from std entirely; zstd in std is decode-only.
 - [One-shot encode and decode](#one-shot-encode-and-decode): the same shape in every codec. Encode returns the compressed length, decode returns the decoded length, and both take caller-owned buffers.
 - [Size the buffers](#size-the-buffers): every encoder exports its exact worst case, and decode never writes past the length it returns.
@@ -13,7 +14,9 @@ One module, a namespace per codec, the same buffer discipline everywhere: the ca
 - [Dictionaries](#dictionaries): zstd dictionaries both directions, the zlib preset, and why there is no trainer in here.
 - [Choose a codec](#choose-a-codec): which format for which job, and what each one costs.
 - [Errors and corrupt input](#errors-and-corrupt-input): closed error sets, named per failure, `error.BufferTooSmall` before any byte past the cap.
+- [Design](#design): how the SIMD code is built, and how to copy one codec out on its own.
 - [Performance](#performance): what the 7-target EC2 grid measured, and the rule that local numbers are never claims.
+- [Limits](#limits): what has no API, and what returns `error.Unimplemented`.
 
 This guide is the recipes. The [API reference](api/) has the contract for every symbol. Each codec's README documents its API, error sets, and buffer sizes in the same terms.
 
@@ -178,6 +181,11 @@ Every failure has a name, the sets are closed per codec, and the names say what 
 
 Hostile input gets error returns, never assertions: the decoders treat every input as untrusted, and the fuzz suites pin the error names per mutation class. Truncated input fails by name too — `error.Truncated` for a DEFLATE stream cut before its final block, and each container adds its own names for its framing (`error.BadHeader` for gzip's magic, `error.BadMagic` for zstd's).
 
+# Design
+
+- Vector code uses `@Vector` and `std.simd`, sized at compile time for the build target. The one inline-assembly kernel is the snappy decoder's byte shuffle, `tbl` on aarch64 and `pshufb` on x86, with a portable fallback.
+- A codec can be copied out on its own: its directory and `src/internal/`, plus `src/flate/` for gzip and zlib, under one module root. The copy needs only `std` and fastmem.
+
 # Performance
 
 The encoders and decoders target the fast class, and the numbers are measured, not asserted. Every comparison runs on a 7-target EC2 grid — ARM and Intel — against the C reference libraries, 5 rounds each with an A/A control, and every claim names a run and a results file in [`docs/results/`](https://github.com/baskingspot/compress/tree/main/docs/results):
@@ -188,3 +196,11 @@ The encoders and decoders target the fast class, and the numbers are measured, n
 - Local `just bench` numbers are never claims. The grid and the methodology are in [`bench/README.md`](https://github.com/baskingspot/compress/blob/main/bench/README.md).
 
 No allocation on the hot paths, no `Io` value held, and the caller's buffers are the only memory the codecs touch.
+
+# Limits
+
+- Brotli takes no custom or shared dictionary. RFC 7932 defines no way to supply one, so there is no API.
+- There is no zstd dictionary trainer. The `zstd` CLI trains, and this package consumes.
+- The zstd encoder implements levels 1 and 3. Levels 2 and 4-19 on the CLI's scale return `error.Unimplemented`.
+- gzip has no dictionary, because RFC 1952 defines none.
+- The snappy `Reader` and `Writer` use a length-prefixed framing of this package's own, not Google's framing format. The stream has no end marker and no checksum, so a stream cut at a block boundary reads as complete.
