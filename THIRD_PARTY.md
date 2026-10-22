@@ -157,9 +157,8 @@ them; the rows are here so the debt is visible.
 
 - fastmem (`https://github.com/mattrobenolt/fastmem-zig`, MIT): the blessed
   memory-copy primitive for codec hot paths. Pinned in `build.zig.zon`.
-- zig-benchmark (`https://github.com/mattrobenolt/zig-benchmark`, MIT): the
-  local benchmark harness behind `zig build bench`. Pinned in
-  `build.zig.zon`. Used by bench executables only, never by codecs.
-- ztest (`https://github.com/mattrobenolt/ztest`, MIT): the plain-text test
-  runner for the test step. Pinned in `build.zig.zon`, lazy. The fuzz path
-  (`-Dfuzz`) uses the default runner.
+- testingx (`https://github.com/baskingspot/testingx`, MIT): the plain-text
+  test runner, the local benchmark harness behind `zig build bench`, and the
+  comptime fixtures. Pinned in `build.zig.zon`, lazy. The fuzz path
+  (`-Dfuzz`) uses the default runner. Used by the test and bench steps only,
+  never by codecs.

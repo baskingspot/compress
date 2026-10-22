@@ -126,7 +126,7 @@ onto a nearly-full disk):
 
 ## Commands
 
-- `just test`: unit tests for every codec, under the ztest plain-text runner.
+- `just test`: unit tests for every codec, under the testingx plain-text runner.
   Must pass before a commit.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
@@ -138,8 +138,8 @@ onto a nearly-full disk):
   before you call Zig work done.
 - `just fmt`: apply `zig fmt` to `src/` and `build.zig`.
 - `just check-baseline`: cross-target `zig build check` covering every
-  portable target (freestanding targets excluded — the ztest runner needs an
-  OS).
+  portable target (freestanding targets excluded — the testingx runner needs
+  an OS).
 - `just flate-oracle`: external-oracle conformance for flate — `python3
 zlib` raw, both directions (catches bit-packing bugs invisible to a
   self-round-trip; the layer is `scripts/flate_oracle.py`).
@@ -156,7 +156,7 @@ zlib` raw, both directions (catches bit-packing bugs invisible to a
   decoder does not make), both directions and byte-parity with `zstd -1` on
   non-ASCII and over-512-KiB inputs; the layer is `scripts/zstd_oracle.py`
   with the `scripts/zstd_klauspost` decoder.
-- `just bench [ARGS]`: local benchmarks (zig-benchmark). Local numbers are
+- `just bench [ARGS]`: local benchmarks (testingx). Local numbers are
   never quoted as claims.
 - `just example <codec> ...`: run a codec's example CLI (e.g. `just example
 snappy encode README.md > /tmp/out` runs `zig build example-snappy --
@@ -171,9 +171,9 @@ encode README.md`).
   `fastmem.copy`, `fastmem.move`, `fastmem.set` (all `(comptime T, dest,
 ...)`). `copy` and `set` are non-overlapping only; `move` handles overlap.
   A stray `@memcpy` in a diff is a review blocker.
-- benchmark, ztest (lazy): bench and test steps only, never imported by
-  codecs. In `build.zig`, lazy deps must go through `b.lazyImport` /
-  `b.lazyDependency`, never `b.dependency`.
+- testingx (lazy): the test runner and bench harness for the test and bench
+  steps only, never imported by codecs. In `build.zig`, lazy deps must go
+  through `b.lazyImport` / `b.lazyDependency`, never `b.dependency`.
 
 ## Tiger style
 

@@ -173,7 +173,7 @@ waits for both.
 
 - Iteration is local-first (Matt, 2026-10-08): remote machines slow the
   iteration cycle, so the fleet is on demand, not the default feedback loop.
-  Local `just bench` (zig-benchmark, benchstat-friendly `--count=N`) drives
+  Local `just bench` (testingx, benchstat-friendly `--count=N`) drives
   development. Local numbers are never quoted as claims.
 - Claims: the fleet harness, ported from fastmem at M1. Seven EC2 targets
   (c7i, c8i, c7a, c8a, c7g, c8g, c9g), n>=5 rounds, exact confidence

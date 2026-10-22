@@ -8,10 +8,10 @@ export AWS_PROFILE := env("AWS_PROFILE", "fastmem-bench")
 default:
     @just --list
 
-[doc("Unit tests for every codec, under the ztest plain-text runner")]
+[doc("Unit tests for every codec, under the testingx plain-text runner")]
 [group("test")]
 test:
-    ZTEST_VERBOSE=1 zig build test
+    TESTINGX_FORMAT=verbose zig build test
 
 [doc("Fuzz every codec's targets for an iteration budget with a K, M, or G suffix, for example `just fuzz 1M`. The budget is per fuzz target. ReleaseSafe only, because a Debug fuzz run hits ziglang/zig#30655")]
 [group("test")]
@@ -42,7 +42,7 @@ fmt:
     oxfmt README.md AGENTS.md docs/content
     just --fmt
 
-[doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. The targets differ most from the dev box, and freestanding targets are excluded because the ztest runner needs an OS. It is not a supported-platform claim")]
+[doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. The targets differ most from the dev box, and freestanding targets are excluded because the testingx runner needs an OS. It is not a supported-platform claim")]
 [group("test")]
 check-baseline:
     just check-target x86_64-linux
@@ -125,10 +125,10 @@ brotli-oracle:
 corpus:
     zig build corpus
 
-[doc("Local benchmarks with zig-benchmark. The numbers are not claims")]
+[doc("Local benchmarks with testingx. The numbers are not claims")]
 [group("bench")]
 bench *ARGS:
-    zig build bench -Doptimize=ReleaseFast -- {{ ARGS }}
+    zig build bench -- {{ ARGS }}
 
 [doc("Run a codec's example CLI, for example `just example snappy encode README.md > out`")]
 [group("dev")]

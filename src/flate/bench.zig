@@ -1,5 +1,5 @@
 //! Local benchmarks for the raw DEFLATE codec. Run with
-//! `zig build bench -Doptimize=ReleaseFast` (or `just bench`).
+//! `zig build bench` (or `just bench`).
 //!
 //! `benchmarkCompress` and `benchmarkDecompress` cover five data shapes
 //! (repetitive text, random, html-like, a single-byte run, and a mixed batch)
@@ -8,7 +8,7 @@
 //! `benchmarkRatio` reports compressed over uncompressed size per case.
 //!
 //! Output is benchstat-friendly:
-//! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! `zig build bench -- --count=10 > bench.txt`.
 //! These are local numbers, not performance claims.
 
 const std = @import("std");
@@ -16,8 +16,15 @@ const Allocator = std.mem.Allocator;
 const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
-const bench = @import("benchmark");
+const testingx = @import("testingx");
 const flate = @import("compress").flate;
+
+/// The suite entrypoint: registers every benchmark in this file.
+pub fn benchmarkMain(b: *testingx.B) !void {
+    try b.add("Compress", benchmarkCompress);
+    try b.add("Decompress", benchmarkDecompress);
+    try b.add("Ratio", benchmarkRatio);
+}
 
 /// Input data shapes.
 const Shape = enum {
@@ -102,11 +109,11 @@ fn caseName(comptime size: Size, comptime shape: Shape) []const u8 {
 
 /// Compress benchmarks: one sub-benchmark per size and shape. Reports MB/s over
 /// the uncompressed input.
-pub fn benchmarkCompress(b: *bench.B) !void {
+pub fn benchmarkCompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = flate.encode.maxCompressedLength(input.len);
@@ -127,11 +134,11 @@ pub fn benchmarkCompress(b: *bench.B) !void {
 /// Decompress benchmarks. The compressed input is prepared once (outside the
 /// timed loop), then decompressed repeatedly. Reports MB/s over the
 /// *decompressed* size.
-pub fn benchmarkDecompress(b: *bench.B) !void {
+pub fn benchmarkDecompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = flate.encode.maxCompressedLength(input.len);
@@ -156,11 +163,11 @@ pub fn benchmarkDecompress(b: *bench.B) !void {
 /// Compression ratio (compressed / uncompressed) per size and shape, reported
 /// as a custom metric so the table shows what the fixed-Huffman level buys over
 /// the stored form. Not a timed loop — it runs once.
-pub fn benchmarkRatio(b: *bench.B) !void {
+pub fn benchmarkRatio(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = flate.encode.maxCompressedLength(input.len);

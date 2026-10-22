@@ -1,4 +1,4 @@
-//! gzip benchmarks: `zig build bench -Doptimize=ReleaseFast`, or for benchstat
+//! gzip benchmarks: `zig build bench`, or for benchstat
 //! input `... -- --count=10 > bench.txt`. Throughput is MB/s over the
 //! *uncompressed* size, so compress and decompress rows compare directly.
 //!
@@ -21,9 +21,18 @@ const DefaultPrng = std.Random.DefaultPrng;
 
 const fastmem = @import("fastmem");
 
-const bench = @import("benchmark");
+const testingx = @import("testingx");
 const flate = @import("compress").flate;
 const gzip = @import("compress").gzip;
+
+/// The suite entrypoint: registers every benchmark in this file.
+pub fn benchmarkMain(b: *testingx.B) !void {
+    try b.add("GzipCompress", benchmarkGzipCompress);
+    try b.add("GzipDecompress", benchmarkGzipDecompress);
+    try b.add("GzipRatio", benchmarkGzipRatio);
+    try b.add("FlateCompress", benchmarkFlateCompress);
+    try b.add("FlateDecompress", benchmarkFlateDecompress);
+}
 
 /// Input corpus shapes, the same set the flate bench uses.
 const Shape = enum {
@@ -109,11 +118,11 @@ fn caseName(comptime size: Size, comptime shape: Shape) []const u8 {
 /// The gzip one-shot encoder. Reports MB/s over the uncompressed input.
 /// (`Gzip` prefix: this binary's rows must not collide with flate's own
 /// bench rows — see the file header.)
-pub fn benchmarkGzipCompress(b: *bench.B) !void {
+pub fn benchmarkGzipCompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = gzip.encode.maxCompressedLength(input.len);
@@ -134,11 +143,11 @@ pub fn benchmarkGzipCompress(b: *bench.B) !void {
 /// The gzip one-shot decoder. The member is prepared once (outside the timed
 /// loop), then decompressed repeatedly. Reports MB/s over the decompressed
 /// size.
-pub fn benchmarkGzipDecompress(b: *bench.B) !void {
+pub fn benchmarkGzipDecompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = gzip.encode.maxCompressedLength(input.len);
@@ -162,11 +171,11 @@ pub fn benchmarkGzipDecompress(b: *bench.B) !void {
 
 /// Compression ratio (member / uncompressed) per size and shape, reported as
 /// a custom metric. Not a timed loop — it runs once.
-pub fn benchmarkGzipRatio(b: *bench.B) !void {
+pub fn benchmarkGzipRatio(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = gzip.encode.maxCompressedLength(input.len);
@@ -188,11 +197,11 @@ pub fn benchmarkGzipRatio(b: *bench.B) !void {
 
 /// The paired raw-flate encoder over the same corpus and level: the delta
 /// against `BenchmarkGzipCompress` is the container's framing and checksum.
-pub fn benchmarkFlateCompress(b: *bench.B) !void {
+pub fn benchmarkFlateCompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = flate.encode.maxCompressedLength(input.len);
@@ -213,11 +222,11 @@ pub fn benchmarkFlateCompress(b: *bench.B) !void {
 /// The paired raw-flate decoder over the same corpus and level: the delta
 /// against `BenchmarkGzipDecompress` is the trailer verification (the CRC-32
 /// rides flate's window fill; there is no second pass).
-pub fn benchmarkFlateDecompress(b: *bench.B) !void {
+pub fn benchmarkFlateDecompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.block }) |size| {
         inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     const input = try makeShape(bb.allocator, shape, size.len());
                     defer bb.allocator.free(input);
                     const bound = flate.encode.maxCompressedLength(input.len);

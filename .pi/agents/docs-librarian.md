@@ -144,7 +144,8 @@ Accumulated memory. Update it when you find a rule or a recurring drift class th
 ## Project shape
 
 - One Zig module, `compress`, rooted at `src/root.zig`. Each codec is a namespace under it: `compress.snappy`, `compress.flate`, `compress.gzip`, `compress.zlib`, `compress.zstd`, `compress.brotli`. `src/internal/` is shared code.
-- The only dependency of the library is `fastmem`. `ztest` and `benchmark` are lazy and belong to the test and bench steps only.
+- The only dependency of the library is `fastmem`. `testingx` is lazy and
+  belongs to the test and bench steps only.
 - The caller owns every buffer, and the codecs do not allocate. Check any claim that says otherwise.
 - The package was renamed from `zcompress` to `compress`. A remaining `zcompress` in a live document is a finding.
 - Zig 0.16 only. There is no "or newer".

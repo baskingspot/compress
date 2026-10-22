@@ -44,7 +44,7 @@ Committing (when the task authorizes a commit):
 
 Validation:
 
-- Run `just test` first (ztest runner, one line per test). If it hangs, bisect rather than instrument: run the test binary from `.zig-cache/o/` directly, where stderr is visible.
+- Run `just test` first (testingx runner, one line per test). If it hangs, bisect rather than instrument: run the test binary from `.zig-cache/o/` directly, where stderr is visible.
 - Report exact commands and outcomes. "Should work" is a guess.
 - If validation fails, diagnose the root cause before changing more code. No shotgun edits.
 - Remove all debug instrumentation before reporting done; grep your own diff for `debug.print`, `/tmp/`, `dbgLog`.

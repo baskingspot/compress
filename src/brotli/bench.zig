@@ -1,4 +1,4 @@
-//! brotli codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! brotli codec benchmarks. Run with `zig build bench`.
 //!
 //! The rows decode the reference streams the brotli CLI 1.2.0 writes over the
 //! shared corpus shapes at quality 11 (`just corpus` generates them into
@@ -10,14 +10,20 @@
 //! over the *decompressed* size. Local numbers are not claims.
 //!
 //! Output is benchstat-friendly:
-//! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! `zig build bench -- --count=10 > bench.txt`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const bench = @import("benchmark");
+const testingx = @import("testingx");
 const brotli = @import("compress").brotli;
+
+/// The suite entrypoint: registers every benchmark in this file.
+pub fn benchmarkMain(b: *testingx.B) !void {
+    try b.add("BrotliDecompress", benchmarkBrotliDecompress);
+    try b.add("BrotliReader", benchmarkBrotliReader);
+}
 
 /// The corpus shapes: the same set as the corpus generator
 /// (`bench/zig/corpus.zig`) and the other codecs' benches.
@@ -67,11 +73,11 @@ fn readCorpus(allocator: Allocator, io: Io, name: []const u8) ![]u8 {
 /// One-shot decode benchmarks: one sub-benchmark per corpus case. The stream
 /// is loaded and checked once (the decode must reproduce the raw shape
 /// exactly, as in the `bench/` harness), then decoded repeatedly.
-pub fn benchmarkBrotliDecompress(b: *bench.B) !void {
+pub fn benchmarkBrotliDecompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
         inline for (std.enums.values(Shape)) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     var threaded: Io.Threaded = .init_single_threaded;
                     const io = threaded.io();
                     const base = comptime baseName(size, shape);
@@ -101,11 +107,11 @@ pub fn benchmarkBrotliDecompress(b: *bench.B) !void {
 /// input and into a fixed writer. The buffer is the documented default
 /// (`DefaultBuffer`, about 16.7 MiB), heap-allocated once; a fresh reader per
 /// iteration, as one stream is one reader.
-pub fn benchmarkBrotliReader(b: *bench.B) !void {
+pub fn benchmarkBrotliReader(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
         inline for (std.enums.values(Shape)) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     var threaded: Io.Threaded = .init_single_threaded;
                     const io = threaded.io();
                     const base = comptime baseName(size, shape);

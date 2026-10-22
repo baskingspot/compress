@@ -1,4 +1,4 @@
-//! zstd codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! zstd codec benchmarks. Run with `zig build bench`.
 //!
 //! The decode rows decode a reference frame written by the zstd CLI v1.5.7
 //! over the shared corpus shapes (level 1, except the entropy shapes in
@@ -9,14 +9,20 @@
 //! Throughput is MB/s over the *decompressed* size.
 //!
 //! Output is benchstat-friendly:
-//! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! `zig build bench -- --count=10 > bench.txt`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
 
-const bench = @import("benchmark");
+const testingx = @import("testingx");
 const zstd = @import("compress").zstd;
+
+/// The suite entrypoint: registers every benchmark in this file.
+pub fn benchmarkMain(b: *testingx.B) !void {
+    try b.add("ZstdCompress", benchmarkZstdCompress);
+    try b.add("ZstdDecompress", benchmarkZstdDecompress);
+}
 
 /// The corpus shapes: the same set as the corpus generator
 /// (`bench/zig/corpus.zig`) and the other codecs' benches. The entropy pair
@@ -68,11 +74,11 @@ fn readCorpus(allocator: Allocator, io: Io, name: []const u8) ![]u8 {
 /// decode back to the raw shape, as in the `bench/` harness's warmup), then
 /// the raw shape is compressed repeatedly. Reports MB/s over the
 /// uncompressed input.
-pub fn benchmarkZstdCompress(b: *bench.B) !void {
+pub fn benchmarkZstdCompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
         inline for (std.enums.values(Shape)) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     var threaded: Io.Threaded = .init_single_threaded;
                     const io = threaded.io();
                     const base = @tagName(shape) ++ switch (size) {
@@ -106,11 +112,11 @@ pub fn benchmarkZstdCompress(b: *bench.B) !void {
 /// Decompress benchmarks: one sub-benchmark per corpus case. The frame is
 /// loaded and checked once (the decode must reproduce the raw shape exactly,
 /// as in the `bench/` harness), then decoded repeatedly.
-pub fn benchmarkZstdDecompress(b: *bench.B) !void {
+pub fn benchmarkZstdDecompress(b: *testingx.B) !void {
     inline for (.{ Size.half, Size.full }) |size| {
         inline for (std.enums.values(Shape)) |shape| {
             _ = try b.run(caseName(size, shape), struct {
-                fn run(bb: *bench.B) !void {
+                fn run(bb: *testingx.B) !void {
                     var threaded: Io.Threaded = .init_single_threaded;
                     const io = threaded.io();
                     const base = @tagName(shape) ++ switch (size) {

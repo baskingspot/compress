@@ -8,14 +8,11 @@
             .url = "git+https://github.com/baskingspot/fastmem#4a697443b21e31e6b54f100b181611e89ec1263d",
             .hash = "fastmem-0.0.0-W3bwd7-KBgBEhLNvTBn-1R1Ru-cCZKliPp7yV0MjZvcm",
         },
-        .benchmark = .{
-            .url = "git+https://github.com/mattrobenolt/zig-benchmark?ref=main#5572317d18d1e5b4630950658b1628b4398a84a8",
-            .hash = "benchmark-0.1.0-JS72VhUcAQAM6gGwbJeMtNhbX7n8LQk4LIdSrRz9ljNg",
-            .lazy = true,
-        },
-        .ztest = .{
-            .url = "git+https://github.com/mattrobenolt/ztest?ref=main#d1a70d1e99d4e8751d5ceddfe8dcc761e7831aad",
-            .hash = "ztest-0.2.0-h6PBz_h1AAD8Z41oiZbR5aKo2xAzeqbuW9KIxfClUgwp",
+        // Development-only: the test runner, benchmarks, and comptime
+        // fixtures. Lazy so consumers of the library never fetch it.
+        .testingx = .{
+            .url = "https://baskingspot.dev/testingx/v0.1.1.tar.gz",
+            .hash = "testingx-0.1.1-ib95-6ivAgB3rCWLHww0C7edG1NLC71y1p1wogPV0Djf",
             .lazy = true,
         },
     },

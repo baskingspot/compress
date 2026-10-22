@@ -1,4 +1,4 @@
-//! Snappy block codec benchmarks. Run with `zig build bench -Doptimize=ReleaseFast`.
+//! Snappy block codec benchmarks. Run with `zig build bench`.
 //!
 //! Covers compress and decompress, plus the compression ratio, across five
 //! input shapes (text, random, html, rle, mixed; see `Shape`) at a fixed 32 KiB
@@ -6,15 +6,22 @@
 //! compress and decompress are directly comparable.
 //!
 //! Output is benchstat-friendly:
-//! `zig build bench -Doptimize=ReleaseFast -- --count=10 > bench.txt`.
+//! `zig build bench -- --count=10 > bench.txt`.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const DefaultPrng = std.Random.DefaultPrng;
 const fastmem = @import("fastmem");
 
-const bench = @import("benchmark");
+const testingx = @import("testingx");
 const snappy = @import("compress").snappy;
+
+/// The suite entrypoint: registers every benchmark in this file.
+pub fn benchmarkMain(b: *testingx.B) !void {
+    try b.add("Compress", benchmarkCompress);
+    try b.add("Decompress", benchmarkDecompress);
+    try b.add("Ratio", benchmarkRatio);
+}
 
 /// Input corpus shapes; `makeShape` builds one.
 const Shape = enum {
@@ -73,10 +80,10 @@ fn shapeName(shape: Shape) []const u8 {
 
 /// Compress benchmarks. One sub-benchmark per shape, at a fixed 32 KiB block
 /// (the raw-block size class). Reports MB/s over the uncompressed input.
-pub fn benchmarkCompress(b: *bench.B) !void {
+pub fn benchmarkCompress(b: *testingx.B) !void {
     inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
         _ = try b.run(shapeName(shape), struct {
-            fn run(bb: *bench.B) !void {
+            fn run(bb: *testingx.B) !void {
                 const input = try makeShape(bb.allocator, shape, 32 * 1024);
                 defer bb.allocator.free(input);
                 const bound = snappy.encode.maxCompressedLength(input.len);
@@ -96,10 +103,10 @@ pub fn benchmarkCompress(b: *bench.B) !void {
 /// Decompress benchmarks. The compressed input is prepared once (outside the
 /// timed loop), then decompressed repeatedly. Reports MB/s over the
 /// *decompressed* size.
-pub fn benchmarkDecompress(b: *bench.B) !void {
+pub fn benchmarkDecompress(b: *testingx.B) !void {
     inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
         _ = try b.run(shapeName(shape), struct {
-            fn run(bb: *bench.B) !void {
+            fn run(bb: *testingx.B) !void {
                 const input = try makeShape(bb.allocator, shape, 32 * 1024);
                 defer bb.allocator.free(input);
                 const bound = snappy.encode.maxCompressedLength(input.len);
@@ -124,10 +131,10 @@ pub fn benchmarkDecompress(b: *bench.B) !void {
 /// Compression ratio (compressed / uncompressed) per shape, reported as a
 /// custom metric so the benchmark table shows how much the match finder helps.
 /// The timed loop does no work; the metric is the result.
-pub fn benchmarkRatio(b: *bench.B) !void {
+pub fn benchmarkRatio(b: *testingx.B) !void {
     inline for (.{ Shape.text, Shape.random, Shape.html, Shape.rle, Shape.mixed }) |shape| {
         _ = try b.run(shapeName(shape), struct {
-            fn run(bb: *bench.B) !void {
+            fn run(bb: *testingx.B) !void {
                 const input = try makeShape(bb.allocator, shape, 32 * 1024);
                 defer bb.allocator.free(input);
                 const bound = snappy.encode.maxCompressedLength(input.len);

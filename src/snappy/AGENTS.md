@@ -66,9 +66,9 @@
   `docs/results/`. Locally, decompress is slowest on RLE (many short overlapping
   copies, one shuffle each) and fastest on incompressible input (plain literal
   copies).
-- To check codegen, run `zig build bench -Doptimize=ReleaseFast`, find the
-  runners (`find .zig-cache -name benchmark -type f`, one per codec), and
-  `objdump -d` the snappy one on AArch64. Look for `tbl` (the overlapping-copy
+- To check codegen, run `zig build bench`, find the runner
+  (`find .zig-cache -name bench-snappy -type f`), and
+  `objdump -d` it on AArch64. Look for `tbl` (the overlapping-copy
   shuffle; GNU objdump prints `tbl v0.16b, ...`, so do not grep `tbl.16b`),
   `ldr q` / `str q` (16-byte moves on the literal and non-overlapping copy
   paths), and `eor` + `rbit` + `clz` (`@ctz` in the 8-byte match extension).

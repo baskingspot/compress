@@ -104,12 +104,6 @@ pub fn build(b: *Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // `--fuzz` test runs need the default test runner (the server protocol
-    // that ztest's `.mode = .simple` skips), so ztest is only used for
-    // normal test runs.
-    const fuzz_mode =
-        b.option(bool, "fuzz", "Enable fuzzing (uses the default test runner)") orelse false;
-
     // fastmem: the copy and fill primitive every codec uses (`fastmem.copy`,
     // `fastmem.move`, `fastmem.set`).
     const fastmem_dep = b.dependency("fastmem", .{
@@ -133,13 +127,34 @@ pub fn build(b: *Build) void {
     // `addFixtures` below.
     compress_mod.addImport("fixtures", addFixtures(b));
 
-    // ztest: plain-text test runner. Lazy — only fetched when the test step
-    // is actually built, not when consumers use compress as a dependency.
-    const ztest_dep = b.lazyDependency("ztest", .{});
-    const test_runner: ?Build.Step.Compile.TestRunner = if (fuzz_mode) null else if (ztest_dep) |z|
-        .{ .path = z.path("src/test_runner.zig"), .mode = .simple }
-    else
-        null;
+    // Dependency consumers need only the exported module. Stopping here also
+    // keeps the test runner and benchmark package out of a consumer's cache.
+    if (b.pkg_hash.len != 0) return;
+
+    // `--fuzz` test runs need the default test runner (the server protocol
+    // that testingx's `.mode = .simple` skips), so testingx is only used for
+    // normal test runs.
+    const fuzz_mode =
+        b.option(bool, "fuzz", "Enable fuzzing (uses the default test runner)") orelse false;
+
+    // testingx: plain-text test runner and benchmark harness. Lazy — only
+    // fetched when a development step is built, not when consumers use
+    // compress as a library dependency.
+    const testingx_dep = b.lazyDependency("testingx", .{
+        // testingx declares no `optimize` option; the module is compiled at
+        // the optimize mode of whatever artifact imports it.
+        .target = target,
+    });
+    const test_runner: ?Build.Step.Compile.TestRunner =
+        if (fuzz_mode or target.result.cpu.arch == .wasm32)
+            // Fuzz runs need the built-in runner's server protocol. wasm32-wasi
+            // baseline has no atomics for the runner's watchdog futex, and the
+            // cross-target gate only compiles there.
+            null
+        else if (testingx_dep) |dep|
+            .{ .path = dep.path("src/runner.zig"), .mode = .simple }
+        else
+            null;
     const test_step = b.step("test", "Run unit tests");
 
     // Example CLIs, one per codec (examples/), sharing examples/cli.zig. Run:
@@ -206,7 +221,7 @@ pub fn build(b: *Build) void {
     }
 
     // Unit tests: one test executable over the one module, covering every
-    // codec's tests and the barrel's own. ztest still reports each test by
+    // codec's tests and the barrel's own. testingx still reports each test by
     // name.
     const compress_tests = b.addTest(.{
         .root_module = compress_mod,
@@ -341,41 +356,37 @@ pub fn build(b: *Build) void {
         probe32_step.dependOn(&b.addInstallArtifact(probe32_exe, .{}).step);
     }
 
-    // Benchmarks. The benchmark dependency is lazy in the zon: while it is
-    // unfetched, b.lazyImport returns null and no bench step is defined. The
-    // call itself still marks the dependency needed, and the build runner
-    // fetches every marked lazy dependency on any invocation, so a cold
-    // cache's first `zig build`, whatever the step, fetches benchmark before
-    // this block runs again.
-    if (b.lazyImport(@This(), "benchmark")) |benchmark| {
+    // Benchmarks. testingx's addBench builds each codec suite as a ReleaseFast
+    // executable. The dependency is lazy in the zon: while it is unfetched,
+    // b.lazyImport returns null and no bench step is defined. The call itself
+    // still marks the dependency needed, and the build runner fetches every
+    // marked lazy dependency on any invocation, so a cold cache's first
+    // `zig build`, whatever the step, fetches testingx before this block runs
+    // again.
+    if (b.lazyImport(@This(), "testingx")) |testingx| {
         // The dependency is lazy in the zon, so it must come through
         // lazyDependency. lazyImport already confirmed it is fetched, so
         // this call returns non-null.
-        const benchmark_dep = b.lazyDependency("benchmark", .{
+        const bench_dep = b.lazyDependency("testingx", .{
             .target = target,
-            .optimize = optimize,
         }).?;
+        const testingx_mod = bench_dep.module("testingx");
 
-        const bench_step = b.step("bench", "Run codec benchmarks (use -Doptimize=ReleaseFast)");
+        const bench_step = b.step("bench", "Run codec benchmarks (ReleaseFast)");
 
-        // zig-benchmark's addRunTest injects @import("benchmark") into each
-        // bench root module and generates the runner executable: one module
-        // per codec over src/<codec>/bench.zig with the shared import set
-        // (compress + fastmem). The brotli bench is decode-only (over the
-        // generated corpus streams); see src/brotli/bench.zig.
+        // One suite per codec: src/<codec>/bench.zig declares benchmarkMain
+        // and registers its own rows. The shared import set is compress +
+        // fastmem. The brotli bench is decode-only (over the generated corpus
+        // streams); see src/brotli/bench.zig.
         inline for (bench_codecs) |name| {
-            const bench_root = b.createModule(.{
+            const run_bench = testingx.addBench(b, .{
+                .name = comptimePrint("bench-{s}", .{name}),
+                .module = testingx_mod,
                 .root_source_file = b.path(comptimePrint("src/{s}/bench.zig", .{name})),
-                .target = target,
-                .optimize = optimize,
                 .imports = &.{
                     .{ .name = "compress", .module = compress_mod },
                     .{ .name = "fastmem", .module = fastmem_mod },
                 },
-            });
-            const run_bench = benchmark.addRunTest(b, .{
-                .dependency = benchmark_dep,
-                .root_module = bench_root,
             });
             if (b.args) |args| run_bench.addArgs(args);
             bench_step.dependOn(&run_bench.step);
