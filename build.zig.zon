@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .fastmem = .{
-            .url = "git+https://github.com/mattrobenolt/fastmem-zig?ref=main#247476ed4ab2f26acd3be052ce911fd1cf8a5a35",
-            .hash = "fastmem-0.0.0-W3bwd5ukBgDwwJRh-sbyj4nnmYJ0wLcqSXLXAUf6uzGJ",
+            .url = "git+https://github.com/baskingspot/fastmem#4a697443b21e31e6b54f100b181611e89ec1263d",
+            .hash = "fastmem-0.0.0-W3bwd7-KBgBEhLNvTBn-1R1Ru-cCZKliPp7yV0MjZvcm",
         },
         .benchmark = .{
             .url = "git+https://github.com/mattrobenolt/zig-benchmark?ref=main#5572317d18d1e5b4630950658b1628b4398a84a8",
