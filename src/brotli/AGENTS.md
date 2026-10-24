@@ -4,7 +4,7 @@ The brotli codec (RFC 7932): the decoder, and the encoder at the reference's
 `q3` class. `README.md` is the user-facing contract; this
 file keeps the decisions, errata, and oracle notes behind it. The research is
 `docs/research/brotli-notes.md` (`brotli-notes.md` below): its `BR1`-`BR41`
-requirement matrix, `T1`-`T8` divergence rows, and `OQ1`-`OQ8` design questions
+requirement matrix, `T1`-`T9` divergence rows, and `OQ1`-`OQ8` design questions
 are cited as they appear there. `§` cites are sections of
 `docs/research/specs/rfc7932-brotli.txt`. brotli wraps nothing — it is a codec,
 not a container — so the layering questions are zstd's one milestone later,
@@ -443,7 +443,7 @@ No other errata exist for this RFC; unlike RFC 8878, the worked examples and
 tables that matter here check out — proven by the hand-built streams of
 `brotli-notes.md` §7.3 and the CRC-verified data of §4.3.
 
-## Divergences from the references (T1-T8)
+## Divergences from the references (T1-T9)
 
 `brotli-notes.md` §5 records the RFC text, the C v1.2.0, the Go v1.2.6, and the
 CLI for each row. Where ours differs from a reference it is on purpose; do not
@@ -486,6 +486,16 @@ CLI for each row. Where ours differs from a reference it is on purpose; do not
   prefix+suffix 13, 24 + 13 + 1), not the C's 542 (extension slack). The C's
   reading that a transform emptying a word is invalid when the distance code is
   ≤ 120 is adopted as `BadTransform` (`decode.c:2247-2250`).
+- **T9 — the spent single-type block count.** §9.3 gives a single-type
+  category BLEN = 16777216 and no switch on the wire; §10's pseudocode
+  decrements the count with no branch for zero. It is reachable: a command
+  whose copy is an emptied dictionary word (T8) produces no output, so a
+  conformant meta-block can hold more than 2^24 commands. Ours re-arms the
+  count and reads nothing (`command.zig`). C v1.2.0 fails there — its safe
+  callers read the failure as "needs more input", and the literal caller
+  ignored it, which is the CVE-2026-111497 shape — and v1.2.1 rejects the
+  stream as `FORMAT_BLOCK_SWITCH`. Do not "fix" ours to reject; the stream is
+  conformant.
 
 **The fixture plan** (`brotli-notes.md` §7): the 45 decodable vectors of
 google/brotli v1.2.0's `tests/testdata/` (22 round-trip pairs, 19 empty-input

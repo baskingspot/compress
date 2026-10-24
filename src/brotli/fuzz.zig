@@ -2339,6 +2339,11 @@ test "brotli fuzz: every strict prefix is Truncated" {
         golden.uncompressed_streams[1].bytes,
         golden.metadata_streams[1].bytes,
         golden.last_metadata_streams[1],
+        // RFC 7932 §6 — the block-switch streams: a cut inside a switch's
+        // type symbol, count symbol, or extra bits is Truncated, never a
+        // decode that continues with the switch half-applied.
+        golden.block_switch_literal_t1.bytes,
+        golden.block_switch_command.bytes,
     };
     for (streams) |stream| {
         for (0..stream.len) |cut| {

@@ -312,7 +312,11 @@ fn switchBlock(
         // emptied dictionary word at a distance above 120 — still spends
         // one, so about 30 MB of input runs the count out and re-arms it
         // here, without reading a switch that is not on the wire. The C
-        // reference re-arms the same way.
+        // reference does not re-arm: v1.2.0 returns a failure its safe
+        // callers read as "needs more input", and v1.2.1 rejects the
+        // stream as FORMAT_BLOCK_SWITCH. The RFC's pseudocode has no branch
+        // for a spent single-type count and the stream is conformant, so
+        // re-arming is the reading that refuses nothing (T9).
         blocks.counts[index] = 1 << 24;
         return;
     }
@@ -1343,4 +1347,27 @@ test "command stream: RFC 7932 §8's dictionary class refusals" {
         error.BadTransform,
         decode.decompress(golden.dictionary_transform.bytes, &target),
     );
+}
+
+/// The single-type re-arm test's header. Only `block_types` and
+/// `first_block_count` are read, but the real `Header` is about 700 KiB, so
+/// it lives here and never on a test's stack.
+var single_type_header: frame.Header = undefined;
+
+test "command stream: a spent single-type block count re-arms without a switch" {
+    // RFC 7932 §9.3, §10 — a single-type category has no switch on the wire
+    // and starts at BLEN = 16777216, but §10's pseudocode decrements it with
+    // no branch for zero. A command stream can spend it (T9), and the
+    // re-arm reads nothing. google/brotli v1.2.0 fails here — the shape of
+    // CVE-2026-111497 — and v1.2.1 rejects the stream; ours decodes it.
+    single_type_header.block_types = .{ 1, 1, 1 };
+    single_type_header.first_block_count = .{ 0, 0, 0 };
+    var blocks: Blocks = .init(&single_type_header);
+    var br: bits.BitReader = .init(&.{});
+    try switchBlock(bits.BitReader, &br, &single_type_header, &blocks, .command);
+    try testing.expectEqual(
+        @as(u32, 1 << 24),
+        blocks.counts[@intFromEnum(frame.Category.command)],
+    );
+    try testing.expectEqual(@as(u64, 0), br.bit_pos);
 }

@@ -802,6 +802,16 @@ cites v1.2.6; the CLI is the build from the tag.
   that erases the word is invalid unless the distance puts it past the
   special-code band. That corner is the C's reading of §8's rejection
   sentence; adopt it as `BadTransform`.)
+- **T9 — the spent single-type block count.** §9.3 gives a single-type
+  category BLEN = 16777216 with no switch on the wire, and §10's
+  pseudocode decrements the count with no branch for zero. It is
+  reachable: a command whose copy is an emptied dictionary word (T8)
+  produces no output, so a conformant meta-block can hold more than 2^24
+  commands. Decision: re-arm the count, read nothing. google/brotli
+  v1.2.0 returns a failure there; its safe callers read that as "needs
+  more input" and the literal caller ignored it, which is the bug class
+  CVE-2026-111497 closed. v1.2.1 rejects the stream as
+  `FORMAT_BLOCK_SWITCH`; ours decodes it, and should.
 
 ## 6. The buffer and window design
 
