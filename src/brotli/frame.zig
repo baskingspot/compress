@@ -401,9 +401,10 @@ fn skipMetadata(comptime Bits: type, br: *Bits) Errors(Bits)!void {
 // ---------------------------------------------------------------------------
 
 /// Drive the ladder over a stream whose meta-blocks are all of the
-/// entropy-free kinds, collecting the output. Test-only: the real decode loop
-/// arrives with the command layer, and `error.Compressed` is this helper's
-/// marker for a stream that layer cannot decode yet.
+/// entropy-free kinds, collecting the output. Test-only: the reader in
+/// `Reader.zig` decodes compressed meta-blocks; this helper handles only
+/// the entropy-free forms, and `error.Compressed` is its marker when a
+/// stream contains a compressed meta-block.
 fn decodeEntropyFree(source: []const u8, target: []u8) !usize {
     var header: Header = undefined;
     var br: bits.BitReader = .init(source);

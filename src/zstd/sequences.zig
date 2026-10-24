@@ -514,7 +514,7 @@ pub const Section = struct {
 ///
 /// Every declared size is a bound: the output never exceeds `target`, the
 /// literals read never exceeds `literals_bytes`, and no offset reaches past
-/// the authorized history — the failures are `BufferTooSmall`,
+/// the authorized history — the bound failures are `BufferTooSmall`,
 /// `LiteralsTooLarge`, and `OffsetTooFar`, raised before the offending write.
 pub fn decode(
     source: []const u8,

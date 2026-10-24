@@ -408,8 +408,8 @@ fn mask64(count: u5) u64 {
 /// The forward writer (`§4.1.1`): fields go out little-endian from the first
 /// byte's low bit up, the exact inverse of `ForwardReader`.
 ///
-/// The description writer is its only user today, so it stays small: a field
-/// is at most 16 bits (`Table 20`'s widest), and a byte leaves the accumulator
+/// Only the description writer uses it, so it stays small: a field is at
+/// most 16 bits (`Table 20`'s widest), and a byte leaves the accumulator
 /// as soon as it is full.
 pub const ForwardWriter = struct {
     target: []u8,

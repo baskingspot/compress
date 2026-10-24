@@ -69,7 +69,7 @@ pub fn Buffer(comptime window_wbits: usize) type {
 /// The reference encoder library's default window: 22, 4,194,288 bytes.
 pub const default_window_wbits: usize = 22;
 
-/// `Buffer(22)`: about 9.1 MiB. Keep it in static or heap storage.
+/// `Buffer(22)`: about 8.7 MiB. Keep it in static or heap storage.
 pub const DefaultBuffer = Buffer(default_window_wbits);
 
 const Writer = @This();
@@ -220,8 +220,8 @@ fn rebase(w: *Io.Writer, preserve: usize, capacity: usize) Io.Writer.Error!void 
 }
 
 /// Process the first `len` staging bytes: copy them into the ring and run
-/// the encoder's input-block step. `force_flush` emits a meta-block now;
-/// `is_last` ends the stream.
+/// the encoder's input-block step. `force_flush` emits a meta-block in
+/// this step; `is_last` ends the stream.
 fn process(self: *Writer, len: usize, is_last: bool, force_flush: bool) Io.Writer.Error!void {
     assert(len <= self.staging.len);
     if (!self.started) {

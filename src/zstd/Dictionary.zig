@@ -240,7 +240,7 @@ pub fn matchParams(self: *const Dictionary, level: u8) match_compress.DictParams
 /// `ZSTD_loadCEntropy`'s literals promotion (`zstd_compress.c:5071-5079`):
 /// "We only set the loaded table as valid if it contains all non-zero
 /// weights. Otherwise, we set it to check" — and the tree must reach the
-/// full alphabet (`maxSymbolValue == 255`, the issue #3724 fix).
+/// full alphabet (`maxSymbolValue == 255`, the facebook/zstd#3724 fix).
 fn literalsPromoted(tree: *const huff0.Tree) bool {
     if (tree.symbol_count != huff0.symbol_count_max) return false;
     for (tree.weights[0..tree.symbol_count]) |weight| {
@@ -370,7 +370,7 @@ test "parse reads the trained dictionaries" {
 test "parse accepts the incomplete statistics the references ship" {
     // DD11 — a dictionary with zero weights and tables short of the
     // alphabet is legal: the C through v1.5.5 errored on the tree, v1.5.6+
-    // does not, and the format has no version field (issue #3724). The C's
+    // does not, and the format has no version field (facebook/zstd#3724). The C's
     // `zero-weight-dict` is the pin: 120 zero weights in its tree and FSE
     // tables that stop short of their alphabets (offsets at symbol 17).
     const zero_weight = try parse(golden.dict_zero_weight);

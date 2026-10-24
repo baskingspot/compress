@@ -49,10 +49,10 @@ pub fn Buffer(comptime window_wbits: usize) type {
     };
 }
 
-/// The default window cap, 24 — the format's maximum (`§9.1`). Measured
-/// (F9): the reference CLI's pipe form emits WBITS 24 for every stream it
-/// writes, and its file form 10..19 by input size, so 24 decodes both
-/// unconfigured. `Buffer(22)` (4.7 MiB rather than 16.7) decodes the file
+/// The default window cap, 24 — the format's maximum (`§9.1`). The
+/// reference CLI's pipe form emits WBITS 24 for every stream it writes,
+/// and its file form 10..19 by input size, so 24 decodes both
+/// unconfigured; `Buffer(22)` (4.7 MiB rather than 16.7) decodes the file
 /// family only.
 pub const default_window_wbits: usize = 24;
 
