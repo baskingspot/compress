@@ -11,7 +11,7 @@ Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, and Zstandard, plus
 every buffer, and the default APIs do not allocate: zstd's streaming
 `*Alloc` variants are the opt-in that takes an allocator, for buffers too
 large for a stack. Streaming goes through `std.Io`. The module imports only
-`std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig).
+`std` and [fastmem](https://github.com/baskingspot/fastmem).
 
 ## What is in it
 

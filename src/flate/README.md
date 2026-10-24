@@ -2,7 +2,7 @@
 
 Raw DEFLATE ([RFC 1951](https://www.rfc-editor.org/rfc/rfc1951.txt)) in pure Zig: an encoder,
 a decoder, and `std.Io` streaming adapters. It is the `compress.flate` namespace, imports
-only `std` and [fastmem](https://github.com/mattrobenolt/fastmem-zig), and never allocates.
+only `std` and [fastmem](https://github.com/baskingspot/fastmem), and never allocates.
 The spec is vendored at `docs/research/specs/rfc1951-deflate.txt`.
 
 The decoder handles stored, fixed-Huffman, and dynamic-Huffman blocks. The

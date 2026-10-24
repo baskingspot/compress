@@ -155,7 +155,7 @@ them; the rows are here so the debt is visible.
 
 ## Dependencies
 
-- fastmem (`https://github.com/mattrobenolt/fastmem-zig`, MIT): the blessed
+- fastmem (`https://github.com/baskingspot/fastmem`, MIT): the blessed
   memory-copy primitive for codec hot paths. Pinned in `build.zig.zon`.
 - testingx (`https://github.com/baskingspot/testingx`, MIT): the plain-text
   test runner, the local benchmark harness behind `zig build bench`, and the

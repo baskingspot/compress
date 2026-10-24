@@ -4,7 +4,7 @@ Snappy compression for Zig, available as `compress.snappy`: a block encoder
 with a hash-table match finder, a block decoder with a SIMD fast path for
 overlapping copies (aarch64; x86_64 with SSSE3; portable code elsewhere), and a
 streaming `Reader`/`Writer` over `std.Io`. It depends on `std`,
-[fastmem](https://github.com/mattrobenolt/fastmem-zig), and `src/internal/`,
+[fastmem](https://github.com/baskingspot/fastmem), and `src/internal/`,
 and never allocates.
 
 The block functions implement the [Snappy block format][format] and add no
