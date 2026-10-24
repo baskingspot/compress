@@ -180,6 +180,7 @@ bench-run *ARGS:
 [group("harness")]
 [working-directory("bench")]
 bench-check:
+    uv lock --check
     uv run ruff check .
     uv run ruff format --check .
     uv run ty check

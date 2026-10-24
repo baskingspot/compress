@@ -18,7 +18,7 @@ build-backend = "hatchling.build"
 packages = ["compress_bench"]
 
 [dependency-groups]
-dev = ["pytest>=9", "ruff>=0.17", "ty>=0.0.86"]
+dev = ["pytest==9.1.1", "ruff==0.17.2", "ty==0.0.91"]
 
 [tool.ruff]
 target-version = "py315"
