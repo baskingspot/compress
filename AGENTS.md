@@ -76,6 +76,18 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   `bench.zig` is the local benchmark; the
   fleet rows live in `bench/zig/bench_compress.zig` (`just bench-run`). Fuzz
   targets are in `fuzz.zig`.
+- `src/brotli/`: Brotli (RFC 7932), decoder and `q3` encoder. `bits.zig` the
+  bit reader; `frame.zig` the stream header and the meta-block ladder;
+  `huffman.zig` both prefix-code forms; `context.zig` the context maps;
+  `command.zig` the command stream; `distance.zig` the distance codes;
+  `dictionary.zig` + `dictionary_data.zig` the 122,784-byte static dictionary
+  and its 121 transforms; `decode.zig` the one-shot decode; `Reader.zig` the
+  streaming decode over the comptime `Buffer(window_wbits)`, 16.7 MiB at the
+  default 24; `encode.zig` the one-shot encode over `encode_match.zig` and
+  `encode_huffman.zig`; `Writer.zig` the streaming encode; `golden.zig` the
+  corpus; `bench.zig` the local benchmark; `oracle.zig` behind `just brotli-oracle`;
+  `fuzz.zig` the targets; `probe32.zig` the 32-bit proof probe
+  (`just check-32`). API: `src/brotli/README.md`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
   sentinel test machinery, the reader lifecycle + generated reader vtable
   entries, the shared writer machinery (the generated `Io.Writer` entries

@@ -17,15 +17,15 @@ The OQ register is the implementation contract; each answer below is what this
 sketch commits to. Where the sketch had to go past the register, the call is
 marked **[sketch call]** and collected at the end.
 
-- **The surface is `{decode, Reader}` today (OQ2).** `brotli.decode.decompress`
+- **The surface is `{decode, Reader}` from the decoder and `{encode, Writer}`
+  from the encoder (OQ2).** `brotli.decode.decompress`
   is the one-shot (`target` a cap, the decoded length returned; the format
   declares no size) and `brotli.Reader` the streaming decode, with
   `Reader.Buffer(window_wbits)` and `Reader.streamAll`. `decode` landed with
-  `decode.zig` (slice 5), `Reader` with `Reader.zig` (slice 6). The
-  encoder seat
-  (`encode`, `Writer`) is stated in the README, never silently absent; the
-  barrel's `{Reader, Writer, encode, decode}` completes at the encoder
-  milestone without reshaping these two. **[sketch call]** there is no
+  `decode.zig` (slice 5), `Reader` with `Reader.zig` (slice 6). The encoder
+  seat (`encode`, `Writer`) landed at M9 (`a0fe8fc`), completing the barrel's
+  `{Reader, Writer, encode, decode}` without reshaping these two.
+  **[sketch call]** there is no
   single-stream pump: the codec's unit is the RFC's own "brotli stream", so a
   `streamStream`-style name would be noise — the zlib shape (its unit is also a
   stream, so `streamAll` only) is the precedent, and a caller who wants exactly
@@ -858,14 +858,14 @@ helpers. Its pure pieces are extracted. The encoder carries no Tracy zones
   oracle lane, not the suite.
 - **Fuzz is the fuzz-engineer's lane. Landed:** `fuzz.zig`'s thirteen
   targets, seeded from `golden.zig`'s vectors and the CLI's streams (nothing
-  generated is committed). The codec is decoder-only, so there is no
-  self-round-trip and no in-process reference encoder: the corpus's model
-  bytes *are* the round trip (the pinned CLI's own output, byte-exact), and
-  the differential available in-process is the one-shot against the streaming
-  `Reader` (`fuzzDifferential`: same verdict, same named class through
-  `sharedName`, same bytes, `§9.1`'s window cap, and T4's exact boundary).
-  The encoder half of the differential gap stays open until the encoder
-  milestone; `just brotli-oracle` is the external half. The targets:
+  generated is committed). The decode side has no in-process reference
+  encoder, so the corpus's model bytes *are* the round trip (the pinned CLI's
+  own output, byte-exact), and the differential available in-process is the
+  one-shot against the streaming `Reader` (`fuzzDifferential`: same verdict,
+  same named class through `sharedName`, same bytes, `§9.1`'s window cap, and
+  T4's exact boundary). The encode side's self-round-trip is `fuzzEncode` and
+  `fuzzEncodeStream`; `just brotli-oracle` is the external half (q3 byte
+  parity for the one-shot). The targets:
   `fuzzGoldenCorpus` (every vector at the exact cap, with slack, and one byte
   short, the refusal classes pinned), `fuzzTruncation` (`§10`'s prefix rule,
   both entry points), `fuzzCorruption` (the mutation taxonomy with the class
