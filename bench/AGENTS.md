@@ -6,9 +6,10 @@ documentation.
 
 ## Provenance
 
-The harness is a port of fastmem's (`~/code/fastmem-zig/bench/`; the design is
-in `docs/bench-design.md` there). `ec2bench/` is copied from fastmem's and stays
-free of benchmark-specific code. `compress_bench/` is the compress adapter.
+The fleet driver is `ec2bench`, a dependency pinned to a tag of
+`baskingspot/infra`; it holds no benchmark-specific code. Its contract is
+`baskingspot/infra/harness/README.md`. `compress_bench/` is the compress
+adapter, adapted from fastmem's bench suite.
 
 Not ported from fastmem:
 

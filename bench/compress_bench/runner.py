@@ -13,12 +13,12 @@ import shutil
 from pathlib import Path
 
 import click
-
 from ec2bench.cli import box_for, ensure_up
 from ec2bench.config import Config
 from ec2bench.fleet import Fleet, tags
 from ec2bench.parallel import Outcome, parallel, progress
 from ec2bench.runs import create_run, validate_label, write_manifest
+
 from compress_bench.analysis import BOOTSTRAP_SEED, analyze, validate_effect
 from compress_bench.build import ARMS, arm_revisions, build_all, provenance, resolve
 from compress_bench.corpus import load as load_corpus

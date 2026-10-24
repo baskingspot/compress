@@ -7,17 +7,17 @@ dedicated boxes, and reports ratios with exact confidence intervals.
 Local `just bench` numbers are for iterating and are not claims. A number that
 gets quoted comes from a run of this harness, recorded under that run's id.
 
-The harness is adapted from fastmem's (`~/code/fastmem-zig/bench/`).
-`ec2bench/` is the generic EC2 core and holds no benchmark-specific code
-(`ec2bench/README.md`). `compress_bench/` is the compress adapter: the suite,
-the cross builds, the result schema, and the analysis.
+`ec2bench` is the generic fleet driver, pinned to a tag of
+`baskingspot/infra`; it holds no benchmark-specific code. `compress_bench/` is
+the compress adapter: the suite, the cross builds, the result schema, and the
+analysis. The harness contract is `baskingspot/infra/harness/README.md`.
 
 ## Arms
 
 A run measures **arms**, one binary each. Each round runs every arm once, in an
 order drawn from a seeded balanced Latin square, and each binary runs on the
 last physical core of the box, isolated through systemd
-(`ec2bench/isolation.py`).
+(`ec2bench.isolation`).
 
 | Arm | Binary | Rows | Build |
 |---|---|---|---|
@@ -137,21 +137,19 @@ compression ratio.
 
 ## Credentials and infrastructure
 
-The harness uses fastmem's AWS setup: profile `fastmem-bench`, the same launch
-templates and reaper, and `tofu_dir` pointing at `~/code/fastmem-zig/infra/base`
-(read-only: the harness only runs `tofu output`). The IAM policy pins
-`Project=fastmem-bench`, so `project.name` in `bench.toml` stays `fastmem-bench`.
+The fleet is shared with the other baskingspot projects. The IAM user, the
+launch templates, and the reaper come from `baskingspot/infra`. The IAM policy
+pins `Project=fastmem-bench`, so `project.name` in `bench.toml` stays
+`fastmem-bench`. The harness finds the launch templates by name and tag and
+reads the key from `~/.ssh/<project>.pem`; no checkout of the infrastructure
+repository is needed.
 
-Both repos' boxes therefore carry the same tag and the same `Target` names, and
-the two harnesses see each other's boxes. `bench ls` lists both,
-`bench down --all` terminates both, and `bench up` adopts an existing box for a
-target and terminates later duplicates, whichever repo launched it. Check
+All repos' boxes therefore carry the same tag and the same `Target` names, and
+the harnesses see each other's boxes. `bench ls` lists all of them,
+`bench down --all` terminates all of them, and `bench up` adopts an existing box
+for a target and terminates later duplicates, whichever repo launched it. Check
 `just bench-ls` before launching, and do not run this harness while a fastmem
 run is using its boxes.
-
-A dedicated `compress-bench` stack needs the human bootstrap in fastmem's
-`infra/README.md` ("Copy into another project"), which needs the `playground-ops`
-SSO profile.
 
 ## Commands
 

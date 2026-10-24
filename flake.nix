@@ -58,7 +58,7 @@
             ];
 
             env = {
-              UV_PYTHON = "${pkgs.python314}/bin/python3";
+              UV_PYTHON = "${pkgs.python315}/bin/python3";
               UV_PYTHON_DOWNLOADS = "never";
             };
           };

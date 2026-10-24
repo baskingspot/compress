@@ -1,14 +1,9 @@
 # compress fleet configuration (bench/README.md).
 #
-# The fleet shares the fastmem-bench infrastructure: the IAM user, the
-# launch templates, and the reaper of ~/code/fastmem-zig/infra (the account
-# predates this repo's own stack; creating a compress-bench IAM user needs
-# the human bootstrap procedure in fastmem's infra/README.md with the
-# playground-ops SSO profile). project.name therefore stays "fastmem-bench":
-# the IAM policy pins the Project tag value. Boxes launched by this repo are
-# tagged Target=<name> like fastmem's; check `bench ls` before concurrent
-# use. tofu_dir points at the fastmem base stack read-only (the harness only
-# runs `tofu output` against it).
+# The fleet is shared with the other baskingspot projects: the IAM user, the
+# launch templates, and the reaper come from baskingspot/infra, and the IAM
+# policy pins the Project tag to fastmem-bench. Boxes launched here carry
+# Target=<name> like fastmem's; check `bench ls` before concurrent use.
 [project]
 name = "fastmem-bench"
 region = "us-west-2"
@@ -16,9 +11,6 @@ profile = "fastmem-bench"
 adapter = "compress_bench"
 remote_dir = "/root/bench"
 image_version = "1"
-tofu_dir = "/Users/matt/code/fastmem-zig/infra/base"
-key_output = "key_file"
-templates_output = "launch_template_ids"
 ssh_user = "root"
 results_dir = "bench-results"
 cache_dir = ".bench-cache"

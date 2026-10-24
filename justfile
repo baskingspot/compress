@@ -66,7 +66,7 @@ check-32:
 
 [doc("Everything CI runs: the unit tests, lint, the cross-target compile gate, and the docs build")]
 [group("ci")]
-ci: test lint check-baseline doc
+ci: test lint check-baseline bench-check doc
 
 [private]
 api:
@@ -180,6 +180,6 @@ bench-run *ARGS:
 [group("harness")]
 [working-directory("bench")]
 bench-check:
-    uv --preview-features format-command format
-    uv --preview-features format-command format --check
-    uv --preview-features check-command check
+    uv run ruff check .
+    uv run ruff format --check .
+    uv run ty check
