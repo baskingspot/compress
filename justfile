@@ -130,6 +130,16 @@ corpus:
 bench *ARGS:
     zig build bench -- {{ ARGS }}
 
+[doc("Record a fleet run's absolute throughput in docs/slop/results/scorecard-<date>.json, for example `just scorecard 20261017T115529Z-encoder-seats`")]
+[group("bench")]
+scorecard RUN:
+    uv run --project bench python bench/scorecard.py {{ RUN }}
+
+[doc("Regenerate the light and dark throughput charts in docs/static/ from the newest scorecard")]
+[group("bench")]
+plot:
+    uv run --project bench python bench/plot_throughput.py
+
 [doc("Run a codec's example CLI, for example `just example snappy encode README.md > out`")]
 [group("dev")]
 example CODEC *ARGS:

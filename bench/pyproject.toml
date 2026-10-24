@@ -32,5 +32,9 @@ ignore = [
   "FBT001", "FBT002", "PLR0913", "ANN401", "PLC0415",
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"plot_throughput.py" = ["RUF001", "T201"]
+"scorecard.py" = ["T201"]
+
 [tool.ty.environment]
 python-version = "3.15"

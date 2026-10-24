@@ -13,6 +13,11 @@ every buffer, and the default APIs do not allocate: zstd's streaming
 large for a stack. Streaming goes through `std.Io`. The module imports only
 `std` and [fastmem](https://github.com/baskingspot/fastmem).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/static/throughput-dark.svg">
+  <img src="docs/static/throughput.svg" alt="One-shot throughput on 64 KiB inputs, median across seven EC2 targets: snappy encodes at 18 GB/s and decodes at 9, zstd at 5 and 12, brotli at 0.1 and 10. Compressible data runs several times faster than prose and random data." width="760" height="420">
+</picture>
+
 ## What is in it
 
 | Namespace                        | Format                       | Support                                      |
