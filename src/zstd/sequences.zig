@@ -7,7 +7,7 @@
 //! section runs to the block's end, `§3.1.1.3.2`), the decoded literals as the
 //! copy source, the output region, and the frame's `State`, and returns the
 //! bytes written and consumed. In the output region `target[0..history_len]` is
-//! history a match may read, which the caller limits to the window (`§3.1.1.4`),
+//! history a match can read, which the caller limits to the window (`§3.1.1.4`),
 //! and the block's output follows it. An offset that reaches before `target[0]`
 //! is `OffsetTooFar`. Declared sizes are bounds, not licenses (`§8`): nothing is
 //! written past `target` or read past the literals or the section, and a huge
@@ -70,7 +70,7 @@ pub const match_length_code_max: u8 = 52;
 /// `§3.1.1.3.2.1.1` — "A decoder is free to limit its maximum supported
 /// value for N. Support for values of at least 22 is recommended. At the time
 /// of this writing, the reference decoder supports a maximum N value of 31."
-/// Ours is the reference's 31.
+/// This decoder uses the reference's 31.
 pub const offset_code_max: u5 = 31;
 
 /// `§3.1.1.3.2.1.1` — an offset code's `Offset_Value = (1 << offsetCode) +
@@ -460,8 +460,7 @@ pub fn readDictionaryTable(
 pub const State = struct {
     /// Storage for the tables a block builds (the FSE_Compressed and RLE
     /// modes), about 12 KB in all. Undefined until a mode writes a cell, so a
-    /// new frame state does not pay to zero it (a per-frame memset of the
-    /// table payloads measured as a real cost).
+    /// new frame state does not pay to zero it.
     built: [alphabet_count]SeqTable = undefined,
     /// The table each alphabet last decoded with, `null` until the frame's
     /// first sequences section with a nonzero count. "The table used in the
@@ -498,7 +497,7 @@ pub const Section = struct {
 /// literals section (`Sequences_Section_Size`, `§3.1.1.3.2`), `literals_bytes`
 /// the decoded literals Sequence Execution copies from, and `target` the
 /// caller's contiguous output region — `target[0..history_len]` is the
-/// history a match may read (the caller caps it at the frame's Window_Size,
+/// history a match can read (the caller caps it at the frame's Window_Size,
 /// `§3.1.1.4`), `target[history_len..]` where this block's output is written.
 /// `state` carries the frame's tables and repeat offsets across blocks.
 ///

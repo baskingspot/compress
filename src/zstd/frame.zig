@@ -133,7 +133,7 @@ pub const window = struct {
     /// The Window_Descriptor byte declaring a window of exactly
     /// `1 << window_log` bytes (`§3.1.1.1.2`): the exponent in bits 7-3,
     /// mantissa 0 in bits 2-0. `size` of the result is that window, which
-    /// the comptime check below pins for every encodable `window_log`.
+    /// a comptime check pins for every encodable `window_log`.
     /// The format's Window_Log is 10 to 41; an encoder that declares
     /// `1 << window_log` with a nonzero mantissa would declare more than it
     /// retains, so the mantissa stays 0.
@@ -230,17 +230,18 @@ pub const HeaderParser = struct {
     stage: Stage = .descriptor,
     /// The Frame_Header_Descriptor byte, once read.
     descriptor: u8 = 0,
-    /// The current field's bytes consumed so far, and its little-endian
-    /// value (the Dictionary_ID's up to four bytes, the FCS's up to eight).
-    /// Both reset when a field completes: the Dictionary_ID and the
-    /// Frame_Content_Size are separate fields that share them.
+    /// The current field's bytes consumed so far.
     taken: usize = 0,
+    /// The current field's little-endian value (the Dictionary_ID's up to
+    /// four bytes, the FCS's up to eight). Both `taken` and this reset when
+    /// a field completes: the Dictionary_ID and the Frame_Content_Size are
+    /// separate fields that share them.
     value: u64 = 0,
-    /// The two sizes the header implies; 0 / `null` until their fields are
-    /// complete. `dictionary_id` is `null` until the field is complete, and
-    /// stays `null` when the flag is 0.
+    /// Window_Size, 0 until its field is complete.
     window_size: u64 = 0,
+    /// `null` until its field is complete; `null` when FCS_Field_Size is 0.
     content_size: ?u64 = null,
+    /// `null` until its field is complete, and when DID_Field_Size is 0.
     dictionary_id: ?u32 = null,
     /// The Frame_Header's bytes consumed (`§3.1.1.1`: 2-14).
     total: usize = 0,
@@ -271,7 +272,7 @@ pub const HeaderParser = struct {
     /// feeds again (the streaming route), and a caller holding the whole
     /// header feeds once. Every stage of a non-empty slice either consumes a
     /// byte or fails, so a driver always makes progress. The input ending
-    /// inside the header is the driver's `Truncated`: the parser is just not
+    /// inside the header is the driver's `Truncated`: the parser is not
     /// `done` yet. Fails with `ReservedBitSet`; the Dictionary_ID field is
     /// read whole, and the dictionary it names is checked by
     /// `checkDictionary` once the header is parsed.
@@ -386,8 +387,8 @@ pub fn parseHeader(source: []const u8) Error!Header {
 /// supplied is `DictionaryRequired`; a supplied dictionary whose ID differs —
 /// a raw dictionary's 0 included, since it names none — is
 /// `DictionaryMismatch`, the C's own label for the same case
-/// (`zstd_decompress.c:716-719`). The reserved ID ranges are not enforced
-/// (DT3): a decoder cannot know the registry.
+/// (`zstd_decompress.c:716-719`). The reserved ID ranges are not enforced:
+/// a decoder cannot know the registry.
 pub fn checkDictionary(header: Header, dict: ?*const Dictionary) error{
     DictionaryRequired,
     DictionaryMismatch,
@@ -446,9 +447,8 @@ pub const State = struct {
 
     /// Start a new frame in `state`, initializing it in place. A `State` is
     /// about 16 KiB, mostly decoding-table payload that stays undefined until a
-    /// block builds it. Returning one by value copied the whole aggregate,
-    /// undefined payload included, which was a measurable cost on 32-64 KiB
-    /// frames.
+    /// block builds it. Returning one by value would copy the whole aggregate,
+    /// undefined payload included, a measurable cost on 32-64 KiB frames.
     ///
     /// A dictionary seeds exactly the seats this resets: `literals.table`
     /// (pointing at the dictionary's decode table when it has entropy), the

@@ -34,8 +34,8 @@ const decode = @import("decode.zig");
 
 /// Upper bound on the size of `compressBlock`'s output for `input_len` bytes of
 /// input: the length varint, the input itself, and one tag byte per 60 input
-/// bytes. The encoder falls back to a single literal whenever matching would
-/// not help, so its output never exceeds this. A `target` of this size makes
+/// bytes. The encoder falls back to a single literal whenever matching does not
+/// help, so its output never exceeds this. A `target` of this size makes
 /// `compressBlock` infallible.
 pub fn maxCompressedLength(input_len: usize) usize {
     return uvarintSize(input_len) + input_len + (input_len + 59) / 60;

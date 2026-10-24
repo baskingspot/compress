@@ -121,7 +121,7 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`): its
 /// last 32 KiB are copied into `buffer`'s front as the window's oldest bytes,
-/// so the finder may match into them and a distance may reach them. Raw
+/// so the finder can match into them and a distance can reach them. Raw
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2).
 ///

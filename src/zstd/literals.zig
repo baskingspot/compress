@@ -204,7 +204,7 @@ fn headerBits(source: []const u8, len: usize) u40 {
 pub const State = struct {
     /// The frame's own decode table, built by its first
     /// Compressed_Literals_Block; undefined until then, so initializing the
-    /// frame state pays for no 4 KiB zeroing (a measured per-frame memset).
+    /// frame that never builds one does not pay to zero it.
     built: huff0.DecodeTable = undefined,
     /// The table a Treeless_Literals_Block reuses: the frame's own `built`
     /// once a Compressed section decoded, else the dictionary's table when

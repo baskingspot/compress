@@ -14,7 +14,7 @@
 //! window is a block's 32 KiB of history followed by the block, so matches
 //! cross block boundaries as the format allows (`§3.2.3`). A preset
 //! dictionary (`Options.dict`) is history in front of that window: the finder
-//! is primed from the dictionary's tail and may emit distances that reach
+//! is primed from the dictionary's tail and can emit distances that reach
 //! into it. The level-6 finder (`Finder6`, `encodeTokens6`) is their
 //! `fastEncL6`: a 4-byte-hash table plus a 7-byte-hash table with two
 //! candidates per slot, the same window shape, and the same dictionary
@@ -77,7 +77,7 @@ const table_size = 1 << table_bits;
 pub const FinderTable = [table_size]u32;
 
 /// History priming density for the streaming/one-shot block sequence: every
-/// `stream_prime_stride`-th history position is hashed so a match may reach
+/// `stream_prime_stride`-th history position is hashed so a match can reach
 /// across the block boundary (`§3.2.3`). Backward extension recovers a
 /// repeat from any covered position inside it, so a stride above 1 keeps the
 /// long matches while dividing the priming pass's cost.
@@ -105,7 +105,7 @@ inline fn load32(source: []const u8, pos: usize) u32 {
 
 /// The finder's window (`§3.2.3`): the preset dictionary's tail followed by
 /// the stream's own bytes, one conceptual region — the byte after the
-/// dictionary's last is `source[0]`, so a match may start in the dictionary
+/// dictionary's last is `source[0]`, so a match can start in the dictionary
 /// and continue at the output's start. Positions are window positions: the
 /// dictionary occupies `[0, dict.len)` and `source[i]` sits at `dict.len + i`.
 ///
@@ -174,7 +174,7 @@ fn Window(comptime preset: bool) type {
 
         /// The number of bytes `a..` and `b..` match, up to `limit` — all
         /// window positions. `b` is always in `source` (the scan runs there);
-        /// `a` may start in the dictionary and cross into the source, where
+        /// `a` can start in the dictionary and cross into the source, where
         /// the dictionary's continuation is the source's start (the
         /// dictionary is conceptually in front of the output). Compares 8
         /// bytes at a time and uses `@ctz` on the first differing u64 to find
@@ -237,7 +237,7 @@ fn Window(comptime preset: bool) type {
         }
 
         /// Hash the window's `[window_start, block_start)` into `table`, every
-        /// `stride` positions, so a match may reach across the block boundary
+        /// `stride` positions, so a match can reach across the block boundary
         /// (`§3.2.3`). Entries are absolute stream positions (`base` is the
         /// absolute position of the window's first byte), matching the scan's
         /// stores. The 8-byte load reads a few bytes past the hashed 5, so the
@@ -313,9 +313,9 @@ pub const fixed_distance_codes: [32]Code = blk: {
     break :blk codes;
 };
 
-/// `§3.2.5` — the length/distance code tables live once, in decode.zig (the
-/// canonical tables both sides read); the encoder aliases them, so the two
-/// spellings cannot drift.
+/// `§3.2.5` — the longest match a length symbol can declare, 258 (length
+/// code 285). Aliased from `decode.zig`, the one spelling of the RFC's
+/// length and distance tables.
 pub const max_match_len = decode.max_match_len;
 const length_base = decode.length_base;
 const length_extra = decode.length_extra;
@@ -396,9 +396,9 @@ pub fn distanceSymbol(distance: usize) DistanceSymbol {
 /// implements: `writeBits` for a non-Huffman data element (LSB-of-value first:
 /// block headers, extra bits, stored LEN/NLEN) and `writeCode` for a Huffman
 /// code (MSB-of-code first; the code tables store the wire bits pre-reversed).
-/// Mixing them up can survive a round trip through our own decoder if both
+/// Mixing them up can survive a round trip through this package's decoder if both
 /// sides share the mistake, but every other decoder misreads the stream, which
-/// is why `just flate-oracle` decodes our output with python3's `zlib`.
+/// is why `just flate-oracle` decodes the encoder's output with python3's `zlib`.
 pub const BitWriter = struct {
     target: []u8,
     /// Whole bytes written into `target`.
@@ -734,7 +734,7 @@ pub fn writeFinalEmptyBlock(w: *BitWriter) error{BufferTooSmall}!void {
 
 /// Encode `source[block_start..block_end]` as one block (fixed Huffman, or
 /// stored when that is smaller) through `w`, for the streaming `Writer`. A
-/// match may reach back into `source[0..block_start]`, up to 32768 bytes.
+/// match can reach back into `source[0..block_start]`, up to 32768 bytes.
 /// `table` is the `Writer`'s: zeroed once per stream and reused across blocks.
 /// `base` is the absolute stream position of `source[0]` (the `Writer`'s window
 /// base). Returns `error.BufferTooSmall` if `w`'s target cannot hold the block.
@@ -1332,7 +1332,7 @@ pub const Options = struct {
     ///     silent alias, and so is any level outside 1-9.
     level: u8 = 1,
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
-    /// of the stream, which the finder's table is primed from and a match may
+    /// of the stream, which the finder's table is primed from and a match can
     /// reach into. Raw deflate names no dictionary, so the caller vouches for
     /// the bytes on both sides; zlib's FDICT/DICTID is the checked form
     /// (RFC 1950 §2.2). A dictionary longer than 32 KiB contributes only its
@@ -1342,7 +1342,7 @@ pub const Options = struct {
 
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
-/// always suffices; a smaller one may return `error.BufferTooSmall`, leaving
+/// always suffices; a smaller one can return `error.BufferTooSmall`, leaving
 /// `target` partly written. `error.Unimplemented` for an unimplemented level.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`); see

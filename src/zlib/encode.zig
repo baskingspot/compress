@@ -84,7 +84,7 @@ pub fn writeDictId(target: *[dict_id_len]u8, dict: []const u8) void {
 /// unsigned integer stored in MSB order (CMF*256 + FLG), is a multiple of
 /// 31"), so the pair always passes `decode.checkHeader`. C zlib's naive
 /// emission with FDICT and FLEVEL 0 gives FCHECK = 31 (`78 3f`), which is 0
-/// mod 31 and fits the field; ours is minimal, so the corner only arises when
+/// mod 31 and fits the field; this encoder's is minimal, so the corner only arises when
 /// decoding.
 ///
 /// This function is total: an unimplemented level (one `compress` rejects)

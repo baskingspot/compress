@@ -237,7 +237,7 @@ const vtable = VTable(Reader, fill, rebase).vtable;
 /// `read` and `peek` families).
 ///
 /// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): its last
-/// 32 KiB are copied into the window in front of the output, so a distance may
+/// 32 KiB are copied into the window in front of the output, so a distance can
 /// reach into them until the output pushes them out of the 32-KiB window. Raw
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2). A dictionary longer than

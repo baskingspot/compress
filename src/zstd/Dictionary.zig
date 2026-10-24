@@ -71,7 +71,7 @@ pub const ParseError = error{
     MalformedHuffmanWeights,
     /// `§4.1.1` — one of the three FSE descriptions is cut short, exceeds its
     /// context's caps, or its budget does not land exactly. Zero-probability
-    /// symbols are legal: the table may cover less than its whole alphabet.
+    /// symbols are legal: the table can cover less than its whole alphabet.
     MalformedFseTable,
 };
 
@@ -301,7 +301,7 @@ fn offcodeMax(content_len: usize) u16 {
 /// formatted dictionary." Content only: no tables (so no Treeless literals
 /// or Repeat sequences from the first block), the default {1,4,8} repeat
 /// offsets, and no Dictionary_ID — it never satisfies a frame that declares
-/// one (DT5: the C's shape; klauspost's ID-assigning raw form is not
+/// one (the C decoder's shape; klauspost's ID-assigning raw form is not
 /// ported).
 ///
 /// Infallible and format-free: any bytes parse, and §5's 8-byte floor is not

@@ -280,7 +280,7 @@ pub fn streamFrame(
 /// frames (`§3.1`). Each frame is decoded as in `streamFrame`, starting where
 /// the previous one ended. Skippable frames are skipped, so an input that
 /// holds only skippable frames, or nothing at all, decodes to zero bytes. Any
-/// other bytes where a frame should start are `BadMagic`, reported as
+/// other bytes where a frame starts are `BadMagic`, reported as
 /// `error.ReadFailed`; they are not skipped. `dict` seeds every frame's
 /// starting state (`§5`), as `Reader.init`'s. `in` needs a buffer of at least
 /// four bytes. Other failures are reported as in `streamFrame`. Does not

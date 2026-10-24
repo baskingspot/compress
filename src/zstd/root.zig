@@ -64,7 +64,7 @@ pub const Writer = @import("Writer.zig");
 
 /// A parsed dictionary (RFC 8878 §5): `parse` reads the formatted form,
 /// `initRaw` takes format-free content. The value is handed to either
-/// direction (the decode side today) and borrows the caller's bytes.
+/// direction and borrows the caller's bytes.
 pub const Dictionary = @import("Dictionary.zig");
 
 test {

@@ -69,7 +69,7 @@ pub const Error = error{
 /// The one-shot's heavy per-block arrays: the literals buffer, the sequence
 /// list, and the match finder's position tables (the long one, and dfast's
 /// small one). Sized by the block layer's worst cases, so no allocation is
-/// needed. `compress` puts one on the stack (see the README's stack figure);
+/// needed. `compress` puts one on the stack, about 1.5 MiB in all;
 /// `compressBuffered` takes a pointer to one the caller owns, which keeps
 /// that stack out of the caller's thread.
 pub const Buffer = struct {
@@ -121,7 +121,7 @@ pub fn compress(source: []const u8, target: []u8, options: Options) Error!usize 
 /// `compress` over a caller-owned `Buffer` instead of the stack: the
 /// literals buffer, the sequence list, and the match finder's table live in
 /// `buffer` (768 KiB), so this form needs only the entropy writers' KiB-scale
-/// scratch of thread stack (about 40 KiB, the README's figures). The frame is
+/// scratch of thread stack (about 64 KiB). The frame is
 /// the same, byte for byte; `buffer`'s contents are unspecified after the
 /// call.
 pub fn compressBuffered(
@@ -380,7 +380,7 @@ pub const frame_header_len_max = frame.magic_len + 1 + 1 + 4 + 8;
 
 /// Compress `source` against `dict` and decode it back through the landed
 /// one-shot with the same dictionary, sentinel-checked (`§5`'s tables seed
-/// the decoder, so a frame our own decoder rejects is malformed whatever the
+/// the decoder, so a frame this package's decoder rejects is malformed whatever the
 /// CLI says). Returns the frame's length.
 fn expectDictRoundTrip(dict: *const Dictionary, source: []const u8) !usize {
     const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(source.len));

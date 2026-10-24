@@ -45,7 +45,7 @@ const decoded_region_len = 3 * encode.max_block_size;
 const Reader = @This();
 
 /// The detailed error recorded once `state == .failed` (the interface reports
-/// `error.ReadFailed`): framing errors are ours (`Truncated`, `InvalidStream`,
+/// `error.ReadFailed`): framing errors come from this layer (`Truncated`, `InvalidStream`,
 /// `StreamTooLong`), block errors come from `decode.DecompressError`, and
 /// `ReadFailed`/`EndOfStream` pass through from the input.
 pub const Error = error{

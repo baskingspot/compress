@@ -114,13 +114,13 @@ pub const Section = struct {
     last_block: bool,
 };
 
-/// Decode one block. `source` starts at the block's Block_Header and may hold
+/// Decode one block. `source` starts at the block's Block_Header and can hold
 /// more input after the block.
 ///
 /// `target[0..decoded_len]` is the output already in `target`, and the block's
 /// output goes to `target[decoded_len..]`. `window_size` is the frame's
 /// Window_Size (`§3.1.1.1.2`); it also sets Block_Maximum_Size, the smaller
-/// of `window_size` and 128 KiB. A match may read the last
+/// of `window_size` and 128 KiB. A match can read the last
 /// `min(decoded_len, window_size)` bytes of that output and whatever this
 /// block has already written. An offset of exactly `window_size` reads the
 /// oldest retained byte, and later in a block an offset can exceed
@@ -131,7 +131,7 @@ pub const Section = struct {
 /// one-shot's contiguous path it equals `decoded_len`; the streaming reader's
 /// window slides, so its region holds only a suffix of the frame and the two
 /// differ. `dict` is the dictionary content (`§5`), conceptually in front of
-/// `target[0]`; a match may reach into it only while the frame's decoded
+/// `target[0]`; a match can reach into it only while the frame's decoded
 /// total at the match is at most `window_size` (`§5`'s boundary, applied in
 /// `decodeCompressed`).
 ///

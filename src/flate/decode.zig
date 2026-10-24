@@ -124,7 +124,7 @@ const max_peek_bits: u6 = 56;
 /// Bit reader over `source`, LSB-first (`§3.1.1`): the first bit read is bit 0
 /// of the next byte, a 9th bit spills into bit 0 of the byte after.
 ///
-/// `bit_pos` is the source of truth for availability. `peek` may read zeros
+/// `bit_pos` is the source of truth for availability. `peek` can read zeros
 /// past the end of the input; `take` is the gate that turns that into
 /// `error.Truncated`, so a truncated stream can never decode a symbol out of
 /// padding.
@@ -209,7 +209,7 @@ const BitReader = struct {
 /// Decoder-table kinds: the alphabet decides which structural rules apply.
 pub const TreeKind = enum {
     /// Literal/length alphabet (0-285). Must be able to code 256 — without an
-    /// end-of-block code no block could ever terminate (`§3.2.7`).
+    /// end-of-block code no block can ever terminate (`§3.2.7`).
     literal_length,
     /// Distance alphabet (0-29). Zero codes ("the data is all literals") and a
     /// single 1-bit code are both legal (`§3.2.7`).
@@ -273,7 +273,7 @@ pub fn HuffmanDecoder(
         /// code space unused (a single 1-bit code is allowed),
         /// `error.MissingEndOfBlockCode` for a literal/length set with no code
         /// for 256, and `error.InvalidDynamicBlockHeader` for an empty precode
-        /// set. A distance set may be empty.
+        /// set. A distance set can be empty.
         pub fn build(self: *Self, lens: []const u4) TreeError!void {
             assert(lens.len <= alphabet_size);
             assert(kind != .literal_length or lens.len > 256);
@@ -466,14 +466,14 @@ pub fn dictHistory(dict: ?[]const u8) []const u8 {
 /// `error.BufferTooSmall` before writing past `target`.
 ///
 /// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): the history
-/// in front of the output, which a distance may reach into. Raw deflate names
+/// in front of the output, which a distance can reach into. Raw deflate names
 /// no dictionary, so the caller vouches for the bytes; zlib's FDICT/DICTID is
 /// the checked form (RFC 1950 §2.2). A dictionary longer than 32 KiB
 /// contributes only its last 32 KiB.
 ///
 /// Decoding stops at the first block with BFINAL set; bytes after it in
 /// `source` are ignored (`§3.2.3`). A malformed or truncated stream returns the
-/// matching `DecompressError`, and after any error `target` may hold a partial
+/// matching `DecompressError`, and after any error `target` can hold a partial
 /// prefix of the output that must not be used. Allocates nothing and uses a few
 /// KiB of stack for the dynamic block's Huffman tables.
 pub fn decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize {
@@ -601,7 +601,7 @@ pub fn decodeDistance(comptime Bits: type, br: *Bits, symbol: u16) Bits.ErrorSet
 /// `§3.2.7` — read a dynamic block's header from `br` and build its literal/length
 /// and distance tables: HLIT, HDIST, HCLEN, the precode lengths in their
 /// scrambled order, then the HLIT + HDIST code lengths as one sequence that a
-/// repeat code may carry across the literal/distance boundary. Returns
+/// repeat code can carry across the literal/distance boundary. Returns
 /// `error.Truncated` if the input ends; `error.InvalidDynamicBlockHeader` for
 /// HLIT above 286, HDIST above 30, an empty precode set, or a repeat with
 /// nothing to repeat or running past the lengths; and the `TreeError`s for an
@@ -665,7 +665,7 @@ pub fn readDynamicHeader(
 
 /// Copy `length` bytes from `match_distance` back in `target` (`§3.2.3`).
 /// `match_distance <= out_pos` and `out_pos + length <= target.len` are the
-/// caller's guarantees. A match may overlap the bytes it is writing — the
+/// caller's guarantees. A match can overlap the bytes it is writing — the
 /// referenced string repeats — so the overlapping case replicates the
 /// `match_distance`-byte pattern.
 pub fn copyMatch(target: []u8, out_pos: usize, match_distance: usize, length: usize) void {

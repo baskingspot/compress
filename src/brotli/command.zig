@@ -334,7 +334,7 @@ fn switchBlock(
 
 /// §10 — "move backwards distance bytes in the uncompressed data, and copy
 /// CLEN bytes from this position to the uncompressed stream". A reference
-/// may overlap the bytes it is writing: "if the last 2 bytes decoded have
+/// can overlap the bytes it is writing: "if the last 2 bytes decoded have
 /// values X and Y, a string reference with <length = 5, distance = 2> adds
 /// X,Y,X,Y,X". The overlapping case replicates the `distance`-byte pattern,
 /// so it is not `fastmem.move`: a move copies as through a temporary and
@@ -450,13 +450,14 @@ pub const Cursor = struct {
         .implicit_distance = true,
         .distance_context = 0,
     },
-    /// The insert and copy lengths of `command` still to write.
+    /// Insert bytes of `command` still to write.
     insert_left: u32 = 0,
+    /// Copy bytes of `command` still to write.
     copy_left: u32 = 0,
     /// The copy's resolved distance (`§4`, `§8`).
     distance: u32 = 0,
     /// `§8` — the transformed word in flight and how much of it is out. The
-    /// word is built here, not on the stack, because a ring may run out of
+    /// word is built here, not on the stack, because a ring can run out of
     /// room mid-word.
     word: [dictionary.scratch_len]u8 = undefined,
     word_left: u32 = 0,

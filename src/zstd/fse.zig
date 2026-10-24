@@ -95,7 +95,7 @@ pub const Description = struct {
 /// `symbol_value_max` is the context's last symbol index (35, 52, and 31 for
 /// the literals length, match length, and offset code tables, 255 for the
 /// Huffman weights) and `accuracy_log_cap` its accuracy log cap. The
-/// description may cover fewer symbols than the context allows but never
+/// description can cover fewer symbols than the context allows but never
 /// more. Returns `MalformedFseTable` for a description that breaks the rules
 /// listed on that error.
 pub fn readDescription(

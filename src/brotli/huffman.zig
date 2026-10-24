@@ -10,7 +10,7 @@
 //! a pure peek-and-take structure; the reference's `BrotliReadSymbol` has the
 //! same shape (`c/dec/huffman.c`).
 //!
-//! The table region is comptime-capped (OQ8): `max_trees` trees per category
+//! The table region is comptime-capped: `max_trees` trees per category
 //! and, per tree, the reference's proven ceiling on the two-level table's
 //! size. Nothing here allocates.
 
@@ -33,7 +33,7 @@ pub const max_distance_alphabet_size = 16 + 120 + (48 << 3);
 pub const max_block_type_alphabet_size = 256 + 2;
 pub const max_context_map_alphabet_size = max_trees + 16;
 
-/// OQ8 — the comptime cap on trees per tree category. The format allows up
+/// The comptime cap on trees per tree category. The format allows up
 /// to 256; a meta-block declaring more fails `error.TooManyTrees`, and the
 /// cap is raisable by editing this constant (the region grows with it).
 pub const max_trees = 64;
@@ -228,7 +228,7 @@ pub fn Tree(comptime bound: usize) type {
         /// Decode one symbol (§3.2). The caller spells out the bit source:
         /// a type with `peek`, `take`, and an `ErrorSet`, such as this
         /// package's `bits.BitReader` or the streaming reader's bit source.
-        /// The peek may read padding; every consume is a strict `take`, so
+        /// The peek can read padding; every consume is a strict `take`, so
         /// a starved decode is `error.Truncated`.
         pub inline fn decode(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
             if (try self.decodeRoot(Bits, br)) |symbol| return symbol;
@@ -257,10 +257,6 @@ pub fn Tree(comptime bound: usize) type {
         /// The subtable half of `decode`, outlined: codes longer than
         /// `root_bits` are the rare path, and keeping it out of the inlined
         /// fast path keeps the hot loop's register pressure to the root
-        /// peek-and-take.
-        /// The subtable half of `decode`, outlined: codes longer than
-        /// `root_bits` are the rare path, and keeping it out of the inlined
-        /// fast path keeps the hot loop's register pressure to the root
         /// peek-and-take. Re-peeks the root bits `decodeRoot` left
         /// unconsumed.
         pub fn decodeSubtable(self: *const Self, comptime Bits: type, br: *Bits) Bits.ErrorSet!u16 {
@@ -286,7 +282,7 @@ pub const BlockTypeTree = Tree(max_block_type_alphabet_size);
 pub const BlockCountTree = Tree(block_count_alphabet_size);
 pub const ContextMapTree = Tree(max_context_map_alphabet_size);
 
-/// OQ8 — one meta-block's tree region: `max_trees` trees in each tree
+/// One meta-block's tree region: `max_trees` trees in each tree
 /// category, the three block-type and block-count trees of §6, and the
 /// context-map tree of §7.3 (the literal map's, then the distance map's).
 /// About 672 KiB at the cap: a caller-owned stack or `Buffer` object, never

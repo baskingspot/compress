@@ -44,7 +44,7 @@ pub fn Buffer(comptime window_wbits: usize) type {
         /// (and later wraps) when the ring fills.
         ring: [1 << window_wbits]u8,
         /// `§9.2` — the meta-block header arena: the context models, the two
-        /// maps, and the tree region (OQ8's comptime cap).
+        /// maps, and the tree region (the comptime tree cap).
         header: frame.Header,
     };
 }
@@ -99,7 +99,7 @@ pub const Error = error{
     BadTransform,
     /// `§8` — a dictionary reference's word length is outside 4..24.
     BadDictionary,
-    /// This decoder's instantiation (OQ8) — a meta-block declares more than
+    /// This decoder's instantiation — a meta-block declares more than
     /// 64 trees in a category.
     TooManyTrees,
     /// `§9.1` — the stream's WBITS is above the instantiated `window_wbits`.

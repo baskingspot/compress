@@ -23,9 +23,8 @@ const huffman = @import("huffman.zig");
 const internal = @import("../internal/root.zig");
 
 /// Everything the framing layer reports: the bit reader's own refusals, this
-/// layer's names, and the tree and context layers' names. The names are the
-/// `decompress` error set's header and ladder rows (`README.md`), name for
-/// name.
+/// layer's names, and the tree and context layers' names. The names match
+/// `decompress`'s header and ladder rows.
 pub const Error = error{
     /// `§9.1` — WBITS is the invalid pattern 0010001.
     BadWindowBits,
@@ -35,7 +34,7 @@ pub const Error = error{
     ExuberantNibble,
     /// `§9.2` — MSKIPBYTES > 1 with an all-zero last byte.
     ExuberantMetaNibble,
-    /// OQ8 — a meta-block declares more trees in a category than the
+    /// A meta-block declares more trees in a category than the
     /// comptime-capped region holds (`huffman.max_trees`).
     TooManyTrees,
 };

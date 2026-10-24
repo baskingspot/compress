@@ -97,7 +97,7 @@ comptime {
 ///
 /// `dict` seeds the frame's starting state (`§5`): the literals tree, the
 /// three sequences tables, and the repeat offsets come from the dictionary
-/// when it has entropy, and its content is the preset history a match may
+/// when it has entropy, and its content is the preset history a match can
 /// reach into while the frame's decoded total is at most Window_Size. `null`
 /// is the no-dictionary decode. A frame that names a nonzero Dictionary_ID
 /// needs the matching dictionary: without one it is `DictionaryRequired`, and
@@ -121,7 +121,7 @@ comptime {
 /// does not match.
 ///
 /// `target` limits the output: a frame that would write past it fails with
-/// `BufferTooSmall` before the write. On any error `target` may hold partial
+/// `BufferTooSmall` before the write. On any error `target` can hold partial
 /// output, which must not be used. A Compressed block keeps a 128 KiB literals
 /// scratch on the stack and the frame state is about 16 KiB. Nothing is
 /// allocated.

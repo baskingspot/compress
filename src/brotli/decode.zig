@@ -40,10 +40,10 @@ const golden = @import("golden.zig");
 pub const prefix = @import("huffman.zig");
 const internal = @import("../internal/root.zig");
 
-/// Everything `decompress` reports, name for name the `README.md` API
-/// block's list: the layers' own refusals composed, plus this surface's
-/// `BufferTooSmall`. The streaming `Reader` reports the same names in its
-/// `err` field, minus `BufferTooSmall` (its output is the caller's `Buffer`).
+/// Everything `decompress` reports: the layers' own refusals composed, plus
+/// this surface's `BufferTooSmall`. The streaming `Reader` reports the same
+/// names in its `err` field, minus `BufferTooSmall` (its output is the
+/// caller's `Buffer`).
 pub const DecompressError = error{
     /// `target` cannot hold the decoded stream.
     BufferTooSmall,
@@ -77,7 +77,7 @@ pub const DecompressError = error{
     BadTransform,
     /// `§8` — a dictionary reference's word length is outside 4..24.
     BadDictionary,
-    /// This decoder's instantiation (OQ8) — a meta-block declares more than
+    /// This decoder's instantiation — a meta-block declares more than
     /// 64 trees in a category.
     TooManyTrees,
 };
@@ -151,7 +151,7 @@ pub const State = struct {
 /// the single byte `06`), and a stream of only empty meta-blocks decodes to
 /// zero bytes.
 ///
-/// On any error `target` may hold partial output, which must not be used.
+/// On any error `target` can hold partial output, which must not be used.
 /// The state is about 691 KiB of stack, nearly all of it the meta-block tree
 /// region, so give decoding threads 1 MiB or more. Nothing is allocated.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {

@@ -371,7 +371,7 @@ pub const Commands = struct {
     buffer: []Command,
     len: usize = 0,
     literals: usize = 0,
-    /// Literals after the last command, not yet a command of their own; the
+    /// Literals after the last command, without a command of their own; the
     /// flush turns them into one (`InitInsertCommand`).
     last_insert_len: usize = 0,
 
