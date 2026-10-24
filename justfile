@@ -113,7 +113,7 @@ zstd-oracle:
     go build -C scripts/zstd_klauspost -o ../../zig-out/bin/zstd-klauspost .
     uv run scripts/zstd_oracle.py
 
-[doc("Check brotli against the pinned reference CLI, brotli 1.2.0, and andybalholm/brotli. The codec is decoder-only, so the lane is the decode direction, with the Go encoder's streams as a second encoder family")]
+[doc("Check brotli against the pinned reference CLI, brotli 1.2.0, and andybalholm/brotli, in both directions: decode the CLI's streams, and encode at quality 3 with byte parity to the CLI's file form")]
 [group("conformance")]
 brotli-oracle:
     zig build brotli-oracle-harness

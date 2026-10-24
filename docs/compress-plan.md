@@ -53,7 +53,7 @@ Codecs, one at a time, each shippable alone:
 2. flate — fast encoder plus full inflate. The core value. (M2)
 3. gzip + zlib — containers over flate, plus checksum kernels. (M3)
 4. zstd — decoder first, then the fast encoder. (M4, M5)
-5. brotli — decoder first, RFC 7932. (M6)
+5. brotli — decoder first, RFC 7932. (M6, M9)
 
 Order rationale: snappy is nearly free and calibrates the whole measurement
 pipeline. flate is the biggest standalone win and unblocks two containers.

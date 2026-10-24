@@ -200,6 +200,7 @@ No allocation on the hot paths, no `Io` value held, and the caller's buffers are
 # Limits
 
 - Brotli takes no custom or shared dictionary. RFC 7932 defines no way to supply one, so there is no API.
+- The Brotli encoder implements quality 3. Qualities 0-2 and 4-11 return `error.Unimplemented`.
 - There is no zstd dictionary trainer. The `zstd` CLI trains, and this package consumes.
 - The zstd encoder implements levels 1 and 3. Levels 2 and 4-19 on the CLI's scale return `error.Unimplemented`.
 - gzip has no dictionary, because RFC 1952 defines none.
