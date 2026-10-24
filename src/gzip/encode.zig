@@ -10,7 +10,7 @@
 //! `Writer` is built from them. The order of header, body, and trailer is the
 //! shared container driver's (`src/internal/container.zig`).
 //!
-//! Format: docs/research/specs/rfc1952-gzip.txt
+//! Format: docs/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const testing = std.testing;
@@ -97,7 +97,7 @@ pub fn compress(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1952-gzip.txt §2.1 (byte order), §2.3
+// Tests. Spec: docs/specs/rfc1952-gzip.txt §2.1 (byte order), §2.3
 // (the member), §2.3.1 (the fixed header, XFL, OS, the trailer).
 // ---------------------------------------------------------------------------
 

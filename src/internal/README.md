@@ -32,6 +32,3 @@ module root a file in a directory above both. Relative imports cannot leave the
 module root's directory, so rooting the module at the codec's own `root.zig`
 fails with "import of file outside module path". The repo's `src/root.zig` is
 that kind of root file.
-
-Notes on the `std.Io` contracts that the generated reader and writer code
-relies on are in `AGENTS.md`.

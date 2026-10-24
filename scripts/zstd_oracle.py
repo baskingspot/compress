@@ -118,7 +118,7 @@ def _inputs() -> list[tuple[str, bytes, bool]]:
         ),
         (
             "RFC 8878 text",
-            (root / "docs/research/specs/rfc8878-zstd.txt").read_bytes(),
+            (root / "docs/specs/rfc8878-zstd.txt").read_bytes(),
             True,
         ),
         # The brotli RFC text triggers the C v1.5.7's pre-block splitter (its
@@ -128,7 +128,7 @@ def _inputs() -> list[tuple[str, bytes, bool]]:
         # bytes smaller while the pipe-form frame is 293 bytes larger.
         (
             "RFC 7932 text (TE8)",
-            (root / "docs/research/specs/rfc7932-brotli.txt").read_bytes(),
+            (root / "docs/specs/rfc7932-brotli.txt").read_bytes(),
             False,
         ),
         # Two repo files whose literals list more than 128 weights: without

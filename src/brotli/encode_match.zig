@@ -9,7 +9,7 @@
 //! `c/enc/hash_longest_match_quickly_inc.h`, `c/enc/backward_references.c`,
 //! and `c/enc/command.h` (`THIRD_PARTY.md`); the hash parameters are the
 //! `H3` instantiation in `c/enc/hash.h` — 16 bucket bits, sweep bits 1,
-//! `USE_DICTIONARY` 0. Format: docs/research/specs/rfc7932-brotli.txt.
+//! `USE_DICTIONARY` 0. Format: docs/specs/rfc7932-brotli.txt.
 
 const std = @import("std");
 const assert = std.debug.assert;

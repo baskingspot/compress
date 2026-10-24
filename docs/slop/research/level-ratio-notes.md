@@ -30,7 +30,7 @@ cites a fleet run in `docs/results/`.
 
 ## 0. Provenance
 
-- Specs (vendored verbatim, provenance in `docs/research/specs/README.md`):
+- Specs (vendored verbatim, provenance in `docs/specs/README.md`):
   `rfc1951-deflate.txt` §3.2.2 (the canonical code-length rules),
   §3.2.3 (block header, BFINAL/BTYPE), §3.2.4 (stored blocks),
   §3.2.6 (fixed Huffman), §3.2.7 (dynamic Huffman: HLIT/HDIST/HCLEN, the

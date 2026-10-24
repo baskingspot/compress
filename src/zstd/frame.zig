@@ -13,7 +13,7 @@
 //! output window slides. `window` holds the Window_Size arithmetic; how large a
 //! window to accept is the caller's call (`checkWindow`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -582,7 +582,7 @@ pub const State = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1 (the frame), §3.1.1
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1 (the frame), §3.1.1
 // (the header, the checksum), §3.1.1.1.1-§3.1.1.1.4 (the descriptor and its
 // fields), §3.1.1.2 (the block chain), §3.1.2 (skippable frames). The
 // fixture frames are `golden.zig`'s, each verified by the pinned zstd v1.5.7

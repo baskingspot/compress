@@ -10,7 +10,7 @@
 //! `c/enc/command.h`, and `c/enc/entropy_encode.c` (`THIRD_PARTY.md`); the C
 //! is the port source of record (the Go port diverges below q5).
 //!
-//! Format: docs/research/specs/rfc7932-brotli.txt. API: README.md.
+//! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
 const Io = std.Io;

@@ -5,9 +5,7 @@ each EC2 target, runs them over one fixed corpus in interleaved rounds on
 dedicated boxes, and reports ratios with exact confidence intervals.
 
 Local `just bench` numbers are for iterating and are not claims. A number that
-gets quoted comes from a run of this harness. The run directory is
-`bench-results/<run-id>` (gitignored), and the write-up is a file under
-`docs/results/` that names the run id.
+gets quoted comes from a run of this harness, recorded under that run's id.
 
 The harness is adapted from fastmem's (`~/code/fastmem-zig/bench/`).
 `ec2bench/` is the generic EC2 core and holds no benchmark-specific code

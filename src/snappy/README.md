@@ -139,7 +139,7 @@ CRC-32C chunks) needs the block functions and your own framing code.
 
 `just test` runs the unit tests, including the golang/snappy decode vectors.
 `just fuzz 10M` runs the fuzz targets and `just bench` the local benchmarks.
-Local numbers are not claims; measured results are in `docs/results/`.
+Local numbers are not claims; a claim names the run that produced it.
 
 ## License
 
@@ -147,4 +147,4 @@ MIT, like compress. The encoder ports the algorithm of klauspost/compress's
 `encodeBlockSnappyGo64K` and the golden test vectors come from golang/snappy,
 both BSD-3-Clause; see [`THIRD_PARTY.md`](../../THIRD_PARTY.md).
 
-[format]: ../../docs/research/specs/snappy-format-description.txt
+[format]: ../../docs/specs/snappy-format-description.txt

@@ -8,7 +8,7 @@
 //! streaming form over `std.Io`. Imports only `std` and `fastmem`; no heap
 //! allocation on any decode path.
 //!
-//! Format: docs/research/specs/rfc7932-brotli.txt. API: README.md.
+//! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
 

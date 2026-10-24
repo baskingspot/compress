@@ -1,8 +1,8 @@
 # Agent notes: zlib
 
 zlib streams (RFC 1950) over flate. `README.md` is the user-facing contract and
-the spec is `docs/research/specs/rfc1950-zlib.txt`. The research is
-`docs/research/containers-notes.md` (cited here as `containers-notes.md`); its
+the spec is `docs/specs/rfc1950-zlib.txt`. The research is
+`docs/slop/research/containers-notes.md` (cited here as `containers-notes.md`); its
 OQ, ZD, and T row ids are used as they appear there. Ports, studied references,
 and licenses are in `THIRD_PARTY.md`.
 
@@ -163,6 +163,6 @@ rule (DQ4/DQ5).
   `src/internal/checksum.zig`: Adler-32 has one user, and a shared file waits
   for a second.
 - `just bench` rows are local numbers, never claims. A claim names a fleet run
-  directory and a results file in `docs/results/` (`m3-fleet-20261010.md` has
+  directory and a results file in `docs/slop/results/` (`m3-fleet-20261010.md` has
   the zlib rows). Read a zlib row only against its paired raw-flate row in the
   same binary (`bench.zig`'s header says why).

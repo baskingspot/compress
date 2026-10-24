@@ -6,7 +6,7 @@ its encode -> our decode) over generated shapes and the example CLI, plus the
 FDICT refusal, the FLEVEL/FCHECK header bytes, and the exact stream boundary.
 Run it with `just zlib-oracle`; python3 comes from the flake. The harness is
 built from src/zlib/oracle.zig. The reference incantations are in
-docs/research/containers-notes.md §5.5, and the shared plumbing is in
+docs/slop/research/containers-notes.md §5.5, and the shared plumbing is in
 scripts/oracle_common.py.
 """
 

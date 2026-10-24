@@ -26,7 +26,7 @@
 //! rep outside the block's addressable prefix is zeroed for the block and
 //! restored after, so the emitted history stays decodable (`§3.1.1.4`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1.4 (offsets), §3.1.1.5
+//! Format: docs/specs/rfc8878-zstd.txt §3.1.1.4 (offsets), §3.1.1.5
 //! (the repeat offsets).
 //! Lineage: facebook/zstd v1.5.7 `zstd_fast.c`
 //! (`ZSTD_compressBlock_fast_noDict_generic`); attribution in THIRD_PARTY.md.
@@ -1655,7 +1655,7 @@ fn countTwo(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1.3.2.1 (the
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1.3.2.1 (the
 // sequences a token stream must carry), §3.1.1.4 (offsets), §3.1.1.5 (the
 // repeat offsets). Every token stream is executed by the test's own decoder
 // — the §3.1.1.4/§3.1.1.5 rules, independent of the finder — and must

@@ -13,7 +13,7 @@
 //! from Table 25 (errata 8195); Table 25 and the algorithm text win. The
 //! literals layer picks the stream count and sizes (`§3.1.1.3.1.6`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;

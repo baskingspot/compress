@@ -11,7 +11,7 @@
 //! is composed from the same code, and the golden tests (and the fuzz targets)
 //! exercise it directly.
 //!
-//! Format: docs/research/specs/rfc7932-brotli.txt. API: README.md.
+//! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -205,7 +205,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc7932-brotli.txt §1.5.1 (bit order),
+// Tests. Spec: docs/specs/rfc7932-brotli.txt §1.5.1 (bit order),
 // §9.1 (the header), §9.2 (the meta-block ladder), §9.3 (the last-byte
 // fill), §8 (the dictionary class). The fixtures are `golden.zig`'s, each
 // verified with the pinned CLI (brotli 1.2.0).

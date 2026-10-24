@@ -13,7 +13,7 @@
  * `snappy::GetUncompressedLength` + `snappy::RawUncompress` into the
  * caller's buffer (the same pair the string wrapper calls internally).
  *
- * Format: docs/research/specs/snappy-format-description.txt (the same spec
+ * Format: docs/specs/snappy-format-description.txt (the same spec
  * compress implements). Built against the pinned release tarball; build
  * defines: CBENCH_TARGET (triple string), CBENCH_CPU, ZIG_VERSION,
  * COMPETITOR_VERSION.

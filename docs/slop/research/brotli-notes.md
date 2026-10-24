@@ -3,7 +3,7 @@
 The research stage of the codec development loop for M6: the brotli decoder —
 the prefix-code, context-modeling, distance, block-switch, and static-
 dictionary layers (`docs/zcompress-plan.md`, "Milestones": "M6 — brotli,
-decoder first"). Spec: `docs/research/specs/rfc7932-brotli.txt` (vendored,
+decoder first"). Spec: `docs/specs/rfc7932-brotli.txt` (vendored,
 verbatim). Every requirement line below cites that file and its section; where
 the RFC is ambiguous, silent, or self-inconsistent, that is stated explicitly
 and the divergence is recorded as a decision for the parent, never silently
@@ -22,7 +22,7 @@ one milestone later, with one new surface the other codecs never had: the
 - Spec: `rfc7932-brotli.txt` — RFC 7932, "Brotli Compressed Data Format"
   (J. Alakuijala, Z. Szabadka, Google, July 2016, Informational), **389,979
   bytes, verified by title line and byte count**; provenance row added to
-  `docs/research/specs/README.md` (fetched 2026-10-12 from rfc-editor.org).
+  `docs/specs/README.md` (fetched 2026-10-12 from rfc-editor.org).
   The size is not a typo: this RFC carries its own data — Appendix A is the
   122,784-byte static dictionary in hex (pages 44-123, roughly 60% of the
   document), Appendix B the 121 word transforms, Appendix C a CRC-32

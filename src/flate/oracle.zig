@@ -1,6 +1,6 @@
 //! The command-line harness behind `just flate-oracle`, which checks this codec
 //! against python3's `zlib` (raw deflate) in both directions
-//! (docs/research/flate-notes.md §4.3; the driver is scripts/flate_oracle.py).
+//! (docs/slop/research/flate-notes.md §4.3; the driver is scripts/flate_oracle.py).
 //! A test tool, not part of the codec: it allocates freely, from an arena.
 //!
 //! Usage:

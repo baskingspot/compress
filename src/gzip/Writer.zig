@@ -12,7 +12,7 @@
 //! the check that rejects use after `finish` are the shared container driver's
 //! (`src/internal/container.zig`); this file supplies gzip's framing.
 //!
-//! Format: docs/research/specs/rfc1952-gzip.txt
+//! Format: docs/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -96,7 +96,7 @@ pub fn streamAll(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1952-gzip.txt §2.1 (byte order), §2.3
+// Tests. Spec: docs/specs/rfc1952-gzip.txt §2.1 (byte order), §2.3
 // (the member), §2.3.1 (the fixed header and trailer). Every decode is
 // sentinel-checked.
 // ---------------------------------------------------------------------------

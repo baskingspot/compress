@@ -1,7 +1,7 @@
 # flate research notes
 
 The research stage of the codec development loop for flate (M2: fast encoder
-plus full inflate). Spec: `docs/research/specs/rfc1951-deflate.txt` (vendored,
+plus full inflate). Spec: `docs/specs/rfc1951-deflate.txt` (vendored,
 verbatim). Every requirement line below cites that file and its section; where
 the RFC is ambiguous or silent, that is stated explicitly and the divergence is
 marked as a decision for the parent, never silently picked.
@@ -12,7 +12,7 @@ marked as a decision for the parent, never silently picked.
   Specification version 1.3" (Deutsch, May 1996), 36,944 bytes, verified by
   title and byte count. Fetched 2026-10-08 from
   https://www.rfc-editor.org/rfc/rfc1951.txt; provenance row already in
-  `docs/research/specs/README.md`. IETF RFCs are freely distributed (the
+  `docs/specs/README.md`. IETF RFCs are freely distributed (the
   document's own Notices grant copying for any purpose with the notice
   preserved).
 - Reference implementations read for this file (cited inline as

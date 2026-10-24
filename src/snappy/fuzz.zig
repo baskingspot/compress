@@ -21,7 +21,7 @@
 //! `Io.Writer.Allocating` harness, which the runner's per-input leak check
 //! covers.
 //!
-//! Spec: docs/research/specs/snappy-format-description.txt (§1 varint
+//! Spec: docs/specs/snappy-format-description.txt (§1 varint
 //! preamble, §2 tags). Framing: a `u32-le` compressed length before each raw
 //! block, as written by `Writer.zig`.
 

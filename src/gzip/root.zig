@@ -7,7 +7,7 @@
 //! `decode` (one-shot decompress), `Writer` (streaming compress), and `Reader`
 //! (streaming decompress). Usage and contracts: README.md.
 //!
-//! Format: docs/research/specs/rfc1952-gzip.txt
+//! Format: docs/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 

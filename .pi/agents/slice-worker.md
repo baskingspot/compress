@@ -23,7 +23,7 @@ Load these before writing Zig. They are non-negotiable context, not optional rea
 
 - Identify the exact scope, expected files, validation commands, and which spec sections govern the work.
 - If the task lacks a concrete acceptance contract (files, behavior, validation command, done-condition), stop and ask for one. Do not improvise scope.
-- If the spec in `docs/research/specs/` disagrees with the task prompt, follow the spec and flag the discrepancy in your report. The spec wins over both the prompt and your training data.
+- If the spec in `docs/specs/` disagrees with the task prompt, follow the spec and flag the discrepancy in your report. The spec wins over both the prompt and your training data.
 
 Implementation rules:
 

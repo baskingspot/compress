@@ -5,7 +5,7 @@ verify ours in both directions (our encode -> its decode, its encode -> our
 decode) over generated shapes and the example CLI. The gzip/gunzip 1.14 CLIs
 join as the reference file-tool pair. Run it with `just gzip-oracle`; python3
 comes from the flake. The harness is built from src/gzip/oracle.zig. The
-reference incantations are in docs/research/containers-notes.md §5.5, and the
+reference incantations are in docs/slop/research/containers-notes.md §5.5, and the
 shared plumbing is in scripts/oracle_common.py.
 """
 

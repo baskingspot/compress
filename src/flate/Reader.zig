@@ -17,7 +17,7 @@
 //! (`init`'s `dict`) is copied into the window in front of the output and
 //! counts as history until the output slides it out.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 const Io = std.Io;

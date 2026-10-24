@@ -377,7 +377,7 @@ pub fn expectTrailer(stream: []const u8, source: []const u8) !void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
 // (the header, FLEVEL, FCHECK, the trailer), §2.3 (decoder obligations),
 // §8.2 (the Adler-32 algorithm), §9 (the sample).
 // ---------------------------------------------------------------------------

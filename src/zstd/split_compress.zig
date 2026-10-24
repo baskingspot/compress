@@ -18,7 +18,7 @@
 //! how many blocks a frame carries, which is why the class's byte parity
 //! depends on it.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1.2 (the block chain).
+//! Format: docs/specs/rfc8878-zstd.txt §3.1.1.2 (the block chain).
 //! Lineage: facebook/zstd v1.5.7 `zstd_preSplit.c`; attribution in
 //! THIRD_PARTY.md.
 
@@ -168,7 +168,7 @@ pub fn optimalBlockSize(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1.2 (block
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1.2 (block
 // boundaries are decode boundaries). The splitter's own shape is pinned by
 // the CLI: a block it cuts decodes to the same bytes, and the split position
 // is a multiple of the 8-KiB chunk.

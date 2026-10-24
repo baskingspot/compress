@@ -13,10 +13,6 @@ the spec. When still in doubt, read the spec again.
 | rfc8878-zstd.txt | https://www.rfc-editor.org/rfc/rfc8878.txt | 2026-10-08 |
 | snappy-format-description.txt | https://github.com/google/snappy/blob/main/format_description.txt | 2026-10-08 |
 
-LZW has no RFC. The reference formats are TIFF 6.0 (PackBits-adjacent LZW
-compression, section 13) and PDF 32000 (LZWDecode, section 7.4.2.2). Those
-spec sections vendor at M6 with the codec.
-
 The zstd reference implementation (BSD-3, https://github.com/facebook/zstd)
 supplements RFC 8878 where the frame/block layer leaves behavior unstated;
 klauspost/compress's zstd (BSD-3) is the Go reference for the same gaps. The

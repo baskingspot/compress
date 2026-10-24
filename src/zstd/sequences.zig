@@ -14,7 +14,7 @@
 //! Number_of_Sequences stops at the end of `target`, since every match writes at
 //! least 3 bytes. Nothing is allocated.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;

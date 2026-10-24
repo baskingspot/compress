@@ -2,7 +2,7 @@
 
 The research stage of the codec development loop for the M3 containers: gzip
 (RFC 1952) and zlib (RFC 1950) over the completed raw-flate module. Specs:
-`docs/research/specs/rfc1952-gzip.txt` and `docs/research/specs/rfc1950-zlib.txt`
+`docs/specs/rfc1952-gzip.txt` and `docs/specs/rfc1950-zlib.txt`
 (vendored, verbatim). Every requirement line below cites one of those files and
 its section; where an RFC is ambiguous or silent, that is stated explicitly and
 the divergence is recorded as a decision for the parent, never silently picked.
@@ -17,7 +17,7 @@ authority on everything inside the deflate body.
   4.3" (Deutsch, May 1996), 25,037 bytes — and `rfc1950-zlib.txt` — RFC 1950,
   "ZLIB Compressed Data Format Specification version 3.3" (Deutsch and Gailly,
   May 1996), 20,502 bytes. Both verified by title line and byte count; both
-  provenance rows already in `docs/research/specs/README.md` (fetched
+  provenance rows already in `docs/specs/README.md` (fetched
   2026-10-08 from rfc-editor.org). Each document's own Notices grant copying
   for any purpose with the notice preserved.
 - Reference implementations read for this file (cited inline as

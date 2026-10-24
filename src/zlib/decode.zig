@@ -10,7 +10,7 @@
 //! dictionary identity (`§2.2`); `checkTrailer` compares ADLER32, so both
 //! layers report the same specific errors.
 //!
-//! Format: docs/research/specs/rfc1950-zlib.txt (§2.2 header, dictionary, and
+//! Format: docs/specs/rfc1950-zlib.txt (§2.2 header, dictionary, and
 //! trailer; §2.3 decoder obligations).
 
 const std = @import("std");
@@ -150,7 +150,7 @@ pub fn decompress(source: []const u8, target: []u8, dict: ?[]const u8) Decompres
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
 // (the header, FCHECK, FLEVEL, the trailer), §2.3 (decoder obligations).
 // Every decode is sentinel-checked.
 // ---------------------------------------------------------------------------

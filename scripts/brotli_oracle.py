@@ -172,8 +172,8 @@ def inputs() -> list[tuple[str, bytes]]:
         ("random", common.SHAPES["random"]),
         ("rle", common.SHAPES["rle"]),
         ("long text (multi-block)", common.SHAPES["long text (multi-block)"]),
-        ("RFC 7932 text", (root / "docs/research/specs/rfc7932-brotli.txt").read_bytes()),
-        ("brotli notes", (root / "docs/research/brotli-notes.md").read_bytes()),
+        ("RFC 7932 text", (root / "docs/specs/rfc7932-brotli.txt").read_bytes()),
+        ("brotli notes", (root / "docs/slop/research/brotli-notes.md").read_bytes()),
         ("brotli AGENTS.md", (root / "src/brotli/AGENTS.md").read_bytes()),
     ]
 
@@ -487,7 +487,7 @@ file_ladder = (
     ("12-byte file", b"hello world\n"),
     ("8 KiB text file", text),
     ("133 KiB rle file", common.SHAPES["rle"]),
-    ("390 KiB RFC file", (root / "docs/research/specs/rfc7932-brotli.txt").read_bytes()),
+    ("390 KiB RFC file", (root / "docs/specs/rfc7932-brotli.txt").read_bytes()),
 )
 file_rows = 0
 file_windows: set[int] = set()

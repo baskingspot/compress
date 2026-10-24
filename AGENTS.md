@@ -1,7 +1,7 @@
 # compress: agent notes
 
 compress gives Zig fast compression codecs. `README.md` is the user overview.
-`docs/compress-plan.md` is the plan: mission, architecture, the codec
+`docs/slop/plan.md` is the plan: mission, architecture, the codec
 development loop, methodology, and milestones with acceptance criteria. Read
 it before you change a kernel or make a performance claim.
 
@@ -100,12 +100,15 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   escape the module root's directory).
   `src/internal/AGENTS.md` is the Io codec pattern book every new codec
   follows.
-- `docs/research/specs/`: vendored specs (RFC 1950/1951/1952, RFC 8878, the
-  snappy format description) with provenance.
+- `docs/`: the human docs. `content/` is the Zola guide, `examples/` the
+  snippets it compiles, `specs/` the vendored format text with provenance,
+  and `static/` the marks.
 - `examples/`: one CLI per codec, thin streaming pumps (`encode`/`decode`)
   over a file or stdin on shared scaffolding (`examples/cli.zig`). The codec
   package owns the framing (snappy's: `src/snappy/README.md`).
-- `docs/results/`: fleet results, one file per measurement (on demand).
+- `docs/slop/`: agent material. `plan.md` is the plan, `research/` the codec
+  research notes, and `results/` the fleet write-ups, one file per run. No
+  human document links this directory.
 - `.pi/agents/`: the roster. The parent orchestrates; agents own lanes.
 
 ## Toolchain
@@ -243,7 +246,7 @@ Deviations, on purpose:
   codecs' golden data re-exports. The one exception: brand marks — a raster
   under `docs/static/` commits only as a render, with its SVG source beside
   it. `scripts/check_binary_files.py` enforces the rule in `just lint`.
-- Spec-first: a codec's work starts from `docs/research/specs/`. Every format
+- Spec-first: a codec's work starts from `docs/specs/`. Every format
   test cites the spec file and section it validates:
   `// RFC 1951 §3.2.5 — fixed Huffman`.
 - README-first: each codec directory carries its own `README.md` documenting
@@ -253,9 +256,12 @@ Deviations, on purpose:
   to use the code: what it is, usage, the API, behavior a caller needs,
   limitations. No milestone labels (M3), research-row ids (OQ7, T10), process
   words (lane, wave, fleet, pattern book), review history, or pointers to
-  other documents' section names. Planning and agent material goes in the
-  `AGENTS.md` beside the code (`src/<codec>/AGENTS.md`): design decisions,
-  errata, test inventories, oracles, provenance. Doc comments (`///`, `//!`)
+  other documents' section names. Agent material goes in `docs/slop/`: the
+  plan, the research notes, and the fleet results. `AGENTS.md` and code
+  comments may link `docs/slop/`; the README, the guide, `CHANGELOG.md`,
+  `THIRD_PARTY.md`, and every other human document must not. Per-codec design
+  decisions, errata, and test inventories stay in the `AGENTS.md` beside the
+  code (`src/<codec>/AGENTS.md`). Doc comments (`///`, `//!`)
   surface as function docs, so they are written for a caller: what it does,
   arguments, errors, preconditions, costs. A why that only a maintainer needs
   is a plain `//` comment next to the code. Short spec cites
@@ -304,9 +310,9 @@ Deviations, on purpose:
   scaffolding.
 - Decode never writes past the decoded length; sentinel overrun checks prove
   it in tests.
-- A performance claim names a fleet run directory and a results file in
-  `docs/results/`. A change that helps one target and hurts another needs a
-  comptime per-model selection.
+- A performance claim names the run's date and the measured value; the
+  write-up in `docs/slop/results/` carries the run id. A change that helps one
+  target and hurts another needs a comptime per-model selection.
 - Fuzz runs use ReleaseSafe (`-Doptimize=ReleaseSafe -Dfuzz --fuzz=<budget>`)
   with an iteration budget; Debug fuzz hits ziglang/zig#30655.
 - Licensing: BSD-3 reference code (klauspost/compress, golang/snappy) is
@@ -345,7 +351,7 @@ belong here either.
   does not show: a constraint, a tradeoff, a rejected alternative. One to three
   short paragraphs of plain prose. No narrative of the investigation, no "the
   honest story", no process history, no restating the diff.
-- Measurements and long write-ups go in `docs/results/`. The commit names the
+- Measurements and long write-ups go in `docs/slop/results/`. The commit names the
   file by path and gives the headline number in one sentence.
 - One logical change per commit. A prose-only cleanup and a code change are
   separate commits. Do not describe an earlier commit as wrong in prose; fix it
@@ -357,7 +363,7 @@ Good (illustrative):
 
     The backward reader reloaded the word for every symbol. Hoisting it keeps
     the hot loop to one load per refill. Fleet numbers are in
-    docs/results/<run>.md.
+    docs/slop/results/<run>.md.
 
 Bad: `zstd perf wave 2: the lean backward reader, the corpus revision, the X2
 answer`. It names a plan, not a change.

@@ -10,7 +10,7 @@
 //!   - `Writer`: a compressing `std.Io.Writer`.
 //!   - `Reader`: a decompressing `std.Io.Reader`.
 //!
-//! Usage and contracts: README.md. Format: docs/research/specs/rfc1950-zlib.txt
+//! Usage and contracts: README.md. Format: docs/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 

@@ -13,7 +13,7 @@
 //! Four-stream mode needs at least 6 regenerated literals (errata 7297); below
 //! that the fourth stream's size can underflow.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;

@@ -16,7 +16,7 @@ Focus:
 
 - Row equivalence across implementations: what is inside the timed loop for each (setup, compression proper, verification, output transport, allocation, copies), and whether the rows compare the same work.
 - Sample semantics: rounds, warmup, outlier handling (outliers are reported, never removed), and whether the confidence interval supports the sentence being written about it.
-- Claim provenance: every number in README and docs cites a run directory and a results file under `docs/results/`. Local-only numbers quoted as claims are invalid on sight.
+- Claim provenance: every number in README and docs comes from a run of the fleet harness, and the write-up under `docs/slop/results/` names the run id. A human document names the run, never the slop path. Local-only numbers quoted as claims are invalid on sight.
 - Fleet validity: same corpus bytes for every implementation, uncompressed-byte throughput, pinned competitor versions on the boxes, and per-target CPU models recorded.
 - Invalid comparisons: mixed geomeans, cross-format aggregates, single-round captures, local host numbers promoted to claims, and rows where one side skips verification work the other does.
 

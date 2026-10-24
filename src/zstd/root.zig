@@ -21,7 +21,7 @@
 //! - `encode.zig`, `decode.zig`, `Reader.zig`, and `Writer.zig`: the
 //!   one-shots and the streaming decoder and encoder.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 

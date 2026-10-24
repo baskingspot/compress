@@ -59,7 +59,7 @@ const gzip = @import("compress").gzip;
 - The [guide](https://baskingspot.dev/compress/) says which codec to use for a task, with examples that compile.
 - The [API reference](https://baskingspot.dev/compress/api/) documents every symbol.
 - [`examples/`](examples/README.md) has a command-line tool for each codec.
-- Each codec's README documents its API, error sets, and buffer sizes. The specs are vendored in [`docs/research/specs/`](docs/research/specs/README.md).
+- Each codec's README documents its API, error sets, and buffer sizes. The specs are vendored in [`docs/specs/`](docs/specs/README.md).
 
 ## Work on it
 
@@ -70,7 +70,7 @@ just fuzz     # fuzz every codec's targets, 10M iterations each by default
 just bench    # local benchmarks
 ```
 
-`just` lists every recipe. Numbers from `just bench` are local and are not claims. Comparisons with other libraries are measured on EC2 by the harness in [`bench/`](bench/README.md) and written up under `docs/results/`.
+`just` lists every recipe. Numbers from `just bench` are local and are not claims. Comparisons with other libraries are measured on EC2 by the harness in [`bench/`](bench/README.md), which describes the grid and the method.
 
 ## License
 

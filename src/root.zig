@@ -10,34 +10,34 @@ const std = @import("std");
 /// brotli (RFC 7932): one-shot `encode.compress` and `decode.decompress`, and
 /// the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
 /// allocation. API: `src/brotli/README.md`. Format:
-/// docs/research/specs/rfc7932-brotli.txt.
+/// docs/specs/rfc7932-brotli.txt.
 pub const brotli = @import("brotli/root.zig");
 /// Raw DEFLATE (RFC 1951): one-shot `encode.compress` and `decode.decompress`,
 /// and the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
 /// allocation. API: `src/flate/README.md`. Format:
-/// docs/research/specs/rfc1951-deflate.txt.
+/// docs/specs/rfc1951-deflate.txt.
 pub const flate = @import("flate/root.zig");
 /// gzip (RFC 1952) over `flate`: one-shot `encode.compress` and
 /// `decode.decompress`, and the streaming `Reader` and `Writer`. Caller-owned
 /// buffers, no heap allocation. API: `src/gzip/README.md`. Format:
-/// docs/research/specs/rfc1952-gzip.txt.
+/// docs/specs/rfc1952-gzip.txt.
 pub const gzip = @import("gzip/root.zig");
 /// Snappy blocks: `encode.compressBlock` and `decode.decompressBlock` over
 /// caller-owned buffers, and a streaming `Reader` and `Writer` over a
 /// length-prefixed framing of this package's own. No heap allocation. API:
 /// `src/snappy/README.md`. Format:
-/// docs/research/specs/snappy-format-description.txt.
+/// docs/specs/snappy-format-description.txt.
 pub const snappy = @import("snappy/root.zig");
 /// zlib (RFC 1950) over `flate`: one-shot `encode.compress` and
 /// `decode.decompress`, and the streaming `Reader` and `Writer`. Caller-owned
 /// buffers, no heap allocation. API: `src/zlib/README.md`. Format:
-/// docs/research/specs/rfc1950-zlib.txt.
+/// docs/specs/rfc1950-zlib.txt.
 pub const zlib = @import("zlib/root.zig");
 /// zstd (RFC 8878): one-shot `encode.compress` and `decode.decompress`, and
 /// the streaming `Reader` and `Writer`, with XXH64 frame checksum
 /// verification and dictionaries (`zstd.Dictionary`, §5). Caller-owned
 /// buffers, no heap allocation. API: `src/zstd/README.md`. Format:
-/// docs/research/specs/rfc8878-zstd.txt.
+/// docs/specs/rfc8878-zstd.txt.
 pub const zstd = @import("zstd/root.zig");
 
 test {

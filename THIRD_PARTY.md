@@ -23,8 +23,8 @@ and dependency with a license that is not ours.
   arbitration, the end-of-match check), `flate/huffman_code.go` (the
   length-limited tree construction), and `flate/huffman_bit_writer.go` (the
   codegen, the dynamic header, the cost model, the stored/fixed/dynamic
-  dispatch). The algorithm is ported, not the code; the oracle's level-6 lane
-  checks the bytes against the pinned module (`scripts/klauspost_flate`).
+  dispatch). The algorithm is ported, not the code; the level-6 oracle check
+  compares the bytes against the pinned module (`scripts/klauspost_flate`).
   Attribution: Copyright klauspost/compress contributors,
   https://github.com/klauspost/compress.
 - `src/snappy/golden.zig` golden fixtures: ported from golang/snappy
@@ -62,7 +62,7 @@ and dependency with a license that is not ours.
   (`std/compress/flate/Decompress.zig`, MIT) as decoder goldens and
   divergence pins (the fixed and dynamic members are std's gzip bodies with
   zlib's framing), and the C-reference emissions verified through python3's
-  `zlib` in `docs/research/containers-notes.md §5.5`. Attribution: Copyright
+  `zlib`. Attribution: Copyright
   the Go Authors, https://github.com/golang/go; Zig std contributors; Jean-loup
   Gailly and Mark Adler (zlib, the `78 3f` corner emission and the dictionary
   vector's DICTID check).
@@ -117,9 +117,9 @@ and dependency with a license that is not ours.
   oracle.
 - `src/flate/encode.zig` persistent `FinderTable`: the `Lookup`/persistent-chain
   design in Zig std's `std.compress.flate` (MIT) is studied, not copied
-  (absolute wrapping positions; `docs/research/flate-notes.md` §8).
+  (absolute wrapping positions).
 
-## Vendored specs (`docs/research/specs/`)
+## Vendored specs (`docs/specs/`)
 
 Verbatim spec text, fetched once with provenance recorded in the directory
 `README.md`. IETF RFCs are freely distributed. The Snappy format description
@@ -146,7 +146,7 @@ them; the rows are here so the debt is visible.
   GPLv2) as the encoder port's source (the port row above) and as the
   behavior oracle for both directions; klauspost/compress (BSD-3-Clause)
   `zstd/` for its error vocabulary, the level-1 encoder decisions it makes
-  differently (`TE1`-`TE5` in `src/zstd/AGENTS.md`), and the strict-window
+  differently, and the strict-window
   decoder behind `just zstd-oracle`; Zig std's zstd decoder (MIT) for its
   `ReverseBitReader`, and for the unverified checksum and rejected dictionary
   frames that the tests pin as divergences.

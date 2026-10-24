@@ -8,7 +8,7 @@ dictionary with its 121 word transforms — plus an encoder at the reference's
 `br` HTTP content encoding. This is the `compress.brotli` namespace; it
 imports only `std` and `fastmem`, and it allocates nothing.
 
-The format is vendored at `docs/research/specs/rfc7932-brotli.txt`; `§` cites
+The format is vendored at `docs/specs/rfc7932-brotli.txt`; `§` cites
 in this directory are sections of that file.
 
 The namespace is exactly `{Reader, Writer, encode, decode}`: one-shot
@@ -178,7 +178,7 @@ Of these, only `q3` is implemented; every other rung returns
 The one-shot is byte-identical to the pinned CLI's file form at `brotli -q 3`
 — the window sized to the input, which is the CLI's own automatic-window rule
 (the smallest `lgwin` in 10..24 whose `(1 << lgwin) - 16` window holds the
-whole input). The pin is asserted per row by the oracle lane, over every
+whole input). The pin is asserted per row by the oracle, over every
 conformance shape, the empty input, and a size ladder of 22 boundaries (the
 window steps, the 16-KiB meta-block cadence, and their neighbours); two runs
 of the same input are identical. The Go port diverges from the C at
@@ -338,14 +338,13 @@ the guard past the decoded length untouched.
 `just brotli-oracle` cross-checks both directions against the pinned reference
 CLI (brotli 1.2.0) and andybalholm/brotli. Decode: the CLI's quality sweep
 (eight inputs × qualities 0..11), its window, file, metadata, and
-trailing-byte lanes, and the Go port's own 40 streams, with the truncation
+trailing-byte rows, and the Go port's own 40 streams, with the truncation
 and corruption batteries asserting the references' verdicts. Encode: our
 one-shot's stream is byte-identical to the CLI's file form on every row, and
 every stream our encoder writes — one-shot and `Writer`, every window — is
 decoded by the CLI, the Go reference, and our own decoder.
 `just bench` runs the local benchmarks; local numbers are not performance
-claims. Design notes, the divergence register, and the fixture inventory are
-in [`AGENTS.md`](AGENTS.md).
+claims.
 
 ## License
 

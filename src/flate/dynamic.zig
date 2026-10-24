@@ -9,7 +9,7 @@
 //! from encode.zig and never touches it. The finder stays in encode.zig; this
 //! file consumes the tokens it produces.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -989,7 +989,7 @@ fn writeTokens(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1951-deflate.txt §3.2.2 (the canonical
+// Tests. Spec: docs/specs/rfc1951-deflate.txt §3.2.2 (the canonical
 // code construction), §3.2.7 (the dynamic header, the code-length codegen,
 // the length cap, the one-distance-code case).
 // ---------------------------------------------------------------------------

@@ -2,8 +2,8 @@
 
 The research stage of the codec development loop for M5: the zstd encoder,
 fast level (`docs/zcompress-plan.md`, "Milestones": "M5 — zstd encoder, fast
-level"). Spec: `docs/research/specs/rfc8878-zstd.txt` (vendored, verbatim,
-provenance in `docs/research/specs/README.md`). The decoder side of the same
+level"). Spec: `docs/specs/rfc8878-zstd.txt` (vendored, verbatim,
+provenance in `docs/specs/README.md`). The decoder side of the same
 format is `docs/research/zstd-notes.md` (zstd-notes): its §1 format study
 covers both directions' wire formats, its OQ numbering is the decoder's, and
 its `Tn` divergence rows are cited here as `Tn` without restating them. This

@@ -24,7 +24,7 @@
 //! `compressBlockStream6`, `emitStoredBlock`, and `writeFinalEmptyBlock`,
 //! which are public for it.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 //! Lineage: klauspost/compress `flate/level1.go` (`fastEncL1`) and
 //! `flate/fast_encoder.go`; attribution in THIRD_PARTY.md.
 
@@ -1981,7 +1981,7 @@ test "fixed tables: §3.2.6's numerals are the canonical construction" {
 }
 
 test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
-    // Spec: docs/research/flate-notes.md §3.2, stream 1 — "literal 'A', match
+    // Spec: docs/slop/research/flate-notes.md §3.2, stream 1 — "literal 'A', match
     // length 20 (code 269 = base 19 + extra 1) at distance 1 (code 0), EOB",
     // packed as `73 c4 06 00` with BFINAL set on that block. Our encoder never
     // sets BFINAL on a data block, so the same tokens are `72 c4 06 00`
@@ -2006,7 +2006,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
 }
 
 test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-first" {
-    // Spec: docs/research/flate-notes.md §3.2, stream 2 — "70 literals 'A',
+    // Spec: docs/slop/research/flate-notes.md §3.2, stream 2 — "70 literals 'A',
     // then match length 3 (code 257, no extra) at distance 67 (code 12 = base
     // 65 + extra value 2, bits [0,1,0,0,0] LSB-first), EOB", packed as the
     // golden.zig hex with BFINAL set on the block. Our greedy finder cannot

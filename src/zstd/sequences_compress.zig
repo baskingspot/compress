@@ -20,7 +20,7 @@
 //! a frame built without a dictionary therefore never selects it, and neither
 //! does this writer. The mode is implemented and round-trips all the same.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 //! Lineage: facebook/zstd v1.5.7 `zstd_compress_sequences.c`
 //! (`ZSTD_selectEncodingType`, `ZSTD_buildCTable`, `ZSTD_encodeSequences_body`);
 //! attribution in THIRD_PARTY.md.
@@ -686,7 +686,7 @@ fn highBit(value: u32) u5 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1.3.2 (the section),
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1.3.2 (the section),
 // §3.1.1.3.2.1 (the header and the modes), §3.1.1.3.2.1.1 (Tables 16/17),
 // §3.1.1.3.2.1.2 (the bitstream), §3.1.1.3.2.2 (the default distributions),
 // §3.1.1.4 (sequence execution). Every round trip runs the landed decoder

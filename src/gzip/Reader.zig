@@ -14,7 +14,7 @@
 //! (`src/internal/container.zig`); this file supplies gzip's framing
 //! (`framing.zig`) and the member walk.
 //!
-//! Format: docs/research/specs/rfc1952-gzip.txt
+//! Format: docs/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -131,7 +131,7 @@ pub fn streamAll(in: *Io.Reader, out: *Io.Writer) Io.Reader.StreamRemainingError
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1952-gzip.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1952-gzip.txt §2.1 (byte order), §2.2
 // (members), §2.3 (the member), §2.3.1 (the fixed header and trailer),
 // §2.3.1.2 (decoder obligations). Every decode is sentinel-checked.
 // ---------------------------------------------------------------------------

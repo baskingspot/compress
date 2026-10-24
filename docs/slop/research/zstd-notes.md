@@ -3,7 +3,7 @@
 The research stage of the codec development loop for M4: the zstd decoder —
 the huff0, fse, block, and frame layers (`docs/zcompress-plan.md`,
 "Milestones": "M4 — zstd decoder"; the encoder is M5). Spec:
-`docs/research/specs/rfc8878-zstd.txt` (vendored, verbatim). Every requirement
+`docs/specs/rfc8878-zstd.txt` (vendored, verbatim). Every requirement
 line below cites that file and its section; where the RFC is ambiguous, silent,
 or self-inconsistent, that is stated explicitly and the divergence is recorded
 as a decision for the parent, never silently picked. The lane shape is M3's
@@ -20,7 +20,7 @@ codec, not a container — so M3's "wrapping design" questions become M4's
 - Spec: `rfc8878-zstd.txt` — RFC 8878, "Zstandard Compression and the
   'application/zstd' Media Type" (Y. Collet, M. Kucherawy, Ed., February 2021;
   obsoletes RFC 8478), **112,425 bytes, verified by title line and byte
-  count**. Provenance row already in `docs/research/specs/README.md`
+  count**. Provenance row already in `docs/specs/README.md`
   (fetched 2026-10-08 from rfc-editor.org); the same README's zstd note — the
   C reference supplements the RFC where the frame/block layer leaves behavior
   unstated — is the posture this file follows. IETF RFCs are freely

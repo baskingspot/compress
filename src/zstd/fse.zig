@@ -10,7 +10,7 @@
 //! context it serves. Appendix A's three tables are the test vectors for the
 //! table construction (`golden.zig`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;

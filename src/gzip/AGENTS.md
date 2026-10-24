@@ -1,8 +1,8 @@
 # Agent notes: gzip
 
 gzip members (RFC 1952) over flate. `README.md` is the user-facing contract and
-`docs/research/specs/rfc1952-gzip.txt` is the format. The research is
-`docs/research/containers-notes.md` (`containers-notes.md` below); its row ids
+`docs/specs/rfc1952-gzip.txt` is the format. The research is
+`docs/slop/research/containers-notes.md` (`containers-notes.md` below); its row ids
 (T1-T7, OQ1-OQ7) are used as they appear there. `THIRD_PARTY.md` has the
 attribution for ported fixtures and studied references.
 
@@ -157,10 +157,10 @@ a plain unit test, so `just test` gates them; the fuzz targets need `just fuzz`.
   `crc32(crc, bytes)` with the conditioning inside (`containers-notes.md §3.3`),
   so a faster kernel swaps in without touching the container. Hardware CRC or
   PCLMULQDQ folding is the plan's deferred decision; the gzip decode gap it
-  targets is in `docs/results/m3-fleet-20261010.md`. The kernel stays here,
+  targets is in `docs/slop/results/m3-fleet-20261010.md`. The kernel stays here,
   not in `src/internal/`, because CRC-32 has one user: snappy's framing carries
   no checksum and zstd uses XXH64.
 - `bench.zig`'s header says why a gzip row compares only with its paired
   raw-flate row from the same binary. Performance claims come from the fleet
-  harness and name a run directory and a results file in `docs/results/`; local
+  harness and name a run directory and a results file in `docs/slop/results/`; local
   numbers are never quoted.

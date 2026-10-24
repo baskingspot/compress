@@ -20,7 +20,7 @@
 //! The 11-bit depth cap is enforced while the tree is built (`§4.2.1`), so
 //! the serialized weights cannot exceed it.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 //! Lineage: facebook/zstd v1.5.7 `zstd_compress_literals.c`
 //! (`ZSTD_compressLiterals`); attribution in THIRD_PARTY.md.
 
@@ -392,7 +392,7 @@ fn covers(table: *const huff0_compress.Table, histogram: *const huff0_compress.H
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1.3.1 (the section
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1.3.1 (the section
 // and its types), §3.1.1.3.1.1 (the header and Table 13),
 // §3.1.1.3.1.2/§3.1.1.3.1.3 (Raw and RLE), §3.1.1.3.1.6 (the Jump_Table).
 // Every section is decoded back through `literals.decode`.

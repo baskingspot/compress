@@ -25,12 +25,12 @@
   here it is `DecompressionFailed`, as in Snappy) and blocks up to 4 MiB. The
   encoder ports only the Snappy-compatible `encodeBlockSnappyGo64K`, which emits
   explicit offsets (its `repeat` variable is a match-finder shortcut). S2 is a
-  deferred decision (`docs/compress-plan.md`, non-goals), not a missing
+  deferred decision (`docs/slop/plan.md`, non-goals), not a missing
   feature.
 
 ## Format notes
 
-- Spec §2.2 (`docs/research/specs/snappy-format-description.txt`): the reference
+- Spec §2.2 (`docs/specs/snappy-format-description.txt`): the reference
   compressor never emits offsets over about 32768, and a decompressor must not
   rely on that. The decoder handles copy-4 and large offsets anyway. This
   encoder's offsets fit `u16` (blocks are at most 64 KiB), so `emitCopy`'s
@@ -63,7 +63,7 @@
 ## Performance notes
 
 - Local `just bench` numbers are not claims; claims cite runs under
-  `docs/results/`. Locally, decompress is slowest on RLE (many short overlapping
+  `docs/slop/results/`. Locally, decompress is slowest on RLE (many short overlapping
   copies, one shuffle each) and fastest on incompressible input (plain literal
   copies).
 - To check codegen, run `zig build bench`, find the runner

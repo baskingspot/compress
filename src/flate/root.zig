@@ -10,7 +10,7 @@
 //!
 //! Usage and behavior: README.md.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 

@@ -28,12 +28,12 @@
 //! (`source_max`, `encode_max`, `out_max`) so a budget run finishes. Nothing
 //! here allocates: every buffer is a stack local.
 //!
-//! Spec: docs/research/specs/rfc8878-zstd.txt (§3.1 frames, §3.1.1 the frame
+//! Spec: docs/specs/rfc8878-zstd.txt (§3.1 frames, §3.1.1 the frame
 //! and its checksum, §3.1.1.1 the header, §3.1.1.2 the block chain, §3.1.1.3
 //! and §3.1.1.4 the entropy layers and execution, §3.1.2 skippable frames,
 //! §4.1 and §4.2 the FSE and Huffman tables). Where this decoder differs from
-//! the C reference, docs/research/zstd-notes.md §4 records the decision; where
-//! the encoder does, docs/research/zstd-encoder-notes.md §5 does.
+//! the C reference, docs/slop/research/zstd-notes.md §4 records the decision; where
+//! the encoder does, docs/slop/research/zstd-encoder-notes.md §5 does.
 
 const std = @import("std");
 const Io = std.Io;
@@ -4018,7 +4018,7 @@ test "zstd fuzz: the codec's rebase runs the trailer step at the frame's tail" {
 
 test "zstd fuzz: the checksum reference pins the empty and multi-block frames" {
     // §3.1.1 — the empty payload's XXH64: std's canonical check value
-    // (docs/research/zstd-notes.md §3), and the trailer the C library wrote
+    // (docs/slop/research/zstd-notes.md §3), and the trailer the C library wrote
     // for it.
     try testing.expectEqual(
         @as(u64, 0xEF46_DB37_51D8_E999),
@@ -4043,7 +4043,7 @@ test "zstd fuzz: the checksum reference pins the empty and multi-block frames" {
 
 test "zstd fuzz: the exceed-only table corner" {
     // §4.1.1 — the FSE distribution's symbol-count rule is the reference's
-    // exceed-only reading (docs/research/zstd-notes.md §4). A distribution
+    // exceed-only reading (docs/slop/research/zstd-notes.md §4). A distribution
     // that spends its budget before the context's last symbol is legal (the
     // reference encoder emits them), while a description that runs past its
     // context is corruption. The golden descriptions are the reference

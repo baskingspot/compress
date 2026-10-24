@@ -13,7 +13,7 @@
 //! served. A failed read returns `error.ReadFailed` and the detail is in
 //! `err`. Decoding a compressed block uses a 128 KiB buffer on the stack.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -726,7 +726,7 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1 (frames), §3.1.1
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1 (frames), §3.1.1
 // (the frame and its checksum), §3.1.1.1 (the header), §3.1.1.2 (the block
 // chain), §3.1.1.4 (offsets and the window), §3.1.2 (skippable frames). The
 // fixtures are `golden.zig`'s. Every decode is sentinel-checked: the target

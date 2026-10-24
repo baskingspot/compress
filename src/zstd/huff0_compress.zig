@@ -14,7 +14,7 @@
 //! reverse with a single 1-bit end mark, so the decoder reading backward
 //! recovers them in order and the last byte is never zero.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 //! Lineage: facebook/zstd v1.5.7 `huf_compress.c` (`HUF_buildCTable_wksp`,
 //! `HUF_writeCTable_wksp`, `HUF_compressWeights`, the stream writers);
 //! attribution in THIRD_PARTY.md.
@@ -599,7 +599,7 @@ fn highBit(value: u32) u5 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §4.2.1 (weights, the
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §4.2.1 (weights, the
 // completion, the code assignment), §4.2.1.1 (the direct description),
 // §4.2.1.2 (the FSE series), §4.2.2 (the streams), §3.1.1.3.1.1 and
 // §3.1.1.3.1.6 (the section's headers and the Jump_Table).

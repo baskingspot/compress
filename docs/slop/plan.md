@@ -135,7 +135,7 @@ just specified.
 
 Every codec runs the same loop, one at a time:
 
-1. Research (spec-researcher): vendor the spec into `docs/research/specs/`,
+1. Research (spec-researcher): vendor the spec into `docs/specs/`,
    record provenance, extract the requirements matrix, list fixture sources.
    No code.
 2. API sketch (parent): the public surface, error sets, buffer ownership,
@@ -295,7 +295,7 @@ streaming `Reader`, with the comptime `Reader.Buffer(window_wbits)` and the
 format's built-in static dictionary shipped unconditionally. The
 research is `docs/research/brotli-notes.md` (the `BR` matrix, the `T`
 divergence rows, the `OQ` register; the RFC vendored at
-`docs/research/specs/rfc7932-brotli.txt`), the google/brotli C reference is
+`docs/specs/rfc7932-brotli.txt`), the google/brotli C reference is
 the oracle lane and the strongest-native competitor, and the API sketch is
 `src/brotli/README.md`.
 Acceptance: the decoder shipped through six slices (the bit reader, the

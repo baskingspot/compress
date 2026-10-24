@@ -18,7 +18,7 @@
 //! Window_Descriptor declares `1 << window_log` (`§3.1.1.1.2`) and its
 //! frames are never single-segment.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -518,7 +518,7 @@ fn compact(w: *Writer) void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1 (the frame and
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1 (the frame and
 // its checksum), §3.1.1.1 (the header's forms), §3.1.1.2 (the block chain),
 // §3.1.1.4 (offsets and the window), §3.1.1.5 (the repeat offsets). Every
 // frame is decoded back through the landed `Reader` (the windowed path) and

@@ -18,7 +18,7 @@
 //! read LSB-of-value first. `§3.2.5`'s "most-significant bit first" sentence
 //! for extra bits describes the numeral, not the wire order.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 //! Lineage: the two-level decode table (a primary table plus a chained chase
 //! for longer codes) follows zlib's `doc/algorithm.txt` and Zig's
 //! `std.compress.flate.Decompress`, reimplemented here; see THIRD_PARTY.md.

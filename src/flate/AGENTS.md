@@ -3,7 +3,7 @@
 Raw DEFLATE (RFC 1951): a fixed-Huffman encoder with a stored-block fallback, an
 inflate for all three block types, and a streaming `Io` layer over both.
 `README.md` is the user contract; this file holds the decisions and traps behind
-it. The research is `docs/research/flate-notes.md` (flate-notes §N). T1-T5 are
+it. The research is `docs/slop/research/flate-notes.md` (flate-notes §N). T1-T5 are
 its divergence ids (§2.3) and OQ1-OQ6 its open questions (§6). The generated
 `Io.Writer` and `Io.Reader` entries (drain top-up, rebase, sticky failure) are
 explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
@@ -223,4 +223,4 @@ containers.
   profiled), so it was reverted. Time the streaming path with the example pump,
   `just example flate encode|decode <file>`, over a large file.
 - Local numbers are never claims. A claim cites a recorded run in
-  `docs/results/` (method: `docs/compress-plan.md`, "Benchmark methodology").
+  `docs/slop/results/` (method: `docs/slop/plan.md`, "Benchmark methodology").

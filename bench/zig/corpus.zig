@@ -124,7 +124,7 @@ const Generated = error{ BufferTooSmall, Unimplemented }!usize;
 /// The committed file the `prose` shape's bytes are a prefix of: the
 /// vendored RFC 7932 text. The generator fails the run if it is shorter
 /// than the largest size, and the anchor pins the bytes.
-const prose_source_path = "docs/research/specs/rfc7932-brotli.txt";
+const prose_source_path = "docs/specs/rfc7932-brotli.txt";
 
 /// One definition of the corpus shapes: the benchmark drivers read the files
 /// this generates; nothing regenerates shapes on the boxes. `prose_source`

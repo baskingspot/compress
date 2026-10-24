@@ -13,7 +13,7 @@
 //! before it ends on a byte boundary). No data block carries BFINAL, so `flush`
 //! mid-stream is always safe. The stream is complete only after `finish`.
 //!
-//! Format: docs/research/specs/rfc1951-deflate.txt
+//! Format: docs/specs/rfc1951-deflate.txt
 
 const std = @import("std");
 const Io = std.Io;

@@ -6,7 +6,7 @@ a 10-byte header, a deflate body, and an 8-byte trailer holding the CRC-32 and
 size of the original data. The deflate codec is `src/flate/`; this module adds
 the framing and the checksum. It depends on `std`, `fastmem`, flate, and the
 shared helpers in `src/internal/`, and never allocates. The format is
-[RFC 1952][rfc1952], vendored at `docs/research/specs/rfc1952-gzip.txt`.
+[RFC 1952][rfc1952], vendored at `docs/specs/rfc1952-gzip.txt`.
 
 ## Usage
 
@@ -145,7 +145,7 @@ and `InvalidBlockType` through `InvalidMatch` for a malformed deflate body.
 std, round trips, corruption and truncation cases), `just fuzz 1M` the fuzz
 targets, and `just gzip-oracle` checks members in both directions against
 python3's zlib, CPython's gzip module, and the gzip tools. `just bench` runs the
-benchmarks; local numbers are not claims. Design notes: `AGENTS.md`.
+benchmarks; local numbers are not claims.
 
 ## License
 

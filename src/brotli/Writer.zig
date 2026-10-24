@@ -12,7 +12,7 @@
 //! valid streams, not byte-pinned ones (the one-shot is the byte-parity
 //! artifact).
 //!
-//! Format: docs/research/specs/rfc7932-brotli.txt. API: README.md.
+//! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
 const Io = std.Io;

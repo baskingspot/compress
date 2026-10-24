@@ -188,14 +188,21 @@ Hostile input gets error returns, never assertions: the decoders treat every inp
 
 # Performance
 
-The encoders and decoders target the fast class, and the numbers are measured, not asserted. Every comparison runs on a 7-target EC2 grid — ARM and Intel — against the C reference libraries, 5 rounds each with an A/A control, and every claim names a run and a results file in [`docs/results/`](https://github.com/baskingspot/compress/tree/main/docs/results):
+The comparisons run on a 7-target EC2 grid, ARM and Intel, against the C
+reference libraries: 5 rounds each, with an A/A control on every run. The grid
+and the method are in [`bench/README.md`](https://github.com/baskingspot/compress/blob/main/bench/README.md).
+Local `just bench` numbers are not claims.
 
-- The zstd encoder is at parity to faster than facebook/zstd's C library at the level-1 class on literal-heavy input on every ARM target, with both sides paying the frame checksum. It is 4-17x faster than klauspost/compress's Go zstd on entropy-heavy input. The zstd decoder verifies the frame checksum and the content size that the C library skips.
-- The Brotli encoder's one-shot beats google/brotli's C encoder on every encode row of the encoder-seats run: 1.4-2.4x on text and HTML, up to 10.7x on random and mixed input. The numbers are in [`docs/results/encoder-seats-fleet-20261017.md`](https://github.com/baskingspot/compress/blob/main/docs/results/encoder-seats-fleet-20261017.md).
-- Brotli decoding is 2-3x faster than google/brotli's C decoder on copy-structure input, and the remaining gaps are entropy rows with ranked, measured causes.
-- Local `just bench` numbers are never claims. The grid and the methodology are in [`bench/README.md`](https://github.com/baskingspot/compress/blob/main/bench/README.md).
-
-No allocation on the hot paths, no `Io` value held, and the caller's buffers are the only memory the codecs touch.
+- The zstd encoder is at parity with or faster than facebook/zstd at level 1
+  on literal-heavy input on every ARM target, with both sides paying the frame
+  checksum. On entropy-heavy input it is 4-17x faster than
+  klauspost/compress's Go zstd. The decoder verifies the frame checksum and the
+  content size, which the C library skips.
+- The Brotli encoder's one-shot beats google/brotli's C encoder on every encode
+  row of the 2026-10-17 run: 1.4-2.4x on text and HTML, up to 10.7x on random
+  and mixed input.
+- Brotli decoding is 2-3x faster than google/brotli's C decoder on
+  copy-structure input. The remaining gaps are entropy rows.
 
 # Limits
 

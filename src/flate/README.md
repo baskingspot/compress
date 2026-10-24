@@ -3,7 +3,7 @@
 Raw DEFLATE ([RFC 1951](https://www.rfc-editor.org/rfc/rfc1951.txt)) in pure Zig: an encoder,
 a decoder, and `std.Io` streaming adapters. It is the `compress.flate` namespace, imports
 only `std` and [fastmem](https://github.com/baskingspot/fastmem), and never allocates.
-The spec is vendored at `docs/research/specs/rfc1951-deflate.txt`.
+The spec is vendored at `docs/specs/rfc1951-deflate.txt`.
 
 The decoder handles stored, fixed-Huffman, and dynamic-Huffman blocks. The
 encoder has two levels. Level 1 is a greedy match finder in the style of
@@ -173,7 +173,7 @@ worked examples, round trips, and overrun checks on every decode. `just flate-or
 cross-checks both directions against python3's `zlib`, pins level 1's bytes, and checks
 level 6 against klauspost/compress's flate at level 6 byte for byte. `just fuzz` runs the
 fuzz targets, and `just bench` runs the local benchmarks. Local numbers are not
-performance claims; a claim cites a recorded run in `docs/results/`.
+performance claims; a claim names the run that produced it.
 
 ## License
 

@@ -10,7 +10,7 @@
 //! the smallest power of two covering the source, from 1 KiB to 512 KiB, so
 //! a source that fits its window is single-segment (`§3.1.1.1.2`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1 (the frame), §3.1.1.1
+//! Format: docs/specs/rfc8878-zstd.txt §3.1.1 (the frame), §3.1.1.1
 //! (the frame header), §3.1.1.2 (the block chain).
 
 const std = @import("std");
@@ -371,7 +371,7 @@ fn writeFrameHeader(
 pub const frame_header_len_max = frame.magic_len + 1 + 1 + 4 + 8;
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1 (the frame and
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1 (the frame and
 // its checksum), §3.1.1.1 (the header's forms), §3.1.1.2 (the block chain),
 // §3.1.1.4 (offsets and the window). Every frame is decoded back through
 // the landed one-shot decoder and its bytes past the decoded length checked;
@@ -1340,7 +1340,7 @@ test "the with-dictionary fixtures the decode slice committed re-emit exactly" {
 
 test "the byte class at level 1 is Treeless literals and Repeat sequences" {
     // RFC 8878 §3.1.1.3.1.1 + §3.1.1.3.2.1 (DE9, the walked-live record in
-    // docs/research/dictionary-notes.md §3.5): a small source over a
+    // docs/slop/research/dictionary-notes.md §3.5): a small source over a
     // CLI-trained dictionary emits Treeless literals (the dictionary's tree,
     // reused from block 0) and Repeat_Mode on all three alphabets while
     // nbSeq < 1000; a source past 1,000 sequences recomputes (FSE ×3), the

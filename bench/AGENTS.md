@@ -22,17 +22,17 @@ Not ported from fastmem:
 Where the competitor pins came from:
 
 - libdeflate v1.26 and zlib-ng 2.3.3: the flate-family native competitors in
-  `docs/research/containers-notes.md` §6.3 and §6.4.
-- google/snappy 1.3.1: the snappy competitor named in `docs/compress-plan.md`
+  `docs/slop/research/containers-notes.md` §6.3 and §6.4.
+- google/snappy 1.3.1: the snappy competitor named in `docs/slop/plan.md`
   ("Benchmark methodology").
-- zstd v1.5.7: the tag in `docs/research/zstd-notes.md` §6.1.
-- google/brotli v1.2.0: the tag in `docs/research/brotli-notes.md` §8, the
+- zstd v1.5.7: the tag in `docs/slop/research/zstd-notes.md` §6.1.
+- google/brotli v1.2.0: the tag in `docs/slop/research/brotli-notes.md` §8, the
   same tag as the flake's brotli CLI that writes the `.br` corpus streams
   (the CLI's q11 output is byte-identical to the tarball's encoder built
   with zig cc, FMA contraction on or off, and on wasm32-wasi).
 - klauspost/compress `v1.18.1-0.20250402062133-8df4d013ff17`: commit 8df4d01 of
   the local research checkout (`~/code/klauspost-compress`, `v1.18.0-5-g8df4d01`
-  in `docs/research/zstd-notes.md` §6.2), pinned in
+  in `docs/slop/research/zstd-notes.md` §6.2), pinned in
   `bench/drivers/klauspost/go.mod`.
 
 ## Design decisions

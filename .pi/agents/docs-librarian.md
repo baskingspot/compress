@@ -37,10 +37,12 @@ In scope, documentation:
 - `src/*/README.md`: one per codec (`snappy`, `flate`, `gzip`, `zlib`, `zstd`, `brotli`) and `src/internal/README.md`. Each documents the codec's API, error sets, and buffer sizes. Check them against `src/<codec>/` and `src/root.zig`.
 - `examples/README.md`, and the example programs it describes.
 - `bench/README.md`.
+- `docs/specs/README.md`.
+- `CHANGELOG.md` and `THIRD_PARTY.md`.
 
 In scope, code comments in `src/**/*.zig`, only when you open the file to check a README claim: `//!` module docs, `///` declaration docs, and `//` comments. Report a wrong one. Do not sweep them all.
 
-Records, never edited and never flagged for their labels: everything under `docs/results/` and `docs/research/`. They are dated working records. Milestone codes there are history. A live document that links to a record is in scope, and a live document that uses a milestone code as a name is a finding.
+Records, never edited and never flagged for their labels: everything under `docs/slop/`. They are dated working records. Milestone codes there are history. A human document may not link or name `docs/slop/`: a link there is a required fix. A human document that uses a milestone code as a name is a finding.
 
 Out of scope everywhere:
 - `AGENTS.md` is the operating manual for agents. Read it. Do not edit it. If a rule there is wrong or stale, report it.

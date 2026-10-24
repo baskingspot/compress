@@ -13,7 +13,7 @@
 //! Block_Maximum_Size is the smaller of Window_Size and 128 KiB (`§3.1.1.2.4`)
 //! and bounds the declared and the decoded size of every block.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;

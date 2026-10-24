@@ -6,7 +6,7 @@
 //! which owns the bit writer.
 //!
 //! Ported from google/brotli v1.2.0 `c/enc/entropy_encode.c` (`THIRD_PARTY.md`).
-//! Format: docs/research/specs/rfc7932-brotli.txt.
+//! Format: docs/specs/rfc7932-brotli.txt.
 
 const std = @import("std");
 const assert = std.debug.assert;

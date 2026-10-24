@@ -443,7 +443,7 @@ test "copyMatch: SIMD shuffle for small offsets round-trips" {
 // ---------------------------------------------------------------------------
 
 test "golden decode: format_description.txt hand examples" {
-    // Spec: docs/research/specs/snappy-format-description.txt §2.2 (copies):
+    // Spec: docs/specs/snappy-format-description.txt §2.2 (copies):
     //   "xababab" could be encoded as <literal: "xab"> <copy: offset=2 length=4>
     // Decompressed = "xababab" (3 literal + 4 copied from offset 2 → "abab").
     //   varint(7)=0x07, literal "xab" (tag (3-1)<<2=0x08), copy1 len4 off2

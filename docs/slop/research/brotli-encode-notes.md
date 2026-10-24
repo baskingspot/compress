@@ -29,7 +29,7 @@ matrix, `T` divergence rows, `OQ` questions), the decoder's design register
 ## 0. Provenance
 
 - Spec: `rfc7932-brotli.txt` (vendored verbatim; provenance row in
-  `docs/research/specs/README.md`, fetched 2026-10-12). The sections this
+  `docs/specs/README.md`, fetched 2026-10-12). The sections this
   file leans on: §1.5.1 (bit order), §3.2-§3.5 (prefix codes), §4
   (distances), §5 (insert-and-copy lengths), §6 (block switches), §7
   (context modeling), §8 (the static dictionary), §9 (stream and meta-block

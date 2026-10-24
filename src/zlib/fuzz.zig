@@ -13,7 +13,7 @@
 //! budget run finishes. The codec allocates nothing; the only allocation is
 //! the harness's `Io.Writer.Allocating`, which the runner's leak check covers.
 //!
-//! Spec: docs/research/specs/rfc1950-zlib.txt (§2.1 byte order, §2.2 header
+//! Spec: docs/specs/rfc1950-zlib.txt (§2.1 byte order, §2.2 header
 //! and trailer, §2.3 decoder obligations, §8.2 the Adler-32 algorithm).
 
 const std = @import("std");

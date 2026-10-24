@@ -3,10 +3,10 @@
 The brotli codec (RFC 7932): the decoder, and the encoder at the reference's
 `q3` class. `README.md` is the user-facing contract; this
 file keeps the decisions, errata, and oracle notes behind it. The research is
-`docs/research/brotli-notes.md` (`brotli-notes.md` below): its `BR1`-`BR41`
+`docs/slop/research/brotli-notes.md` (`brotli-notes.md` below): its `BR1`-`BR41`
 requirement matrix, `T1`-`T9` divergence rows, and `OQ1`-`OQ8` design questions
 are cited as they appear there. `§` cites are sections of
-`docs/research/specs/rfc7932-brotli.txt`. brotli wraps nothing — it is a codec,
+`docs/specs/rfc7932-brotli.txt`. brotli wraps nothing — it is a codec,
 not a container — so the layering questions are zstd's one milestone later,
 plus one surface no other codec here has: the 122,784-byte static dictionary
 the format folds into distance space (§8).
@@ -131,7 +131,7 @@ marked **[sketch call]** and collected at the end.
   needed. The dictionary milestone verified the refusal live
   (`dictionary-notes.md §5.2`: the CLI 1.2.0's `-D` stream decodes with `-D`,
   fails without it, and fails here with the natural distance refusal) and lands
-  no brotli dictionary API; the milestone row in `docs/compress-plan.md`
+  no brotli dictionary API; the milestone row in `docs/slop/plan.md`
   records the negative.
 
 - **The prefix-code layer owns both forms and both Kraft rules (§3.4, §3.5).**
@@ -592,7 +592,7 @@ three CLI text streams) and the CRC pins are the gates.
 
 ## The encoder (`encode.zig`, `encode_match.zig`, `encode_huffman.zig`, `Writer.zig`)
 
-The first encoder class is the reference's `q3` (`docs/research/brotli-encode-notes.md`
+The first encoder class is the reference's `q3` (`docs/slop/research/brotli-encode-notes.md`
 §1.5, the `EN` matrix in §6): the `h03` quickly hasher through
 `BrotliStoreMetaBlockTrivial` — one emission path, fresh trees per meta-block,
 NBLTYPES 1/1/1, no block splitting, no context modeling, and no dictionary
@@ -1028,7 +1028,7 @@ ships none and std ships none (both verified). The arms that exist:
 - **compress** — ours.
 
 The fleet run records the missing arms (the M4 precedent: the competitor-set
-gap is stated in the run's results file under `docs/results/`). Claims cite a
+gap is stated in the run's results file under `docs/slop/results/`). Claims cite a
 recorded fleet run, never local numbers.
 
 ## Sketch calls beyond the register

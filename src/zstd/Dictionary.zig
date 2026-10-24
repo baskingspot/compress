@@ -14,7 +14,7 @@
 //! repeat offsets, and no ID. The value borrows `source` (no copy, no
 //! allocation) and must outlive every call that uses it.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt §5
+//! Format: docs/specs/rfc8878-zstd.txt §5
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -330,11 +330,11 @@ pub fn initRaw(content: []const u8) Dictionary {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §5 (the dictionary
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §5 (the dictionary
 // format), §4.2.1 (the literals tree), §4.1.1 (the FSE descriptions). The
 // trained fixtures are `golden.zig`'s, each trained and checked with the
 // pinned zstd v1.5.7 CLI; the field expectations come from the research's
-// independent from-scratch parse (docs/research/dictionary-notes.md §1.1).
+// independent from-scratch parse (docs/slop/research/dictionary-notes.md §1.1).
 // ---------------------------------------------------------------------------
 
 test "parse reads the trained dictionaries" {

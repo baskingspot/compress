@@ -10,7 +10,7 @@
 //!   - `fuzzAmplification`: bomb-shaped streams against caps of every size
 //!   - `fuzzReaderMachinery`: random `Io.Reader` consumer operations
 //!
-//! Spec: docs/research/specs/rfc1951-deflate.txt (§3.1.1 bit packing, §3.2.3
+//! Spec: docs/specs/rfc1951-deflate.txt (§3.1.1 bit packing, §3.2.3
 //! block format, §3.2.4 stored blocks, §3.2.5 length/distance codes, §3.2.6
 //! fixed Huffman, §3.2.7 dynamic Huffman). Contracts: src/flate/README.md.
 

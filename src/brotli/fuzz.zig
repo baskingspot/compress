@@ -49,7 +49,7 @@
 //! cannot spin: a `Reader` that neither serves bytes nor fails inside its
 //! call budget is `error.PumpStalled`, reported, never a timeout.
 //!
-//! Spec: docs/research/specs/rfc7932-brotli.txt. API and contracts:
+//! Spec: docs/specs/rfc7932-brotli.txt. API and contracts:
 //! README.md; the per-layer corner lists these targets were built from:
 //! AGENTS.md.
 

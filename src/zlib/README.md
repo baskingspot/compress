@@ -6,7 +6,7 @@ a big-endian Adler-32 trailer. The compression is [flate](../flate/README.md)'s
 checksum, and `std.Io` streaming. It is the `compress.zlib` namespace. It uses
 `std`, `fastmem`, and `src/flate/` (copy `src/zlib/` out with `src/flate/` and
 `src/internal/`), allocates nothing, and takes caller-owned buffers. The spec
-is vendored at `docs/research/specs/rfc1950-zlib.txt`.
+is vendored at `docs/specs/rfc1950-zlib.txt`.
 
 ## Usage
 

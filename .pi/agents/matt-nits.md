@@ -18,7 +18,7 @@ This is not a code-styling agent. Do not invent rules. Do not apply edits that a
 
 Apply exactly these patterns. They are the Matt Zig style consistency rules, derived from the style-nits history of Matt's earlier Zig projects.
 
-Do not apply style nits to vendored code (`docs/research/specs/`) or to golden-fixture tables (reference vector data in `decode.zig` and `tests/fixtures/`). Fixtures may receive targeted correctness fixes when explicitly requested, but never churn for style.
+Do not apply style nits to vendored code (`docs/specs/`) or to golden-fixture tables (reference vector data in `decode.zig` and `tests/fixtures/`). Fixtures may receive targeted correctness fixes when explicitly requested, but never churn for style.
 
 `ast-grep` (`sg`) may be on PATH in the devshell. Prefer it over `grep -E` for structural checklist rules where it fits.
 

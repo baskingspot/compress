@@ -8,7 +8,7 @@
 //! rebuild their inputs from. "The CLI" in the comments below is the zstd CLI v1.5.7,
 //! the reference decoder the fixtures were generated and checked with.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -52,7 +52,7 @@ pub const TableRow = struct {
 };
 
 // The `pair_*` fixtures are the RFC's Huffman worked example (`§4.2.2`),
-// hand-built (`docs/research/zstd-notes.md` §5.4): a 19-byte frame whose
+// hand-built (`docs/slop/research/zstd-notes.md` §5.4): a 19-byte frame whose
 // literals stream is `01 0D` or `10 0D`, decoding to `00 01 04 05` and
 // `00 01 05 04` respectively on both the CLI and Zig std. `pair_tree` is the
 // direct-weights tree description, `pair_stream` the Table 25 stream, and
@@ -82,7 +82,7 @@ pub const pair_errata_literals_section: [9]u8 =
 
 // The Appendix A tables below are the spec's A.1, A.2, and A.3 rows, minus
 // each table's first data row, which is errata 6441's all-zero state-0
-// duplicate (`docs/research/zstd-notes.md` §4): 64 + 64 + 32 real rows. The
+// duplicate (`docs/slop/research/zstd-notes.md` §4): 64 + 64 + 32 real rows. The
 // three `*_defaultDistribution` arrays of `§3.1.1.3.2.2` are not here. They
 // live in `sequences.zig`, whose Predefined_Mode builds its tables from them
 // and whose tests cross-check them against these rows.
@@ -285,7 +285,7 @@ pub const weights_description = [_]u8{
 };
 pub const weights_description_counts = [_]i16{ 26, 1, 1, 2, 1, 0, 0, 0, 1 };
 // The `literals_*` sections are the literals sections of real `zstd` v1.5.7
-// frames (`docs/research/zstd-notes.md` §5). Each is a single compressed block
+// frames (`docs/slop/research/zstd-notes.md` §5). Each is a single compressed block
 // whose sequences section is the zero-sequence byte (`§3.1.1.3.2.1`), so the
 // frame's decoded output is exactly its literals, and both the CLI's `zstd -d`
 // and CPython 3.14's `compression.zstd` produce the expected bytes. The input
@@ -722,7 +722,7 @@ pub const frame_pair = hex("28b52ffd004855000042800184432010010d00");
 pub const frame_pair_errata = hex("28b52ffd004855000042800184432010100d00");
 
 // The hand-built multi-block fixtures below are whole frames
-// (`docs/research/zstd-notes.md` §5.4): each is the magic, a descriptor 0x00
+// (`docs/slop/research/zstd-notes.md` §5.4): each is the magic, a descriptor 0x00
 // (no Frame_Content_Size, no checksum), a 512 KB window descriptor, then one
 // or more compressed blocks of raw literals and the sequences section in
 // question. `zstd -d` decodes every one of them to the bytes the tests
@@ -1000,7 +1000,8 @@ pub const frame_truncated_header = hex("28b52ffd004801");
 // decodes the good ones byte-exact, `zstd -t` verifies the checksummed ones (the C library's
 // XXH64 against std's, through the trailer), and `zstd -d` exits 1 on every negative corner.
 // The bytes below are generator output, not hand transcriptions. The research behind these
-// fixtures is in `docs/research/zstd-notes.md` §3 (the checksum) and §5.4 (the corruption set).
+// fixtures is in `docs/slop/research/zstd-notes.md` §3 (the checksum) and §5.4 (the
+// corruption set).
 //
 // The groups:
 //
@@ -1163,7 +1164,7 @@ pub const skippable_huge = hex("512a4d18ffffffff616263");
 
 // The dictionary fixtures (RFC 8878 §5). The trained dictionaries are the
 // pinned CLI v1.5.7's `zstd --train -r <dir>` output over 24 seeded
-// corpus-shaped samples (`docs/research/dictionary-notes.md` §1.1: the
+// corpus-shaped samples (`docs/slop/research/dictionary-notes.md` §1.1: the
 // research's from-scratch byte-level parse and klauspost's InspectDictionary
 // agree on every field, and both dictionaries round-trip through the CLI
 // byte-exact). The two incomplete-statistics dictionaries are the C's own

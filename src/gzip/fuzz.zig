@@ -15,7 +15,7 @@
 //! finishes. The "hostile-header pins" test at the end is a plain unit test, so
 //! `just test` runs it too.
 //!
-//! Spec: docs/research/specs/rfc1952-gzip.txt (§2.2 members, §2.3.1 the fixed
+//! Spec: docs/specs/rfc1952-gzip.txt (§2.2 members, §2.3.1 the fixed
 //! header, §2.3.1.1 FEXTRA, §2.3.1.2 decoder obligations, §8 the CRC-32 sample).
 
 const std = @import("std");

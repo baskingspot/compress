@@ -12,7 +12,7 @@
 //! meta-block byte. A failed read returns `error.ReadFailed` and the detail
 //! is in `err`. Nothing is allocated.
 //!
-//! Format: docs/research/specs/rfc7932-brotli.txt. API: README.md.
+//! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
 const Io = std.Io;
@@ -614,7 +614,7 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc7932-brotli.txt §9.1 (the header), §9.2
+// Tests. Spec: docs/specs/rfc7932-brotli.txt §9.1 (the header), §9.2
 // (the meta-block ladder), §9.3 (the last-byte fill), §10 (the command
 // stream's execution). The fixtures are `golden.zig`'s, each verified with
 // the pinned CLI (brotli 1.2.0); every decode checks the output byte for byte

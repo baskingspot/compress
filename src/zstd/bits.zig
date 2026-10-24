@@ -19,7 +19,7 @@
 //! (`§4.2.2`, `§3.1.1.3.2.1.2`), while a Huffman weight series ends on the
 //! overflow (`§4.2.1.2`).
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 //! Lineage (the writer inverses): facebook/zstd v1.5.7 `huf_compress.c`
 //! (`HUF_compress1X_usingCTable_internal`) and `fse_compress.c`
 //! (`FSE_compress_usingCTable`); attribution in THIRD_PARTY.md.

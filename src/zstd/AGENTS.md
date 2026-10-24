@@ -8,12 +8,12 @@ behind it. The external-oracle lane is `just zstd-oracle` (`oracle.zig`,
 `scripts/zstd_oracle.py`, `scripts/zstd_klauspost`); the encoder's oracle
 notes are below.
 
-Research is `docs/research/zstd-notes.md` (zstd-notes) for the decoder — `OQn`
+Research is `docs/slop/research/zstd-notes.md` (zstd-notes) for the decoder — `OQn`
 are its §7 design questions, `Tn` its §4 divergence rows — and
-`docs/research/zstd-encoder-notes.md` (zstd-encoder-notes) for the encoder:
+`docs/slop/research/zstd-encoder-notes.md` (zstd-encoder-notes) for the encoder:
 `EQn` are its §3 design questions, `TEn` its §5 divergence rows, and its §1.1
 `ZE` matrix is the compliance list (our decoder's every error name is an encoder
-MUST). `§` cites are sections of `docs/research/specs/rfc8878-zstd.txt`. zstd
+MUST). `§` cites are sections of `docs/specs/rfc8878-zstd.txt`. zstd
 frames itself and owns its checksum, so the container questions gzip answered
 recur inside this namespace; `src/gzip/AGENTS.md` ("The wrapping design") states
 them once. The Io contracts are in `src/internal/AGENTS.md`. The reader
@@ -452,7 +452,7 @@ sets can still hit the deliberate differences (TE8, TE11 below).
 ## The dictionary (RFC 8878 §5; the M7 sketch)
 
 The dictionary milestone consumes dictionaries, never trains them. The
-research is `docs/research/dictionary-notes.md` (`dict-notes` below): its
+research is `docs/slop/research/dictionary-notes.md` (`dict-notes` below): its
 `DD`/`DE`/`ZL` matrices are the requirements, its `DT` rows the divergences,
 its `DQ` register the API questions, and its §11 the milestone row. The
 dictionary file is an input — the `zstd` CLI trains (`--train`, fastCover,
@@ -938,7 +938,7 @@ the record of what the divergence was.
 ## Performance
 
 - `just bench` runs `bench.zig` (`just corpus` first). Claims cite a recorded
-  fleet run under `docs/results/` (`m4-*`, `zstd-wave2-*`), never local numbers.
+  fleet run under `docs/slop/results/` (`m4-*`, `zstd-wave2-*`), never local numbers.
   The encoder's bench arm (encode rows against the CLI and klauspost) is the M5
   addition; the fleet's zstd-c driver runs the encode rows too (the
   `m5-encode-fleet-20261013` run).

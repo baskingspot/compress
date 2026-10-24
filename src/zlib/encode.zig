@@ -16,7 +16,7 @@
 //! (`src/internal/container.zig`, `EncodeHooks`), instantiated over
 //! `framing.zig`.
 //!
-//! Format: docs/research/specs/rfc1950-zlib.txt
+//! Format: docs/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 const testing = std.testing;
@@ -141,7 +141,7 @@ pub fn compress(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
 // (the header, the trailer, FCHECK, FLEVEL), §2.3 (decoder obligations).
 // ---------------------------------------------------------------------------
 

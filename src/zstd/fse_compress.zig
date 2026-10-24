@@ -16,10 +16,10 @@
 //! that walk the decoder between them. The writer's numbers follow the C
 //! reference's (`FSE_normalizeCount`, `FSE_buildCTable_wksp`,
 //! `FSE_writeNCount_generic`, `FSE_compress_usingCTable_generic`) unless a
-//! `TEn` row in `docs/research/zstd-encoder-notes.md` says otherwise; the byte
+//! `TEn` row in `docs/slop/research/zstd-encoder-notes.md` says otherwise; the byte
 //! class they produce is the CLI's.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 //! Lineage: facebook/zstd v1.5.7 `fse_compress.c` (`FSE_normalizeCount`,
 //! `FSE_buildCTable_wksp`, `FSE_writeNCount_generic`); attribution in
 //! THIRD_PARTY.md.
@@ -716,7 +716,7 @@ fn mask32(count: u5) u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §4.1 (the FSE state
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §4.1 (the FSE state
 // machine), §4.1.1 (the table description and the table construction),
 // §3.1.1.3.2.1 (the sequences contexts' caps), §4.2.1.2 (the weights context).
 // The byte-exact expectations are the reference encoder's own descriptions

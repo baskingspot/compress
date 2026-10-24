@@ -7,7 +7,7 @@ the `compress.zstd` namespace; it imports only `std` and `fastmem`, and
 neither direction allocates (the `*Alloc` pumps allocate their default buffer
 for the call).
 
-The format is vendored at `docs/research/specs/rfc8878-zstd.txt`; `§` cites in
+The format is vendored at `docs/specs/rfc8878-zstd.txt`; `§` cites in
 this directory are sections of that file.
 
 ## Usage
@@ -245,7 +245,7 @@ state — so `encode` exposes only the names above.
   the CLI, libzstd, and this package's decoder accept, and the whole frame
   reproduces the pinned CLI v1.5.7's `zstd -1` bytes (level 1) and `zstd -3`
   bytes (level 3) on the corpus shapes, on the tests' fixtures, and on the
-  `just zstd-oracle` lane's non-ASCII and over-512-KiB inputs. The level-3 pin
+  non-ASCII and over-512-KiB inputs of `just zstd-oracle`. The level-3 pin
   is the CLI's file form with default threading, over inputs up to the level's
   8-MiB job size: above it the CLI's multithreaded form splits the input into
   jobs whose boundary blocks no single-call encoder produces, so the pin there
@@ -411,8 +411,7 @@ recorded.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only), and `just check-32`
 runs a large-frame probe on wasm32-wasi under wasmtime. `just corpus` generates
 the hash-checked benchmark corpus, and `just bench` runs the local benchmarks;
-local numbers are not performance claims. Design notes, RFC errata, and the
-test inventory are in [`AGENTS.md`](AGENTS.md).
+local numbers are not performance claims.
 
 ## License
 

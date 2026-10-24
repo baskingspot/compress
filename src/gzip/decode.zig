@@ -8,7 +8,7 @@
 //! header declaring a 65,535-byte extra field costs no memory. `checkTrailer`
 //! is the one place the CRC-32 and size are compared.
 //!
-//! Format: docs/research/specs/rfc1952-gzip.txt
+//! Format: docs/specs/rfc1952-gzip.txt
 
 const std = @import("std");
 const mem = std.mem;
@@ -302,7 +302,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1952-gzip.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1952-gzip.txt §2.1 (byte order), §2.2
 // (members), §2.3 (the member), §2.3.1 (the fixed header, the optional
 // fields, FHCRC, the trailer), §2.3.1.1 (FEXTRA), §2.3.1.2 (decoder
 // obligations).

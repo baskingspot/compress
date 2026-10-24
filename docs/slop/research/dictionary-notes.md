@@ -35,7 +35,7 @@ and the module registers (`src/zstd/AGENTS.md`, `src/brotli/AGENTS.md`,
 ## 0. Provenance
 
 - Specs (all vendored verbatim, provenance rows in
-  `docs/research/specs/README.md`): `rfc8878-zstd.txt` §5 (Dictionary Format)
+  `docs/specs/README.md`): `rfc8878-zstd.txt` §5 (Dictionary Format)
   and §6 (Use of Dictionaries) — 4 pages total, the whole normative surface;
   `rfc1950-zlib.txt` §2.2 (Data format: FDICT, DICTID, and the ADLER32
   trailer's "excluding any dictionary data"), §2.3 (Compliance); `rfc1951-deflate.txt` §3.2.3 (the preset

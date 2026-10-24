@@ -12,7 +12,7 @@
 //! `window` are public because `zstd.Reader` is built from the same code and
 //! the tests exercise it directly.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt
+//! Format: docs/specs/rfc8878-zstd.txt
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -198,7 +198,7 @@ fn skippableLength(source: []const u8) error{Truncated}!usize {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1 (frames and
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1 (frames and
 // skippable frames), §3.1.1 (the frame and its checksum), §3.1.1.1.1-§3.1.1.1.4
 // (the header's fields), §3.1.1.2 (the block chain), §3.1.1.4 (offsets and the
 // window), §3.1.2 (skippable frames). The fixtures are `golden.zig`'s, each

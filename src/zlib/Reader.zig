@@ -15,7 +15,7 @@
 //! `framing.zig`. Flate's checksum hook folds the Adler-32 as decoded bytes
 //! enter the window, so the trailer check at the end hashes nothing again.
 //!
-//! Format: docs/research/specs/rfc1950-zlib.txt
+//! Format: docs/specs/rfc1950-zlib.txt
 
 const std = @import("std");
 const Io = std.Io;
@@ -124,7 +124,7 @@ pub fn streamAll(
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
+// Tests. Spec: docs/specs/rfc1950-zlib.txt §2.1 (byte order), §2.2
 // (the header, the trailer, the stream's end), §2.3 (decoder obligations).
 // Every decode is sentinel-checked.
 // ---------------------------------------------------------------------------

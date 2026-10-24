@@ -10,7 +10,7 @@
 //!   - `deflate_test.go` `deflateTests` (15 rows, as decode goldens)
 //!   - `testdata/huffman-*` `.in`/`.golden` pairs (9)
 //!   - hand-built micro-streams checked against python3's zlib
-//!     (`docs/research/flate-notes.md` §3.2), RFC 1951 §3.2.3/§3.2.4/§3.2.7
+//!     (`docs/slop/research/flate-notes.md` §3.2), RFC 1951 §3.2.3/§3.2.4/§3.2.7
 //!     examples, and three raw streams from Zig std
 //!
 //! Every decode here is checked with the sentinel overrun rule (`checkDecode`).
@@ -436,7 +436,7 @@ pub const truncated_cases: [10]TruncatedCase = .{
 /// `error.Truncated`; Go asserts `io.ErrUnexpectedEOF` for all of them.
 pub const truncated_streams_data = "\x00\x0c\x00\xf3\xffhello, world\x01\x00\x00\xff\xff";
 
-/// Hand-built micro-streams (`docs/research/flate-notes.md` §3.2, checked
+/// Hand-built micro-streams (`docs/slop/research/flate-notes.md` §3.2, checked
 /// against python3's zlib), RFC 1951's own micro-examples, and three raw
 /// streams from Zig std. The first two groups pin the byte-level packing
 /// rules:

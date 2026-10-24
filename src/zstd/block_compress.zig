@@ -20,7 +20,7 @@
 //! handed exactly the block's decoded bytes. Either way each byte reaches
 //! XXH64 once, in order.
 //!
-//! Format: docs/research/specs/rfc8878-zstd.txt §3.1.1.2 (blocks), §3.1.1.5
+//! Format: docs/specs/rfc8878-zstd.txt §3.1.1.2 (blocks), §3.1.1.5
 //! (the repeat offsets), §3.1.1 (the checksum).
 //! Lineage: facebook/zstd v1.5.7 `zstd_compress.c` (the block emission ladder,
 //! `ZSTD_compressBlock_internal` / `ZSTD_entropyCompressSeqStore`); attribution
@@ -616,7 +616,7 @@ fn isRle(block_source: []const u8) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc8878-zstd.txt §3.1.1.2 (the block
+// Tests. Spec: docs/specs/rfc8878-zstd.txt §3.1.1.2 (the block
 // header and the three types), §3.1.1.2.3 (RLE), §3.1.1.2.4 (Block_Size and
 // the minGain margin), §3.1.1 (the checksum). Every block the layer emits is
 // decoded back through the landed decoder (`block.decode`) and its bytes

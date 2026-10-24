@@ -154,7 +154,7 @@ pub fn crc32(crc: u32, bytes: []const u8) u32 {
 }
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1952-gzip.txt §8 (the sample table and
+// Tests. Spec: docs/specs/rfc1952-gzip.txt §8 (the sample table and
 // update), §2.3.1 (the trailer value). std's `Crc32` is the reference for the
 // slice-by-16 kernel.
 // ---------------------------------------------------------------------------

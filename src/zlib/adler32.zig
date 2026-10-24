@@ -14,7 +14,7 @@
 //! the arithmetic. `std.hash.Adler32` is the reference the tests check it
 //! against.
 //!
-//! Format: docs/research/specs/rfc1950-zlib.txt (§2.2 the trailer, §8.2 the
+//! Format: docs/specs/rfc1950-zlib.txt (§2.2 the trailer, §8.2 the
 //! algorithm).
 
 const std = @import("std");
@@ -156,7 +156,7 @@ pub const Checksum = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Tests. Spec: docs/research/specs/rfc1950-zlib.txt §2.2 (the trailer value),
+// Tests. Spec: docs/specs/rfc1950-zlib.txt §2.2 (the trailer value),
 // §8.2 (the algorithm and the deferred modulo), §9 (the sample). std's
 // `Adler32` is the reference the vector kernel is checked against.
 // ---------------------------------------------------------------------------
