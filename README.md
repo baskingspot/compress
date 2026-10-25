@@ -31,7 +31,6 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 
 Not implemented:
 
-- Brotli custom dictionaries: a custom or shared dictionary is outside RFC 7932, so there is no API for one.
 - A zstd dictionary trainer: the zstd CLI trains dictionaries, and this package consumes them.
 - zstd levels other than 1 and 3: the rest return `error.Unimplemented`.
 - Google's Snappy framing: the `Reader` and `Writer` use a length-prefixed framing of this package's own. It has no end marker or checksum, so a stream cut at a block boundary reads as complete.
