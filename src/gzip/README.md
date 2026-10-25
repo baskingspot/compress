@@ -52,14 +52,11 @@ one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 
 ```zig
 // Names are relative to gzip = @import("compress").gzip
-encode.Options        // struct { level: u8 = 1 }
-                      //   flate's level scale, 1-9: level 1 (the default) and
-                      //   level 6 are implemented; levels 2-5 and 7-9, and
-                      //   anything outside 1-9, are not implemented and
-                      //   return `error.Unimplemented`
+encode.Level          // flate.encode.Level: @"1" or @"6"
+encode.Options        // struct { level: Level = .@"1" }
 encode.maxCompressedLength(input_len: usize) usize
 encode.compress(source: []const u8, target: []u8, options: Options)
-    error{ BufferTooSmall, Unimplemented }!usize
+    error{BufferTooSmall}!usize
 
 decode.decompress(source: []const u8, target: []u8) DecompressError!usize
 decode.DecompressError = flate.decode.DecompressError || error{
@@ -132,9 +129,8 @@ and `InvalidBlockType` through `InvalidMatch` for a malformed deflate body.
 ## Limitations
 
 - Only flate's levels 1 and 6 exist: level 1 is the fixed-Huffman fast
-  encoder, level 6 the klauspost class. Levels 2-5 and 7-9, and anything
-  outside 1-9, return `error.Unimplemented`; a `Writer` made with one fails
-  every write and `finish`, and `Writer.streamAll` rejects it before reading.
+  encoder, level 6 the klauspost class. `Level` cannot represent another
+  number.
 - A `Writer` or `compress` call writes one member, with no file name, comment,
   modification time, or extra field. On input, names and comments over 512 bytes
   are rejected (`HeaderTooLong`), though RFC 1952 allows them.

@@ -69,13 +69,16 @@ pub fn main(init: std.process.Init) !u8 {
             print("gzip-oracle: encode needs <input-file> [LEVEL]\n", .{});
             return 1;
         }
-        const level: u8 = if (args.len == 4)
-            std.fmt.parseInt(u8, args[3], 10) catch {
+        const level: gzip.encode.Level = if (args.len == 4) level: {
+            const number = std.fmt.parseInt(u8, args[3], 10) catch {
                 print("gzip-oracle: level must be a number, got '{s}'\n", .{args[3]});
                 return 1;
-            }
-        else
-            1;
+            };
+            break :level gzip.encode.Level.fromInt(number) orelse {
+                print("gzip-oracle: level must be 1 or 6, got {d}\n", .{number});
+                return 1;
+            };
+        } else .@"1";
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, gzip.encode.maxCompressedLength(source.len));
 

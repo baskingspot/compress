@@ -42,19 +42,26 @@ const sentinel = internal.sentinel;
 const common = @import("common.zig");
 const readInt = common.readInt;
 const decode = @import("decode.zig");
+/// The format's maximum backward match reach: 32768 (`§3.2.5`, the canonical
+/// constant in decode.zig with the distance tables). The finder's window is
+/// this much history followed by the block, so the cap is structural.
+pub const history_len = decode.history_len;
+/// `§3.2.5` — the longest match a length symbol can declare, 258 (length
+/// code 285). Aliased from `decode.zig`, the one spelling of the RFC's
+/// length and distance tables.
+pub const max_match_len = decode.max_match_len;
+const length_base = decode.length_base;
+const length_extra = decode.length_extra;
+const distance_base = decode.distance_base;
+const distance_extra = decode.distance_extra;
 const dynamic = @import("dynamic.zig");
-const writer = @import("Writer.zig");
 const golden = @import("golden.zig");
+const writer = @import("Writer.zig");
 
 /// The encoder's block size: 65535, the stored-block LEN cap (`§3.2.4`), so any
 /// block can fall back to stored. `compress` splits input at it; the streaming
 /// `Writer` emits blocks at it.
 pub const max_block_size: usize = 65535;
-
-/// The format's maximum backward match reach: 32768 (`§3.2.5`, the canonical
-/// constant in decode.zig with the distance tables). The finder's window is
-/// this much history followed by the block, so the cap is structural.
-pub const history_len = decode.history_len;
 
 /// Worst-case compressed size for `input_len` bytes:
 /// `input_len + 5 * ceil(input_len / max_block_size) + 2`. Every block costs at
@@ -312,15 +319,6 @@ pub const fixed_distance_codes: [32]Code = blk: {
     for (&codes, 0..) |*code, i| code.* = .{ .bits = wireBits(@intCast(i), 5), .len = 5 };
     break :blk codes;
 };
-
-/// `§3.2.5` — the longest match a length symbol can declare, 258 (length
-/// code 285). Aliased from `decode.zig`, the one spelling of the RFC's
-/// length and distance tables.
-pub const max_match_len = decode.max_match_len;
-const length_base = decode.length_base;
-const length_extra = decode.length_extra;
-const distance_base = decode.distance_base;
-const distance_extra = decode.distance_extra;
 
 /// A length symbol ready to emit: the merged-alphabet symbol (257-285), its
 /// extra-bit count, and the extra-bit value.
@@ -1310,27 +1308,31 @@ pub fn compressBlockStream6(
     );
 }
 
-/// Whether `level` is implemented: 1 (fixed Huffman) and 6 (dynamic Huffman)
-/// are; every other level (2-5, 7-9, and anything outside 1-9) returns
-/// `error.Unimplemented`, never a silent alias of another level. The
-/// containers' shared driver asks through this, so the rule lives once.
-pub fn levelImplemented(level: u8) bool {
-    return level == 1 or level == 6;
-}
+/// The compression levels this encoder implements, named by the zlib scale.
+/// The tag is the level number, so `@intFromEnum` spells the CLI's value.
+pub const Level = enum(u8) {
+    /// Fixed-Huffman blocks from the level-1 match finder, or a stored block
+    /// when that is smaller.
+    @"1" = 1,
+    /// klauspost/compress's level-6 class: the wider two-table greedy finder,
+    /// dynamic-Huffman blocks (`§3.2.7`), and the per-block stored, fixed, and
+    /// dynamic dispatch. Byte-identical to klauspost/compress's flate at
+    /// level 6 (the pinned module version).
+    @"6" = 6,
+
+    /// The level for a zlib-scale number, or `null` when this encoder does
+    /// not implement it. Use this at a boundary where the number comes from
+    /// outside the type system, such as a config value or a flag; a literal
+    /// needs no conversion.
+    pub fn fromInt(number: u8) ?Level {
+        return std.enums.fromInt(Level, number);
+    }
+};
 
 /// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = struct {
-    /// The zlib-scale compression level, 1-9:
-    ///
-    ///   - 1 (the default): fixed-Huffman blocks from the level-1 match
-    ///     finder, or a stored block when that is smaller.
-    ///   - 6: klauspost/compress's level-6 class — their wider greedy match
-    ///     finder, dynamic-Huffman blocks (`§3.2.7`), and the per-block
-    ///     stored/fixed/dynamic dispatch. Byte-identical to
-    ///     klauspost/compress's flate at level 6 (the pinned module version).
-    ///   - 2-5 and 7-9 are not implemented: `error.Unimplemented`, never a
-    ///     silent alias, and so is any level outside 1-9.
-    level: u8 = 1,
+    /// The compression level. Only the levels in `Level` are representable.
+    level: Level = .@"1",
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
     /// of the stream, which the finder's table is primed from and a match can
     /// reach into. Raw deflate names no dictionary, so the caller vouches for
@@ -1343,7 +1345,7 @@ pub const Options = struct {
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
 /// always suffices; a smaller one can return `error.BufferTooSmall`, leaving
-/// `target` partly written. `error.Unimplemented` for an unimplemented level.
+/// `target` partly written.
 ///
 /// `options.dict` is the stream's preset dictionary or `null` (`§3.2.3`); see
 /// `Options`.
@@ -1357,8 +1359,7 @@ pub fn compress(
     source: []const u8,
     target: []u8,
     options: Options,
-) error{ BufferTooSmall, Unimplemented }!usize {
-    if (!levelImplemented(options.level)) return error.Unimplemented;
+) error{BufferTooSmall}!usize {
     // A preset dictionary is a second region in front of `source` (the caller
     // owns the source bytes, so they cannot be prepended to). The streaming
     // `Writer` owns a buffer and puts its dictionary inside it instead; both
@@ -1384,8 +1385,11 @@ fn compressBlocks(
     source: []const u8,
     target: []u8,
     options: Options,
-) error{ BufferTooSmall, Unimplemented }!usize {
-    if (options.level == 6) return compressBlocks6(preset, window, source, target);
+) error{BufferTooSmall}!usize {
+    switch (options.level) {
+        .@"6" => return compressBlocks6(preset, window, source, target),
+        .@"1" => {},
+    }
 
     var w: BitWriter = .{ .target = target };
 
@@ -1446,27 +1450,23 @@ fn roundTrip(input: []const u8) !void {
     try golden.checkDecode(target, comp[0..clen], input);
 }
 
-test "compress: options — every implemented level round-trips" {
-    // Levels are the zlib scale: 1 (fixed Huffman) and 6 (dynamic Huffman)
-    // are implemented, and `.{}` is level 1.
+test "compress: options — every level round-trips and carries its tag" {
+    // The levels are the zlib scale, and the tag is the number.
     var comp: [4096]u8 = undefined;
     var decoded: [4096]u8 = undefined;
     const input = "the quick brown fox jumps over the lazy dog. " ** 8;
 
-    try testing.expectEqual(@as(u8, 1), (Options{}).level);
-    for ([_]u8{ 1, 6 }) |level| {
+    try testing.expectEqual(Level.@"1", (Options{}).level);
+    try testing.expectEqual(@as(u8, 1), @intFromEnum(Level.@"1"));
+    try testing.expectEqual(@as(u8, 6), @intFromEnum(Level.@"6"));
+    try testing.expectEqual(Level.@"1", Level.fromInt(1).?);
+    try testing.expectEqual(Level.@"6", Level.fromInt(6).?);
+    try testing.expectEqual(@as(?Level, null), Level.fromInt(2));
+    try testing.expectEqual(@as(?Level, null), Level.fromInt(0));
+    for (std.enums.values(Level)) |level| {
         const n = try compress(input, &comp, .{ .level = level });
         const dn = try decode.decompress(comp[0..n], &decoded, null);
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
-    }
-
-    // The unimplemented levels: never a silent alias, and any level outside
-    // 1-9 is rejected too (0 and 10 included).
-    for ([_]u8{ 0, 2, 3, 4, 5, 7, 8, 9, 10, 255 }) |level| {
-        try testing.expectError(
-            error.Unimplemented,
-            compress(input, &comp, .{ .level = level }),
-        );
     }
 }
 
@@ -1481,10 +1481,10 @@ test "compress: level 6 emits a dynamic-Huffman block for compressible text" {
     const input = "the quick brown fox jumps over the lazy dog. " ** 400;
     const dynamic_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(dynamic_comp);
-    const dynamic_len = try compress(input, dynamic_comp, .{ .level = 6 });
+    const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6" });
     const fixed_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(fixed_comp);
-    const fixed_len = try compress(input, fixed_comp, .{ .level = 1 });
+    const fixed_len = try compress(input, fixed_comp, .{ .level = .@"1" });
     try testing.expect(dynamic_len < fixed_len);
 
     // BFINAL=0, BTYPE=10: the first three bits are 1, 0, 0 (LSB first).
@@ -1555,7 +1555,7 @@ test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
     const gpa = testing.allocator;
     for (cases) |case| {
         var comp: [256]u8 = undefined;
-        const n = try compress(case.input, &comp, .{ .level = 6 });
+        const n = try compress(case.input, &comp, .{ .level = .@"6" });
         try testing.expectEqualSlices(u8, case.want, comp[0..n]);
         const target = try gpa.alloc(u8, case.input.len + sentinel.len);
         defer gpa.free(target);
@@ -1580,7 +1580,7 @@ test "compress: level 6 with a preset dictionary emits klauspost's bytes" {
         0x8b, 0x52, 0xb9, 0x86, 0xa2, 0x9a, 0x41, 0x12, 0x17, 0x80, 0x01, 0x00,
     };
     var comp: [256]u8 = undefined;
-    const n = try compress(source, &comp, .{ .level = 6, .dict = dict });
+    const n = try compress(source, &comp, .{ .level = .@"6", .dict = dict });
     try testing.expectEqualSlices(u8, want, comp[0..n]);
 
     const gpa = testing.allocator;
@@ -1592,7 +1592,7 @@ test "compress: level 6 with a preset dictionary emits klauspost's bytes" {
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: writer.Buffer = undefined;
-    var w: writer = .init(&out.writer, &buf, .{ .level = 6, .dict = dict });
+    var w: writer = .init(&out.writer, &buf, .{ .level = .@"6", .dict = dict });
     try w.writer.writeAll(source);
     try w.finish();
     try testing.expectEqualSlices(u8, comp[0..n], out.written());
@@ -1612,7 +1612,7 @@ test "compress: level 6 round-trips every shape" {
             defer gpa.free(input);
             const comp = try gpa.alloc(u8, maxCompressedLength(len));
             defer gpa.free(comp);
-            const clen = compress(input, comp, .{ .level = 6 }) catch |err| {
+            const clen = compress(input, comp, .{ .level = .@"6" }) catch |err| {
                 print("FAIL: {s} len {d}: {s}\n", .{ @tagName(shape), len, @errorName(err) });
                 return err;
             };

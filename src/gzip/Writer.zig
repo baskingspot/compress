@@ -62,10 +62,8 @@ const Hooks = container.WriterHooks(framing, Writer);
 /// `buffer` as its working space. `options` (the level) is fixed for the
 /// member. Write through `&w.writer` and end the member with `finish`.
 ///
-/// `init` writes nothing to `output`. With an unimplemented level (2-5, 7-9,
-/// or anything outside 1-9), the writer is created already failed: every
-/// write and `finish` returns `error.WriteFailed`. Do not move the writer
-/// once you have started using it.
+/// `init` writes nothing to `output`. Do not move the writer once you have
+/// started using it.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     return Hooks.init(output, buffer, options);
 }
@@ -82,8 +80,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 
 /// Compress everything from `in` into `out` as one member and return the
 /// number of bytes read from `in`. `in` is read to its end, then the member is
-/// finished. Returns `error.ReadFailed` for a failure of `in`, or at once for
-/// an unimplemented level, and `error.WriteFailed` for a failure of `out`.
+/// finished. Returns `error.ReadFailed` for a failure of `in` and
+/// `error.WriteFailed` for a failure of `out`.
 ///
 /// Allocates nothing. The writer and its buffer take about 224 KiB of stack,
 /// and emitting a block needs another 64 KiB.
@@ -122,7 +120,7 @@ fn roundTrip(source: []const u8) !void {
     var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll(source);
     try w.finish();
-    try golden.expectHeader(out.written(), encode.xflFor(1));
+    try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
     try golden.expectTrailer(out.written(), source);
     try decodeMember(out.written(), source);
 }
@@ -135,17 +133,17 @@ test "Writer: the emitted member is the deterministic one" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w.finish();
-    try golden.expectHeader(out.written(), encode.xflFor(6));
+    try golden.expectHeader(out.written(), encode.xflFor(.@"6"));
     try golden.expectTrailer(out.written(), "the quick brown fox jumps over the lazy dog. " ** 4);
 
     // The same input and level produce the same member.
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
     var buf2: Buffer = undefined;
-    var w2: Writer = .init(&second.writer, &buf2, .{ .level = 6 });
+    var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6" });
     try w2.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w2.finish();
     try testing.expectEqualSlices(u8, out.written(), second.written());
@@ -165,7 +163,7 @@ test "Writer: the header is lazy and written before the first byte" {
 
     try w.writer.flush();
     var header: [encode.header_len]u8 = undefined;
-    encode.writeHeader(&header, 1);
+    encode.writeHeader(&header, .@"1");
     try testing.expectEqualSlices(u8, &header, out.written());
 
     // A write alone does not emit: it lands in the block region.
@@ -176,7 +174,7 @@ test "Writer: the header is lazy and written before the first byte" {
 
     try w.writer.writeAll("y");
     try w.finish();
-    try golden.expectHeader(out.written(), encode.xflFor(1));
+    try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
     try golden.expectTrailer(out.written(), "xy");
     try decodeMember(out.written(), "xy");
 }
@@ -298,26 +296,6 @@ test "Writer: a failed or finished writer never reports a false success" {
     try golden.expectTrailer(out.written(), "hello, gzip");
 }
 
-test "Writer: an unimplemented level is rejected, never silently aliased" {
-    // `Writer.init(..., .{ .level = 5 })` makes the interface fail (every
-    // write and `finish` returns `error.WriteFailed`), and `Writer.streamAll`
-    // returns `error.ReadFailed` at once.
-    const gpa = testing.allocator;
-    var out: Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 5 });
-    try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, gzip"));
-    try testing.expectError(error.WriteFailed, w.finish());
-    try testing.expectEqual(@as(usize, 0), out.written().len);
-
-    var in: Io.Reader = .fixed("hello, gzip");
-    try testing.expectError(
-        error.ReadFailed,
-        Writer.streamAll(&in, &out.writer, .{ .level = 5 }),
-    );
-}
-
 test "Writer: random write machinery sequences stay correct" {
     // Mixed writeSplatAll/writeVecAll/splatBytesAll/writableSliceGreedy+
     // advance/writeByte/flush sequences: the driver class that catches drain
@@ -382,7 +360,7 @@ test "Writer: random write machinery sequences stay correct" {
             }
         }
         try w.finish();
-        try golden.expectHeader(out.written(), encode.xflFor(1));
+        try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
         try golden.expectTrailer(out.written(), expect.items);
         decodeMember(out.written(), expect.items) catch |err| {
             print("\nFAIL: iter {d}: {s}\n", .{ iter, @errorName(err) });
@@ -426,7 +404,7 @@ test "Writer: streamAll consumes its input exactly and writes one member" {
     defer out.deinit();
     try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .{}));
     try testing.expectEqual(source.len, in.seek);
-    try golden.expectHeader(out.written(), encode.xflFor(1));
+    try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
     try golden.expectTrailer(out.written(), source);
     try decodeMember(out.written(), source);
 }

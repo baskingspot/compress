@@ -312,7 +312,7 @@ fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const 
         if (mem.eql(u8, codec, "flate"))
             return compress.flate.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "flate6"))
-            return compress.flate.encode.compress(raw, target, .{ .level = 6 });
+            return compress.flate.encode.compress(raw, target, .{ .level = .@"6" });
         if (mem.eql(u8, codec, "gzip"))
             return compress.gzip.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zlib"))

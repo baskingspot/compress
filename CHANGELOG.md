@@ -5,6 +5,13 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `flate`, `gzip`, and `zlib` take a `Level` enum (`@"1"` and `@"6"`) instead
+  of a number. `error.Unimplemented` leaves `compress`, and a bad level is a
+  compile error. A numeric level from a config maps with `Level.fromInt` and
+  handles the null.
+
 ### Added
 
 - `compress`: one Zig module with a namespace per codec. The default APIs take

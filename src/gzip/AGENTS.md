@@ -80,8 +80,8 @@ header parse, the trailer check, the CRC-32, and the member boundary.
   and written bytes land in flate's block buffer (the caller's `Writer.Buffer`).
 - The header is written lazily (Go's shape) because `init` cannot fail. The
   trailer is written by `finish` only.
-- An unimplemented level poisons the writer at `init`, and `Writer.streamAll`
-  rejects it upfront: the same behavior as flate's.
+- The level is `flate.encode.Level`, so an unimplemented level is not
+  representable and the writer has no init-time level failure.
 - A clean `EndOfStream` always means the trailer was verified, on the fill path
   and on the rebase path. The rebase path is the easy one to miss: an
   over-the-end `peek` reaches flate's sticky end through `rebase`, before any

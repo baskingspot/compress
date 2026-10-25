@@ -169,7 +169,7 @@ Pick the format for the job, not the fastest name:
 | In-memory blocks, latency-bound | snappy | No ratio to speak of; the framing here is this package's own |
 | Web text, either direction      | brotli | Encoder at quality 3; the static dictionary ships inside     |
 
-The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; levels 2 and 4-19 on the CLI's 1-19 scale return `error.Unimplemented`. The DEFLATE encoder's level 1 writes fixed-Huffman and stored blocks only; its level 6 writes dynamic-Huffman blocks and is byte-identical to klauspost/compress's level 6; `gzip` and `zlib` inherit both.
+The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; levels 2 and 4-19 on the CLI's 1-19 scale return `error.Unimplemented`. The DEFLATE encoder's `Level` has `@"1"` (fixed-Huffman and stored blocks) and `@"6"` (dynamic-Huffman, byte-identical to klauspost/compress's level 6); `gzip` and `zlib` take the same type.
 
 # Errors and corrupt input
 

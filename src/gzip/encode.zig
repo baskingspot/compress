@@ -25,6 +25,8 @@ const decode = @import("decode.zig");
 const framing = @import("framing.zig");
 /// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = framing.Options;
+/// The compression levels this encoder takes (flate's, re-exported).
+pub const Level = framing.Level;
 /// RFC 1952 §2.3 — the fixed header's length.
 pub const header_len = framing.header_len;
 /// RFC 1952 §2.3 — the trailer's length.
@@ -48,7 +50,7 @@ pub fn maxCompressedLength(input_len: usize) usize {
 /// (unknown; `§2.3.1.2` suggests "255 for OS"). For a given level the header
 /// is the same every time: nothing in it depends on the clock or the
 /// environment. Multi-byte fields are little-endian (`§2.1`).
-pub fn writeHeader(target: *[header_len]u8, level: u8) void {
+pub fn writeHeader(target: *[header_len]u8, level: Level) void {
     target[0] = 0x1f; // ID1
     target[1] = 0x8b; // ID2
     target[2] = 8; // CM: deflate
@@ -67,15 +69,13 @@ pub fn writeTrailer(target: *[trailer_len]u8, crc: u32, len: u32) void {
 }
 
 /// The XFL byte for `level` (`§2.3.1`: 2 means "maximum compression", 4
-/// means "fastest algorithm"): 4 for levels 0 and 1, 2 for level 9, and 0
-/// for the rest. These are the bands C zlib and Go use. The field is
-/// informational (`§2.3.1.2`) and reflects the requested level, not what the
-/// encoder did with it.
-pub fn xflFor(level: u8) u8 {
+/// means "fastest algorithm"): 4 for level 1 and 0 for level 6, the bands C
+/// zlib and Go use. The field is informational (`§2.3.1.2`) and reflects the
+/// requested level, not what the encoder did with it.
+pub fn xflFor(level: Level) u8 {
     return switch (level) {
-        0, 1 => 4,
-        9 => 2,
-        else => 0,
+        .@"1" => 4,
+        .@"6" => 0,
     };
 }
 
@@ -83,8 +83,7 @@ pub fn xflFor(level: u8) u8 {
 /// member's length. Returns `error.BufferTooSmall` when `target` cannot hold
 /// it: size `target` with `maxCompressedLength`, though a smaller `target` can
 /// still fit when the data compresses well. `target`'s contents are
-/// unspecified after an error. Returns `error.Unimplemented` for an
-/// unimplemented level (2-5 and 7-9, or anything outside 1-9).
+/// unspecified after an error.
 ///
 /// Allocates nothing. Level 1 uses about 128 KiB of stack (flate's
 /// match-finder table), level 6 about 700 KiB.
@@ -92,7 +91,7 @@ pub fn compress(
     source: []const u8,
     target: []u8,
     options: Options,
-) error{ BufferTooSmall, Unimplemented }!usize {
+) error{BufferTooSmall}!usize {
     return Hooks.compress(source, target, options);
 }
 
@@ -147,34 +146,20 @@ test "encode: the empty member is the golden bytes" {
 }
 
 test "encode: XFL follows the level bands" {
-    // RFC 1952 §2.3.1 — XFL 4 is "compressor used fastest algorithm", 2
-    // "maximum compression"; the bands are C zlib's and Go's.
-    const cases = [_]struct { level: u8, xfl: u8 }{
-        .{ .level = 0, .xfl = 4 },
-        .{ .level = 1, .xfl = 4 },
-        .{ .level = 2, .xfl = 0 },
-        .{ .level = 8, .xfl = 0 },
-        .{ .level = 9, .xfl = 2 },
+    // RFC 1952 §2.3.1 — XFL 4 is "compressor used fastest algorithm"; the
+    // bands are C zlib's and Go's.
+    const cases = [_]struct { level: Level, xfl: u8 }{
+        .{ .level = .@"1", .xfl = 4 },
+        .{ .level = .@"6", .xfl = 0 },
     };
     for (cases) |case| try testing.expectEqual(case.xfl, xflFor(case.level));
 
-    // The implemented levels emit a member carrying the matching byte.
+    // Each level emits a member carrying the matching byte.
     var target: [64]u8 = undefined;
-    for ([_]u8{ 1, 6 }) |level| {
+    for (std.enums.values(Level)) |level| {
         const len = try compress("x", &target, .{ .level = level });
         try testing.expectEqual(xflFor(level), target[8]);
         try testing.expect(len > 0);
-    }
-}
-
-test "encode: an unimplemented level is rejected, never aliased" {
-    // Levels 2-5 and 7-9 (and anything outside 1-9) are not implemented:
-    // `error.Unimplemented`, and nothing is written to `target`.
-    var target: [64]u8 = undefined;
-    for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
-        sentinel.fill(&target);
-        try testing.expectError(error.Unimplemented, compress("x", &target, .{ .level = level }));
-        try sentinel.expect(&target, 0);
     }
 }
 
@@ -234,7 +219,7 @@ test "encode: the bound holds for every shape" {
     prng.random().bytes(noise);
     const target = try testing.allocator.alloc(u8, maxCompressedLength(noise.len));
     defer testing.allocator.free(target);
-    for ([_]u8{ 1, 6 }) |level| {
+    for (std.enums.values(Level)) |level| {
         const len = try compress(noise, target, .{ .level = level });
         try testing.expectEqual(maxCompressedLength(noise.len), len);
     }

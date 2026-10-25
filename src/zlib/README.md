@@ -79,14 +79,11 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 // One-shot. `dict` is the stream's preset dictionary or `null` (§2.2): on
 // encode it sets FDICT and writes the Adler-32 of the whole slice as DICTID;
 // on decode it is checked against the header's DICTID before any body byte.
-zlib.encode.Options        // struct { level: u8 = 1, dict: ?[]const u8 = null }
-                           //   flate's level scale, 1-9: level 1 (the default)
-                           //   and level 6 are implemented; levels 2-5 and 7-9,
-                           //   and anything outside 1-9, are not implemented
-                           //   and return `error.Unimplemented`
+zlib.encode.Level          // flate.encode.Level: @"1" or @"6"
+zlib.encode.Options        // struct { level: Level = .@"1", dict: ?[]const u8 = null }
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
-    error{ BufferTooSmall, Unimplemented }!usize      // the stream's length
+    error{BufferTooSmall}!usize                       // the stream's length
 zlib.decode.decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize
 zlib.decode.DecompressError = flate.decode.DecompressError || error{
     BadHeader, DictionaryRequired, DictionaryMismatch, WrongChecksum,
@@ -178,9 +175,7 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
 
 ## Limitations
 
-- Only flate's levels 1 and 6 exist: `compress` returns `error.Unimplemented`
-  for levels 2-5 and 7-9 and for anything outside 1-9, and a `Writer` made
-  with one fails every write and `finish`.
+- Only flate's levels 1 and 6 exist: `Level` cannot represent another number.
 - Level 1 writes fixed-Huffman and stored blocks only, so its output is larger
   than level 6's; the decoder handles every block type.
 

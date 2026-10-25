@@ -57,11 +57,9 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
-/// Huffman). An unimplemented level is never returned: it is
-/// `error.Unimplemented`, which `fuzzRoundTrip` checks explicitly.
-fn implementedLevel(smith: *Smith) u8 {
-    return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
+/// A Smith-picked level: 1 (fixed-Huffman) or 6 (dynamic Huffman).
+fn implementedLevel(smith: *Smith) encode.Level {
+    return if (rangeAtMost(smith, 0, 1) == 0) .@"1" else .@"6";
 }
 
 /// Every stream this codec writes ends with the final empty fixed block:
@@ -358,7 +356,7 @@ fn shapeSeed(
 
 /// Seeds for `fuzzRoundTrip`: the Smith values the shape builder reads, so
 /// each seed pins a structure instead of relying on the fuzzer to grow one.
-/// `1` and `6` are the implemented levels; `5` is not implemented.
+/// The level is 1 unless the seed's first byte is 6.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -372,8 +370,8 @@ const roundtrip_corpus: []const []const u8 = &.{
     // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
     // fixed block.
     &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
-    // An unimplemented level: `error.Unimplemented`, never a silent alias.
-    &shapeSeed(5, .random, 0, ""),
+    // The dynamic-Huffman level on a random shape: the stored fallback.
+    &shapeSeed(6, .random, 0, ""),
 };
 
 /// The whole one-shot codec, on the shapes a compressor handles worst.
@@ -387,26 +385,9 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// final empty fixed block (`03 00` where byte-aligned), and the decode writes
 /// nothing past the decoded length.
 fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(u8);
+    const level: encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
-
-    if (level != 1 and level != 6) {
-        // The level contract: an unimplemented level is `error.Unimplemented`
-        // on both layers, never silent aliasing.
-        var tiny: [8]u8 = undefined;
-        try testing.expectError(
-            error.Unimplemented,
-            encode.compress(source, &tiny, .{ .level = 5 }),
-        );
-        var sink: Io.Writer.Discarding = .init(&.{});
-        var fixed_in: Io.Reader = .fixed(source);
-        try testing.expectError(
-            error.ReadFailed,
-            Writer.streamAll(&fixed_in, &sink.writer, .{ .level = 5 }),
-        );
-        return;
-    }
 
     var compressed_buf: [encode.maxCompressedLength(roundtrip_max)]u8 = undefined;
     const c_len = try encode.compress(source, &compressed_buf, .{ .level = level });

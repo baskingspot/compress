@@ -105,11 +105,9 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked implemented level: 1 (fixed-Huffman) or 6 (dynamic
-/// Huffman). An unimplemented level is never returned: it is
-/// `error.Unimplemented`, which the round-trip target exercises explicitly.
-fn implementedLevel(smith: *Smith) u8 {
-    return if (rangeAtMost(smith, 0, 1) == 0) 1 else 6;
+/// A Smith-picked level: 1 (fixed-Huffman) or 6 (dynamic Huffman).
+fn implementedLevel(smith: *Smith) gzip.encode.Level {
+    return if (rangeAtMost(smith, 0, 1) == 0) .@"1" else .@"6";
 }
 
 /// How many `stream` calls decoding `plain_len` bytes may take: each call
@@ -266,7 +264,7 @@ fn buildShape(smith: *Smith, buf: []u8) usize {
 /// RFC 1952 §2.3.1 — the emitted header is the same every time: ID1/ID2/CM
 /// fixed, FLG=0 (no optional fields, reserved bits clear), MTIME=0, XFL by
 /// level band, OS=255.
-fn expectGzipHeader(member: []const u8, level: u8) !void {
+fn expectGzipHeader(member: []const u8, level: gzip.encode.Level) !void {
     try testing.expect(member.len >= header_len + trailer_len);
     try testing.expectEqual(@as(u8, 0x1f), member[0]);
     try testing.expectEqual(@as(u8, 0x8b), member[1]);
@@ -279,12 +277,11 @@ fn expectGzipHeader(member: []const u8, level: u8) !void {
 }
 
 /// RFC 1952 §2.3.1 — XFL is informational; the emitted band is the one C
-/// zlib and Go use: 4 for levels 0 and 1, 2 for level 9, 0 otherwise.
-fn xflFor(level: u8) u8 {
+/// zlib and Go use: 4 for level 1, 0 for level 6.
+fn xflFor(level: gzip.encode.Level) u8 {
     return switch (level) {
-        0, 1 => 4,
-        9 => 2,
-        else => 0,
+        .@"1" => 4,
+        .@"6" => 0,
     };
 }
 
@@ -352,7 +349,7 @@ fn expectFailure(result: gzip.decode.DecompressError!usize) !void {
 fn reencodeRoundTrip(bytes: []const u8) !void {
     assert(bytes.len <= corrupt_out_max);
     var member: [gzip.encode.maxCompressedLength(corrupt_out_max)]u8 = undefined;
-    const m_len = try gzip.encode.compress(bytes, &member, .{ .level = 1 });
+    const m_len = try gzip.encode.compress(bytes, &member, .{ .level = .@"1" });
     try testing.expect(m_len <= gzip.encode.maxCompressedLength(bytes.len));
 
     var plain: [corrupt_out_max + guard_len]u8 = undefined;
@@ -368,8 +365,8 @@ fn reencodeRoundTrip(bytes: []const u8) !void {
 // ---------------------------------------------------------------------------
 
 /// Seeds for target 1: the Smith values the shape builder reads, so each seed
-/// pins a structure instead of relying on the fuzzer to grow one. `1` and
-/// `6` are the implemented levels; `5` is not implemented.
+/// pins a structure instead of relying on the fuzzer to grow one. The level
+/// is 1 unless the seed's first byte is 6.
 const roundtrip_corpus: []const []const u8 = &.{
     // A 65534-byte phrase at the block split (the seed runs out of content
     // bytes, so the phrase is eight zero bytes repeated).
@@ -382,8 +379,8 @@ const roundtrip_corpus: []const []const u8 = &.{
     // 70000 bytes of 'Z' at level 1: two fixed blocks plus the final empty
     // fixed block.
     &shapeSeed(1, .run, 70_000, &u64Le(0x5a)),
-    // An unimplemented level: `error.Unimplemented`, never a silent alias.
-    &shapeSeed(5, .random, 0, ""),
+    // The dynamic-Huffman level on a random shape: the stored fallback.
+    &shapeSeed(6, .random, 0, ""),
 };
 
 /// Target 1: the whole one-shot codec, on the shapes a compressor is worst at.
@@ -395,31 +392,9 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// emitted member is the deterministic one, and a member followed by marker
 /// bytes decodes identically (bytes after the trailer are ignored).
 fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(u8);
+    const level: gzip.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
-
-    if (level != 1 and level != 6) {
-        // An unimplemented level is `error.Unimplemented` on the one-shot and
-        // `error.ReadFailed` on the stream pump, never silently aliased to
-        // another level.
-        var tiny: [16]u8 = undefined;
-        try testing.expectError(
-            error.Unimplemented,
-            gzip.encode.compress(source, &tiny, .{ .level = 5 }),
-        );
-        var sink: Io.Writer.Discarding = .init(&.{});
-        var fixed_in: Io.Reader = .fixed(source);
-        try testing.expectError(
-            error.ReadFailed,
-            gzip.Writer.streamAll(&fixed_in, &sink.writer, .{ .level = 5 }),
-        );
-        var wbuf: gzip.Writer.Buffer = undefined;
-        var w: gzip.Writer = .init(&sink.writer, &wbuf, .{ .level = 5 });
-        try testing.expectError(error.WriteFailed, w.writer.writeAll("x"));
-        try testing.expectError(error.WriteFailed, w.finish());
-        return;
-    }
 
     // The marker room rides the same buffer: the member followed by markers is
     // one contiguous slice.
@@ -1534,8 +1509,7 @@ const amplification_corpus: []const []const u8 = &.{
 /// untouched). The stored-only level decodes the same source through the
 /// passthrough path, so the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
-    const level = smith.value(u8);
-    if (level != 1 and level != 6) return; // unimplemented; target 1 covers it
+    const level: gzip.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];

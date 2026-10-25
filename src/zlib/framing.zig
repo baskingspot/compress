@@ -20,15 +20,13 @@ const adler32 = @import("adler32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 
-/// Whether the inner codec implements `level` (flate's rule, re-exported):
-/// 1 and 6 are implemented; every other level returns `error.Unimplemented`.
-pub const levelImplemented = flate.encode.levelImplemented;
+/// The inner codec's compression levels (flate's type, re-exported).
+pub const Level = flate.encode.Level;
 
 /// Encoder configuration. `.{}` is the default: level 1, no dictionary.
 pub const Options = struct {
-    /// The zlib-scale compression level: 1 or 6 (flate's implemented
-    /// levels). Any other level selects `error.Unimplemented`.
-    level: u8 = 1,
+    /// The compression level.
+    level: Level = .@"1",
     /// The stream's preset dictionary or `null` (`§2.2`): on encode it sets
     /// FDICT and writes the Adler-32 of the whole slice as DICTID; on decode
     /// it is checked against the header's DICTID before any body byte.
@@ -188,7 +186,7 @@ pub fn bodyCompress(
     source: []const u8,
     target: []u8,
     options: Options,
-) error{ BufferTooSmall, Unimplemented }!usize {
+) error{BufferTooSmall}!usize {
     return flate.encode.compress(source, target, .{
         .level = options.level,
         .dict = dictionary(options),

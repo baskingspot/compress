@@ -148,7 +148,7 @@ fn roundTrip(source: []const u8) !void {
     try w.writer.writeAll(source);
     try w.finish();
     const stream = compressed.written();
-    try golden.expectHeader(stream, 1);
+    try golden.expectHeader(stream, .@"1");
     try golden.expectTrailer(stream, source);
 
     const markers = 8;

@@ -19,15 +19,13 @@ const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 
-/// Whether the inner codec implements `level` (flate's rule, re-exported):
-/// 1 and 6 are implemented; every other level returns `error.Unimplemented`.
-pub const levelImplemented = flate.encode.levelImplemented;
+/// The inner codec's compression levels (flate's type, re-exported).
+pub const Level = flate.encode.Level;
 
 /// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = struct {
-    /// The zlib-scale compression level: 1 or 6 (flate's implemented
-    /// levels). Any other level selects `error.Unimplemented`.
-    level: u8 = 1,
+    /// The compression level.
+    level: Level = .@"1",
 };
 
 /// The failure detail a reader records in `err` once its state is `.failed`:
@@ -171,7 +169,7 @@ pub fn bodyCompress(
     source: []const u8,
     target: []u8,
     options: Options,
-) error{ BufferTooSmall, Unimplemented }!usize {
+) error{BufferTooSmall}!usize {
     return flate.encode.compress(source, target, .{ .level = options.level });
 }
 

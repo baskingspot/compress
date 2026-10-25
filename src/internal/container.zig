@@ -16,9 +16,8 @@
 //! they are checked where their values flow: a `HeaderError` must coerce into
 //! `Error`, and an `initReader` result must fit the `inner` field.
 //!
-//! - `Options`: the public encoder knobs. `Options.level` is a numeric level;
-//!   `levelImplemented(level)` says which levels the inner codec implements
-//!   (the rest are not implemented).
+//! - `Options`: the public encoder knobs. `Options.level` is the inner
+//!   codec's level type, so the driver never validates it.
 //! - `Error`: the streaming reader's detail errors: the inner codec's reader
 //!   errors, `EndOfStream`, and the framing's own.
 //! - `DecompressError`: the one-shot decoder's errors: `Error` minus
@@ -261,9 +260,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Returns a `Host` that writes one container to `output`, with
         /// `buffer` as the compression window and `options` fixed for the
-        /// writer's lifetime. An unimplemented level returns a poisoned
-        /// writer whose every write and `finish` returns `error.WriteFailed`,
-        /// matching `streamOne`, which rejects it before reading.
+        /// writer's lifetime.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
             var host: Host = .{
                 .writer = .failing,
@@ -276,13 +273,11 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             // the encoder fills. A framing with a preset dictionary starts
             // that region after the dictionary (the inner writer knows where),
             // so it is taken from there, never recomputed here.
-            if (F.levelImplemented(options.level)) {
-                host.writer = .{
-                    .buffer = host.inner.writer.buffer,
-                    .end = 0,
-                    .vtable = &vtable,
-                };
-            }
+            host.writer = .{
+                .buffer = host.inner.writer.buffer,
+                .end = 0,
+                .vtable = &vtable,
+            };
             return host;
         }
 
@@ -392,8 +387,7 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
 
         /// Reads `in` to its end, writes it to `out` as one complete container
         /// (the stream ending and the trailer included), and returns the
-        /// number of input bytes consumed. An unimplemented level returns
-        /// `error.ReadFailed` before any input is read; a failing `in` returns
+        /// number of input bytes consumed. A failing `in` returns
         /// `error.ReadFailed` and a failing `out` returns `error.WriteFailed`.
         /// The window is a stack local of `@sizeOf(F.WriterBuffer)` bytes;
         /// nothing is allocated.
@@ -402,7 +396,6 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             out: *Io.Writer,
             options: F.Options,
         ) Io.Reader.StreamRemainingError!usize {
-            if (!F.levelImplemented(options.level)) return error.ReadFailed;
             var buffer: F.WriterBuffer = undefined;
             var ww: Host = init(out, &buffer, options);
             const n = try in.streamRemaining(&ww.writer);
@@ -430,13 +423,12 @@ pub fn EncodeHooks(comptime F: type) type {
         /// cannot hold the result: `maxCompressedLength(source.len)` is always
         /// enough, a smaller target may still fit when the body compresses
         /// under the bound, and `target`'s contents are unspecified after a
-        /// failure. Returns `error.Unimplemented` for an unimplemented level.
+        /// failure.
         pub fn compress(
             source: []const u8,
             target: []u8,
             options: F.Options,
-        ) error{ BufferTooSmall, Unimplemented }!usize {
-            if (!F.levelImplemented(options.level)) return error.Unimplemented;
+        ) error{BufferTooSmall}!usize {
             // The header is written before the body is attempted, so the
             // check must come first: a target that cannot hold even the
             // framing is too small.

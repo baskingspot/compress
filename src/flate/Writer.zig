@@ -125,26 +125,11 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2).
 ///
-/// `options.level` is 1 or 6; any other level (2-5, 7-9, or anything
-/// outside 1-9) poisons the returned writer, so every write and `finish`
-/// returns `error.WriteFailed` — never a silent alias of another level.
-///
 /// Stack: a `Writer` holds the level-6 match-finder tables (384 KiB) and the
 /// emitter state, and `Buffer` is 98303 bytes, so place both with that in
 /// mind. Each block emission also uses about 320 KiB of stack for its
 /// token list and compressed-output scratch.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
-    // An unimplemented level must not silently alias another one. Poisoning
-    // the interface makes every write and `finish` return `error.WriteFailed`;
-    // `streamAll` rejects it up front.
-    if (!encode.levelImplemented(options.level)) {
-        return .{
-            .writer = .failing,
-            .output = output,
-            .buffer = buffer,
-            .options = options,
-        };
-    }
     // A preset dictionary is the window's oldest bytes: its tail fills the
     // history region in front of the block region, exactly where earlier
     // blocks' bytes sit once the stream has written them (`§3.2.3`).
@@ -187,7 +172,7 @@ fn writeEnding(w: *Writer) Io.Writer.Error!void {
         .bits = w.bits,
         .bit_count = w.bit_count,
     };
-    if (w.options.level == 6) w.emitter.flushEob(&bw) catch unreachable;
+    if (w.options.level == .@"6") w.emitter.flushEob(&bw) catch unreachable;
     encode.writeFinalEmptyBlock(&bw) catch unreachable;
     bw.finish() catch unreachable;
     w.bits = 0;
@@ -221,7 +206,7 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     // The finder's window is the block's 32-KiB history followed by the
     // block itself, so a match crosses block boundaries exactly as `§3.2.3`
     // allows.
-    if (w.options.level == 6) {
+    if (w.options.level == .@"6") {
         var prime_dict = false;
         if (w.finder == null) {
             w.finder = .{ .l6 = undefined };
@@ -547,7 +532,7 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll(input);
     try w.finish();
     // Random bytes cannot beat the stored form, so the stream is exactly
@@ -563,23 +548,8 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     // The one-shot path emits the identical stream, byte for byte.
     const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(input_len));
     defer gpa.free(one_shot);
-    const clen = try encode.compress(input, one_shot, .{ .level = 6 });
+    const clen = try encode.compress(input, one_shot, .{ .level = .@"6" });
     try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
-}
-
-test "Writer: an unimplemented level is rejected, never silently aliased" {
-    // Levels 2-5 and 7-9 are not implemented: they poison the writer at
-    // init, so every write and `finish` returns `error.WriteFailed`.
-    const gpa = testing.allocator;
-    for ([_]u8{ 0, 2, 5, 7, 9, 10 }) |level| {
-        var out: Io.Writer.Allocating = .init(gpa);
-        defer out.deinit();
-        var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .{ .level = level });
-        try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, flate"));
-        try testing.expectError(error.WriteFailed, w.finish());
-        try testing.expectEqual(@as(usize, 0), out.written().len);
-    }
 }
 
 test "Writer: a failed or finished writer never reports a false success" {
@@ -894,9 +864,8 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
 /// `out`, and return the number of input bytes consumed. The stream is
 /// finished and `out` is flushed before the call returns.
 ///
-/// Returns `error.ReadFailed` if `in` fails or if `options.level` is not
-/// implemented (2-5, 7-9, or anything outside 1-9), checked before any
-/// work. `error.WriteFailed` if `out` fails.
+/// Returns `error.ReadFailed` if `in` fails, and `error.WriteFailed` if `out`
+/// fails.
 /// Allocates nothing: the `Writer`, its `Buffer`, and the block scratch are
 /// locals on the caller's stack, about 700 KiB at the peak at level 6.
 pub fn streamAll(
@@ -904,7 +873,6 @@ pub fn streamAll(
     out: *Io.Writer,
     options: encode.Options,
 ) Io.Reader.StreamRemainingError!usize {
-    if (!encode.levelImplemented(options.level)) return error.ReadFailed;
     var buf: Buffer = undefined;
     var ww: Writer = .init(out, &buf, options);
     const n = try in.streamRemaining(&ww.writer);
@@ -983,8 +951,8 @@ test "Writer: random call sequences round-trip at both levels" {
     // (see `compressBlock6`): a flushed tiny block used to dispatch
     // klauspost's "too small" marker as a real token list.
     const gpa = testing.allocator;
-    for ([_]u8{ 1, 6 }) |level| {
-        var rng: DefaultPrng = .init(0xF00D + @as(u64, level));
+    for (std.enums.values(encode.Level)) |level| {
+        var rng: DefaultPrng = .init(0xF00D + @as(u64, @intFromEnum(level)));
         const rand = rng.random();
         var iter: usize = 0;
         while (iter < 200) : (iter += 1) {
@@ -1055,7 +1023,7 @@ test "Writer: a flushed tiny block is stored at level 6" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll(data[0..1]);
     try w.writer.flush();
     try w.writer.writeAll(data[1..2]);

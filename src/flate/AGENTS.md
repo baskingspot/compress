@@ -119,10 +119,9 @@ touching one.
 - The 3-byte input buffer. A 16-bit peek can start 7 bits into a byte, and
   `Io.Reader.fill` asserts its capacity, so a narrower buffer cannot show the
   decoder enough bits. Widening any peek raises this floor for every container.
-- An unimplemented level fails instead of aliasing: `error.Unimplemented` from
-  `compress`, a poisoned `Writer`, `error.ReadFailed` from `Writer.streamAll`
-  (levels 1 and 6 are the implemented ones; `encode.levelImplemented` is the
-  one predicate, and the containers' shared driver asks through it).
+- The level is an enum: `encode.Level` has `@"1"` and `@"6"` only, named by
+  the zlib scale, so an unimplemented level is unrepresentable. `gzip` and
+  `zlib` re-export the type and the shared container driver takes it as is.
 - A contiguous read the window cannot hold is `error.ReadFailed` with
   `err == .StreamTooLong`, never an assert.
 - The preset-history parameter. `decode.decompress`, `Reader.init`, and

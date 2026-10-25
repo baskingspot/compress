@@ -92,9 +92,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 
 /// Compress everything in `in` into one zlib stream written to `out`, and
 /// return the number of input bytes consumed. `in` is read to its end, then
-/// the stream is finished. Returns `error.ReadFailed` if `in` fails (and at
-/// once for an unimplemented level) and `error.WriteFailed` if
-/// `out` fails. Uses about 288 KiB of stack (the 96 KiB buffer plus flate's
+/// the stream is finished. Returns `error.ReadFailed` if `in` fails and
+/// `error.WriteFailed` if `out` fails. Uses about 288 KiB of stack (the 96 KiB buffer plus flate's
 /// writer state and block scratch) and allocates nothing.
 pub fn streamAll(
     in: *Io.Reader,
@@ -136,7 +135,7 @@ fn roundTrip(source: []const u8) !void {
     var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll(source);
     try w.finish();
-    try golden.expectHeader(out.written(), 1);
+    try golden.expectHeader(out.written(), .@"1");
     try golden.expectTrailer(out.written(), source);
     try decodeStream(out.written(), source);
 }
@@ -156,17 +155,17 @@ test "Writer: the emitted stream is the deterministic one" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 6 });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w.finish();
-    try golden.expectHeader(out.written(), 6);
+    try golden.expectHeader(out.written(), .@"6");
     try golden.expectTrailer(out.written(), "the quick brown fox jumps over the lazy dog. " ** 4);
 
     // The same input and level produce the same stream.
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
     var buf2: Buffer = undefined;
-    var w2: Writer = .init(&second.writer, &buf2, .{ .level = 6 });
+    var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6" });
     try w2.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w2.finish();
     try testing.expectEqualSlices(u8, out.written(), second.written());
@@ -185,7 +184,7 @@ test "Writer: the header is lazy and written before the first byte" {
 
     try w.writer.flush();
     var header: [encode.header_len]u8 = undefined;
-    encode.writeHeader(&header, 1, false);
+    encode.writeHeader(&header, .@"1", false);
     try testing.expectEqualSlices(u8, &header, out.written());
 
     // A write alone does not emit: it lands in the block region.
@@ -196,7 +195,7 @@ test "Writer: the header is lazy and written before the first byte" {
 
     try w.writer.writeAll("y");
     try w.finish();
-    try golden.expectHeader(out.written(), 1);
+    try golden.expectHeader(out.written(), .@"1");
     try golden.expectTrailer(out.written(), "xy");
     try decodeStream(out.written(), "xy");
 }
@@ -318,26 +317,6 @@ test "Writer: a failed or finished writer never reports a false success" {
     try golden.expectTrailer(out.written(), "hello, zlib");
 }
 
-test "Writer: an unimplemented level is rejected, never silently aliased" {
-    // `Writer.init(..., .{ .level = 5 })` poisons the interface (every
-    // write and `finish` reports `error.WriteFailed`), and `Writer.streamAll`
-    // returns `error.ReadFailed` upfront.
-    const gpa = testing.allocator;
-    var out: Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = 5 });
-    try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zlib"));
-    try testing.expectError(error.WriteFailed, w.finish());
-    try testing.expectEqual(@as(usize, 0), out.written().len);
-
-    var in: Io.Reader = .fixed("hello, zlib");
-    try testing.expectError(
-        error.ReadFailed,
-        Writer.streamAll(&in, &out.writer, .{ .level = 5 }),
-    );
-}
-
 test "Writer: random write machinery sequences stay correct" {
     // Mixed writeSplatAll/writeVecAll/splatBytesAll/writableSliceGreedy+
     // advance/writeByte/flush sequences: the driver class that catches drain
@@ -402,7 +381,7 @@ test "Writer: random write machinery sequences stay correct" {
             }
         }
         try w.finish();
-        try golden.expectHeader(out.written(), 1);
+        try golden.expectHeader(out.written(), .@"1");
         try golden.expectTrailer(out.written(), expect.items);
         decodeStream(out.written(), expect.items) catch |err| {
             print("\nFAIL: iter {d}: {s}\n", .{ iter, @errorName(err) });
@@ -436,7 +415,7 @@ test "Writer: streamAll consumes its input exactly and writes one stream" {
     defer out.deinit();
     try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .{}));
     try testing.expectEqual(source.len, in.seek);
-    try golden.expectHeader(out.written(), 1);
+    try golden.expectHeader(out.written(), .@"1");
     try golden.expectTrailer(out.written(), source);
     try decodeStream(out.written(), source);
 }
@@ -460,11 +439,11 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
         @as(usize, encode.header_len + encode.dict_id_len),
         out.written().len,
     );
-    try golden.expectDictHeader(out.written(), 1, dict);
+    try golden.expectDictHeader(out.written(), .@"1", dict);
 
     try w.writer.writeAll(source);
     try w.finish();
-    try golden.expectDictHeader(out.written(), 1, dict);
+    try golden.expectDictHeader(out.written(), .@"1", dict);
     try golden.expectTrailer(out.written(), source);
     try decodeStreamDict(out.written(), source, dict);
 
@@ -494,7 +473,7 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     try empty_w.writer.writeAll(source);
     try empty_w.finish();
     try testing.expectEqualSlices(u8, plain_out.written(), empty_out.written());
-    try golden.expectHeader(empty_out.written(), 1);
+    try golden.expectHeader(empty_out.written(), .@"1");
 }
 
 test "Writer: a dictionary round-trips through the streaming layer" {
