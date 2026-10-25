@@ -355,6 +355,44 @@ pub fn build(b: *Build) void {
         probe32_step.dependOn(&b.addInstallArtifact(probe32_exe, .{}).step);
     }
 
+    // The browser demo: a freestanding wasm32 module over the one-shot APIs,
+    // with fixed input and output regions. `just wasm-demo` serves it.
+    const demo_target = b.resolveTargetQuery(.{
+        .cpu_arch = .wasm32,
+        .os_tag = .freestanding,
+    });
+    const demo_mod = b.createModule(.{
+        .root_source_file = b.path("demo/wasm.zig"),
+        .target = demo_target,
+        .optimize = .ReleaseSmall,
+        .imports = &.{
+            .{ .name = "compress", .module = compress_mod },
+        },
+    });
+    const demo_exe = b.addExecutable(.{
+        .name = "compress-demo",
+        .root_module = demo_mod,
+    });
+    demo_exe.entry = .disabled;
+    demo_exe.rdynamic = true;
+    demo_exe.stack_size = 4 * 1024 * 1024;
+    const demo_step = b.step("wasm-demo", "Build the browser demo (wasm32-freestanding)");
+    demo_step.dependOn(&b.addInstallFileWithDir(
+        demo_exe.getEmittedBin(),
+        .{ .custom = "demo" },
+        "compress.wasm",
+    ).step);
+    demo_step.dependOn(&b.addInstallFileWithDir(
+        b.path("demo/index.html"),
+        .{ .custom = "demo" },
+        "index.html",
+    ).step);
+    demo_step.dependOn(&b.addInstallFileWithDir(
+        b.path("demo/app.js"),
+        .{ .custom = "demo" },
+        "app.js",
+    ).step);
+
     // Benchmarks. testingx's addBench builds each codec suite as a ReleaseFast
     // executable. The dependency is lazy in the zon: while it is unfetched,
     // b.lazyImport returns null and no bench step is defined. The call itself

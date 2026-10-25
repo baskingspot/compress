@@ -70,6 +70,7 @@ nix develop   # Zig 0.16, zls, ziglint, zigdoc, and the rest
 just ci       # unit tests, lint, and the cross-target compile gate
 just fuzz     # fuzz every codec's targets, 10M iterations each by default
 just bench    # local benchmarks
+just wasm-demo # build and serve the browser demo
 ```
 
 `just` lists every recipe. Numbers from `just bench` are local and are not claims. Comparisons with other libraries are measured on EC2 by the harness in [`bench/`](bench/README.md), which describes the grid and the method.

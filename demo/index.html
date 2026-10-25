@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>compress, in the browser</title>
+<style>
+  :root {
+    --paper: #f4f1ec;
+    --ink: #16191d;
+    --heat: #d4412b;
+    --slate: #58616c;
+    --rule: #d9d3ca;
+    --code: #ebe6de;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #16191d;
+      --ink: #f4f1ec;
+      --slate: #a7aeb8;
+      --rule: #2d333b;
+      --code: #1f242b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  main { max-width: 960px; margin: 0 auto; padding: 40px 24px 64px; }
+  h1 { margin: 0; font-size: 28px; letter-spacing: -0.02em; }
+  h1 span { color: var(--heat); }
+  .lede { margin: 6px 0 28px; color: var(--slate); max-width: 60ch; }
+  .controls {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px;
+    margin: 0 0 16px;
+  }
+  label { display: flex; align-items: center; gap: 7px; color: var(--slate); font-size: 13px; }
+  select, button, input[type="file"] {
+    font: inherit; color: var(--ink); background: var(--paper);
+    border: 1px solid var(--rule); border-radius: 6px; padding: 6px 9px;
+  }
+  button { cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--slate); }
+  button.primary { background: var(--heat); border-color: var(--heat); color: #fff; font-weight: 600; }
+  button.primary:hover:not(:disabled) { filter: brightness(1.07); }
+  button:disabled { opacity: 0.45; cursor: default; }
+  .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 720px) { .panes { grid-template-columns: 1fr; } }
+  .pane { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+  .pane > span { color: var(--slate); font-size: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+  textarea, pre {
+    margin: 0; min-height: 280px; max-height: 420px; overflow: auto;
+    padding: 12px; border: 1px solid var(--rule); border-radius: 8px;
+    background: var(--code); color: var(--ink);
+    font: 12.5px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre; tab-size: 2;
+  }
+  textarea { resize: vertical; }
+  .stats { margin-left: auto; color: var(--slate); font-size: 13px; font-variant-numeric: tabular-nums; }
+  #status { min-height: 1.5em; margin: 14px 0 0; color: var(--slate); font-size: 13px; }
+  #status.error { color: var(--heat); }
+  footer { margin-top: 28px; color: var(--slate); font-size: 12px; }
+  code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+</style>
+</head>
+<body>
+<main>
+  <h1>compress <span>in the browser</span></h1>
+  <p class="lede">
+    Six compression codecs, compiled to wasm and running on this page.
+    Nothing is uploaded and no server is involved: the module is the library,
+    and the work happens in your tab.
+  </p>
+
+  <div class="controls">
+    <label>Codec <select id="codec"></select></label>
+    <label id="level-wrap">Level <select id="level"></select></label>
+    <button id="sample" type="button">Load a sample</button>
+  </div>
+
+  <div class="panes">
+    <label class="pane">
+      <span>Input</span>
+      <textarea id="source" spellcheck="false"></textarea>
+    </label>
+    <label class="pane">
+      <span id="result-label">Result</span>
+      <pre id="result">Encode something.</pre>
+    </label>
+  </div>
+
+  <div class="controls" style="margin-top: 16px">
+    <button id="encode" class="primary" type="button" disabled>Encode</button>
+    <button id="decode" type="button" disabled>Decode</button>
+    <button id="download" type="button" disabled>Download</button>
+    <span class="stats" id="stats"></span>
+  </div>
+  <p id="status" role="status"></p>
+
+  <footer>
+    wasm32-freestanding, <span id="wasm-size">…</span> of wasm, built from the
+    <code>compress</code> source. Snappy is the block format, up to 64 KiB.
+  </footer>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>

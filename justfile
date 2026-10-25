@@ -22,7 +22,7 @@ fuzz LIMIT="10M":
 [group("lint")]
 lint:
     ziglint
-    zig fmt --check src build.zig
+    zig fmt --check src build.zig demo
     uv run scripts/check_binary_files.py
     uvx ruff check --line-length 100 scripts
     uvx ruff format --check --line-length 100 scripts
@@ -36,7 +36,7 @@ lint:
 [doc("Format everything lint checks")]
 [group("lint")]
 fmt:
-    zig fmt src build.zig
+    zig fmt src build.zig demo
     uvx ruff format --line-length 100 scripts
     nix fmt
     oxfmt README.md AGENTS.md docs/content
@@ -151,6 +151,12 @@ plot:
 [group("dev")]
 example CODEC *ARGS:
     zig build -Doptimize=ReleaseFast example-{{ CODEC }} -- {{ ARGS }}
+
+[doc("Build the browser demo and serve it at http://127.0.0.1:8080")]
+[group("dev")]
+wasm-demo:
+    zig build wasm-demo
+    python3 -m http.server 8080 --bind 127.0.0.1 --directory zig-out/demo
 
 [doc("Remove build artifacts")]
 [group("dev")]
