@@ -10,9 +10,8 @@ const example_codecs = [_][]const u8{ "brotli", "snappy", "flate", "gzip", "zlib
 // The codecs with a local bench (src/<codec>/bench.zig).
 const bench_codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd", "brotli" };
 
-/// The codecs with an oracle harness (src/<codec>/oracle.zig): every codec
-/// except snappy, whose conformance rides the flate family's lanes.
-const oracle_codecs = [_][]const u8{ "brotli", "flate", "gzip", "zlib", "zstd" };
+/// The codecs with an oracle harness (src/<codec>/oracle.zig).
+const oracle_codecs = [_][]const u8{ "brotli", "flate", "gzip", "snappy", "zlib", "zstd" };
 
 /// One binary fixture the golden data commits as base64 text: `path` is the
 /// committed file, `name` the file name it decodes back to inside the

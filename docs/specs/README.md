@@ -12,6 +12,7 @@ the spec. When still in doubt, read the spec again.
 | rfc7932-brotli.txt | https://www.rfc-editor.org/rfc/rfc7932.txt | 2026-10-12 |
 | rfc8878-zstd.txt | https://www.rfc-editor.org/rfc/rfc8878.txt | 2026-10-08 |
 | snappy-format-description.txt | https://github.com/google/snappy/blob/main/format_description.txt | 2026-10-08 |
+| snappy-framing.txt | https://github.com/google/snappy/blob/main/framing_format.txt | 2026-10-24 |
 
 The zstd reference implementation (BSD-3, https://github.com/facebook/zstd)
 supplements RFC 8878 where the frame/block layer leaves behavior unstated;

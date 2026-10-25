@@ -22,8 +22,8 @@
 //! covers.
 //!
 //! Spec: docs/specs/snappy-format-description.txt (§1 varint
-//! preamble, §2 tags). Framing: a `u32-le` compressed length before each raw
-//! block, as written by `Writer.zig`.
+//! preamble, §2 tags). Framing: docs/specs/snappy-framing.txt, as written by
+//! `Writer.zig`.
 
 const std = @import("std");
 const Io = std.Io;
@@ -37,9 +37,9 @@ const fastmem = @import("fastmem");
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const common = @import("common.zig");
-const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
+const crc32c = @import("crc32c.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const block_max: usize = encode.max_block_size;
@@ -427,13 +427,15 @@ const Mutation = enum(u8) {
     truncate,
     flip_byte,
     poke_length,
+    poke_type,
     append_bytes,
     duplicate_prefix,
 };
 
 /// The framing-corruption stream cap: the worst-case compressed form of one
 /// `framing_max` block plus its length prefix, plus room for appended bytes.
-const mut_max: usize = encode.maxCompressedLength(framing_max) + frame_prefix_len + 64;
+const mut_max: usize = 2 * (Writer.identifier.len + Writer.chunk_header_len +
+    Writer.chunk_crc_len + encode.maxCompressedLength(framing_max)) + 128;
 
 /// Apply a Smith-chosen sequence of corruptions to `buf[0..len.*]`.
 fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
@@ -446,18 +448,24 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
                 buf[smith.index(len.*)] ^= smith.value(u8);
             },
             .poke_length => {
-                // A declared block length: zero, one, absurd, or arbitrary.
-                // Poked at any offset, which is usually a block's length
-                // prefix and sometimes data inside a block.
-                if (len.* < frame_prefix_len) continue;
-                const at = smith.index(len.* - (frame_prefix_len - 1));
-                const value: u32 = switch (smith.valueRangeAtMost(u8, 0, 3)) {
+                // A chunk length is a 24-bit little-endian field: zero, one,
+                // absurd, or arbitrary, poked at any offset.
+                if (len.* < 3) continue;
+                const at = smith.index(len.* - 2);
+                const value: u24 = switch (smith.valueRangeAtMost(u8, 0, 3)) {
                     0 => 0,
                     1 => 1,
-                    2 => math.maxInt(u32),
-                    else => smith.value(u32),
+                    2 => math.maxInt(u24),
+                    else => smith.value(u24),
                 };
-                writeInt(u32, buf[at..][0..4], value);
+                buf[at] = @truncate(value);
+                buf[at + 1] = @truncate(value >> 8);
+                buf[at + 2] = @truncate(value >> 16);
+            },
+            .poke_type => {
+                if (len.* == 0) continue;
+                const kinds = [_]u8{ 0x00, 0x01, 0x02, 0x7f, 0x80, 0xfe, 0xff };
+                buf[smith.index(len.*)] = kinds[smith.index(kinds.len)];
             },
             .append_bytes => {
                 const extra = @min(buf.len - len.*, rangeAtMost(smith, 0, 64));
@@ -476,29 +484,57 @@ fn mutateStream(smith: *Smith, buf: []u8, len: *usize) !void {
     }
 }
 
-/// Walk the framing independently of `Reader`: decode each `u32-le`-prefixed
-/// block with the block decoder and append it to `plain`. Returns true when
-/// the whole buffer parsed; false at the first framing or block error, with
+/// Walk the framing independently of `Reader`: check the identifier, parse
+/// each chunk, verify the masked CRC-32C, decode compressed chunks with the
+/// block decoder, and append the bytes to `plain`. Returns true when the whole
+/// buffer parsed; false at the first framing, checksum, or block error, with
 /// the bytes decoded before it still in `plain`.
 ///
-/// The rules: a 4-byte prefix with a length in `[1, scratch_len]`, that many
-/// block bytes, and a block whose declared decoded length fits one block. The
-/// block decode itself is shared with `Reader`; that layer has its own target.
+/// The block decode itself is shared with `Reader`; that layer has its own
+/// target.
 fn referenceDecode(stream: []const u8, plain: *Io.Writer.Allocating) !bool {
-    var block_buf: [block_max]u8 = undefined;
-    var pos: usize = 0;
+    if (stream.len == 0) return true;
+    if (stream.len < Writer.identifier.len) return false;
+    if (!std.mem.eql(u8, stream[0..Writer.identifier.len], Writer.identifier)) return false;
+    var decoded: [Writer.max_chunk_len]u8 = undefined;
+    var pos: usize = Writer.identifier.len;
     while (pos < stream.len) {
-        if (stream.len - pos < frame_prefix_len) return false;
-        const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
-        pos += frame_prefix_len;
-        if (block_len == 0 or block_len > Writer.scratch_len) return false;
-        if (stream.len - pos < block_len) return false;
-        const block = stream[pos..][0..block_len];
-        pos += block_len;
-        const decoded_len = decode.decompressedBlockLength(block) catch return false;
-        if (decoded_len > block_max) return false;
-        const n = decode.decompressBlock(block, block_buf[0..decoded_len]) catch return false;
-        try plain.writer.writeAll(block_buf[0..n]);
+        if (stream.len - pos < Writer.chunk_header_len) return false;
+        const kind = stream[pos];
+        const length = @as(usize, stream[pos + 1]) | (@as(usize, stream[pos + 2]) << 8) |
+            (@as(usize, stream[pos + 3]) << 16);
+        pos += Writer.chunk_header_len;
+        if (stream.len - pos < length) return false;
+        const payload = stream[pos..][0..length];
+        pos += length;
+
+        switch (kind) {
+            0x00, 0x01 => {
+                if (length < Writer.chunk_crc_len) return false;
+                if (length - Writer.chunk_crc_len > Writer.scratch_len) return false;
+                if (kind == 0x01 and length - Writer.chunk_crc_len > Writer.max_chunk_len) {
+                    return false;
+                }
+                const stored = readInt(u32, payload[0..4]);
+                const data = payload[4..];
+                const n = if (kind == 0x00) blk: {
+                    const decoded_len = decode.decompressedBlockLength(data) catch return false;
+                    if (decoded_len > Writer.max_chunk_len) return false;
+                    break :blk decode.decompressBlock(data, decoded[0..decoded_len]) catch
+                        return false;
+                } else blk: {
+                    fastmem.copy(u8, &decoded, data);
+                    break :blk data.len;
+                };
+                if (crc32c.mask(crc32c.crc32c(0, decoded[0..n])) != stored) return false;
+                try plain.writer.writeAll(decoded[0..n]);
+            },
+            0xff => {
+                if (length != 6 or !std.mem.eql(u8, payload, "sNaPpY")) return false;
+            },
+            0x02...0x7f => return false,
+            else => {},
+        }
     }
     return true;
 }

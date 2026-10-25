@@ -26,6 +26,6 @@ which take them from the run's arena (`examples/zstd.zig`), and brotli's
 same way (`examples/brotli.zig`).
 
 The stream format is the codec package's, not the example's. The snappy tool,
-for instance, reads and writes the package's length-prefixed framing, not
-Google's framing format. The examples double as short, complete uses of the
-streaming API.
+for instance, reads and writes Google's framed format, so its output is a
+`.sz`-style stream that other snappy tools read. The examples double as short,
+complete uses of the streaming API.

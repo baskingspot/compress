@@ -8,8 +8,9 @@ streaming `Reader`/`Writer` over `std.Io`. It depends on `std`,
 and never allocates.
 
 The block functions implement the [Snappy block format][format] and add no
-framing. The streaming layer's framing is its own, not Google's `sNaPpY`
-format (see "Streaming").
+framing. The streaming layer implements Google's [framed format][framing]:
+the `sNaPpY` identifier, compressed and raw data chunks with a masked CRC-32C
+each, and skippable chunks.
 
 ## Usage
 
@@ -65,7 +66,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void // error{WriteFailed}
 // snappy.Reader: a decompressing Io.Reader, read through `&r.reader`
 pub const Buffer = [3 * max_block_size + Writer.scratch_len]u8; // 257 KiB
 pub fn init(input: *Io.Reader, buffer: *Buffer) Reader
-pub const Error = error{ Truncated, InvalidStream, StreamTooLong, BufferTooSmall,
+pub const Error = error{ Truncated, InvalidStream, BadStreamIdentifier,
+    BadChunkType, BadChecksum, StreamTooLong, BufferTooSmall,
     DecompressionFailed, ReadFailed, EndOfStream };
 err: ?Error, // why the interface returned error.ReadFailed
 
@@ -97,34 +99,43 @@ pub fn streamAll(in: *Io.Reader, out: *Io.Writer) error{ ReadFailed, WriteFailed
 
 ## Streaming
 
-`Writer` and `Reader` use this framing:
+`Writer` and `Reader` use Google's [framing][framing]:
 
 ```text
-stream := block*
-block  := u32-le compressed_length, raw-snappy-block
+stream     := identifier chunk*
+identifier := 0xff, u24-le 6, "sNaPpY"
+chunk      := type, u24-le length, data
+  0x00 compressed   u32-le masked CRC-32C (uncompressed), snappy block
+  0x01 uncompressed u32-le masked CRC-32C, raw bytes
+  0xfe padding, 0x80-0xfd skippable: skipped
+  0x02-0x7f reserved unskippable: error
 ```
 
-`compressed_length` is in `[1, Writer.scratch_len]` and a block decodes to at
-most 64 KiB. `Writer` cuts input into 64 KiB blocks; a `flush` ends one early.
-An empty stream is zero bytes. There is no magic number, end marker, or
-checksum. Google's framing (`framing_format.txt`: the `sNaPpY` identifier and
-CRC-32C chunks) needs the block functions and your own framing code.
+A data chunk decodes to at most 64 KiB. `Writer` cuts input into 64 KiB
+chunks; a `flush` ends one early. A chunk is compressed only when the block is
+smaller than the raw bytes. An empty stream is the identifier alone (10
+bytes). The identifier may repeat between chunks (for concatenation); the
+Reader checks and ignores it.
 
-- **Writer.** `finish` ends the stream: it writes the last partial block and
-  flushes `output`; without it the tail stays in the buffer. After `finish`, or
-  after a failed write to `output`, later writes and `finish` return
-  `error.WriteFailed`. `flush` emits a block early and keeps the writer usable.
+- **Writer.** `finish` ends the stream: it writes the identifier if nothing
+  has been written, the final partial chunk, and flushes `output`; without it
+  the tail stays in the buffer. After `finish`, or after a failed write to
+  `output`, later writes and `finish` return `error.WriteFailed`. `flush`
+  emits a chunk early and keeps the writer usable.
 - **Reader.** It reads `input` to its end and returns `error.EndOfStream` when
-  `input` ends at a block boundary. Corrupt framing or a corrupt block returns
+  `input` ends at a chunk boundary. Corrupt framing or a corrupt block returns
   `error.ReadFailed` with the reason in `r.err`: `Truncated` (the input ended
-  inside a length prefix or block), `InvalidStream` (a length of 0 or over
-  `scratch_len`, or a block that decodes to more than 64 KiB), or
-  `DecompressionFailed`. Both outcomes are sticky, and bytes from the blocks
+  inside the identifier, a chunk header, or a chunk), `BadStreamIdentifier`,
+  `BadChunkType` (a reserved unskippable type), `BadChecksum`, `InvalidStream`
+  (a data chunk shorter than its checksum, a payload past the staging region,
+  or a block that decodes past 64 KiB), `StreamTooLong`, or
+  `DecompressionFailed`. Both outcomes are sticky, and bytes from the chunks
   before a bad one are still served.
-- **Trailing bytes.** Nothing marks the end of a stream, so bytes after the
-  last block are read as more blocks: garbage is an error, an appended second
-  stream reads as a continuation, and a stream cut at a block boundary looks
-  complete. Add a checksum if you need to detect that.
+- **Trailing bytes.** The input's end is the stream's end; there is no end
+  marker. A cut inside a chunk is `Truncated`, but a cut exactly at a chunk
+  boundary is a complete stream (the CRC checks each chunk, not the stream's
+  length). A second stream's identifier is accepted and ignored, so
+  concatenated streams decode as one.
 - **Contiguous reads.** `peek`, `take`, and the delimiter reads need contiguous
   bytes, and the buffer guarantees two blocks (128 KiB). A larger request can
   fail with `error.ReadFailed` and `r.err == .StreamTooLong`; other reads have
@@ -138,8 +149,10 @@ CRC-32C chunks) needs the block functions and your own framing code.
 ## Testing and benchmarks
 
 `just test` runs the unit tests, including the golang/snappy decode vectors.
-`just fuzz 10M` runs the fuzz targets and `just bench` the local benchmarks.
-Local numbers are not claims; a claim names the run that produced it.
+`just snappy-oracle` cross-checks framed streams against klauspost/compress's
+snappy-compatible s2 in both directions. `just fuzz 10M` runs the fuzz targets
+and `just bench` the local benchmarks. Local numbers are not claims; a claim
+names the run that produced it.
 
 ## License
 
@@ -148,3 +161,4 @@ MIT, like compress. The encoder ports the algorithm of klauspost/compress's
 both BSD-3-Clause; see [`THIRD_PARTY.md`](../../THIRD_PARTY.md).
 
 [format]: ../../docs/specs/snappy-format-description.txt
+[framing]: ../../docs/specs/snappy-framing.txt

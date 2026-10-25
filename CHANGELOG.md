@@ -11,6 +11,10 @@ All notable changes to compress are recorded here. The format follows
   `zstd` its own (`@"1"` and `@"3"`), instead of a number. A bad level is a
   compile error, and `error.Unimplemented` leaves `compress`. A numeric level
   from a config maps with `Level.fromInt` and handles the null.
+- `snappy.Writer` and `snappy.Reader` use Google's framed format: the
+  `sNaPpY` identifier, per-chunk masked CRC-32C, and skippable chunks. Streams
+  interoperate with other framed-snappy tools; streams from the previous
+  length-prefixed framing do not decode.
 - `brotli.encode` and `brotli.Writer` take no options: quality 3 is the only
   encoder class, so the one-value `Options` is gone. The one-shot is
   `compress(source, target)`, the writer `init(window_wbits, output, buffer)`.

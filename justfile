@@ -106,6 +106,13 @@ flate-oracle:
     go build -C scripts/klauspost_flate -o ../../zig-out/bin/flate-klauspost .
     uv run scripts/flate_oracle.py
 
+[doc("Check snappy framed streams against klauspost/compress's snappy-compatible s2, both directions")]
+[group("conformance")]
+snappy-oracle:
+    zig build snappy-oracle-harness
+    go build -C scripts/snappy_klauspost -o ../../zig-out/bin/snappy-klauspost .
+    uv run scripts/snappy_oracle.py
+
 [doc("Check zstd against the reference CLI and klauspost/compress. klauspost makes the strict Window_Size check that the C decoder does not")]
 [group("conformance")]
 zstd-oracle:

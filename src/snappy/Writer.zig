@@ -1,18 +1,23 @@
-//! snappy.Writer: a compressing `Io.Writer` that produces the framed snappy
-//! stream. Write through `&w.writer`, then call `finish`.
+//! snappy.Writer: a compressing `Io.Writer` over Google's framed snappy
+//! stream (`framing_format.txt`). Write through `&w.writer`, then call
+//! `finish`.
 //!
 //! Uncompressed writes accumulate in the caller-provided `Buffer` (one full
-//! block). As the buffer fills, `drain` compresses whole `max_block_size`
-//! blocks and emits them; `flush` and `finish` emit the partial tail. Each
-//! emitted block compresses into a `scratch_len` stack buffer, so nothing is
-//! allocated.
+//! chunk). As the buffer fills, `drain` compresses whole `max_block_size`
+//! chunks and emits them; `flush` and `finish` emit the partial tail. A
+//! chunk is emitted compressed only when the block is smaller than the raw
+//! bytes; otherwise it is a raw chunk. Each emitted chunk compresses into a
+//! `scratch_len` stack buffer, so nothing is allocated.
 //!
-//! Framing:
+//! Framing (`framing_format.txt` §4):
 //! ```text
-//! stream := block*
-//! block  := u32-le compressed_length, raw-snappy-block
+//! stream := identifier chunk*
+//! identifier := 0xff, u24-le 6, "sNaPpY"
+//! chunk  := type, u24-le length, data
+//!   compressed   0x00: u32-le masked CRC-32C (uncompressed), snappy block
+//!   uncompressed 0x01: u32-le masked CRC-32C, raw bytes
 //! ```
-//! There is no magic number, end marker, or checksum.
+//! The stream has no end marker; the input's end is the stream's end.
 
 const std = @import("std");
 const Io = std.Io;
@@ -24,31 +29,43 @@ const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
 const common = @import("common.zig");
-const frame_prefix_len = common.frame_prefix_len;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
+const crc32c = @import("crc32c.zig");
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const golden = @import("golden.zig");
 const Reader = @import("Reader.zig");
 
-/// The caller-provided uncompressed accumulation buffer: one full block.
-pub const Buffer = [encode.max_block_size]u8;
+/// The stream identifier chunk every framed stream starts with (`§4.1`).
+pub const identifier = "\xff\x06\x00\x00sNaPpY";
 
-/// The largest compressed block this framing allows: `maxCompressedLength` of
-/// a full block. The writer compresses each block into a stack buffer of this
-/// size, and the reader stages incoming blocks in one.
-pub const scratch_len = encode.maxCompressedLength(encode.max_block_size);
+/// The chunk header's width: one type byte and a three-byte little-endian
+/// length (`§1`).
+pub const chunk_header_len = 4;
+/// The masked CRC-32C's width, ahead of every data chunk's payload (`§3`).
+pub const chunk_crc_len = 4;
+/// The most uncompressed bytes one data chunk may carry (`§4.2`, `§4.3`).
+pub const max_chunk_len = encode.max_block_size;
+
+/// The caller-provided uncompressed accumulation buffer: one full chunk.
+pub const Buffer = [max_chunk_len]u8;
+
+/// The largest compressed block: `maxCompressedLength` of a full chunk.
+pub const scratch_len = encode.maxCompressedLength(max_chunk_len);
 
 const Writer = @This();
 
 writer: Io.Writer,
 output: *Io.Writer,
+/// Whether the stream identifier has gone out. The identifier is written
+/// lazily: `finish` still emits it for an empty stream.
+started: bool = false,
 
 /// The shared writer machinery (`src/internal/writer.zig`): the generated
 /// `Io.Writer` entries and the poisoned `finish`, over this writer's
-/// `emitBlock`. A snappy stream has no ending of its own (the last block is
-/// the last byte), so the ending hook is null.
+/// `emitBlock`. The stream has no ending of its own, so the ending hook is
+/// null.
 const Hooks = internal.writer.VTable(Writer, emitBlock, null);
 
 /// Wrap `output` (the compressed-stream sink) with `buffer` as the
@@ -65,38 +82,59 @@ pub fn init(output: *Io.Writer, buffer: *Buffer) Writer {
     };
 }
 
-/// Complete the stream: emit the final partial block, then flush `output`.
-/// Without it the buffered tail never reaches `output`. Terminal: afterwards,
-/// and after any failed write to `output`, writes and `finish` return
-/// `error.WriteFailed` rather than reporting a truncated stream as complete.
+/// Complete the stream: emit the identifier when nothing has been written,
+/// the final partial chunk, then flush `output`. Without it the buffered tail
+/// never reaches `output`. Terminal: afterwards, and after any failed write
+/// to `output`, writes and `finish` return `error.WriteFailed` rather than
+/// reporting a truncated stream as complete.
 pub fn finish(w: *Writer) Io.Writer.Error!void {
+    if (!w.started) try w.start();
     return Hooks.finish(w);
 }
 
-/// Compress `bytes` (a region of the accumulation buffer) into stack
-/// scratch and emit it with the `u32-le` length prefix. A no-op when empty.
-fn emit(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
-    if (bytes.len == 0) return;
-    assert(bytes.len <= encode.max_block_size);
-    var scratch: [scratch_len]u8 = undefined;
-    // `scratch` holds `maxCompressedLength` of a full block, so `compressBlock`
-    // cannot run out of room.
-    const n = encode.compressBlock(bytes, &scratch) catch unreachable;
-    var prefix: [frame_prefix_len]u8 = undefined;
-    writeInt(u32, &prefix, @intCast(n));
-    try w.output.writeAll(&prefix);
-    try w.output.writeAll(scratch[0..n]);
+/// Write the stream identifier once.
+fn start(w: *Writer) Io.Writer.Error!void {
+    if (w.started) return;
+    try w.output.writeAll(identifier);
+    w.started = true;
 }
 
-/// Emit the first `emit_len` bytes of the buffered block, then slide the
+/// Emit one data chunk for `bytes` (a region of the accumulation buffer):
+/// the identifier on first use, the type and length, the masked CRC-32C of
+/// the uncompressed bytes, and the compressed block or the raw bytes. A no-op
+/// when empty.
+fn emitChunk(w: *Writer, bytes: []const u8) Io.Writer.Error!void {
+    if (bytes.len == 0) return;
+    assert(bytes.len <= max_chunk_len);
+    try w.start();
+    var scratch: [scratch_len]u8 = undefined;
+    // `scratch` holds `maxCompressedLength` of a full chunk, so `compressBlock`
+    // cannot run out of room.
+    const n = encode.compressBlock(bytes, &scratch) catch unreachable;
+    const compressed = n < bytes.len;
+    const payload = if (compressed) scratch[0..n] else bytes;
+    const length = chunk_crc_len + payload.len;
+    assert(length < 1 << 24);
+    var header: [chunk_header_len]u8 = .{ if (compressed) 0x00 else 0x01, 0, 0, 0 };
+    header[1] = @truncate(length);
+    header[2] = @truncate(length >> 8);
+    header[3] = @truncate(length >> 16);
+    var checksum: [chunk_crc_len]u8 = undefined;
+    writeInt(u32, &checksum, crc32c.mask(crc32c.crc32c(0, bytes)));
+    try w.output.writeAll(&header);
+    try w.output.writeAll(&checksum);
+    try w.output.writeAll(payload);
+}
+
+/// Emit the first `emit_len` bytes of the buffered chunk, then slide the
 /// unemitted tail to the front of the buffer. This is the hook the shared
 /// writer machinery (`src/internal/writer.zig`) calls: `drain`, `flush`, and
-/// `finish` emit the whole block, `rebase` emits the front, and the tail it
-/// preserves becomes the new block.
+/// `finish` emit the whole chunk, `rebase` emits the front, and the tail it
+/// preserves becomes the new chunk.
 fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     assert(emit_len <= w.writer.end);
     if (emit_len == 0) return;
-    try w.emit(w.writer.buffer[0..emit_len]);
+    try w.emitChunk(w.writer.buffer[0..emit_len]);
     const keep = w.writer.end - emit_len;
     if (keep != 0) {
         fastmem.move(u8, w.writer.buffer[0..keep], w.writer.buffer[emit_len..][0..keep]);
@@ -104,88 +142,89 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     w.writer.end = keep;
 }
 
-test "Writer: empty input produces an empty stream" {
+test "Writer: empty input is the identifier alone" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
     try w.finish();
-    try testing.expectEqual(0, out.written().len);
+    try testing.expectEqualSlices(u8, identifier, out.written());
 }
 
-test "Writer: partial tail is emitted at finish" {
+test "Writer: partial tail is one data chunk with its checksum" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
     try w.writer.writeAll("hello, snappy");
     try w.finish();
-    // One block: a 4-byte prefix + the raw block (varint 13 + literal tag +
-    // 13 bytes = 15).
-    try testing.expectEqual(19, out.written().len);
-    try testing.expectEqual(@as(u32, 15), readInt(u32, out.written()[0..4]));
+
+    const stream = out.written();
+    try testing.expectEqualSlices(u8, identifier, stream[0..identifier.len]);
+    const chunk = stream[identifier.len..];
+    try testing.expect(chunk[0] == 0x00 or chunk[0] == 0x01);
+    const length = @as(usize, chunk[1]) | (@as(usize, chunk[2]) << 8) |
+        (@as(usize, chunk[3]) << 16);
+    try testing.expectEqual(@as(usize, 4 + 13), length);
+    var decoded: [13]u8 = undefined;
+    const payload = chunk[4 + chunk_crc_len ..][0 .. length - chunk_crc_len];
+    if (chunk[0] == 0x00) {
+        const n = try decode.decompressBlock(payload, &decoded);
+        try testing.expectEqual(@as(usize, 13), n);
+    } else {
+        @memcpy(decoded[0..], payload);
+    }
+    try testing.expectEqualStrings("hello, snappy", &decoded);
+    const stored = readInt(u32, chunk[4..8]);
+    try testing.expectEqual(crc32c.mask(crc32c.crc32c(0, &decoded)), stored);
+    try roundTrip("hello, snappy");
 }
 
-test "Writer: writes past one block split into full blocks" {
+test "Writer: writes past one chunk split into full chunks" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
-    try w.writer.writeAll("a" ** (3 * encode.max_block_size + 1));
+    try w.writer.writeAll("a" ** (3 * max_chunk_len + 1));
     try w.finish();
-    // Four blocks: three full (64K each) plus a one-byte tail.
-    try testing.expectEqual(4, countBlocks(out.written()));
+    try testing.expectEqual(4, countChunks(out.written()));
+    try roundTrip("a" ** (3 * max_chunk_len + 1));
 }
 
 test "Writer: writableSliceGreedy on a full buffer emits, never drops" {
     // The File.Reader simple-mode stream feeds a Writer through
     // `writableSliceGreedy` + `advance` (a direct write into the buffer),
     // which lands on `rebase` when the buffer is full. `rebase` must emit the
-    // buffered block to free the space; discarding it would silently drop a
-    // whole block of input.
+    // buffered chunk to free the space; discarding it would silently drop a
+    // whole chunk of input.
     const gpa = testing.allocator;
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
 
-    // Fill the buffer exactly, without forcing a drain.
-    try w.writer.writeAll("a" ** encode.max_block_size);
-    // The direct-slice read: fills the (freshly emitted) whole buffer.
+    try w.writer.writeAll("a" ** max_chunk_len);
     const dest = try w.writer.writableSliceGreedy(1);
-    try testing.expectEqual(encode.max_block_size, dest.len);
+    try testing.expectEqual(max_chunk_len, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
-    // More writes past the second block, then finish.
     try w.writer.writeAll("c" ** 1000);
     try w.finish();
 
-    // Three blocks: 'a' x 65536, 'b' x 65536, 'c' x 1000.
-    try testing.expectEqual(3, countBlocks(out.written()));
-    var rbuf: Reader.Buffer = undefined;
-    var fixed_in: Io.Reader = .fixed(out.written());
-    var r: Reader = .init(&fixed_in, &rbuf);
-    var plain: Io.Writer.Allocating = .init(gpa);
-    defer plain.deinit();
-    while (true) {
-        _ = r.reader.stream(&plain.writer, .unlimited) catch |err| switch (err) {
-            error.EndOfStream => break,
-            else => |e| return e,
-        };
-    }
-    try testing.expectEqual(2 * encode.max_block_size + 1000, plain.written().len);
-    try testing.expect(plain.written()[0] == 'a');
-    try testing.expect(plain.written()[encode.max_block_size] == 'b');
-    try testing.expect(plain.written()[2 * encode.max_block_size] == 'c');
+    try testing.expectEqual(3, countChunks(out.written()));
+    const plain = try decodeFramed(gpa, out.written());
+    defer gpa.free(plain);
+    try testing.expectEqual(2 * max_chunk_len + 1000, plain.len);
+    try testing.expect(plain[0] == 'a');
+    try testing.expect(plain[max_chunk_len] == 'b');
+    try testing.expect(plain[2 * max_chunk_len] == 'c');
 }
 
-test "Writer: golden decoded outputs encode to streams the block decoder verifies" {
-    // Encode each golden `want` through Writer, then decode the framed stream
-    // with the block decoder (the golden-verified path), independent of
-    // Reader: the framing must parse and every block must reproduce its
-    // input bytes.
+test "Writer: golden decoded outputs encode to verified chunks" {
+    // Encode each golden `want` through Writer, then walk the chunks
+    // independently of Reader: every checksum must match the decoded bytes,
+    // and every compressed block must decode to its input.
     const gpa = testing.allocator;
-    var d_buf: [encode.max_block_size]u8 = undefined;
     for (golden.golden_decode_cases) |tc| {
         if (tc.want_err) continue; // Corrupt sources have no output.
 
@@ -196,18 +235,33 @@ test "Writer: golden decoded outputs encode to streams the block decoder verifie
         try w.writer.writeAll(tc.want);
         try w.finish();
 
+        const stream = out.written();
+        try testing.expectEqualSlices(u8, identifier, stream[0..identifier.len]);
+        var pos: usize = identifier.len;
         var plain: Io.Writer.Allocating = .init(gpa);
         defer plain.deinit();
-        const stream = out.written();
-        var pos: usize = 0;
+        var decoded: [max_chunk_len]u8 = undefined;
         while (pos < stream.len) {
-            const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
-            pos += frame_prefix_len;
-            const block = stream[pos..][0..block_len];
-            pos += block_len;
-            const d_len = try decode.decompressedBlockLength(block);
-            const n = try decode.decompressBlock(block, d_buf[0..d_len]);
-            try plain.writer.writeAll(d_buf[0..n]);
+            const kind = stream[pos];
+            const length = @as(usize, stream[pos + 1]) |
+                (@as(usize, stream[pos + 2]) << 8) |
+                (@as(usize, stream[pos + 3]) << 16);
+            pos += chunk_header_len;
+            try testing.expect(length >= chunk_crc_len);
+            const stored = readInt(u32, stream[pos..][0..4]);
+            pos += chunk_crc_len;
+            const payload = stream[pos..][0 .. length - chunk_crc_len];
+            pos += length - chunk_crc_len;
+            const n = switch (kind) {
+                0x00 => try decode.decompressBlock(payload, &decoded),
+                0x01 => blk: {
+                    fastmem.copy(u8, &decoded, payload);
+                    break :blk payload.len;
+                },
+                else => return error.InvalidStream,
+            };
+            try testing.expectEqual(crc32c.mask(crc32c.crc32c(0, decoded[0..n])), stored);
+            try plain.writer.writeAll(decoded[0..n]);
         }
         try testing.expectEqualSlices(u8, tc.want, plain.written());
     }
@@ -238,7 +292,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     try w2.finish();
     try testing.expectError(error.WriteFailed, w2.writer.writeAll("more"));
     try testing.expectError(error.WriteFailed, w2.finish());
-    try testing.expectEqual(1, countBlocks(out.written()));
+    try testing.expectEqual(1, countChunks(out.written()));
 }
 
 test "Writer: random write machinery sequences stay correct" {
@@ -307,39 +361,62 @@ test "Writer: random write machinery sequences stay correct" {
         }
         try w.finish();
 
-        var rbuf: Reader.Buffer = undefined;
-        var fixed_in: Io.Reader = .fixed(out.written());
-        var r: Reader = .init(&fixed_in, &rbuf);
-        const got = try r.reader.allocRemaining(gpa, .unlimited);
+        const got = try decodeFramed(gpa, out.written());
         defer gpa.free(got);
         try testing.expectEqual(expect.items.len, got.len);
         try testing.expectEqualSlices(u8, expect.items, got);
     }
 }
 
-test "Writer: flush mid-stream emits the partial block" {
+test "Writer: flush mid-stream emits the partial chunk" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
     try w.writer.writeAll("hello, ");
     try w.writer.flush();
-    try testing.expectEqual(1, countBlocks(out.written()));
+    try testing.expectEqual(1, countChunks(out.written()));
     try w.writer.writeAll("snappy");
     try w.finish();
-    try testing.expectEqual(2, countBlocks(out.written()));
+    try testing.expectEqual(2, countChunks(out.written()));
+    try roundTrip("hello, snappy");
 }
 
-/// Count the framed blocks in a stream produced by `Writer`.
-fn countBlocks(stream: []const u8) usize {
+/// Count the data chunks in a stream produced by `Writer`.
+fn countChunks(stream: []const u8) usize {
+    assert(std.mem.startsWith(u8, stream, identifier));
     var n: usize = 0;
-    var pos: usize = 0;
+    var pos: usize = identifier.len;
     while (pos < stream.len) {
-        const block_len = readInt(u32, stream[pos..][0..frame_prefix_len]);
-        pos += frame_prefix_len + block_len;
-        n += 1;
+        const kind = stream[pos];
+        const length = @as(usize, stream[pos + 1]) | (@as(usize, stream[pos + 2]) << 8) |
+            (@as(usize, stream[pos + 3]) << 16);
+        pos += chunk_header_len + length;
+        if (kind == 0x00 or kind == 0x01) n += 1;
     }
+    assert(pos == stream.len);
     return n;
+}
+
+/// Decode a framed stream with `Reader`, for the round-trip checks.
+fn decodeFramed(gpa: std.mem.Allocator, stream: []const u8) ![]u8 {
+    var rbuf: Reader.Buffer = undefined;
+    var fixed_in: Io.Reader = .fixed(stream);
+    var r: Reader = .init(&fixed_in, &rbuf);
+    return r.reader.allocRemaining(gpa, .unlimited);
+}
+
+/// Encode `src` with `Writer`, decode with `Reader`, expect identity.
+fn roundTrip(src: []const u8) !void {
+    var out: Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var wbuf: Buffer = undefined;
+    var w: Writer = .init(&out.writer, &wbuf);
+    try w.writer.writeAll(src);
+    try w.finish();
+    const got = try decodeFramed(testing.allocator, out.written());
+    defer testing.allocator.free(got);
+    try testing.expectEqualSlices(u8, src, got);
 }
 
 /// Compress everything `in` yields into `out` as one framed snappy stream and

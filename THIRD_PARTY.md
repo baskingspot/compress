@@ -122,8 +122,8 @@ and dependency with a license that is not ours.
 ## Vendored specs (`docs/specs/`)
 
 Verbatim spec text, fetched once with provenance recorded in the directory
-`README.md`. IETF RFCs are freely distributed. The Snappy format description
-comes from google/snappy (BSD-3-Clause).
+`README.md`. IETF RFCs are freely distributed. The Snappy format and framing
+descriptions come from google/snappy (BSD-3-Clause).
 
 ## Studied, not copied
 

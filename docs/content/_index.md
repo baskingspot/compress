@@ -139,7 +139,7 @@ A `Buffer` is storage that the codec writes into, not state that it owns. The ty
 
 A failed allocation from a `*Alloc` pump is `error.OutOfMemory`.
 
-The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming framing is this package's own length-prefixed form, not Google's: it has no end marker and no checksum, so a stream cut at a block boundary reads as complete. Snappy framing is a decision to make with that in mind.
+The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming layer uses Google's framed format: the `sNaPpY` identifier, per-chunk masked CRC-32C, and skippable chunks, so its streams interoperate with other framed-snappy tools.
 
 # Dictionaries
 
@@ -212,4 +212,3 @@ plot` from the recorded run.
 - The Brotli encoder is quality 3 only; the reference's other qualities are different encoders.
 - There is no zstd dictionary trainer. The `zstd` CLI trains, and this package consumes.
 - The zstd encoder implements levels 1 and 3. The CLI's other levels are different encoders, and `Level` cannot represent them.
-- The snappy `Reader` and `Writer` use a length-prefixed framing of this package's own, not Google's framing format. The stream has no end marker and no checksum, so a stream cut at a block boundary reads as complete.
