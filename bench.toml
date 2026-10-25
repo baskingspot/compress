@@ -1,13 +1,13 @@
 # compress fleet configuration (bench/README.md).
 #
-# The fleet is shared with the other baskingspot projects: the IAM user, the
+# The fleet is shared with the other baskingspot projects: the IAM role, the
 # launch templates, and the reaper come from baskingspot/infra, and the IAM
-# policy pins the Project tag to fastmem-bench. Boxes launched here carry
+# policy pins the Project tag to baskingspot-bench. Boxes launched here carry
 # Target=<name> like fastmem's; check `bench ls` before concurrent use.
 [project]
-name = "fastmem-bench"
+name = "baskingspot-bench"
 region = "us-west-2"
-profile = "fastmem-bench"
+profile = "baskingspot-bench"
 adapter = "compress_bench"
 remote_dir = "/root/bench"
 image_version = "1"

@@ -2,7 +2,7 @@
 
 # The EC2 benchmark harness (bench/README.md) shares fastmem's IAM user and
 # launch templates (see bench.toml), so its recipes run under that AWS profile.
-export AWS_PROFILE := env("AWS_PROFILE", "fastmem-bench")
+export AWS_PROFILE := env("AWS_PROFILE", "baskingspot-bench")
 
 [private]
 default:

@@ -137,10 +137,9 @@ compression ratio.
 
 ## Credentials and infrastructure
 
-The fleet is shared with the other baskingspot projects. The IAM user, the
+The fleet is shared with the other baskingspot projects. The IAM role, the
 launch templates, and the reaper come from `baskingspot/infra`. The IAM policy
-pins `Project=fastmem-bench`, so `project.name` in `bench.toml` stays
-`fastmem-bench`. The harness finds the launch templates by name and tag and
+pins `Project=baskingspot-bench`, which is `project.name` in `bench.toml`. The harness finds the launch templates by name and tag and
 reads the key from `~/.ssh/<project>.pem`; no checkout of the infrastructure
 repository is needed.
 
