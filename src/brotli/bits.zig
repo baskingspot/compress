@@ -11,6 +11,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const common = @import("common.zig");
 const testing = std.testing;
 
 const fastmem = @import("fastmem");
@@ -193,7 +194,7 @@ pub const BitReader = struct {
             // `bit_count` is 0..32 here. `bits` keeps its high zeroes, so
             // a peek past the loaded bits still reads zero padding.
             const add: u64 = (63 - self.bit_count) >> 3;
-            const window = std.mem.readInt(u64, self.source[self.next_byte..][0..8], .little);
+            const window = common.readInt(u64, self.source[self.next_byte..][0..8]);
             const loaded = window & ((@as(u64, 1) << @intCast(add << 3)) - 1);
             self.bits |= loaded << @intCast(self.bit_count);
             // `add` is 3..7 (the comment above), and `bit_count` is u64 here

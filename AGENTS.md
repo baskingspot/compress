@@ -76,8 +76,8 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   `bench.zig` is the local benchmark; the
   fleet rows live in `bench/zig/bench_compress.zig` (`just bench-run`). Fuzz
   targets are in `fuzz.zig`.
-- `src/brotli/`: Brotli (RFC 7932), decoder and `q3` encoder. `bits.zig` the
-  bit reader; `frame.zig` the stream header and the meta-block ladder;
+- `src/brotli/`: Brotli (RFC 7932), decoder and `q3` encoder. `common.zig` the
+  little-endian `readInt`; `bits.zig` the bit reader; `frame.zig` the stream header and the meta-block ladder;
   `huffman.zig` both prefix-code forms; `context.zig` the context maps;
   `command.zig` the command stream; `distance.zig` the distance codes;
   `dictionary.zig` + `dictionary_data.zig` the 122,784-byte static dictionary

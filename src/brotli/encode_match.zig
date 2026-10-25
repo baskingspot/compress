@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const common = @import("common.zig");
 
 const fastmem = @import("fastmem");
 
@@ -56,7 +57,7 @@ const hash_mul64: u64 = 0x1FE35A7B_D3579BD3;
 /// The reference's `HashBytes`: the top `bucket_bits` of the product of the
 /// five-byte prefix (left-justified) and the multiplier.
 fn hashBytes(bytes: []const u8, index: usize) u32 {
-    const word = std.mem.readInt(u64, bytes[index..][0..8], .little);
+    const word = common.readInt(u64, bytes[index..][0..8]);
     const h = (word << (64 - 8 * hash_len)) *% hash_mul64;
     return @truncate(h >> (64 - bucket_bits));
 }
@@ -205,8 +206,8 @@ fn findMatchLength(window: Window, source: usize, target: usize, limit: usize) u
     while (matched + 8 <= limit) : (matched += 8) {
         const from = (source + matched) & window.mask;
         const to = (target + matched) & window.mask;
-        const a = std.mem.readInt(u64, window.bytes[from..][0..8], .little);
-        const b = std.mem.readInt(u64, window.bytes[to..][0..8], .little);
+        const a = common.readInt(u64, window.bytes[from..][0..8]);
+        const b = common.readInt(u64, window.bytes[to..][0..8]);
         if (a != b) return matched + (@ctz(a ^ b) >> 3);
     }
     while (matched < limit and

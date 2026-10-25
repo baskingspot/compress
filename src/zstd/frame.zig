@@ -1094,23 +1094,23 @@ test "a checksummed raw-block frame folds inside the copy" {
     var bytes: [magic_len + 2 + 4 + 2 * block.block_header_len + total + checksum_len]u8 =
         undefined;
     var at: usize = 0;
-    std.mem.writeInt(u32, bytes[at..][0..4], magic, .little);
+    common.writeInt(u32, bytes[at..][0..4], magic);
     at += magic_len;
     bytes[at] = 0x80 | descriptor_checksum;
     bytes[at + 1] = 0x30;
     at += 2;
-    std.mem.writeInt(u32, bytes[at..][0..4], total, .little);
+    common.writeInt(u32, bytes[at..][0..4], total);
     at += 4;
     var src: usize = 0;
     for ([_]usize{ first_len, second_len }, 0..) |size, i| {
         const last: u24 = if (i == 1) 1 else 0;
-        std.mem.writeInt(u24, bytes[at..][0..3], last | @as(u24, @intCast(size)) << 3, .little);
+        common.writeInt(u24, bytes[at..][0..3], last | @as(u24, @intCast(size)) << 3);
         at += block.block_header_len;
         fastmem.copy(u8, bytes[at..][0..size], data[src..][0..size]);
         src += size;
         at += size;
     }
-    std.mem.writeInt(u32, bytes[at..][0..4], @truncate(xxh64.xxh64(0, &data)), .little);
+    common.writeInt(u32, bytes[at..][0..4], @truncate(xxh64.xxh64(0, &data)));
     at += checksum_len;
 
     const framed = bytes[0..at];
