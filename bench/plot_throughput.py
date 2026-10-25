@@ -1,8 +1,9 @@
 """Render the light and dark throughput charts from the newest scorecard.
 
-Six panels, one per codec namespace, each with an encode and a decode line
-over the corpus shapes. The y axis is a shared log scale in GB/s, so the
-panels compare directly. Only the brand palette is used.
+One row per codec, two dots per row: encode and decode. Each dot is the median
+throughput across the corpus shapes, and the line through it is the shape
+range, so the reader sees both the rate and how much the input moves it. The x
+axis is a shared log scale in GB/s. Only the brand palette is used.
 
     uv run --project bench python bench/plot_throughput.py
 """
@@ -29,22 +30,19 @@ PAPER = "#f4f1ec"
 HEAT = "#d4412b"
 SLATE = "#58616c"
 
-Y_MIN = 0.03
-Y_MAX = 100.0
-Y_TICKS = (0.1, 1.0, 10.0, 100.0)
+X_MIN = 0.05
+X_MAX = 100.0
+X_TICKS = (0.1, 1.0, 10.0, 100.0)
 
 WIDTH = 760
-HEIGHT = 420
-LEFT = 64.0
-RIGHT = 18.0
-TOP = 76.0
-BOTTOM = 58.0
-GAP_X = 26.0
-GAP_Y = 34.0
-PANEL_W = (WIDTH - LEFT - RIGHT - 2 * GAP_X) / 3
-PANEL_H = (HEIGHT - TOP - BOTTOM - GAP_Y) / 2
-PLOT_W = PANEL_W - 8.0
-PLOT_H = PANEL_H - 24.0
+HEIGHT = 330
+LEFT = 88.0
+RIGHT = 24.0
+TOP = 66.0
+BOTTOM = 44.0
+PLOT_W = WIDTH - LEFT - RIGHT
+PLOT_H = HEIGHT - TOP - BOTTOM
+ROW_H = PLOT_H / len(CODECS)
 
 FONT = "ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif"
 
@@ -63,13 +61,11 @@ def text(
     anchor: str = "start",
     weight: str = "normal",
     opacity: float = 1.0,
-    rotate: float | None = None,
 ) -> str:
-    transform = f' transform="rotate({rotate} {x:.2f} {y:.2f})"' if rotate else ""
     return (
         f'<text x="{x:.2f}" y="{y:.2f}" font-size="{size}" fill="{fill}"'
         f' font-family="{FONT}" font-weight="{weight}" text-anchor="{anchor}"'
-        f' opacity="{opacity}"{transform}>{escape(value)}</text>'
+        f' opacity="{opacity}">{escape(value)}</text>'
     )
 
 
@@ -92,84 +88,28 @@ def shape_medians(observations: list[dict[str, Any]]) -> dict[tuple[str, str], l
     return series
 
 
-def y_of(value: float, top: float) -> float:
-    fraction = (math.log10(value) - math.log10(Y_MIN)) / (math.log10(Y_MAX) - math.log10(Y_MIN))
-    return top + PLOT_H * (1.0 - fraction)
-
-
-def panel(
-    codec: str,
+def summarize(
     series: dict[tuple[str, str], list[float]],
-    x0: float,
-    top: float,
-    theme: dict[str, str],
-    *,
-    row: int,
-) -> list[str]:
-    parts: list[str] = []
-    bottom = top + PLOT_H
-    parts.append(text(x0, top - 9, codec, size=9.5, fill=theme["fg"], weight="600"))
+) -> dict[tuple[str, str], tuple[float, float, float]]:
+    """Lowest shape, median shape, highest shape for each codec and direction."""
+    out: dict[tuple[str, str], tuple[float, float, float]] = {}
+    for key, values in series.items():
+        present = [value for value in values if not math.isnan(value)]
+        out[key] = (min(present), statistics.median(present), max(present))
+    return out
 
-    for tick in Y_TICKS:
-        y = y_of(tick, top)
-        parts.append(
-            f'<line x1="{x0:.2f}" y1="{y:.2f}" x2="{x0 + PLOT_W:.2f}" y2="{y:.2f}"'
-            f' stroke="{theme["rule"]}" stroke-width="0.7" opacity="{theme["grid"]}"/>'
-        )
-        if x0 == LEFT and tick != Y_TICKS[-1]:
-            label = f"{tick:g}"
-            parts.append(text(x0 - 7, y + 2.4, label, size=7, fill=theme["muted"], anchor="end"))
 
-    parts.append(
-        f'<line x1="{x0:.2f}" y1="{top:.2f}" x2="{x0:.2f}" y2="{bottom:.2f}"'
-        f' stroke="{theme["rule"]}" stroke-width="0.7" opacity="{theme["axis"]}"/>'
-    )
-    parts.append(
-        f'<line x1="{x0:.2f}" y1="{bottom:.2f}" x2="{x0 + PLOT_W:.2f}" y2="{bottom:.2f}"'
-        f' stroke="{theme["rule"]}" stroke-width="0.7" opacity="{theme["axis"]}"/>'
-    )
-
-    step = PLOT_W / (len(SHAPES) - 1)
-    for index, shape in enumerate(SHAPES):
-        x = x0 + step * index
-        if row == 1:
-            parts.append(
-                text(
-                    x,
-                    bottom + 12,
-                    shape,
-                    size=6.8,
-                    fill=theme["muted"],
-                    anchor="end",
-                    rotate=-40,
-                )
-            )
-
-    for direction, color in (("compress", theme["encode"]), ("decompress", theme["decode"])):
-        values = series[(codec, direction)]
-        points = [
-            (x0 + step * index, y_of(value, top))
-            for index, value in enumerate(values)
-            if not math.isnan(value)
-        ]
-        if len(points) < 2:
-            continue
-        path = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
-        parts.append(
-            f'<polyline points="{path}" fill="none" stroke="{color}"'
-            f' stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>'
-        )
-        for x, y in points:
-            parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="2.1" fill="{color}"/>')
-
-    return parts
+def x_of(value: float) -> float:
+    fraction = (math.log10(value) - math.log10(X_MIN)) / (math.log10(X_MAX) - math.log10(X_MIN))
+    return LEFT + PLOT_W * fraction
 
 
 def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[float]]) -> Path:
+    summary = summarize(series)
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}"'
-            f' viewBox="0 0 {WIDTH} {HEIGHT}" role="img">'
+            f' viewBox="0 0 {WIDTH} {HEIGHT}" role="img">\n'
         ),
         f'<rect width="{WIDTH}" height="{HEIGHT}" fill="{theme["bg"]}"/>',
     ]
@@ -178,7 +118,7 @@ def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[
         text(
             LEFT,
             48,
-            "64 KiB inputs. Median of seven EC2 targets; eight corpus shapes.",
+            "GB/s on a log scale. Median and range across eight corpus shapes; seven EC2 targets.",
             size=8.5,
             fill=theme["muted"],
         )
@@ -193,44 +133,76 @@ def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[
             f'<line x1="{x:.2f}" y1="27" x2="{x + 16:.2f}" y2="27"'
             f' stroke="{color}" stroke-width="1.7" stroke-linecap="round"/>'
         )
-        parts.append(f'<circle cx="{x + 8:.2f}" cy="27" r="2.1" fill="{color}"/>')
+        parts.append(f'<circle cx="{x + 8:.2f}" cy="27" r="2.6" fill="{color}"/>')
         parts.append(text(x + 21, 30, label, size=8, fill=theme["fg"]))
 
+    for tick in X_TICKS:
+        x = x_of(tick)
+        parts.append(
+            f'<line x1="{x:.2f}" y1="{TOP:.2f}" x2="{x:.2f}" y2="{TOP + PLOT_H:.2f}"'
+            f' stroke="{theme["rule"]}" stroke-width="0.7" opacity="{theme["grid"]}"/>'
+        )
+        parts.append(
+            text(
+                x,
+                TOP + PLOT_H + 16,
+                f"{tick:g}",
+                size=7.5,
+                fill=theme["muted"],
+                anchor="middle",
+            )
+        )
+
     for index, codec in enumerate(CODECS):
-        column = index % 3
-        row = index // 3
-        x0 = LEFT + column * (PANEL_W + GAP_X)
-        top = TOP + row * (PANEL_H + GAP_Y)
-        parts.extend(panel(codec, series, x0, top, theme, row=row))
+        center = TOP + ROW_H * (index + 0.5)
+        parts.append(
+            text(
+                LEFT - 14,
+                center + 3.5,
+                codec,
+                size=10,
+                fill=theme["fg"],
+                anchor="end",
+                weight="600",
+            )
+        )
+        for direction, color, offset in (
+            ("compress", theme["encode"], -7.0),
+            ("decompress", theme["decode"], 7.0),
+        ):
+            low, middle, high = summary[(codec, direction)]
+            y = center + offset
+            parts.append(
+                f'<line x1="{x_of(low):.2f}" y1="{y:.2f}" x2="{x_of(high):.2f}" y2="{y:.2f}"'
+                f' stroke="{color}" stroke-width="1.2" stroke-linecap="round"'
+                f' opacity="{theme["range"]}"/>'
+            )
+            parts.extend(
+                f'<line x1="{x_of(edge):.2f}" y1="{y - 4:.2f}"'
+                f' x2="{x_of(edge):.2f}" y2="{y + 4:.2f}"'
+                f' stroke="{color}" stroke-width="1.2" stroke-linecap="round"'
+                f' opacity="{theme["range"]}"/>'
+                for edge in (low, high)
+            )
+            parts.append(f'<circle cx="{x_of(middle):.2f}" cy="{y:.2f}" r="3.2" fill="{color}"/>')
 
     parts.append(
         text(
-            18,
-            (TOP + HEIGHT - BOTTOM) / 2,
-            "GB/s",
-            size=7.5,
+            WIDTH - RIGHT,
+            HEIGHT - 14,
+            "Zig 0.16.0 · 2026-10-17",
+            size=6.5,
             fill=theme["muted"],
-            anchor="middle",
-            rotate=-90,
+            anchor="end",
         )
     )
     parts.append(
         text(
             LEFT,
-            HEIGHT - 16,
+            HEIGHT - 14,
             "flate, gzip, zlib, and zstd at level 1; brotli at quality 3. Five rounds.",
             size=6.5,
             fill=theme["muted"],
-        )
-    )
-    parts.append(
-        text(
-            WIDTH - RIGHT,
-            HEIGHT - 16,
-            "Zig 0.16.0 · 2026-10-17",
-            size=6.5,
-            fill=theme["muted"],
-            anchor="end",
         )
     )
     parts.append("</svg>")
@@ -255,7 +227,7 @@ def main() -> int:
         "muted": SLATE,
         "rule": SLATE,
         "grid": "0.18",
-        "axis": "0.32",
+        "range": "0.45",
         "encode": HEAT,
         "decode": SLATE,
     }
@@ -265,7 +237,7 @@ def main() -> int:
         "muted": PAPER,
         "rule": PAPER,
         "grid": "0.14",
-        "axis": "0.30",
+        "range": "0.55",
         "encode": HEAT,
         "decode": PAPER,
     }

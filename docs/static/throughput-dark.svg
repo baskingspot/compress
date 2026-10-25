@@ -1,194 +1,76 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="420" viewBox="0 0 760 420" role="img">
-<rect width="760" height="420" fill="#16191d"/>
-<text x="64.00" y="30.00" font-size="15" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="700" text-anchor="start" opacity="1.0">compress throughput</text>
-<text x="64.00" y="48.00" font-size="8.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">64 KiB inputs. Median of seven EC2 targets; eight corpus shapes.</text>
-<line x1="624.00" y1="27" x2="640.00" y2="27" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round"/>
-<circle cx="632.00" cy="27" r="2.1" fill="#d4412b"/>
-<text x="645.00" y="30.00" font-size="8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">encode</text>
-<line x1="686.00" y1="27" x2="702.00" y2="27" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round"/>
-<circle cx="694.00" cy="27" r="2.1" fill="#f4f1ec"/>
-<text x="707.00" y="30.00" font-size="8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">decode</text>
-<text x="64.00" y="67.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">snappy</text>
-<line x1="64.00" y1="162.86" x2="264.67" y2="162.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="165.26" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">0.1</text>
-<line x1="64.00" y1="133.91" x2="264.67" y2="133.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="136.31" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">1</text>
-<line x1="64.00" y1="104.95" x2="264.67" y2="104.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="107.35" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">10</text>
-<line x1="64.00" y1="76.00" x2="264.67" y2="76.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="64.00" y1="76.00" x2="64.00" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="64.00" y1="178.00" x2="264.67" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<polyline points="64.00,97.68 92.67,97.52 121.33,98.28 150.00,136.49 178.67,141.39 207.33,90.44 236.00,90.45 264.67,90.32" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="64.00" cy="97.68" r="2.1" fill="#d4412b"/>
-<circle cx="92.67" cy="97.52" r="2.1" fill="#d4412b"/>
-<circle cx="121.33" cy="98.28" r="2.1" fill="#d4412b"/>
-<circle cx="150.00" cy="136.49" r="2.1" fill="#d4412b"/>
-<circle cx="178.67" cy="141.39" r="2.1" fill="#d4412b"/>
-<circle cx="207.33" cy="90.44" r="2.1" fill="#d4412b"/>
-<circle cx="236.00" cy="90.45" r="2.1" fill="#d4412b"/>
-<circle cx="264.67" cy="90.32" r="2.1" fill="#d4412b"/>
-<polyline points="64.00,113.85 92.67,107.39 121.33,105.61 150.00,130.11 178.67,135.80 207.33,81.74 236.00,81.71 264.67,81.84" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="64.00" cy="113.85" r="2.1" fill="#f4f1ec"/>
-<circle cx="92.67" cy="107.39" r="2.1" fill="#f4f1ec"/>
-<circle cx="121.33" cy="105.61" r="2.1" fill="#f4f1ec"/>
-<circle cx="150.00" cy="130.11" r="2.1" fill="#f4f1ec"/>
-<circle cx="178.67" cy="135.80" r="2.1" fill="#f4f1ec"/>
-<circle cx="207.33" cy="81.74" r="2.1" fill="#f4f1ec"/>
-<circle cx="236.00" cy="81.71" r="2.1" fill="#f4f1ec"/>
-<circle cx="264.67" cy="81.84" r="2.1" fill="#f4f1ec"/>
-<text x="298.67" y="67.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">flate</text>
-<line x1="298.67" y1="162.86" x2="499.33" y2="162.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="133.91" x2="499.33" y2="133.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="104.95" x2="499.33" y2="104.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="76.00" x2="499.33" y2="76.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="76.00" x2="298.67" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="298.67" y1="178.00" x2="499.33" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<polyline points="298.67,104.52 327.33,105.68 356.00,105.71 384.67,147.81 413.33,150.28 442.00,152.56 470.67,152.41 499.33,152.51" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="298.67" cy="104.52" r="2.1" fill="#d4412b"/>
-<circle cx="327.33" cy="105.68" r="2.1" fill="#d4412b"/>
-<circle cx="356.00" cy="105.71" r="2.1" fill="#d4412b"/>
-<circle cx="384.67" cy="147.81" r="2.1" fill="#d4412b"/>
-<circle cx="413.33" cy="150.28" r="2.1" fill="#d4412b"/>
-<circle cx="442.00" cy="152.56" r="2.1" fill="#d4412b"/>
-<circle cx="470.67" cy="152.41" r="2.1" fill="#d4412b"/>
-<circle cx="499.33" cy="152.51" r="2.1" fill="#d4412b"/>
-<polyline points="298.67,96.23 327.33,103.40 356.00,102.72 384.67,146.04 413.33,147.38 442.00,82.05 470.67,153.72 499.33,82.04" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="298.67" cy="96.23" r="2.1" fill="#f4f1ec"/>
-<circle cx="327.33" cy="103.40" r="2.1" fill="#f4f1ec"/>
-<circle cx="356.00" cy="102.72" r="2.1" fill="#f4f1ec"/>
-<circle cx="384.67" cy="146.04" r="2.1" fill="#f4f1ec"/>
-<circle cx="413.33" cy="147.38" r="2.1" fill="#f4f1ec"/>
-<circle cx="442.00" cy="82.05" r="2.1" fill="#f4f1ec"/>
-<circle cx="470.67" cy="153.72" r="2.1" fill="#f4f1ec"/>
-<circle cx="499.33" cy="82.04" r="2.1" fill="#f4f1ec"/>
-<text x="533.33" y="67.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">gzip</text>
-<line x1="533.33" y1="162.86" x2="734.00" y2="162.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="133.91" x2="734.00" y2="133.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="104.95" x2="734.00" y2="104.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="76.00" x2="734.00" y2="76.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="76.00" x2="533.33" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="533.33" y1="178.00" x2="734.00" y2="178.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<polyline points="533.33,124.58 562.00,124.18 590.67,124.07 619.33,149.13 648.00,151.59 676.67,153.07 705.33,153.08 734.00,153.07" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="533.33" cy="124.58" r="2.1" fill="#d4412b"/>
-<circle cx="562.00" cy="124.18" r="2.1" fill="#d4412b"/>
-<circle cx="590.67" cy="124.07" r="2.1" fill="#d4412b"/>
-<circle cx="619.33" cy="149.13" r="2.1" fill="#d4412b"/>
-<circle cx="648.00" cy="151.59" r="2.1" fill="#d4412b"/>
-<circle cx="676.67" cy="153.07" r="2.1" fill="#d4412b"/>
-<circle cx="705.33" cy="153.08" r="2.1" fill="#d4412b"/>
-<circle cx="734.00" cy="153.07" r="2.1" fill="#d4412b"/>
-<polyline points="533.33,126.22 562.00,127.62 590.67,127.42 619.33,157.03 648.00,158.56 676.67,121.31 705.33,165.99 734.00,121.36" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="533.33" cy="126.22" r="2.1" fill="#f4f1ec"/>
-<circle cx="562.00" cy="127.62" r="2.1" fill="#f4f1ec"/>
-<circle cx="590.67" cy="127.42" r="2.1" fill="#f4f1ec"/>
-<circle cx="619.33" cy="157.03" r="2.1" fill="#f4f1ec"/>
-<circle cx="648.00" cy="158.56" r="2.1" fill="#f4f1ec"/>
-<circle cx="676.67" cy="121.31" r="2.1" fill="#f4f1ec"/>
-<circle cx="705.33" cy="165.99" r="2.1" fill="#f4f1ec"/>
-<circle cx="734.00" cy="121.36" r="2.1" fill="#f4f1ec"/>
-<text x="64.00" y="227.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">zlib</text>
-<line x1="64.00" y1="322.86" x2="264.67" y2="322.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="325.26" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">0.1</text>
-<line x1="64.00" y1="293.91" x2="264.67" y2="293.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="296.31" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">1</text>
-<line x1="64.00" y1="264.95" x2="264.67" y2="264.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<text x="57.00" y="267.35" font-size="7" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">10</text>
-<line x1="64.00" y1="236.00" x2="264.67" y2="236.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="64.00" y1="236.00" x2="64.00" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="64.00" y1="338.00" x2="264.67" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<text x="64.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 64.00 350.00)">rle</text>
-<text x="92.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 92.67 350.00)">text</text>
-<text x="121.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 121.33 350.00)">html</text>
-<text x="150.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 150.00 350.00)">prose</text>
-<text x="178.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 178.67 350.00)">words</text>
-<text x="207.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 207.33 350.00)">mixed</text>
-<text x="236.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 236.00 350.00)">skewlit</text>
-<text x="264.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 264.67 350.00)">random</text>
-<polyline points="64.00,271.27 92.67,272.82 121.33,272.66 150.00,308.13 178.67,310.53 207.33,312.65 236.00,312.68 264.67,312.64" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="64.00" cy="271.27" r="2.1" fill="#d4412b"/>
-<circle cx="92.67" cy="272.82" r="2.1" fill="#d4412b"/>
-<circle cx="121.33" cy="272.66" r="2.1" fill="#d4412b"/>
-<circle cx="150.00" cy="308.13" r="2.1" fill="#d4412b"/>
-<circle cx="178.67" cy="310.53" r="2.1" fill="#d4412b"/>
-<circle cx="207.33" cy="312.65" r="2.1" fill="#d4412b"/>
-<circle cx="236.00" cy="312.68" r="2.1" fill="#d4412b"/>
-<circle cx="264.67" cy="312.64" r="2.1" fill="#d4412b"/>
-<polyline points="64.00,275.15 92.67,278.35 121.33,278.22 150.00,316.65 178.67,318.24 207.33,267.72 236.00,325.84 264.67,267.63" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="64.00" cy="275.15" r="2.1" fill="#f4f1ec"/>
-<circle cx="92.67" cy="278.35" r="2.1" fill="#f4f1ec"/>
-<circle cx="121.33" cy="278.22" r="2.1" fill="#f4f1ec"/>
-<circle cx="150.00" cy="316.65" r="2.1" fill="#f4f1ec"/>
-<circle cx="178.67" cy="318.24" r="2.1" fill="#f4f1ec"/>
-<circle cx="207.33" cy="267.72" r="2.1" fill="#f4f1ec"/>
-<circle cx="236.00" cy="325.84" r="2.1" fill="#f4f1ec"/>
-<circle cx="264.67" cy="267.63" r="2.1" fill="#f4f1ec"/>
-<text x="298.67" y="227.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">zstd</text>
-<line x1="298.67" y1="322.86" x2="499.33" y2="322.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="293.91" x2="499.33" y2="293.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="264.95" x2="499.33" y2="264.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="236.00" x2="499.33" y2="236.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="298.67" y1="236.00" x2="298.67" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="298.67" y1="338.00" x2="499.33" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<text x="298.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 298.67 350.00)">rle</text>
-<text x="327.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 327.33 350.00)">text</text>
-<text x="356.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 356.00 350.00)">html</text>
-<text x="384.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 384.67 350.00)">prose</text>
-<text x="413.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 413.33 350.00)">words</text>
-<text x="442.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 442.00 350.00)">mixed</text>
-<text x="470.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 470.67 350.00)">skewlit</text>
-<text x="499.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 499.33 350.00)">random</text>
-<polyline points="298.67,266.45 327.33,266.68 356.00,266.62 384.67,306.27 413.33,309.39 442.00,273.83 470.67,294.82 499.33,273.82" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="298.67" cy="266.45" r="2.1" fill="#d4412b"/>
-<circle cx="327.33" cy="266.68" r="2.1" fill="#d4412b"/>
-<circle cx="356.00" cy="266.62" r="2.1" fill="#d4412b"/>
-<circle cx="384.67" cy="306.27" r="2.1" fill="#d4412b"/>
-<circle cx="413.33" cy="309.39" r="2.1" fill="#d4412b"/>
-<circle cx="442.00" cy="273.83" r="2.1" fill="#d4412b"/>
-<circle cx="470.67" cy="294.82" r="2.1" fill="#d4412b"/>
-<circle cx="499.33" cy="273.82" r="2.1" fill="#d4412b"/>
-<polyline points="298.67,261.45 327.33,261.71 356.00,262.28 384.67,301.21 413.33,304.73 442.00,262.59 470.67,295.94 499.33,262.56" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="298.67" cy="261.45" r="2.1" fill="#f4f1ec"/>
-<circle cx="327.33" cy="261.71" r="2.1" fill="#f4f1ec"/>
-<circle cx="356.00" cy="262.28" r="2.1" fill="#f4f1ec"/>
-<circle cx="384.67" cy="301.21" r="2.1" fill="#f4f1ec"/>
-<circle cx="413.33" cy="304.73" r="2.1" fill="#f4f1ec"/>
-<circle cx="442.00" cy="262.59" r="2.1" fill="#f4f1ec"/>
-<circle cx="470.67" cy="295.94" r="2.1" fill="#f4f1ec"/>
-<circle cx="499.33" cy="262.56" r="2.1" fill="#f4f1ec"/>
-<text x="533.33" y="227.00" font-size="9.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="start" opacity="1.0">brotli</text>
-<line x1="533.33" y1="322.86" x2="734.00" y2="322.86" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="293.91" x2="734.00" y2="293.91" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="264.95" x2="734.00" y2="264.95" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="236.00" x2="734.00" y2="236.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
-<line x1="533.33" y1="236.00" x2="533.33" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<line x1="533.33" y1="338.00" x2="734.00" y2="338.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.30"/>
-<text x="533.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 533.33 350.00)">rle</text>
-<text x="562.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 562.00 350.00)">text</text>
-<text x="590.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 590.67 350.00)">html</text>
-<text x="619.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 619.33 350.00)">prose</text>
-<text x="648.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 648.00 350.00)">words</text>
-<text x="676.67" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 676.67 350.00)">mixed</text>
-<text x="705.33" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 705.33 350.00)">skewlit</text>
-<text x="734.00" y="350.00" font-size="6.8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0" transform="rotate(-40 734.00 350.00)">random</text>
-<polyline points="533.33,294.06 562.00,292.39 590.67,292.08 619.33,325.49 648.00,327.01 676.67,321.86 705.33,322.36 734.00,321.83" fill="none" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="533.33" cy="294.06" r="2.1" fill="#d4412b"/>
-<circle cx="562.00" cy="292.39" r="2.1" fill="#d4412b"/>
-<circle cx="590.67" cy="292.08" r="2.1" fill="#d4412b"/>
-<circle cx="619.33" cy="325.49" r="2.1" fill="#d4412b"/>
-<circle cx="648.00" cy="327.01" r="2.1" fill="#d4412b"/>
-<circle cx="676.67" cy="321.86" r="2.1" fill="#d4412b"/>
-<circle cx="705.33" cy="322.36" r="2.1" fill="#d4412b"/>
-<circle cx="734.00" cy="321.83" r="2.1" fill="#d4412b"/>
-<polyline points="533.33,248.20 562.00,264.93 590.67,264.63 619.33,308.88 648.00,307.49 676.67,242.41 705.33,307.52 734.00,242.79" fill="none" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/>
-<circle cx="533.33" cy="248.20" r="2.1" fill="#f4f1ec"/>
-<circle cx="562.00" cy="264.93" r="2.1" fill="#f4f1ec"/>
-<circle cx="590.67" cy="264.63" r="2.1" fill="#f4f1ec"/>
-<circle cx="619.33" cy="308.88" r="2.1" fill="#f4f1ec"/>
-<circle cx="648.00" cy="307.49" r="2.1" fill="#f4f1ec"/>
-<circle cx="676.67" cy="242.41" r="2.1" fill="#f4f1ec"/>
-<circle cx="705.33" cy="307.52" r="2.1" fill="#f4f1ec"/>
-<circle cx="734.00" cy="242.79" r="2.1" fill="#f4f1ec"/>
-<text x="18.00" y="219.00" font-size="7.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0" transform="rotate(-90 18.00 219.00)">GB/s</text>
-<text x="64.00" y="404.00" font-size="6.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">flate, gzip, zlib, and zstd at level 1; brotli at quality 3. Five rounds.</text>
-<text x="742.00" y="404.00" font-size="6.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">Zig 0.16.0 · 2026-10-17</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330" role="img">
+
+<rect width="760" height="330" fill="#16191d"/>
+<text x="88.00" y="30.00" font-size="15" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="700" text-anchor="start" opacity="1.0">compress throughput</text>
+<text x="88.00" y="48.00" font-size="8.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">GB/s on a log scale. Median and range across eight corpus shapes; seven EC2 targets.</text>
+<line x1="618.00" y1="27" x2="634.00" y2="27" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round"/>
+<circle cx="626.00" cy="27" r="2.6" fill="#d4412b"/>
+<text x="639.00" y="30.00" font-size="8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">encode</text>
+<line x1="680.00" y1="27" x2="696.00" y2="27" stroke="#f4f1ec" stroke-width="1.7" stroke-linecap="round"/>
+<circle cx="688.00" cy="27" r="2.6" fill="#f4f1ec"/>
+<text x="701.00" y="30.00" font-size="8" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">decode</text>
+<line x1="147.09" y1="66.00" x2="147.09" y2="286.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
+<text x="147.09" y="302.00" font-size="7.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">0.1</text>
+<line x1="343.40" y1="66.00" x2="343.40" y2="286.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
+<text x="343.40" y="302.00" font-size="7.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">1</text>
+<line x1="539.70" y1="66.00" x2="539.70" y2="286.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
+<text x="539.70" y="302.00" font-size="7.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">10</text>
+<line x1="736.00" y1="66.00" x2="736.00" y2="286.00" stroke="#f4f1ec" stroke-width="0.7" opacity="0.14"/>
+<text x="736.00" y="302.00" font-size="7.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">100</text>
+<text x="74.00" y="87.83" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">snappy</text>
+<line x1="292.64" y1="77.33" x2="638.93" y2="77.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="292.64" y1="73.33" x2="292.64" y2="81.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="638.93" y1="73.33" x2="638.93" y2="81.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="589.54" cy="77.33" r="3.2" fill="#d4412b"/>
+<line x1="330.55" y1="91.33" x2="697.27" y2="91.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="330.55" y1="87.33" x2="330.55" y2="95.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="697.27" y1="87.33" x2="697.27" y2="95.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="529.42" cy="91.33" r="3.2" fill="#f4f1ec"/>
+<text x="74.00" y="124.50" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">flate</text>
+<line x1="216.91" y1="114.00" x2="542.67" y2="114.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="216.91" y1="110.00" x2="216.91" y2="118.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="542.67" y1="110.00" x2="542.67" y2="118.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="241.15" cy="114.00" r="3.2" fill="#d4412b"/>
+<line x1="209.04" y1="128.00" x2="695.07" y2="128.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="209.04" y1="124.00" x2="209.04" y2="132.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="695.07" y1="124.00" x2="695.07" y2="132.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="552.59" cy="128.00" r="3.2" fill="#f4f1ec"/>
+<text x="74.00" y="161.17" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">gzip</text>
+<line x1="213.38" y1="150.67" x2="410.08" y2="150.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="213.38" y1="146.67" x2="213.38" y2="154.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="410.08" y1="146.67" x2="410.08" y2="154.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="232.26" cy="150.67" r="3.2" fill="#d4412b"/>
+<line x1="125.91" y1="164.67" x2="428.78" y2="164.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="125.91" y1="160.67" x2="125.91" y2="168.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="428.78" y1="160.67" x2="428.78" y2="168.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="386.70" cy="164.67" r="3.2" fill="#f4f1ec"/>
+<text x="74.00" y="197.83" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zlib</text>
+<line x1="216.11" y1="187.33" x2="496.88" y2="187.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="216.11" y1="183.33" x2="216.11" y2="191.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="496.88" y1="183.33" x2="496.88" y2="191.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="239.23" cy="187.33" r="3.2" fill="#d4412b"/>
+<line x1="126.89" y1="201.33" x2="521.53" y2="201.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="126.89" y1="197.33" x2="126.89" y2="205.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="521.53" y1="197.33" x2="521.53" y2="205.33" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="449.30" cy="201.33" r="3.2" fill="#f4f1ec"/>
+<text x="74.00" y="234.50" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zstd</text>
+<line x1="238.45" y1="224.00" x2="529.56" y2="224.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="238.45" y1="220.00" x2="238.45" y2="228.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="529.56" y1="220.00" x2="529.56" y2="228.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="479.54" cy="224.00" r="3.2" fill="#d4412b"/>
+<line x1="270.04" y1="238.00" x2="563.48" y2="238.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="270.04" y1="234.00" x2="270.04" y2="242.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="563.48" y1="234.00" x2="563.48" y2="242.00" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="555.82" cy="238.00" r="3.2" fill="#f4f1ec"/>
+<text x="74.00" y="271.17" font-size="10" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">brotli</text>
+<line x1="118.97" y1="260.67" x2="355.75" y2="260.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="118.97" y1="256.67" x2="118.97" y2="264.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="355.75" y1="256.67" x2="355.75" y2="264.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="153.97" cy="260.67" r="3.2" fill="#d4412b"/>
+<line x1="241.88" y1="274.67" x2="692.57" y2="274.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="241.88" y1="270.67" x2="241.88" y2="278.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<line x1="692.57" y1="270.67" x2="692.57" y2="278.67" stroke="#f4f1ec" stroke-width="1.2" stroke-linecap="round" opacity="0.55"/>
+<circle cx="540.87" cy="274.67" r="3.2" fill="#f4f1ec"/>
+<text x="736.00" y="316.00" font-size="6.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">Zig 0.16.0 · 2026-10-17</text>
+<text x="88.00" y="316.00" font-size="6.5" fill="#f4f1ec" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">flate, gzip, zlib, and zstd at level 1; brotli at quality 3. Five rounds.</text>
 </svg>

@@ -188,13 +188,14 @@ Hostile input gets error returns, never assertions: the decoders treat every inp
 
 # Performance
 
-The chart is one-shot throughput on 64 KiB inputs: the median of seven EC2
-targets over eight corpus shapes, in GB/s. Encode and decode use the default
-classes: flate, gzip, zlib, and zstd at level 1, brotli at quality 3.
+The chart is one-shot throughput on 64 KiB inputs, in GB/s. Each dot is the
+median across eight corpus shapes, and the line through it is the shape range,
+so the spread is visible without a line per shape. Encode and decode use the
+default classes: flate, gzip, zlib, and zstd at level 1, brotli at quality 3.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="throughput-dark.svg">
-  <img src="throughput.svg" alt="One-shot throughput on 64 KiB inputs, median across seven EC2 targets: snappy encodes at 18 GB/s and decodes at 9, zstd at 5 and 12, brotli at 0.1 and 10. Compressible data runs several times faster than prose and random data." width="760" height="420">
+  <img src="throughput.svg" alt="64 KiB inputs. Each dot is the median across eight corpus shapes; the line through it is the shape range, on a log scale, across seven EC2 targets. Snappy encodes at 18 GB/s and decodes at 9; zstd at 5 and 12; brotli at 0.1 and 10." width="760" height="330">
 </picture>
 
 The input's shape matters as much as the codec: each codec slows by 10x or

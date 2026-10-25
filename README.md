@@ -15,7 +15,7 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/static/throughput-dark.svg">
-  <img src="docs/static/throughput.svg" alt="One-shot throughput on 64 KiB inputs, median across seven EC2 targets: snappy encodes at 18 GB/s and decodes at 9, zstd at 5 and 12, brotli at 0.1 and 10. Compressible data runs several times faster than prose and random data." width="760" height="420">
+  <img src="docs/static/throughput.svg" alt="64 KiB inputs. Each dot is the median across eight corpus shapes; the line through it is the shape range, on a log scale, across seven EC2 targets. Snappy encodes at 18 GB/s and decodes at 9; zstd at 5 and 12; brotli at 0.1 and 10." width="760" height="330">
 </picture>
 
 ## What is in it
