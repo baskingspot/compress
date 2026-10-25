@@ -32,7 +32,6 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 Not implemented:
 
 - A zstd dictionary trainer: the zstd CLI trains dictionaries, and this package consumes them.
-- Google's Snappy framing: the `Reader` and `Writer` use a length-prefixed framing of this package's own. It has no end marker or checksum, so a stream cut at a block boundary reads as complete.
 
 ## Install
 
