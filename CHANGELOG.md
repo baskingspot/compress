@@ -5,6 +5,8 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-25
+
 ### Added
 
 - `compress`: one Zig module with a namespace per codec. The default APIs take

@@ -36,7 +36,7 @@ Not implemented:
 ## Install
 
 ```sh
-zig fetch --save git+https://github.com/baskingspot/compress
+zig fetch --save https://baskingspot.dev/compress/v0.1.0.tar.gz
 ```
 
 Add the module to your build:
