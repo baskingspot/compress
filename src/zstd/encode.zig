@@ -36,12 +36,26 @@ const sequences = @import("sequences.zig");
 const sequences_compress = @import("sequences_compress.zig");
 const split_compress = @import("split_compress.zig");
 
+/// The compression levels this encoder implements, named by the CLI scale.
+/// The tag is the level number, so `@intFromEnum` spells the CLI's value.
+pub const Level = enum(u8) {
+    /// `ZSTD_fast`, byte-identical to `zstd -1`.
+    @"1" = 1,
+    /// `ZSTD_dfast`, byte-identical to `zstd -3` up to the 8 MiB job size.
+    @"3" = 3,
+
+    /// The level for a CLI-scale number, or `null` when this encoder does not
+    /// implement it. Use this at a boundary where the number comes from
+    /// outside the type system; a literal needs no conversion.
+    pub fn fromInt(number: u8) ?Level {
+        return std.enums.fromInt(Level, number);
+    }
+};
+
 /// `compress`'s options.
 pub const Options = struct {
-    /// The compression level on the CLI's 1-19 scale: 1 is the level-1 class
-    /// (`ZSTD_fast`), 3 the dfast class (`ZSTD_dfast`). Every other level
-    /// returns `error.Unimplemented`, never a silent alias.
-    level: u8 = 1,
+    /// The compression level. Only the levels in `Level` are representable.
+    level: Level = .@"1",
     /// The dictionary the frame is compressed against (`§5`): its tables seed
     /// the frame's entropy state (with `ZSTD_loadCEntropy`'s promotions) and
     /// its content is the match region's virtual past. The frame names the
@@ -50,20 +64,10 @@ pub const Options = struct {
     dict: ?*const Dictionary = null,
 };
 
-/// The levels with a finder behind them: 1 (`ZSTD_fast`) and 3
-/// (`ZSTD_dfast`). The other numbers of the CLI's 1-19 scale are distinct
-/// output classes this package cannot produce, and return
-/// `error.Unimplemented`.
-pub fn implemented(level: u8) bool {
-    return level == 1 or level == 3;
-}
-
 /// Everything `compress` reports.
 pub const Error = error{
     /// `target` cannot hold the frame. Its contents are then unspecified.
     BufferTooSmall,
-    /// The level option is not implemented.
-    Unimplemented,
 };
 
 /// The one-shot's heavy per-block arrays: the literals buffer, the sequence
@@ -130,8 +134,7 @@ pub fn compressBuffered(
     buffer: *Buffer,
     options: Options,
 ) Error!usize {
-    if (!implemented(options.level)) return error.Unimplemented;
-    const level = options.level;
+    const level: u8 = @intFromEnum(options.level);
     // The dictionary's shape: which scan the frame runs and how its
     // parameters are sized (the C's `ZSTD_shouldAttachDict` switch,
     // `zstd_compress.c:2309-2323`). An empty content attaches nothing and
@@ -579,19 +582,6 @@ test "maxCompressedLength bounds every emission" {
     );
 }
 
-test "an unimplemented level is rejected, never aliased" {
-    var target: [64]u8 = undefined;
-    for ([_]u8{ 0, 2, 4, 5, 19, 20 }) |level| {
-        try testing.expectError(
-            error.Unimplemented,
-            compress(&.{}, &target, .{ .level = level }),
-        );
-    }
-    // The two implemented levels are accepted (an empty frame either way).
-    try testing.expectEqual(@as(usize, 13), try compress(&.{}, &target, .{ .level = 1 }));
-    try testing.expectEqual(@as(usize, 13), try compress(&.{}, &target, .{ .level = 3 }));
-}
-
 test "level 3 round-trips through the landed decoder" {
     // RFC 8878 §3.1.1 — the dfast class's frames decode to the source, byte
     // for byte, over every shape and across the parameter ladder's classes:
@@ -611,7 +601,7 @@ test "level 3 round-trips through the landed decoder" {
                 maxCompressedLength(size),
             );
             defer testing.allocator.free(frame_buffer);
-            const written = try compress(source[0..size], frame_buffer, .{ .level = 3 });
+            const written = try compress(source[0..size], frame_buffer, .{ .level = .@"3" });
             const plain = try testing.allocator.alloc(u8, size);
             defer testing.allocator.free(plain);
             internal.sentinel.fill(plain);
@@ -629,7 +619,7 @@ test "level 3 round-trips through the landed decoder" {
                 maxCompressedLength(size),
             );
             defer testing.allocator.free(frame_buffer);
-            const written = try compress(source[0..size], frame_buffer, .{ .level = 3 });
+            const written = try compress(source[0..size], frame_buffer, .{ .level = .@"3" });
             const plain = try testing.allocator.alloc(u8, size);
             defer testing.allocator.free(plain);
             internal.sentinel.fill(plain);
@@ -711,7 +701,7 @@ test "our level-3 frame is the CLI's own bytes" {
         golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
-        const written = try compress(input, target, .{ .level = 3 });
+        const written = try compress(input, target, .{ .level = .@"3" });
         try testing.expectEqual(case.expected.len, written);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // The CLI's frame decodes through our decoder to the input.
@@ -743,7 +733,7 @@ test "the level-3 pre-splitter cuts a full block at a chunk boundary" {
     fastmem.copy(u8, source[262144..][0..1000], source[0..1000]);
     const target = try testing.allocator.alloc(u8, maxCompressedLength(total));
     defer testing.allocator.free(target);
-    const written = try compress(source[0..total], target, .{ .level = 3 });
+    const written = try compress(source[0..total], target, .{ .level = .@"3" });
     var cursor = headerLenFor(target, written);
     var blocks: usize = 0;
     var split_seen = false;
@@ -791,7 +781,7 @@ test "compress round-trips at level 3 with a dictionary, both match-region shape
             );
             defer testing.allocator.free(frame_buffer);
             const written = try compress(source[0..size], frame_buffer, .{
-                .level = 3,
+                .level = .@"3",
                 .dict = &trained,
             });
             const plain = try testing.allocator.alloc(u8, size);
@@ -810,7 +800,7 @@ test "compress round-trips at level 3 with a dictionary, both match-region shape
         const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(size));
         defer testing.allocator.free(frame_buffer);
         const written = try compress(source[0..size], frame_buffer, .{
-            .level = 3,
+            .level = .@"3",
             .dict = &raw,
         });
         const header = try frame.parseHeader(frame_buffer[frame.magic_len..written]);
@@ -882,7 +872,7 @@ test "the level-3 with-dictionary frames are the CLI's own bytes" {
         golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
-        const written = try compress(input, target, .{ .level = 3, .dict = &trained });
+        const written = try compress(input, target, .{ .level = .@"3", .dict = &trained });
         try testing.expectEqual(case.expected.len, written);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         const plain = try testing.allocator.alloc(u8, input.len);

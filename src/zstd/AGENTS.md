@@ -402,11 +402,9 @@ sets can still hit the deliberate differences (TE8, TE11 below).
   the stack local violated the house's KiB-scale rule and survived only the
   8-MiB default `ulimit -s`. The block layer stays internal: no zstd
   block function is self-contained (cross-block entropy and repeat-offset
-  state), unlike snappy's and flate's. `Options.level` is the CLI's numeric
-  scale: 1 is the level-1 class, 3 the dfast class, and every other level
-  (2, 4-19, and anything outside 1-19) returns `error.Unimplemented` — the
-  flate pattern, never a silent alias (the enum seat became the number in the
-  level-APIs commit; the dfast class filled level 3). The barrel is complete: `{encode, decode,
+  state), unlike snappy's and flate's. `Options.level` is an enum named by the
+  CLI's scale: `@"1"` is the level-1 class and `@"3"` the dfast class, so an
+  unimplemented level is not representable. The barrel is complete: `{encode, decode,
   Writer, Reader}`. `Writer.streamAll` and `Writer.streamAllAlloc` mirror the
   Reader's pumps (the caller-buffered pair first, then the default-window
   allocation); there is no stack-buffered default pump — `Writer.Buffer(19)`

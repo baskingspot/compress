@@ -36,20 +36,10 @@ pub const max_simple_distance_alphabet_size = 140;
 /// `16 + NDIRECT + (48 << NPOSTFIX)`.
 pub const distance_alphabet_size = 16 + 48;
 
-/// The encoder's options: the reference's quality scale.
-pub const Options = struct {
-    /// The reference's quality scale (0-11). 3 — the `q3` class — is the
-    /// implemented one; every other value, including values outside 0-11,
-    /// returns `error.Unimplemented`.
-    quality: u8 = 3,
-};
-
 /// The one-shot encoder's errors.
 pub const Error = error{
     /// `target` cannot hold the stream.
     BufferTooSmall,
-    /// A quality other than 3 is selected.
-    Unimplemented,
 };
 
 /// The largest stream `compress` can write for an `input_len`-byte input:
@@ -83,8 +73,7 @@ pub fn maxCompressedLength(input_len: usize) usize {
 /// Stack: the 256-KiB bucket table, the delayed-command buffer, and the
 /// tree-build scratch are comptime locals — about 550 KiB. Give encoding
 /// threads 1 MiB or more.
-pub fn compress(source: []const u8, target: []u8, options: Options) Error!usize {
-    if (options.quality != 3) return error.Unimplemented;
+pub fn compress(source: []const u8, target: []u8) Error!usize {
     const lgwin = windowBitsFor(source.len);
     var hash: [match.bucket_size]u32 = undefined;
     var command_buffer: [max_commands]match.Command = undefined;
@@ -1035,7 +1024,7 @@ fn roundTrip(source: []const u8) !void {
     const target = try testing.allocator.alloc(u8, cap + 1);
     defer testing.allocator.free(target);
     fastmem.set(u8, target, 0xA5);
-    const written = try compress(source, target, .{});
+    const written = try compress(source, target);
     try testing.expect(written <= cap);
     try testing.expectEqual(@as(u8, 0xA5), target[written]);
     const plain = try testing.allocator.alloc(u8, source.len + 1);
@@ -1051,14 +1040,14 @@ test "the empty input is the window header plus the empty last meta-block" {
     // The pinned CLI's file form on an empty file: WBITS 10, ISLAST and
     // ISLASTEMPTY, zero fill — `a1 01`.
     var target: [8]u8 = @splat(0);
-    const written = try compress("", &target, .{});
+    const written = try compress("", &target);
     try testing.expectEqualSlices(u8, &.{ 0xa1, 0x01 }, target[0..written]);
 }
 
 test "a one-byte input is stored uncompressed" {
     // `bytes <= 2` never compresses (the reference's `ShouldCompress`).
     var target: [16]u8 = @splat(0);
-    const written = try compress("A", &target, .{});
+    const written = try compress("A", &target);
     try testing.expectEqualSlices(u8, &.{ 0x21, 0x00, 0x00, 0x04, 0x41, 0x03 }, target[0..written]);
 }
 
@@ -1109,20 +1098,13 @@ test "maxCompressedLength bounds the stream" {
     try testing.expect(maxCompressedLength(1 << 17) >= (1 << 17) + 11);
 }
 
-test "an unimplemented quality is refused, never aliased" {
-    var target: [64]u8 = @splat(0);
-    try testing.expectError(error.Unimplemented, compress("hello", &target, .{ .quality = 0 }));
-    try testing.expectError(error.Unimplemented, compress("hello", &target, .{ .quality = 11 }));
-    try testing.expectError(error.Unimplemented, compress("hello", &target, .{ .quality = 200 }));
-}
-
 test "a target smaller than the stream is BufferTooSmall, never a short write" {
     var target: [4]u8 = @splat(0xA5);
-    try testing.expectError(error.BufferTooSmall, compress("hello world", &target, .{}));
+    try testing.expectError(error.BufferTooSmall, compress("hello world", &target));
     // Nothing past the cap was touched.
     for (target) |byte| try testing.expectEqual(@as(u8, 0xA5), byte);
     // The exact-size target fits.
     var exact: [16]u8 = @splat(0);
-    const written = try compress("hello world", &exact, .{});
+    const written = try compress("hello world", &exact);
     try testing.expectEqual(@as(usize, 16), written);
 }

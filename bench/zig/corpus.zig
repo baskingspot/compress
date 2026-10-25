@@ -119,7 +119,7 @@ const brotli_cli_quality = "11";
 /// The four one-shot encoders' error unions: they share the payload (`usize`,
 /// the produced length) and their error sets coerce to this one, so
 /// `writeBlob` takes one named type rather than a duck-typed value.
-const Generated = error{ BufferTooSmall, Unimplemented }!usize;
+const Generated = error{BufferTooSmall}!usize;
 
 /// The committed file the `prose` shape's bytes are a prefix of: the
 /// vendored RFC 7932 text. The generator fails the run if it is shorter

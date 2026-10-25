@@ -132,11 +132,13 @@ pub const default_window_log: usize = 19;
 /// level-3 `Writer` needs `Buffer(21)` to reach the class's window.
 pub const level3_default_window_log: usize = 21;
 
-/// The default window log for a level: `default_window_log` for level 1,
-/// `level3_default_window_log` for level 3 (and for an unimplemented level,
-/// which never writes a frame).
-pub fn defaultWindowLog(level: u8) usize {
-    return if (level == 3) level3_default_window_log else default_window_log;
+/// The default window log for a level: `default_window_log` for level 1 and
+/// `level3_default_window_log` for level 3.
+pub fn defaultWindowLog(level: encode.Level) usize {
+    return switch (level) {
+        .@"1" => default_window_log,
+        .@"3" => level3_default_window_log,
+    };
 }
 
 /// `Buffer(default_window_log)`: about 2.2 MiB, larger than a typical thread
@@ -213,9 +215,6 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeTrailer);
 /// Write through `&w.writer`, then call `finish`. `init` writes nothing,
 /// allocates nothing, and zeroes the finder's tables.
 ///
-/// `options.level` must be 1 or 3 (the implemented classes); any other level
-/// poisons the writer, so every write and `finish` returns
-/// `error.WriteFailed` and `output` sees no byte.
 pub fn init(
     comptime window_log: usize,
     output: *Io.Writer,
@@ -241,10 +240,9 @@ pub fn init(
         .block_len = block_len,
         // The C's streaming class: an unknown source size picks the default
         // row's widths and minMatch, and the caller's window_log replaces
-        // the row's windowLog. An unimplemented level never compresses (the
-        // writer is poisoned below), so its parameters are the level-1 ones.
+        // the row's windowLog.
         .params = match_compress.forStreaming(
-            if (encode.implemented(options.level)) options.level else 1,
+            @intFromEnum(options.level),
             @intCast(window_log),
         ),
     };
@@ -257,11 +255,11 @@ pub fn init(
     if (options.dict) |d| {
         block_compress.seedFromDict(&w.state, d);
         if (d.content.len > 0) {
-            const dict_params = d.matchParams(options.level);
+            const dict_params = d.matchParams(@intFromEnum(options.level));
             w.dict = .{
                 .content = d.content,
-                .table = if (options.level == 1) &d.match else null,
-                .dfast = if (options.level == 3) &d.match_dfast else null,
+                .table = if (options.level == .@"1") &d.match else null,
+                .dfast = if (options.level == .@"3") &d.match_dfast else null,
                 .window_size = window_len,
                 .low_limit = d.content.len,
                 .dict_limit = d.content.len,
@@ -284,17 +282,13 @@ pub fn init(
     assert(w.params.chain_log <= 16);
     w.tables = .{
         .long = buffer.long_table[0 .. @as(usize, 1) << @intCast(w.params.hash_log)],
-        .small = if (options.level == 3)
+        .small = if (options.level == .@"3")
             buffer.small_table[0 .. @as(usize, 1) << @intCast(w.params.chain_log)]
         else
             &.{},
     };
     fastmem.set(u32, w.tables.long, 0);
     if (w.tables.small.len > 0) fastmem.set(u32, w.tables.small, 0);
-    // An unimplemented level must not silently alias the implemented ones:
-    // poisoning the interface makes every write and `finish` return
-    // `error.WriteFailed`, before a byte of output.
-    if (!encode.implemented(options.level)) w.writer = .failing;
     return w;
 }
 
@@ -322,9 +316,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// `Buffer(window_log)` the caller owns (about 2.2 MiB at the default
 /// `window_log`), so this needs no large stack local of its own.
 ///
-/// Returns `error.WriteFailed` if `out` fails or if `options.level` is not
-/// implemented (the writer is poisoned at `init`, so nothing is written),
-/// and `error.ReadFailed` if `in` fails. Does not allocate.
+/// Returns `error.WriteFailed` if `out` fails and `error.ReadFailed` if `in`
+/// fails. Does not allocate.
 pub fn streamAll(
     comptime window_log: usize,
     in: *Io.Reader,
@@ -355,7 +348,7 @@ pub fn streamAllAlloc(
     out: *Io.Writer,
     options: encode.Options,
 ) StreamAllocError!usize {
-    if (options.level == 3) {
+    if (options.level == .@"3") {
         const buffer = try allocator.create(Buffer(level3_default_window_log));
         defer allocator.destroy(buffer);
         return streamAll(level3_default_window_log, in, out, buffer, options);
@@ -1073,7 +1066,7 @@ test "Writer: level 3 round-trips through the landed Reader" {
                 level3_default_window_log,
                 source[0..size],
                 0,
-                .{ .level = 3 },
+                .{ .level = .@"3" },
             );
         }
     }
@@ -1084,18 +1077,20 @@ test "Writer: level 3 round-trips through the landed Reader" {
                 level3_default_window_log,
                 source[0..size],
                 0,
-                .{ .level = 3 },
+                .{ .level = .@"3" },
             );
         }
     }
     // Chunked writes, the single-byte path included.
     golden.fillShape(.text, &source);
-    _ = try expectRoundTripLevel(level3_default_window_log, source[0..37], 1, .{ .level = 3 });
-    _ = try expectRoundTripLevel(level3_default_window_log, source[0..4096], 1, .{ .level = 3 });
+    _ = try expectRoundTripLevel(level3_default_window_log, source[0..37], 1, .{ .level = .@"3" });
+    _ = try expectRoundTripLevel(level3_default_window_log, source[0..4096], 1, .{
+        .level = .@"3",
+    });
     golden.fillShape(.mixed, &source);
     inline for (.{ 14, 17, 21 }) |window_log| {
-        _ = try expectRoundTripLevel(window_log, source[0..3000], 1, .{ .level = 3 });
-        _ = try expectRoundTripLevel(window_log, &source, 997, .{ .level = 3 });
+        _ = try expectRoundTripLevel(window_log, source[0..3000], 1, .{ .level = .@"3" });
+        _ = try expectRoundTripLevel(window_log, &source, 997, .{ .level = .@"3" });
     }
 }
 
@@ -1112,7 +1107,7 @@ test "Writer: level 3 attaches a dictionary and round-trips it" {
                 level3_default_window_log,
                 source[0..size],
                 0,
-                .{ .level = 3, .dict = &trained },
+                .{ .level = .@"3", .dict = &trained },
             );
         }
     }
@@ -1128,34 +1123,16 @@ test "Writer: the level-3 pumps take the class's window" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var in: Io.Reader = .fixed(&source);
-    const consumed = try streamAllAlloc(gpa, &in, &out.writer, .{ .level = 3 });
+    const consumed = try streamAllAlloc(gpa, &in, &out.writer, .{ .level = .@"3" });
     try testing.expectEqual(source.len, consumed);
     const header = try frame.parseHeader(out.written()[frame.magic_len..]);
     try testing.expectEqual(@as(u64, 1) << 21, header.window_size);
     try testing.expectEqual(@as(?u64, null), header.content_size);
     try testing.expectEqual(
         @as(usize, 21),
-        defaultWindowLog(3),
+        defaultWindowLog(.@"3"),
     );
-    try testing.expectEqual(@as(usize, 19), defaultWindowLog(1));
-    try testing.expectEqual(@as(usize, 19), defaultWindowLog(2));
-}
-
-test "Writer: the unimplemented levels are rejected, never silently aliased" {
-    // Levels 2 and 4-19 are not implemented: they poison the writer at
-    // `init`, so every write and `finish` returns
-    // `error.WriteFailed` and the sink sees nothing.
-    const gpa = testing.allocator;
-    var out: Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    const buffer = try makeBuffer(default_window_log);
-    defer gpa.destroy(buffer);
-    for ([_]u8{ 0, 2, 4, 19, 20 }) |level| {
-        var w: Writer = .init(default_window_log, &out.writer, buffer, .{ .level = level });
-        try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
-        try testing.expectError(error.WriteFailed, w.finish());
-        try testing.expectEqual(@as(usize, 0), out.written().len);
-    }
+    try testing.expectEqual(@as(usize, 19), defaultWindowLog(.@"1"));
 }
 
 test "Writer: random write machinery sequences stay correct" {

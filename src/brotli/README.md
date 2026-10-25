@@ -14,9 +14,8 @@ in this directory are sections of that file.
 The namespace is exactly `{Reader, Writer, encode, decode}`: one-shot
 `brotli.encode.compress` and `brotli.decode.decompress`, and the streaming
 `brotli.Writer` and `brotli.Reader`. The decoder came first and is the fuller
-surface; the encoder's implemented class is the reference's `q3`, and every
-other quality returns `error.Unimplemented` rather than silently aliasing
-another class.
+surface; the encoder implements the reference's `q3` class. The format's
+other qualities are different encoders, not options here.
 
 ## Usage
 
@@ -122,20 +121,13 @@ const brotli = @import("compress").brotli; // the encoder's two names: `encode`,
 
 // One-shot encode: one stream, header through last byte. `target` is a cap;
 // the return value is the compressed length.
-brotli.encode.compress(source: []const u8, target: []u8, options: Options)
-    error{ BufferTooSmall, Unimplemented }!usize
+brotli.encode.compress(source: []const u8, target: []u8) error{BufferTooSmall}!usize
     // BufferTooSmall: `target` cannot hold the stream
-    // Unimplemented: a quality other than 3 is selected
 brotli.encode.maxCompressedLength(input_len: usize) usize
     // input_len + 5 * (input_len >> 14) + 7 — the q3 class's worst case: a
     // meta-block that does not shrink is stored uncompressed, and every
     // meta-block but the last holds at least one 16-KiB input block, so at
     // most five bytes of header land per 16 KiB
-brotli.encode.Options = struct { quality: u8 = 3 }
-    // quality: 0-11, the reference's scale. 3 (the default) is the implemented
-    // q3 class; every other value — 0-2, 4-11, and anything outside 0-11 —
-    // returns error.Unimplemented, never a silent alias.
-
 // Streaming encode: one `Writer` writes one stream; `finish` is required.
 // You own the `Buffer`: the history ring, the hash table, the delayed
 // commands, the tree-build scratch, and the I/O windows.
@@ -150,14 +142,13 @@ brotli.Writer.Buffer(comptime window_wbits: usize) type
 brotli.Writer.default_window_wbits: usize // 22: the reference encoder library's own default
 brotli.Writer.DefaultBuffer // Buffer(22): 9,097,172 bytes (about 8.7 MiB)
 brotli.Writer.init(comptime window_wbits: usize, output: *Io.Writer,
-    buffer: *Buffer(window_wbits), options: encode.Options) Writer
+    buffer: *Buffer(window_wbits)) Writer
     // write through `&w.writer`, then call `finish`
 brotli.Writer.writer: Io.Writer
 brotli.Writer.finish(w: *Writer) Io.Writer.Error!void
     // writes the last meta-block; the stream is incomplete without it
 brotli.Writer.streamAll(comptime window_wbits: usize, in: *Io.Reader, out: *Io.Writer,
-    buffer: *Buffer(window_wbits), options: encode.Options)
-    error{ ReadFailed, WriteFailed }!usize
+    buffer: *Buffer(window_wbits)) error{ ReadFailed, WriteFailed }!usize
 ```
 
 The quality scale is the reference's, `q0` through `q11`:
@@ -172,8 +163,7 @@ The quality scale is the reference's, `q0` through `q11`:
 - `q10`: zopfli with the clustering split.
 - `q11`: zopfli, 5 candidates.
 
-Of these, only `q3` is implemented; every other rung returns
-`error.Unimplemented`.
+Of these, only `q3` is implemented.
 
 The one-shot is byte-identical to the pinned CLI's file form at `brotli -q 3`
 — the window sized to the input, which is the CLI's own automatic-window rule
@@ -296,7 +286,7 @@ The pin is the CLI, and the CLI's file form is not always the reference
 
 ## Limitations
 
-- **Encoder: quality 3 only; other qualities return `error.Unimplemented`.**
+- **Encoder: quality 3 only.** The other rungs are different encoders.
   `brotli.encode` and `brotli.Writer` are the encoder's two names.
 - **No dictionary-supplying API.** The built-in dictionary ships
   unconditionally — any stream can reference it, so there is nothing to
@@ -328,9 +318,8 @@ past the decoded length was written. The encoder's half: every shape round
 trips through `compress` and through a `Writer` at every window class (the
 streaming form fed everything at once emits the one-shot's exact bytes), a
 `Writer`'s forced flush is a valid stream prefix, the empty input and the
-one-byte input are pinned to the CLI's own bytes, and an unimplemented
-quality is a refusal, never an alias. The 45-vector reference corpus is not
-vendored.
+one-byte input are pinned to the CLI's own bytes. The 45-vector reference
+corpus is not vendored.
 `just fuzz 1M` runs the fuzz targets (ReleaseSafe only): the decoder's corpus,
 mutation, differential, and layer targets, and the encoder's round trip —
 every stream `compress` or a `Writer` writes decodes back to its input, with

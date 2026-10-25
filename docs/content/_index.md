@@ -16,7 +16,7 @@ One module, a namespace per codec, the same buffer discipline everywhere: the ca
 - [Errors and corrupt input](#errors-and-corrupt-input): closed error sets, named per failure, `error.BufferTooSmall` before any byte past the cap.
 - [Design](#design): how the SIMD code is built, and how to copy one codec out on its own.
 - [Performance](#performance): what the 7-target EC2 grid measured, and the rule that local numbers are never claims.
-- [Limits](#limits): what has no API, and what returns `error.Unimplemented`.
+- [Limits](#limits): what has no API, and what is outside this package's scope.
 
 This guide is the recipes. The [API reference](api/) has the contract for every symbol. Each codec's README documents its API, error sets, and buffer sizes in the same terms.
 
@@ -169,7 +169,7 @@ Pick the format for the job, not the fastest name:
 | In-memory blocks, latency-bound | snappy | No ratio to speak of; the framing here is this package's own |
 | Web text, either direction      | brotli | Encoder at quality 3; the static dictionary ships inside     |
 
-The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; levels 2 and 4-19 on the CLI's 1-19 scale return `error.Unimplemented`. The DEFLATE encoder's `Level` has `@"1"` (fixed-Huffman and stored blocks) and `@"6"` (dynamic-Huffman, byte-identical to klauspost/compress's level 6); `gzip` and `zlib` take the same type.
+The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; its `Level` enum has `@"1"` and `@"3"`, and another number is not representable. The DEFLATE encoder's `Level` has `@"1"` (fixed-Huffman and stored blocks) and `@"6"` (dynamic-Huffman, byte-identical to klauspost/compress's level 6); `gzip` and `zlib` take the same type.
 
 # Errors and corrupt input
 
@@ -209,7 +209,7 @@ plot` from the recorded run.
 
 # Limits
 
-- The Brotli encoder implements quality 3. Qualities 0-2 and 4-11 return `error.Unimplemented`.
+- The Brotli encoder is quality 3 only; the reference's other qualities are different encoders.
 - There is no zstd dictionary trainer. The `zstd` CLI trains, and this package consumes.
-- The zstd encoder implements levels 1 and 3. Levels 2 and 4-19 on the CLI's scale return `error.Unimplemented`.
+- The zstd encoder implements levels 1 and 3. The CLI's other levels are different encoders, and `Level` cannot represent them.
 - The snappy `Reader` and `Writer` use a length-prefixed framing of this package's own, not Google's framing format. The stream has no end marker and no checksum, so a stream cut at a block boundary reads as complete.

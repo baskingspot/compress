@@ -102,31 +102,15 @@ const vtable: Io.Writer.VTable = .{
 /// searching a `window_wbits` window. Write through `&w.writer`, then call
 /// `finish`.
 ///
-/// `options.quality` must be 3 (the implemented class); any other value
-/// poisons the returned writer, so every write and `finish` returns
-/// `error.WriteFailed`, never a silent alias.
-///
 /// Stack: `Buffer(window_wbits)` is MiB-scale and lives in the caller's
 /// storage; the writer itself is KiB-scale.
 pub fn init(
     comptime window_wbits: usize,
     output: *Io.Writer,
     buffer: *Buffer(window_wbits),
-    options: encode.Options,
 ) Writer {
     assert(window_wbits >= 10);
     assert(window_wbits <= 24);
-    if (options.quality != 3) {
-        return .{
-            .writer = .failing,
-            .output = output,
-            .ring = &.{},
-            .mask = 0,
-            .staging = &.{},
-            .state = undefined,
-            .lgwin = @intCast(window_wbits),
-        };
-    }
     const ring_size = ringSize(window_wbits);
     var state: encode.State = .{
         .matcher = .{
@@ -270,17 +254,15 @@ fn accept(w: *Io.Writer, bytes: []const u8) usize {
 }
 
 /// One-call pump: encode every byte of `in` into one stream on `out`, using
-/// `buffer`. Returns the bytes read. `error.ReadFailed` reports an input or
-/// an unimplemented quality; `error.WriteFailed` an output failure.
+/// `buffer`. Returns the bytes read. `error.ReadFailed` is an input failure;
+/// `error.WriteFailed` an output failure.
 pub fn streamAll(
     comptime window_wbits: usize,
     in: *Io.Reader,
     out: *Io.Writer,
     buffer: *Buffer(window_wbits),
-    options: encode.Options,
 ) error{ ReadFailed, WriteFailed }!usize {
-    if (options.quality != 3) return error.ReadFailed;
-    var w: Writer = .init(window_wbits, out, buffer, options);
+    var w: Writer = .init(window_wbits, out, buffer);
     const n = try in.streamRemaining(&w.writer);
     try w.finish();
     return n;
@@ -301,7 +283,7 @@ fn roundTrip(comptime window_wbits: usize, source: []const u8) !void {
     const buffer = try gpa.create(Buffer(window_wbits));
     defer gpa.destroy(buffer);
     var in: Io.Reader = .fixed(source);
-    _ = try streamAll(window_wbits, &in, &out.writer, buffer, .{});
+    _ = try streamAll(window_wbits, &in, &out.writer, buffer);
 
     const plain = try gpa.alloc(u8, source.len + 1);
     defer gpa.free(plain);
@@ -350,29 +332,12 @@ test "a Writer fed everything at once is the one-shot" {
     const buffer = try gpa.create(Buffer(comptime_lgwin));
     defer gpa.destroy(buffer);
     var in: Io.Reader = .fixed(&source);
-    _ = try streamAll(comptime_lgwin, &in, &streamed.writer, buffer, .{});
+    _ = try streamAll(comptime_lgwin, &in, &streamed.writer, buffer);
 
     const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(source.len));
     defer gpa.free(one_shot);
-    const written = try encode.compress(&source, one_shot, .{});
+    const written = try encode.compress(&source, one_shot);
     try testing.expectEqualSlices(u8, one_shot[0..written], streamed.written());
-}
-
-test "an unimplemented quality poisons the writer, never a silent alias" {
-    const gpa = testing.allocator;
-    const buffer = try gpa.create(DefaultBuffer);
-    defer gpa.destroy(buffer);
-    var out: Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    var w: Writer = .init(22, &out.writer, buffer, .{ .quality = 11 });
-    try testing.expectError(error.WriteFailed, w.writer.writeAll("hello"));
-    try testing.expectError(error.WriteFailed, w.finish());
-
-    var in: Io.Reader = .fixed("hello");
-    try testing.expectError(
-        error.ReadFailed,
-        streamAll(22, &in, &out.writer, buffer, .{ .quality = 0 }),
-    );
 }
 
 test "flush forces the pending meta-block out" {
@@ -381,7 +346,7 @@ test "flush forces the pending meta-block out" {
     defer gpa.destroy(buffer);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    var w: Writer = .init(22, &out.writer, buffer, .{});
+    var w: Writer = .init(22, &out.writer, buffer);
     try w.writer.writeAll("hello world, hello world, hello world");
     const before = out.written().len;
     try w.writer.flush();

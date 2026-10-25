@@ -320,9 +320,9 @@ fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const 
         if (mem.eql(u8, codec, "zstd"))
             return compress.zstd.encode.compress(raw, target, .{});
         if (mem.eql(u8, codec, "zstd3"))
-            return compress.zstd.encode.compress(raw, target, .{ .level = 3 });
+            return compress.zstd.encode.compress(raw, target, .{ .level = .@"3" });
         if (mem.eql(u8, codec, "brotli"))
-            return compress.brotli.encode.compress(raw, target, .{});
+            return compress.brotli.encode.compress(raw, target);
         if (mem.eql(u8, codec, "brotli-stream"))
             return brotliStream(bench, raw, target);
         return compress.snappy.encode.compressBlock(raw, target);
@@ -338,9 +338,9 @@ fn brotliStream(bench: *Bench, raw: []const u8, target: []u8) !usize {
     var in: Io.Reader = .fixed(raw);
     var out: Io.Writer = .fixed(target);
     if (raw.len <= (1 << 16) - 16) {
-        _ = try compress.brotli.Writer.streamAll(16, &in, &out, bench.brotli_window_16, .{});
+        _ = try compress.brotli.Writer.streamAll(16, &in, &out, bench.brotli_window_16);
     } else {
-        _ = try compress.brotli.Writer.streamAll(17, &in, &out, bench.brotli_window_17, .{});
+        _ = try compress.brotli.Writer.streamAll(17, &in, &out, bench.brotli_window_17);
     }
     return out.buffered().len;
 }

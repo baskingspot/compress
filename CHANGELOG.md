@@ -7,10 +7,13 @@ All notable changes to compress are recorded here. The format follows
 
 ### Changed
 
-- `flate`, `gzip`, and `zlib` take a `Level` enum (`@"1"` and `@"6"`) instead
-  of a number. `error.Unimplemented` leaves `compress`, and a bad level is a
-  compile error. A numeric level from a config maps with `Level.fromInt` and
-  handles the null.
+- `flate`, `gzip`, and `zlib` take a `Level` enum (`@"1"` and `@"6"`), and
+  `zstd` its own (`@"1"` and `@"3"`), instead of a number. A bad level is a
+  compile error, and `error.Unimplemented` leaves `compress`. A numeric level
+  from a config maps with `Level.fromInt` and handles the null.
+- `brotli.encode` and `brotli.Writer` take no options: quality 3 is the only
+  encoder class, so the one-value `Options` is gone. The one-shot is
+  `compress(source, target)`, the writer `init(window_wbits, output, buffer)`.
 
 ### Added
 

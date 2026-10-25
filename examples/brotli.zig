@@ -33,7 +33,6 @@ fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
         in,
         out,
         buffer,
-        .{},
     );
 }
 

@@ -50,7 +50,6 @@ test {
     // The consumer surface, spelled the way a consumer spells it: names are
     // reached through the codec namespaces, and nothing is flat at the root.
     _ = brotli.encode.compress;
-    _ = brotli.encode.Options;
     _ = brotli.decode.decompress;
     _ = brotli.decode.DecompressError;
     _ = brotli.Reader.streamAll;

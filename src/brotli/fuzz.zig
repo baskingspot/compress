@@ -1285,7 +1285,7 @@ fn fuzzEncode(_: void, smith: *Smith) anyerror!void {
     sentinel.fill(&target);
     const cap = encode.maxCompressedLength(input.len);
     try testing.expect(cap <= encode_out_max);
-    const written = try encode.compress(input, target[0..cap], .{});
+    const written = try encode.compress(input, target[0..cap]);
     try testing.expect(written <= cap);
     try sentinel.expect(&target, written);
     try expectEncodeRoundTrip(input, target[0..written]);
@@ -1307,9 +1307,9 @@ fn fuzzEncodeStream(storage: *EncodeStorage, smith: *Smith) anyerror!void {
     var in: Io.Reader = .fixed(input);
     var out: Io.Writer = .fixed(&compressed);
     switch (rangeAtMost(smith, 0, 2)) {
-        0 => _ = try Writer.streamAll(10, &in, &out, &storage.writer10, .{}),
-        1 => _ = try Writer.streamAll(16, &in, &out, &storage.writer16, .{}),
-        else => _ = try Writer.streamAll(22, &in, &out, &storage.writer22, .{}),
+        0 => _ = try Writer.streamAll(10, &in, &out, &storage.writer10),
+        1 => _ = try Writer.streamAll(16, &in, &out, &storage.writer16),
+        else => _ = try Writer.streamAll(22, &in, &out, &storage.writer22),
     }
     try expectEncodeRoundTrip(input, out.buffered());
 }

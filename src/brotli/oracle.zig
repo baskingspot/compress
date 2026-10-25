@@ -34,7 +34,7 @@ pub fn main(init: std.process.Init) !u8 {
     const args = try init.minimal.args.toSlice(arena);
     if (args.len != 3 and args.len != 4) {
         print("usage: brotli-oracle decode|stream <file> <cap-or-wbits> > out\n" ++
-            "       brotli-oracle encode <input-file> [quality] > stream\n" ++
+            "       brotli-oracle encode <input-file> > stream\n" ++
             "       brotli-oracle encode-stream <input-file> <window-wbits> > stream\n", .{});
         return 1;
     }
@@ -51,15 +51,10 @@ pub fn main(init: std.process.Init) !u8 {
     defer stdout_writer.interface.flush() catch {};
 
     if (std.mem.eql(u8, args[1], "encode")) {
-        const quality: u8 = if (args.len == 4)
-            std.fmt.parseInt(u8, args[3], 10) catch 255
-        else
-            3;
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_stream_len));
         const cap = brotli.encode.maxCompressedLength(source.len);
         const target = try arena.alloc(u8, cap);
-        const options: brotli.encode.Options = .{ .quality = quality };
-        const written = brotli.encode.compress(source, target, options) catch |err| {
+        const written = brotli.encode.compress(source, target) catch |err| {
             print("brotli-oracle: {s}\n", .{@errorName(err)});
             return 1;
         };
@@ -77,7 +72,6 @@ pub fn main(init: std.process.Init) !u8 {
                     &file_reader.interface,
                     &stdout_writer.interface,
                     buffer,
-                    .{},
                 ) catch |err| {
                     print("brotli-oracle: {s}\n", .{@errorName(err)});
                     return 1;
@@ -133,7 +127,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     print("usage: brotli-oracle decode|stream <file> <cap-or-wbits> > out\n" ++
-        "       brotli-oracle encode <input-file> [quality] > stream\n" ++
+        "       brotli-oracle encode <input-file> > stream\n" ++
         "       brotli-oracle encode-stream <input-file> <window-wbits> > stream\n", .{});
     return 1;
 }

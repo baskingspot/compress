@@ -20,19 +20,18 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 
 ## What is in it
 
-| Namespace                        | Format                       | Support                                      |
-| -------------------------------- | ---------------------------- | -------------------------------------------- |
-| [`snappy`](src/snappy/README.md) | Snappy blocks                | encode, decode, streaming                    |
-| [`flate`](src/flate/README.md)   | raw DEFLATE, RFC 1951        | encode, decode, streaming, preset dictionary |
-| [`gzip`](src/gzip/README.md)     | gzip, RFC 1952, over `flate` | encode, decode, streaming                    |
-| [`zlib`](src/zlib/README.md)     | zlib, RFC 1950, over `flate` | encode, decode, streaming, preset dictionary |
-| [`zstd`](src/zstd/README.md)     | Zstandard, RFC 8878          | encode, decode, streaming, dictionaries      |
-| [`brotli`](src/brotli/README.md) | Brotli, RFC 7932             | encode (quality 3), decode, streaming        |
+| Namespace                        | Format                       | Support                                               |
+| -------------------------------- | ---------------------------- | ----------------------------------------------------- |
+| [`snappy`](src/snappy/README.md) | Snappy blocks                | encode, decode, streaming                             |
+| [`flate`](src/flate/README.md)   | raw DEFLATE, RFC 1951        | encode, decode, streaming, preset dictionary          |
+| [`gzip`](src/gzip/README.md)     | gzip, RFC 1952, over `flate` | encode, decode, streaming                             |
+| [`zlib`](src/zlib/README.md)     | zlib, RFC 1950, over `flate` | encode, decode, streaming, preset dictionary          |
+| [`zstd`](src/zstd/README.md)     | Zstandard, RFC 8878          | encode (levels 1, 3), decode, streaming, dictionaries |
+| [`brotli`](src/brotli/README.md) | Brotli, RFC 7932             | encode (quality 3), decode, streaming                 |
 
 Not implemented:
 
 - A zstd dictionary trainer: the zstd CLI trains dictionaries, and this package consumes them.
-- zstd levels other than 1 and 3: the rest return `error.Unimplemented`.
 - Google's Snappy framing: the `Reader` and `Writer` use a length-prefixed framing of this package's own. It has no end marker or checksum, so a stream cut at a block boundary reads as complete.
 
 ## Install

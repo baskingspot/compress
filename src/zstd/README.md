@@ -110,28 +110,29 @@ zstd.Dictionary.ParseError = error{
 // the frame names the dictionary's ID, and the window and size class cover
 // source + dictionary content, so the dictionary never expires mid-frame.
 zstd.encode.compress(source: []const u8, target: []u8, options: Options)
-    error{ BufferTooSmall, Unimplemented }!usize
+    error{BufferTooSmall}!usize
 zstd.encode.compressBuffered(source: []const u8, target: []u8, buffer: *Buffer,
-    options: Options) error{ BufferTooSmall, Unimplemented }!usize
+    options: Options) error{BufferTooSmall}!usize
 zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + the long table 512 KiB
     // (1 << 17 entries, level 3's widest hashLog) + the small table 256 KiB
     // (1 << 16 entries, its widest chainLog); 1.375 MiB
 zstd.encode.maxCompressedLength(input_len: usize) usize // 18-byte header cap + 3/block + input_len + 4
-zstd.encode.Options = struct { level: u8 = 1, dict: ?*const Dictionary = null }
-    // level: 1-19, the CLI's scale (1 is the default):
-    //   1: the level-1 class — the `zstd -1` byte pin.
-    //   3: the double-fast (dfast) class — two hash tables (long + small), the
-    //      two-candidate scan, the repcode pre-check reused — byte-identical to
-    //      the pinned CLI's `zstd -3` (v1.5.7, file form, default threading,
-    //      inputs up to 8 MiB, the level's job size; above it the CLI's
-    //      multithread form splits jobs, so the pin there is round-trip-only,
-    //      the same shape the level-1 parity exclusions already document).
-    // Levels 2 and 4-19 are not implemented and return error.Unimplemented,
-    // never a silent alias, and so is any level outside 1-19. A level-3
+zstd.encode.Level = enum(u8) { @"1" = 1, @"3" = 3 }  // the CLI scale's numbers
+zstd.encode.Options = struct { level: Level = .@"1", dict: ?*const Dictionary = null }
+    // level: the implemented classes, named by the CLI-scale number:
+    //   @"1": the level-1 class — the `zstd -1` byte pin.
+    //   @"3": the double-fast (dfast) class — two hash tables (long + small),
+    //         the two-candidate scan, the repcode pre-check reused —
+    //         byte-identical to the pinned CLI's `zstd -3` (v1.5.7, file
+    //         form, default threading, inputs up to 8 MiB, the level's job
+    //         size; above it the CLI's multithread form splits jobs, so the
+    //         pin there is round-trip-only, the same shape the level-1 parity
+    //         exclusions already document).
+    // Another level is not representable; a numeric level from a config maps
+    // with Level.fromInt and handles the null at that boundary. A level-3
     // `Writer`'s match table region grows to the long+small tables, and its
     // default window is log 21 (the -3 class's window), so `Writer.Buffer(21)`
-    // is its default. Callers of the old `.fast` name change to level 1, and
-    // of `.ratio` to level 3 — a source-breaking rename of the same classes.
+    // is its default.
 
 // One-shot decode. `dict` seeds the frame's tables, repeat offsets, and
 // history; `null` is the no-dictionary decode. The third parameter is
@@ -167,7 +168,7 @@ zstd.Writer.Buffer(comptime window_log: usize) type
     //   dictionary is in play
     // + sequences 12 * (block / 3 + 1); window_log must be 10 to 31
 zstd.Writer.default_window_log: usize // 19: a 512 KiB window, the largest level 1 declares
-zstd.Writer.defaultWindowLog(level: u8) usize // 19 for level 1, 21 for level 3
+zstd.Writer.defaultWindowLog(level: Level) usize // 19 for level 1, 21 for level 3
 zstd.Writer.level3_default_window_log: usize // 21: the dfast class's window (2 MiB)
 zstd.Writer.DefaultBuffer // Buffer(default_window_log): 2.2 MiB
 zstd.Writer.init(comptime window_log: usize, output: *Io.Writer, buffer: *Buffer(window_log),
@@ -377,11 +378,10 @@ state — so `encode` exposes only the names above.
 ## Limitations
 
 - Levels 1 and 3 only: level 1 is the level-1 class and level 3 the dfast
-  class; levels 2 and 4-19, and anything outside 1-19, are not implemented
-  and return `error.Unimplemented` (a `Writer` made with one fails every
-  write and `finish`). Each of the CLI's other levels is a distinct output
-  class this package cannot produce. Level 3's byte pin is the CLI's file
-  form only: a level-3 `Writer`'s frames are the same class (windowLog 21,
+  class, and `Level` cannot represent another number. Each of the CLI's other
+  levels is a distinct output class this package cannot produce. Level 3's
+  byte pin is the CLI's file form only: a level-3 `Writer`'s frames are the
+  same class (windowLog 21,
   the dfast tables) but not byte-pinned against the CLI's pipe form.
 - No trainer: a dictionary is an input. `zstd --train` (the CLI's fastCover)
   or any other tool produces the file, and `zstd.Dictionary` consumes it; an

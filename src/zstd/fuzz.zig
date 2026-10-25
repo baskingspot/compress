@@ -2751,7 +2751,7 @@ fn fuzzEncodeRoundTrip(_: void, smith: *Smith) anyerror!void {
     const mode = rangeAtMost(smith, 0, 3);
     // The implemented levels: 1 (fast) and 3 (dfast). Both round-trip; only
     // the bytes differ.
-    const level: u8 = if (smith.boolWeighted(1, 1)) 3 else 1;
+    const level: encode.Level = if (smith.boolWeighted(1, 1)) .@"3" else .@"1";
     // Single-byte writes only where the loop stays cheap.
     if (mode == 2) size = @min(size, 4096);
 
@@ -2764,7 +2764,7 @@ fn fuzzEncodeRoundTrip(_: void, smith: *Smith) anyerror!void {
 
 /// The one-shot's frame for `source`: the bound, the trailer, identity at the
 /// exact cap and with slack, and a Smith-chosen smaller cap.
-fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: u8) !void {
+fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: encode.Level) !void {
     var compressed: [encode_bound]u8 = undefined;
     const bound = encode.maxCompressedLength(source.len);
     const written = try encode.compress(source, compressed[0..bound], .{ .level = level });
@@ -2808,7 +2808,12 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: u8) !v
 
 /// The Writer's frame for `source`, in `mode`'s write pattern: the empty
 /// writer's 13-byte frame, the bound, the trailer, and identity.
-fn expectWriterEncodeRoundTrip(smith: *Smith, source: []const u8, mode: usize, level: u8) !void {
+fn expectWriterEncodeRoundTrip(
+    smith: *Smith,
+    source: []const u8,
+    mode: usize,
+    level: encode.Level,
+) !void {
     var out: [writer_out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&out);
     var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
@@ -3593,34 +3598,16 @@ fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
     try expectStickyEnd(&r);
 }
 
-/// The poison lifecycle: a writer at an unimplemented level, a sink that fills
-/// mid-frame, `finish` twice, and a write after `finish` — every one reports
-/// `error.WriteFailed`, and no false success.
+/// The poison lifecycle: a sink that fills mid-frame, `finish` twice, and a
+/// write after `finish` — every one reports `error.WriteFailed`, and no false
+/// success.
 fn writerPoison(smith: *Smith) !void {
     var buffer: Writer.Buffer(10) = undefined;
-    switch (rangeAtMost(smith, 0, 3)) {
-        // An unimplemented level is poisoned at `init`: every write and
-        // `finish` fails and the sink sees nothing. The one-shot returns
-        // `Unimplemented` before any byte.
-        0 => {
-            var out: [64]u8 = undefined;
-            var fw: Io.Writer = .fixed(&out);
-            var w: Writer = .init(10, &fw, &buffer, .{ .level = 2 });
-            try testing.expectError(error.WriteFailed, w.writer.writeAll("hello, zstd"));
-            try testing.expectError(error.WriteFailed, w.finish());
-            try testing.expectEqual(@as(usize, 0), fw.end);
-            var target: [64]u8 = undefined;
-            sentinel.fill(&target);
-            try testing.expectError(
-                error.Unimplemented,
-                encode.compress("hello, zstd", &target, .{ .level = 2 }),
-            );
-            try sentinel.expect(&target, 0);
-        },
+    switch (rangeAtMost(smith, 0, 2)) {
         // The sink fills mid-frame: the buffered block's emission fails and
         // `finish` reports it — twice, never a false success — and the writer
         // stays poisoned.
-        1 => {
+        0 => {
             var out: [8]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
             var w: Writer = .init(10, &fw, &buffer, .{});
@@ -3633,7 +3620,7 @@ fn writerPoison(smith: *Smith) !void {
         // `finish` twice and a write after `finish` on a healthy writer: the
         // frame is complete, the later calls fail, and the sink does not
         // grow.
-        2 => {
+        1 => {
             var out: [256]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
             var w: Writer = .init(10, &fw, &buffer, .{});
@@ -3813,7 +3800,11 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
     // the same or larger, and its header form no larger).
     {
         var level3: [encode_bound + guard_len]u8 = undefined;
-        const written3 = try encode.compress(source[0..size], level3[0..bound], .{ .level = 3 });
+        const written3 = try encode.compress(
+            source[0..size],
+            level3[0..bound],
+            .{ .level = .@"3" },
+        );
         try testing.expect(written3 <= bound);
         try expectTrailerConsistent(level3[0..written3], written3, source[0..size], true);
     }

@@ -849,8 +849,8 @@ helpers. Its pure pieces are extracted. The encoder carries no Tracy zones
   bytes of the empty input (`a1 01`) and the one-byte input, the
   window-by-size ladder, round trips through the one-shot and through a
   `Writer` at every window class, the multi-meta-block and incompressible
-  paths, the cap (`BufferTooSmall`, never a short write), the unimplemented
-  quality's refusal (and the poisoned writer), the forced mid-stream flush,
+  paths, the cap (`BufferTooSmall`, never a short write), the forced
+  mid-stream flush,
   §3.2's own worked example for the canonical assignment, the builder's
   depth limit and determinism, §5's length-code table positions, §4's
   distance-prefix inverse, the matcher's first copy and ring push, and the

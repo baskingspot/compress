@@ -65,7 +65,7 @@ pub fn main(init: std.process.Init) !u8 {
             print("zstd-oracle: {s} needs <input-file> <dict-file> [level]\n", .{args[1]});
             return 1;
         }
-        const level: u8 = if (args.len == 5) try parseLevel(args[4]) else 1;
+        const level: zstd.encode.Level = if (args.len == 5) try parseLevel(args[4]) else .@"1";
         const dict_file = try Io.Dir.cwd().openFile(io, args[3], .{
             .allow_directory = false,
             .follow_symlinks = true,
@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !u8 {
             print("zstd-oracle: encode-oneshot needs <input-file> [level]\n", .{});
             return 1;
         }
-        const level = if (args.len == 4) try parseLevel(args[3]) else 1;
+        const level = if (args.len == 4) try parseLevel(args[3]) else .@"1";
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const target = try arena.alloc(u8, zstd.encode.maxCompressedLength(source.len));
         const frame_len = zstd.encode.compress(source, target, .{ .level = level }) catch |err| {
@@ -132,11 +132,11 @@ pub fn main(init: std.process.Init) !u8 {
             print("zstd-oracle: encode-stream needs <input-file> [level]\n", .{});
             return 1;
         }
-        const level = if (args.len == 4) try parseLevel(args[3]) else 1;
+        const level = if (args.len == 4) try parseLevel(args[3]) else .@"1";
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
         const options: zstd.encode.Options = .{ .level = level };
         var in: Io.Reader = .fixed(source);
-        if (level == 3) {
+        if (level == .@"3") {
             const buffer = try arena.create(
                 zstd.Writer.Buffer(zstd.Writer.level3_default_window_log),
             );
@@ -226,9 +226,13 @@ pub fn main(init: std.process.Init) !u8 {
 }
 
 /// Parse a CLI-scale level argument (1-19; `encode` gates the unimplemented ones).
-fn parseLevel(text: []const u8) !u8 {
-    return std.fmt.parseInt(u8, text, 10) catch {
-        print("zstd-oracle: level must be 1-19, got '{s}'\n", .{text});
+fn parseLevel(text: []const u8) !zstd.encode.Level {
+    const number = std.fmt.parseInt(u8, text, 10) catch {
+        print("zstd-oracle: level must be 1 or 3, got '{s}'\n", .{text});
+        return error.BadLevel;
+    };
+    return zstd.encode.Level.fromInt(number) orelse {
+        print("zstd-oracle: level must be 1 or 3, got {d}\n", .{number});
         return error.BadLevel;
     };
 }
