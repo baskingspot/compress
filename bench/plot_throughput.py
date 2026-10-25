@@ -30,14 +30,13 @@ PAPER = "#f4f1ec"
 HEAT = "#d4412b"
 SLATE = "#58616c"
 
-X_MIN = 0.05
-X_MAX = 100.0
-X_TICKS = (0.1, 1.0, 10.0, 100.0)
+X_MAX = 20.0
+X_TICKS = (0.0, 5.0, 10.0, 15.0, 20.0)
 
 WIDTH = 760
-HEIGHT = 330
+HEIGHT = 300
 LEFT = 88.0
-RIGHT = 24.0
+RIGHT = 52.0
 TOP = 66.0
 BOTTOM = 44.0
 PLOT_W = WIDTH - LEFT - RIGHT
@@ -88,24 +87,23 @@ def shape_medians(observations: list[dict[str, Any]]) -> dict[tuple[str, str], l
     return series
 
 
-def summarize(
-    series: dict[tuple[str, str], list[float]],
-) -> dict[tuple[str, str], tuple[float, float, float]]:
-    """Lowest shape, median shape, highest shape for each codec and direction."""
-    out: dict[tuple[str, str], tuple[float, float, float]] = {}
-    for key, values in series.items():
-        present = [value for value in values if not math.isnan(value)]
-        out[key] = (min(present), statistics.median(present), max(present))
-    return out
+def medians(series: dict[tuple[str, str], list[float]]) -> dict[tuple[str, str], float]:
+    return {
+        key: statistics.median([value for value in values if not math.isnan(value)])
+        for key, values in series.items()
+    }
 
 
 def x_of(value: float) -> float:
-    fraction = (math.log10(value) - math.log10(X_MIN)) / (math.log10(X_MAX) - math.log10(X_MIN))
-    return LEFT + PLOT_W * fraction
+    return LEFT + PLOT_W * min(value, X_MAX) / X_MAX
+
+
+def label(value: float) -> str:
+    return f"{value:.2f}" if value < 1 else f"{value:.1f}"
 
 
 def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[float]]) -> Path:
-    summary = summarize(series)
+    middle = medians(series)
     parts = [
         (
             f'<svg xmlns="http://www.w3.org/2000/svg" width="{WIDTH}" height="{HEIGHT}"'
@@ -118,23 +116,19 @@ def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[
         text(
             LEFT,
             48,
-            "GB/s on a log scale. Median and range across eight corpus shapes; seven EC2 targets.",
+            "64 KiB inputs, median across eight corpus shapes and seven EC2 targets. GB/s.",
             size=8.5,
             fill=theme["muted"],
         )
     )
 
     legend_x = WIDTH - RIGHT - 118
-    for index, (label, color) in enumerate(
+    for index, (direction_label, color) in enumerate(
         (("encode", theme["encode"]), ("decode", theme["decode"]))
     ):
         x = legend_x + index * 62
-        parts.append(
-            f'<line x1="{x:.2f}" y1="27" x2="{x + 16:.2f}" y2="27"'
-            f' stroke="{color}" stroke-width="1.7" stroke-linecap="round"/>'
-        )
-        parts.append(f'<circle cx="{x + 8:.2f}" cy="27" r="2.6" fill="{color}"/>')
-        parts.append(text(x + 21, 30, label, size=8, fill=theme["fg"]))
+        parts.append(f'<rect x="{x:.2f}" y="23" width="16" height="7" rx="1.5" fill="{color}"/>')
+        parts.append(text(x + 21, 30, direction_label, size=8, fill=theme["fg"]))
 
     for tick in X_TICKS:
         x = x_of(tick)
@@ -167,24 +161,18 @@ def render(theme: dict[str, str], name: str, series: dict[tuple[str, str], list[
             )
         )
         for direction, color, offset in (
-            ("compress", theme["encode"], -7.0),
-            ("decompress", theme["decode"], 7.0),
+            ("compress", theme["encode"], -8.0),
+            ("decompress", theme["decode"], 8.0),
         ):
-            low, middle, high = summary[(codec, direction)]
+            value = middle[(codec, direction)]
             y = center + offset
             parts.append(
-                f'<line x1="{x_of(low):.2f}" y1="{y:.2f}" x2="{x_of(high):.2f}" y2="{y:.2f}"'
-                f' stroke="{color}" stroke-width="1.2" stroke-linecap="round"'
-                f' opacity="{theme["range"]}"/>'
+                f'<rect x="{LEFT:.2f}" y="{y - 4.5:.2f}" width="{x_of(value) - LEFT:.2f}"'
+                f' height="9" rx="1.5" fill="{color}"/>'
             )
-            parts.extend(
-                f'<line x1="{x_of(edge):.2f}" y1="{y - 4:.2f}"'
-                f' x2="{x_of(edge):.2f}" y2="{y + 4:.2f}"'
-                f' stroke="{color}" stroke-width="1.2" stroke-linecap="round"'
-                f' opacity="{theme["range"]}"/>'
-                for edge in (low, high)
+            parts.append(
+                text(x_of(value) + 6, y + 2.6, label(value), size=7.5, fill=theme["muted"])
             )
-            parts.append(f'<circle cx="{x_of(middle):.2f}" cy="{y:.2f}" r="3.2" fill="{color}"/>')
 
     parts.append(
         text(

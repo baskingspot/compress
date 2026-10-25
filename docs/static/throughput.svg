@@ -1,76 +1,52 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="330" viewBox="0 0 760 330" role="img">
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="300" viewBox="0 0 760 300" role="img">
 
-<rect width="760" height="330" fill="#f4f1ec"/>
+<rect width="760" height="300" fill="#f4f1ec"/>
 <text x="88.00" y="30.00" font-size="15" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="700" text-anchor="start" opacity="1.0">compress throughput</text>
-<text x="88.00" y="48.00" font-size="8.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">GB/s on a log scale. Median and range across eight corpus shapes; seven EC2 targets.</text>
-<line x1="618.00" y1="27" x2="634.00" y2="27" stroke="#d4412b" stroke-width="1.7" stroke-linecap="round"/>
-<circle cx="626.00" cy="27" r="2.6" fill="#d4412b"/>
-<text x="639.00" y="30.00" font-size="8" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">encode</text>
-<line x1="680.00" y1="27" x2="696.00" y2="27" stroke="#58616c" stroke-width="1.7" stroke-linecap="round"/>
-<circle cx="688.00" cy="27" r="2.6" fill="#58616c"/>
-<text x="701.00" y="30.00" font-size="8" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">decode</text>
-<line x1="147.09" y1="66.00" x2="147.09" y2="286.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
-<text x="147.09" y="302.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">0.1</text>
-<line x1="343.40" y1="66.00" x2="343.40" y2="286.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
-<text x="343.40" y="302.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">1</text>
-<line x1="539.70" y1="66.00" x2="539.70" y2="286.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
-<text x="539.70" y="302.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">10</text>
-<line x1="736.00" y1="66.00" x2="736.00" y2="286.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
-<text x="736.00" y="302.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">100</text>
-<text x="74.00" y="87.83" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">snappy</text>
-<line x1="292.64" y1="77.33" x2="638.93" y2="77.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="292.64" y1="73.33" x2="292.64" y2="81.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="638.93" y1="73.33" x2="638.93" y2="81.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="589.54" cy="77.33" r="3.2" fill="#d4412b"/>
-<line x1="330.55" y1="91.33" x2="697.27" y2="91.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="330.55" y1="87.33" x2="330.55" y2="95.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="697.27" y1="87.33" x2="697.27" y2="95.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="529.42" cy="91.33" r="3.2" fill="#58616c"/>
-<text x="74.00" y="124.50" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">flate</text>
-<line x1="216.91" y1="114.00" x2="542.67" y2="114.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="216.91" y1="110.00" x2="216.91" y2="118.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="542.67" y1="110.00" x2="542.67" y2="118.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="241.15" cy="114.00" r="3.2" fill="#d4412b"/>
-<line x1="209.04" y1="128.00" x2="695.07" y2="128.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="209.04" y1="124.00" x2="209.04" y2="132.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="695.07" y1="124.00" x2="695.07" y2="132.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="552.59" cy="128.00" r="3.2" fill="#58616c"/>
-<text x="74.00" y="161.17" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">gzip</text>
-<line x1="213.38" y1="150.67" x2="410.08" y2="150.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="213.38" y1="146.67" x2="213.38" y2="154.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="410.08" y1="146.67" x2="410.08" y2="154.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="232.26" cy="150.67" r="3.2" fill="#d4412b"/>
-<line x1="125.91" y1="164.67" x2="428.78" y2="164.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="125.91" y1="160.67" x2="125.91" y2="168.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="428.78" y1="160.67" x2="428.78" y2="168.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="386.70" cy="164.67" r="3.2" fill="#58616c"/>
-<text x="74.00" y="197.83" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zlib</text>
-<line x1="216.11" y1="187.33" x2="496.88" y2="187.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="216.11" y1="183.33" x2="216.11" y2="191.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="496.88" y1="183.33" x2="496.88" y2="191.33" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="239.23" cy="187.33" r="3.2" fill="#d4412b"/>
-<line x1="126.89" y1="201.33" x2="521.53" y2="201.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="126.89" y1="197.33" x2="126.89" y2="205.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="521.53" y1="197.33" x2="521.53" y2="205.33" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="449.30" cy="201.33" r="3.2" fill="#58616c"/>
-<text x="74.00" y="234.50" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zstd</text>
-<line x1="238.45" y1="224.00" x2="529.56" y2="224.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="238.45" y1="220.00" x2="238.45" y2="228.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="529.56" y1="220.00" x2="529.56" y2="228.00" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="479.54" cy="224.00" r="3.2" fill="#d4412b"/>
-<line x1="270.04" y1="238.00" x2="563.48" y2="238.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="270.04" y1="234.00" x2="270.04" y2="242.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="563.48" y1="234.00" x2="563.48" y2="242.00" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="555.82" cy="238.00" r="3.2" fill="#58616c"/>
-<text x="74.00" y="271.17" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">brotli</text>
-<line x1="118.97" y1="260.67" x2="355.75" y2="260.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="118.97" y1="256.67" x2="118.97" y2="264.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="355.75" y1="256.67" x2="355.75" y2="264.67" stroke="#d4412b" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="153.97" cy="260.67" r="3.2" fill="#d4412b"/>
-<line x1="241.88" y1="274.67" x2="692.57" y2="274.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="241.88" y1="270.67" x2="241.88" y2="278.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<line x1="692.57" y1="270.67" x2="692.57" y2="278.67" stroke="#58616c" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-<circle cx="540.87" cy="274.67" r="3.2" fill="#58616c"/>
-<text x="736.00" y="316.00" font-size="6.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">Zig 0.16.0 · 2026-10-17</text>
-<text x="88.00" y="316.00" font-size="6.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">flate, gzip, zlib, and zstd at level 1; brotli at quality 3. Five rounds.</text>
+<text x="88.00" y="48.00" font-size="8.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">64 KiB inputs, median across eight corpus shapes and seven EC2 targets. GB/s.</text>
+<rect x="590.00" y="23" width="16" height="7" rx="1.5" fill="#d4412b"/>
+<text x="611.00" y="30.00" font-size="8" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">encode</text>
+<rect x="652.00" y="23" width="16" height="7" rx="1.5" fill="#58616c"/>
+<text x="673.00" y="30.00" font-size="8" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">decode</text>
+<line x1="88.00" y1="66.00" x2="88.00" y2="256.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
+<text x="88.00" y="272.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">0</text>
+<line x1="243.00" y1="66.00" x2="243.00" y2="256.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
+<text x="243.00" y="272.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">5</text>
+<line x1="398.00" y1="66.00" x2="398.00" y2="256.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
+<text x="398.00" y="272.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">10</text>
+<line x1="553.00" y1="66.00" x2="553.00" y2="256.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
+<text x="553.00" y="272.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">15</text>
+<line x1="708.00" y1="66.00" x2="708.00" y2="256.00" stroke="#58616c" stroke-width="0.7" opacity="0.18"/>
+<text x="708.00" y="272.00" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="middle" opacity="1.0">20</text>
+<text x="74.00" y="85.33" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">snappy</text>
+<rect x="88.00" y="69.33" width="556.24" height="9" rx="1.5" fill="#d4412b"/>
+<text x="650.24" y="76.43" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">17.9</text>
+<rect x="88.00" y="85.33" width="274.79" height="9" rx="1.5" fill="#58616c"/>
+<text x="368.79" y="92.43" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">8.9</text>
+<text x="74.00" y="117.00" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">flate</text>
+<rect x="88.00" y="101.00" width="9.34" height="9" rx="1.5" fill="#d4412b"/>
+<text x="103.34" y="108.10" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">0.30</text>
+<rect x="88.00" y="117.00" width="360.60" height="9" rx="1.5" fill="#58616c"/>
+<text x="454.60" y="124.10" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">11.6</text>
+<text x="74.00" y="148.67" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">gzip</text>
+<rect x="88.00" y="132.67" width="8.42" height="9" rx="1.5" fill="#d4412b"/>
+<text x="102.42" y="139.77" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">0.27</text>
+<rect x="88.00" y="148.67" width="51.52" height="9" rx="1.5" fill="#58616c"/>
+<text x="145.52" y="155.77" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">1.7</text>
+<text x="74.00" y="180.33" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zlib</text>
+<rect x="88.00" y="164.33" width="9.14" height="9" rx="1.5" fill="#d4412b"/>
+<text x="103.14" y="171.43" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">0.29</text>
+<rect x="88.00" y="180.33" width="107.37" height="9" rx="1.5" fill="#58616c"/>
+<text x="201.37" y="187.43" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">3.5</text>
+<text x="74.00" y="212.00" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">zstd</text>
+<rect x="88.00" y="196.00" width="153.08" height="9" rx="1.5" fill="#d4412b"/>
+<text x="247.08" y="203.10" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">4.9</text>
+<rect x="88.00" y="212.00" width="374.54" height="9" rx="1.5" fill="#58616c"/>
+<text x="468.54" y="219.10" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">12.1</text>
+<text x="74.00" y="243.67" font-size="10" fill="#16191d" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="600" text-anchor="end" opacity="1.0">brotli</text>
+<rect x="88.00" y="227.67" width="3.36" height="9" rx="1.5" fill="#d4412b"/>
+<text x="97.36" y="234.77" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">0.11</text>
+<rect x="88.00" y="243.67" width="314.28" height="9" rx="1.5" fill="#58616c"/>
+<text x="408.28" y="250.77" font-size="7.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">10.1</text>
+<text x="708.00" y="286.00" font-size="6.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="end" opacity="1.0">Zig 0.16.0 · 2026-10-17</text>
+<text x="88.00" y="286.00" font-size="6.5" fill="#58616c" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif" font-weight="normal" text-anchor="start" opacity="1.0">flate, gzip, zlib, and zstd at level 1; brotli at quality 3. Five rounds.</text>
 </svg>
