@@ -5,7 +5,7 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .fastmem = .{
-            .url = "git+https://github.com/baskingspot/fastmem#f6fa7064c2fe273eb7a5e575358e91540c74db41",
+            .url = "git+https://github.com/baskingspot/fastmem#c87adb88dcc1765cc889be4e51d59a01e1db5462",
             .hash = "fastmem-0.0.0-W3bwdyOqBgCfq7hg9gtr_UuFX1aw_XBaxqXz-MHC4GmQ",
         },
         // Development-only: the test runner, benchmarks, and comptime
