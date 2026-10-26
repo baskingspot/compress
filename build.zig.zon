@@ -5,14 +5,14 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .fastmem = .{
-            .url = "git+https://github.com/baskingspot/fastmem#6eeb96704cccc4cc64edeb0e7b8895d09a522d07",
+            .url = "git+https://github.com/baskingspot/fastmem#f6fa7064c2fe273eb7a5e575358e91540c74db41",
             .hash = "fastmem-0.0.0-W3bwdyOqBgCfq7hg9gtr_UuFX1aw_XBaxqXz-MHC4GmQ",
         },
         // Development-only: the test runner, benchmarks, and comptime
         // fixtures. Lazy so consumers of the library never fetch it.
         .testingx = .{
-            .url = "https://baskingspot.dev/testingx/v0.1.1.tar.gz",
-            .hash = "testingx-0.1.1-ib95-6ivAgB3rCWLHww0C7edG1NLC71y1p1wogPV0Djf",
+            .url = "https://baskingspot.dev/testingx/v0.2.0.tar.gz",
+            .hash = "testingx-0.2.0-ib95-5lNAwA8WZQH6Q6eDm2hgfC3ixFJuhkOrR8gcZAm",
             .lazy = true,
         },
     },
