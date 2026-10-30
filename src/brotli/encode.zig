@@ -78,17 +78,17 @@ pub fn compress(source: []const u8, target: []u8) Error!usize {
     var hash: [bucket_entries]u32 = undefined;
     var command_buffer: [max_commands]match.Command = undefined;
     var scratch: Scratch = undefined;
-    var state: State = .{
-        .matcher = .{
-            .hasher = .{ .buckets = &hash },
-            .window = .{ .bytes = source, .mask = std.math.maxInt(usize) },
-            .lgwin = lgwin,
-        },
-        .commands = .{ .buffer = &command_buffer },
-        .writer = .{ .sink = .{ .slice = target } },
-        .scratch = &scratch,
-        .max_metablock_size = maxMetablockSize(lgwin),
-    };
+    var state: State = .init(
+        .init(
+            .{ .buckets = &hash },
+            .{ .bytes = source, .mask = std.math.maxInt(usize) },
+            lgwin,
+        ),
+        .init(&command_buffer),
+        .init(.{ .slice = target }),
+        &scratch,
+        maxMetablockSize(lgwin),
+    );
     state.matcher.hasher.init();
     storeWindowBits(&state.writer, lgwin) catch |err| return oneShotError(err);
     state.run(source.len) catch |err| return oneShotError(err);
@@ -167,7 +167,12 @@ pub const Sink = union(enum) {
     pub const Stream = struct {
         output: *Io.Writer,
         buffer: []u8,
-        len: usize = 0,
+        len: usize,
+
+        /// A windowed stream sink at the start of `buffer`.
+        pub fn init(output: *Io.Writer, buffer: []u8) Stream {
+            return .{ .output = output, .buffer = buffer, .len = 0 };
+        }
 
         pub fn byte(self: *Stream, b: u8) EmitError!void {
             if (self.len == self.buffer.len) try self.flush();
@@ -193,17 +198,22 @@ pub const BitWriter = struct {
     sink: Sink,
     /// Bits appended so far, the pending partial byte included: the wire
     /// position.
-    bit_pos: usize = 0,
+    bit_pos: usize,
     /// Whole bytes handed to the sink.
-    written: usize = 0,
+    written: usize,
     /// The pending bits, LSB first.
-    bits: u64 = 0,
+    bits: u64,
     /// The pending bit count, below eight between writes.
-    pending_len: u7 = 0,
+    pending_len: u7,
+
+    /// A writer at the start of its stream, with no pending bits.
+    pub fn init(sink: Sink) BitWriter {
+        return .{ .sink = sink, .bit_pos = 0, .written = 0, .bits = 0, .pending_len = 0 };
+    }
 
     /// A counting writer: no bytes, the same bit arithmetic.
     pub fn counting() BitWriter {
-        return .{ .sink = .{ .count = {} } };
+        return .init(.{ .count = {} });
     }
 
     /// Append `n` bits of `value`, least significant first (§1.5.1).
@@ -284,22 +294,41 @@ pub fn storeWindowBits(w: *BitWriter, lgwin: u6) EmitError!void {
 /// The per-meta-block scratch: the three histograms, the three depth/bit
 /// tables, the builder's node pool, and the code-length serialization.
 pub const Scratch = struct {
-    literal_histo: [256]u32 = @splat(0),
-    command_histo: [704]u32 = @splat(0),
-    distance_histo: [max_simple_distance_alphabet_size]u32 = @splat(0),
-    literal_depth: [256]u8 = @splat(0),
-    literal_bits: [256]u16 = @splat(0),
-    command_depth: [704]u8 = @splat(0),
-    command_bits: [704]u16 = @splat(0),
-    distance_depth: [max_simple_distance_alphabet_size]u8 = @splat(0),
-    distance_bits: [max_simple_distance_alphabet_size]u16 = @splat(0),
+    literal_histo: [256]u32,
+    command_histo: [704]u32,
+    distance_histo: [max_simple_distance_alphabet_size]u32,
+    literal_depth: [256]u8,
+    literal_bits: [256]u16,
+    command_depth: [704]u8,
+    command_bits: [704]u16,
+    distance_depth: [max_simple_distance_alphabet_size]u8,
+    distance_bits: [max_simple_distance_alphabet_size]u16,
     /// The builder's node pool (`MAX_HUFFMAN_TREE_SIZE`).
-    tree: [2 * 704 + 1]huffman.Node = undefined,
+    tree: [2 * 704 + 1]huffman.Node,
     /// §3.5's run-length serialization of a depth sequence.
-    tree_symbols: [704]u8 = undefined,
-    tree_extra_bits: [704]u8 = undefined,
-    code_length_depth: [18]u8 = undefined,
-    code_length_bits: [18]u16 = undefined,
+    tree_symbols: [704]u8,
+    tree_extra_bits: [704]u8,
+    code_length_depth: [18]u8,
+    code_length_bits: [18]u16,
+
+    /// Scratch before a meta-block: zeroed histograms and depths, with the
+    /// builder's pool left undefined until the tree pass fills it.
+    pub const zero: Scratch = .{
+        .literal_histo = @splat(0),
+        .command_histo = @splat(0),
+        .distance_histo = @splat(0),
+        .literal_depth = @splat(0),
+        .literal_bits = @splat(0),
+        .command_depth = @splat(0),
+        .command_bits = @splat(0),
+        .distance_depth = @splat(0),
+        .distance_bits = @splat(0),
+        .tree = undefined,
+        .tree_symbols = undefined,
+        .tree_extra_bits = undefined,
+        .code_length_depth = undefined,
+        .code_length_bits = undefined,
+    };
 };
 
 // ---------------------------------------------------------------------------
@@ -315,19 +344,40 @@ pub const State = struct {
     /// The distance ring at the last meta-block boundary: an uncompressed
     /// meta-block's symbols never execute, so the ring rolls back
     /// (the reference's `saved_dist_cache_`).
-    saved_dist_cache: [4]i32 = .{ 4, 11, 15, 16 },
+    saved_dist_cache: [4]i32,
     /// The bit writer. It lives by value here so neither driver has to keep
     /// a self-pointer honest across a move.
     writer: BitWriter,
     scratch: *Scratch,
     /// The input's absolute size: one past the last byte written.
-    input_pos: usize = 0,
+    input_pos: usize,
     /// One past the last position the matcher has seen.
-    last_processed_pos: usize = 0,
+    last_processed_pos: usize,
     /// The start of the pending meta-block.
-    last_flush_pos: usize = 0,
+    last_flush_pos: usize,
     /// The largest meta-block this window can emit.
     max_metablock_size: usize,
+
+    /// A stream state at position zero, with the §4 distance-ring seed.
+    pub fn init(
+        matcher: match.Matcher,
+        commands: match.Commands,
+        writer: BitWriter,
+        scratch: *Scratch,
+        max_metablock_size: usize,
+    ) State {
+        return .{
+            .matcher = matcher,
+            .commands = commands,
+            .saved_dist_cache = .{ 4, 11, 15, 16 },
+            .writer = writer,
+            .scratch = scratch,
+            .input_pos = 0,
+            .last_processed_pos = 0,
+            .last_flush_pos = 0,
+            .max_metablock_size = max_metablock_size,
+        };
+    }
 
     /// The reference's `RemainingInputBlockSize`: how much input the matcher
     /// can still take before the current block is full.

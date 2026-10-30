@@ -27,7 +27,8 @@
 //! - `Checksum`: the checksum state. `.{}` is its initial value, `hook()`
 //!   returns the inner codec's checksum hook over it, and `fold(bytes)` folds
 //!   a whole buffer for the one-shot path.
-//! - `Header`: the header parse state; the reader carries one.
+//! - `Header`: the header parse state; the reader carries one, seeded from
+//!   `reader_header_init`.
 //! - `ReaderBuffer`, `WriterBuffer`: the caller-owned buffers, re-exported
 //!   from the inner codec.
 //! - `InnerReader`, `InnerWriter`: the inner codec's streaming types. The
@@ -115,6 +116,10 @@ pub fn ReaderHooks(comptime F: type, comptime Host: type) type {
                 .reader = .{ .buffer = buffer, .seek = 0, .end = 0, .vtable = &vtable },
                 .inner = F.initReader(input, buffer, dict),
                 .input = input,
+                .header = F.reader_header_init,
+                .checksum = .init,
+                .state = .streaming,
+                .err = null,
                 .dict = dict,
             };
             // A framing that pre-seeds the window (a preset dictionary) starts
@@ -267,6 +272,8 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
                 .output = output,
                 .inner = F.initWriter(output, buffer, options),
                 .options = options,
+                .checksum = .init,
+                .header = .pending,
             };
             // The interface's serving region is the inner codec's block
             // region: the same bytes, which the generated entries hand out and
@@ -441,7 +448,7 @@ pub fn EncodeHooks(comptime F: type) type {
             // for the trailer: report that before the overflowing write,
             // never after.
             if (target.len - trailer_at < F.trailer_len) return error.BufferTooSmall;
-            var checksum: F.Checksum = .{};
+            var checksum: F.Checksum = .init;
             checksum.fold(source);
             F.writeTrailer(target[trailer_at..][0..F.trailer_len], &checksum);
             return trailer_at + F.trailer_len;

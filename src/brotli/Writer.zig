@@ -90,7 +90,7 @@ state: encode.State,
 lgwin: u6,
 /// Whether the stream header is on the wire. It is written with the first
 /// meta-block, so `init` cannot fail.
-started: bool = false,
+started: bool,
 
 const vtable: Io.Writer.VTable = .{
     .drain = drain,
@@ -112,17 +112,17 @@ pub fn init(
     assert(window_wbits >= 10);
     assert(window_wbits <= 24);
     const ring_size = ringSize(window_wbits);
-    var state: encode.State = .{
-        .matcher = .{
-            .hasher = .{ .buckets = &buffer.hash },
-            .window = .{ .bytes = &buffer.ring, .mask = ring_size - 1 },
-            .lgwin = @intCast(window_wbits),
-        },
-        .commands = .{ .buffer = &buffer.commands },
-        .writer = .{ .sink = .{ .stream = .{ .output = output, .buffer = &buffer.out } } },
-        .scratch = &buffer.scratch,
-        .max_metablock_size = encode.maxMetablockSize(@intCast(window_wbits)),
-    };
+    var state: encode.State = .init(
+        .init(
+            .{ .buckets = &buffer.hash },
+            .{ .bytes = &buffer.ring, .mask = ring_size - 1 },
+            @intCast(window_wbits),
+        ),
+        .init(&buffer.commands),
+        .init(.{ .stream = .init(output, &buffer.out) }),
+        &buffer.scratch,
+        encode.maxMetablockSize(@intCast(window_wbits)),
+    );
     state.matcher.hasher.init();
     return .{
         .writer = .{
@@ -136,6 +136,7 @@ pub fn init(
         .staging = &buffer.staging,
         .state = state,
         .lgwin = @intCast(window_wbits),
+        .started = false,
     };
 }
 

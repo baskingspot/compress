@@ -82,7 +82,7 @@ pub const Params = struct {
     /// The compression level that selected the scan: 1 is the `ZSTD_fast`
     /// class, 3 the `ZSTD_dfast` one. The block layer dispatches on it;
     /// levels 2 and 4-19 never reach a frame (the option gates them).
-    level: u8 = 1,
+    level: u8,
     /// The frame's Window_Log (`§3.1.1.1.2`): the finder's reach.
     window_log: u6,
     /// The long table's width: `min(hashLog, windowLog + 1)`
@@ -92,10 +92,21 @@ pub const Params = struct {
     /// same way (`cycleLog > windowLog ⇒ chainLog -= cycleLog - windowLog`,
     /// `zstd_compress.c:1563-1567`). The fast finder has one table and never
     /// reads it.
-    chain_log: u6 = 0,
+    chain_log: u6,
     /// The hash width in bytes — 4 to 7 by the size class (the C's
     /// `minMatch`, `clevels.h`).
     mls: u3,
+
+    /// Level 1's fast-finder parameters: one table and no chain.
+    pub fn init(window_log: u6, hash_log: u6, mls: u3) Params {
+        return .{
+            .level = 1,
+            .window_log = window_log,
+            .hash_log = hash_log,
+            .chain_log = 0,
+            .mls = mls,
+        };
+    }
 
     /// The C's level ladder for a one-shot with a known source size: the
     /// size class picks (windowLog, chainLog, hashLog, minMatch) from
@@ -183,8 +194,19 @@ pub const Store = struct {
     literals: []u8,
     /// The block's sequences, in order.
     sequences: []sequences_compress.Sequence,
-    literals_len: usize = 0,
-    sequence_count: usize = 0,
+    literals_len: usize,
+    sequence_count: usize,
+
+    /// An empty token stream over the block's `literals` and `sequences`
+    /// storage.
+    pub fn init(literals: []u8, sequence_list: []sequences_compress.Sequence) Store {
+        return .{
+            .literals = literals,
+            .sequences = sequence_list,
+            .literals_len = 0,
+            .sequence_count = 0,
+        };
+    }
 
     /// Append one sequence: its `literals_length` literals from
     /// `source[anchor..position]`, then the match.
@@ -1748,7 +1770,7 @@ fn expectFind(source: []const u8, params: Params, rep_seed: [3]u32, block_start:
     try testing.expect(params.hash_log <= 16);
     var literals: [256 * 1024]u8 = undefined;
     var sequence_buffer: [256 * 1024 / 4 + 1]sequences_compress.Sequence = undefined;
-    var store: Store = .{ .literals = &literals, .sequences = &sequence_buffer };
+    var store: Store = .init(&literals, &sequence_buffer);
     var rep = rep_seed;
     find(
         source,
@@ -1773,7 +1795,7 @@ test "the finder emits sequences that reproduce the block" {
     // RFC 8878 §3.1.1.4 — a sequence copies its literals then its match at
     // the offset; the streams the finder emits must reproduce the block
     // exactly, for every shape the ladder's classes cover.
-    const params: Params = .{ .window_log = 17, .hash_log = 13, .mls = 6 };
+    const params: Params = .init(17, 13, 6);
     var rng: DefaultPrng = .init(0xF00D);
     const random = rng.random();
     var source: [128 * 1024]u8 = undefined;
@@ -1810,11 +1832,11 @@ test "the rep pre-check wins two bytes ahead and keeps its literals" {
     fastmem.copy(u8, source[0..pattern.len], pattern);
     var index: usize = pattern.len;
     while (index < source.len) : (index += 1) source[index] = @truncate(index);
-    const params: Params = .{ .window_log = 10, .hash_log = 11, .mls = 6 };
+    const params: Params = .init(10, 11, 6);
     var hash_table: [1 << 11]u32 = @splat(0);
     var literals: [2048]u8 = undefined;
     var sequence_buffer: [1024]sequences_compress.Sequence = undefined;
-    var store: Store = .{ .literals = &literals, .sequences = &sequence_buffer };
+    var store: Store = .init(&literals, &sequence_buffer);
     var rep = [3]u32{ 1, 4, 8 };
     find(&source, 0, source.len, params, &hash_table, &rep, &store);
     try expectTokensReproduce(&source, 0, source.len, params.window_log, &store, .{ 1, 4, 8 });
@@ -1840,11 +1862,11 @@ test "the offset-2 chain emits zero-literal repcodes that decode" {
     fastmem.set(u8, source[64 + pattern.len .. 64 + pattern.len + 200], 'd');
     const tail = "xyz!";
     fastmem.copy(u8, source[264..][0..tail.len], tail);
-    const params: Params = .{ .window_log = 12, .hash_log = 13, .mls = 6 };
+    const params: Params = .init(12, 13, 6);
     var hash_table: [1 << 13]u32 = @splat(0);
     var literals: [2048]u8 = undefined;
     var sequence_buffer: [512]sequences_compress.Sequence = undefined;
-    var store: Store = .{ .literals = &literals, .sequences = &sequence_buffer };
+    var store: Store = .init(&literals, &sequence_buffer);
     var rep = [3]u32{ 1, 4, 8 };
     find(&source, 64, source.len - 64, params, &hash_table, &rep, &store);
     try expectTokensReproduce(
@@ -1873,11 +1895,11 @@ test "the finder refuses candidates that reach before the prefix" {
     // window, so the table's stale early positions are out of reach.
     var source: [64 * 1024]u8 = undefined;
     for (&source, 0..) |*byte, index| byte.* = @truncate(index % 8);
-    const params: Params = .{ .window_log = 10, .hash_log = 11, .mls = 6 };
+    const params: Params = .init(10, 11, 6);
     var hash_table: [1 << 11]u32 = @splat(0);
     var literals: [8192]u8 = undefined;
     var sequence_buffer: [4096]sequences_compress.Sequence = undefined;
-    var store: Store = .{ .literals = &literals, .sequences = &sequence_buffer };
+    var store: Store = .init(&literals, &sequence_buffer);
     var rep = [3]u32{ 1, 4, 8 };
     const block_start = 60 * 1024;
     find(
@@ -1933,7 +1955,7 @@ test "every emission stays strictly below the declared Window_Size" {
     var max_offset: usize = 0;
     while (block_start < total) {
         const size = @min(128 * 1024, total - block_start);
-        var store: Store = .{ .literals = literals, .sequences = seqs };
+        var store: Store = .init(literals, seqs);
         find(source, block_start, size, params, hash_table, &rep, &store);
         for (store.sequences[0..store.sequence_count]) |sequence| {
             if (sequence.offset_value > 3) {

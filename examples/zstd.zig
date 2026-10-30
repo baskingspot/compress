@@ -45,7 +45,7 @@ fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
     // `streamAllAlloc` takes the default window (a 512 KiB window, the
     // largest level 1 declares) from the arena for the call, then writes one
     // finished frame (RFC 8878 §3.1).
-    _ = try zstd.Writer.streamAllAlloc(arena, in, out, .{});
+    _ = try zstd.Writer.streamAllAlloc(arena, in, out, .init);
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {

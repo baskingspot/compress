@@ -52,7 +52,7 @@ pub const Error = error{
 pub const State = struct {
     /// The frame's one tree; `null` until its first Compressed block or a
     /// dictionary load.
-    table: ?huff0_compress.Table = null,
+    table: ?huff0_compress.Table,
     /// The C's `HUF_repeat` state. `valid` only a dictionary sets, when its
     /// tree covers all 256 symbols with no zero weight (`ZSTD_loadCEntropy`,
     /// `zstd_compress.c:5071-5079`); `check` is a tree this frame wrote,
@@ -60,7 +60,11 @@ pub const State = struct {
     /// literals; `none` is no tree to reuse. The C keeps the state across
     /// Raw and RLE literals blocks ("nextHuf" is restored from "prevHuf" on
     /// every bail).
-    repeat: Repeat = .none,
+    repeat: Repeat,
+
+    /// A frame state before its first Compressed block: no tree and no
+    /// repeat mode.
+    pub const empty: State = .{ .table = null, .repeat = .none };
 };
 
 /// `HUF_repeat` (`huf_compress.h:19`): whether a previous tree may be reused,
@@ -402,13 +406,13 @@ fn covers(table: *const huff0_compress.Table, histogram: *const huff0_compress.H
 /// untouched past their end.
 fn expectRoundTrip(source: []const u8, expected_type: literals.BlockType) !void {
     var target: [256 * 1024]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const written = try write(source, &target, &state, false);
     const header = try literals.parseHeader(target[0..written]);
     try testing.expectEqual(expected_type, header.block_type);
     try testing.expectEqual(@as(u20, @intCast(source.len)), header.regenerated_size);
     var decoded: [256 * 1024]u8 = undefined;
-    var decode_state: literals.State = .{};
+    var decode_state: literals.State = .empty;
     const section = try literals.decode(target[0..written], &decoded, &decode_state);
     try testing.expectEqual(source.len, section.bytes.len);
     try testing.expectEqualSlices(u8, source, section.bytes);
@@ -420,7 +424,7 @@ test "write's ladder picks Raw, RLE, and Compressed at the C's thresholds" {
     // 64 literals, RLE for a one-byte alphabet, Compressed above with one
     // stream under 256 literals and four above.
     var target: [256 * 1024]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     // 63 literals: Raw, the C's floor (`zstd_compress_literals.c:114-127`).
     // The header is 2 bytes at that size (Regenerated_Size is over 31).
     var short: [63]u8 = undefined;
@@ -473,14 +477,14 @@ test "the suspect sample check bails before the full histogram" {
     else
         0x41;
     var target: [256 * 1024]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const raw_len = try write(&source, &target, &state, true);
     try testing.expectEqual(
         literals.BlockType.raw,
         (try literals.parseHeader(target[0..raw_len])).block_type,
     );
     // Without the flag the same bytes take the full ladder and compress.
-    state = .{};
+    state = .empty;
     const compressed_len = try write(&source, &target, &state, false);
     try testing.expectEqual(
         literals.BlockType.compressed,
@@ -489,7 +493,7 @@ test "the suspect sample check bails before the full histogram" {
     // A suspect block whose samples are NOT flat pays the full ladder: half
     // one byte at both ends, largest_total far over 68.
     for (&source, 0..) |*byte, index| byte.* = if (index % 2 == 0) 0x41 else @truncate(index % 7);
-    state = .{};
+    state = .empty;
     const skewed_len = try write(&source, &target, &state, true);
     try testing.expectEqual(
         literals.BlockType.compressed,
@@ -506,7 +510,7 @@ test "the flat-histogram bail keeps a treeless distribution Raw" {
     var source: [2048]u8 = undefined;
     for (&source, 0..) |*byte, index| byte.* = @truncate(index % 128);
     var target: [256 * 1024]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const written = try write(&source, &target, &state, false);
     try testing.expectEqual(
         literals.BlockType.raw,
@@ -515,7 +519,7 @@ test "the flat-histogram bail keeps a treeless distribution Raw" {
     // One symbol past the bound: five more occurrences of byte 0 make its
     // count 21, over the bail's 20, and the tree is attempted.
     for (source[1..6]) |*byte| byte.* = 0;
-    state = .{};
+    state = .empty;
     const past = try write(&source, &target, &state, false);
     try testing.expectEqual(
         literals.BlockType.compressed,
@@ -542,10 +546,10 @@ test "every ladder rung decodes back through the landed decoder" {
             };
         }
         var target: [256 * 1024]u8 = undefined;
-        var state: State = .{};
+        var state: State = .empty;
         const written = try write(source[0..length], &target, &state, false);
         var decoded: [256 * 1024]u8 = undefined;
-        var decode_state: literals.State = .{};
+        var decode_state: literals.State = .empty;
         const section = try literals.decode(target[0..written], &decoded, &decode_state);
         try testing.expectEqualSlices(u8, source[0..length], section.bytes);
         try testing.expectEqual(written, section.bytes_consumed);
@@ -572,7 +576,7 @@ test "the pair fixture's literals section is regenerated byte for byte" {
         .weights = @splat(0),
         .symbol_count = tree.symbol_count,
         .max_bits = tree.max_bits,
-        .codes = @splat(.{}),
+        .codes = @splat(.zero),
     };
     for (tree.weights[0..tree.symbol_count], 0..) |weight, symbol| {
         table.weights[symbol] = weight;
@@ -625,7 +629,7 @@ test "Treeless reuses the previous block's tree" {
     // description's bytes are what Treeless saves.
     const second: []const u8 = first[0..2048];
     var target: [64 * 1024]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const first_len = try write(&first, &target, &state, false);
     const first_header = try literals.parseHeader(target[0..first_len]);
     try testing.expectEqual(literals.BlockType.compressed, first_header.block_type);
@@ -639,7 +643,7 @@ test "Treeless reuses the previous block's tree" {
     // The state's tree is unchanged, and the section decodes through it.
     try testing.expectEqual(first_table.symbol_count, state.table.?.symbol_count);
     var decoded: [64 * 1024]u8 = undefined;
-    var decode_state: literals.State = .{};
+    var decode_state: literals.State = .empty;
     _ = try literals.decode(target[0..first_len], &decoded, &decode_state);
     const section = try literals.decode(second_target[0..second_len], &decoded, &decode_state);
     try testing.expectEqualSlices(u8, second, section.bytes);
@@ -665,7 +669,7 @@ test "a tree listing over 128 weights takes the FSE series, never Raw" {
         byte.* = if (index % 16 == 0) @intCast(0x81 + (index / 16) % 8) else 'a';
     }
     var target: [4096]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const written = try write(&source, &target, &state, false);
     const header = try literals.parseHeader(target[0..written]);
     try testing.expectEqual(literals.BlockType.compressed, header.block_type);
@@ -673,7 +677,7 @@ test "a tree listing over 128 weights takes the FSE series, never Raw" {
     // FSE form; the direct form's is `127 + listed` (>= 128 here).
     try testing.expect(target[header.header_len] < 128);
     var decoded: [4096]u8 = undefined;
-    var decode_state: literals.State = .{};
+    var decode_state: literals.State = .empty;
     const section = try literals.decode(target[0..written], &decoded, &decode_state);
     try testing.expectEqualSlices(u8, &source, section.bytes);
 }
@@ -697,7 +701,7 @@ test "a Raw-sized target never fails the Huffman attempt" {
         for (source[0..length], 0..) |*byte, index| {
             if (index % 9 == 0) byte.* = 'e';
         }
-        var state: State = .{};
+        var state: State = .empty;
         const raw_len = rawHeaderLength(length) + length;
         const written = try write(source[0..length], target[0..raw_len], &state, false);
         try testing.expect(written <= raw_len);

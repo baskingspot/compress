@@ -109,10 +109,14 @@ fn foldRaw(raw: u32, bytes: []const u8) u32 {
 pub const Checksum = struct {
     /// The raw running CRC-32 (the kernel state; `final()` carries the
     /// conditioning). Starts at the complemented-running initial value.
-    raw: u32 = 0xffff_ffff,
+    raw: u32,
     /// The folded length mod 2^32 (`§2.3.1`: "the size of the original
     /// (uncompressed) input data modulo 2^32").
-    len: u32 = 0,
+    len: u32,
+
+    /// A checksum before any payload byte: the complemented-running seed and
+    /// a zero length.
+    pub const init: Checksum = .{ .raw = 0xffff_ffff, .len = 0 };
 
     /// Fold one contiguous payload run directly: the one-shot encoder's
     /// route over `source`, no hook indirection. The state's raw field and
@@ -178,7 +182,7 @@ test "crc32: the golang/go gzip golden trailer" {
 test "crc32: the empty payload is the RFC's empty-CRC value" {
     // The complement of the initial state: what a zero-length member's
     // trailer carries (§2.3.1's CRC over zero bytes).
-    const empty: Checksum = .{};
+    const empty: Checksum = .init;
     try testing.expectEqual(@as(u32, 0x0000_0000), empty.final());
     try testing.expectEqual(@as(u32, 0), empty.len);
 }
@@ -190,7 +194,7 @@ test "crc32: incremental runs equal one pass" {
     const bytes = "the quick brown fox jumps over the lazy dog. " ** 20;
     const whole = Crc32.hash(bytes);
     try testing.expectEqual(whole, crc32(0, bytes));
-    var split: Checksum = .{};
+    var split: Checksum = .init;
     const hook = split.hook();
     var at: usize = 0;
     while (at < bytes.len) : (at += 7) {

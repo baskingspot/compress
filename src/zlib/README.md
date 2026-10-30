@@ -20,7 +20,7 @@ const zlib = @import("compress").zlib;
 fn roundTrip(gpa: std.mem.Allocator, source: []const u8) !void {
     const target = try gpa.alloc(u8, zlib.encode.maxCompressedLength(source.len));
     defer gpa.free(target);
-    const stream = target[0..try zlib.encode.compress(source, target, .{})];
+    const stream = target[0..try zlib.encode.compress(source, target, .init)];
 
     const plain = try gpa.alloc(u8, source.len);
     defer gpa.free(plain);
@@ -54,7 +54,7 @@ Streaming, over any `*std.Io.Writer` and `*std.Io.Reader`:
 ```zig
 fn compressTo(out: *std.Io.Writer, bytes: []const u8) !void {
     var buffer: zlib.Writer.Buffer = undefined; // 98,303 bytes
-    var w: zlib.Writer = .init(out, &buffer, .{});
+    var w: zlib.Writer = .init(out, &buffer, .init);
     try w.writer.writeAll(bytes);
     try w.finish(); // writes the trailer; the stream is incomplete without it
 }
@@ -80,7 +80,7 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 // encode it sets FDICT and writes the Adler-32 of the whole slice as DICTID;
 // on decode it is checked against the header's DICTID before any body byte.
 zlib.encode.Level          // flate.encode.Level: @"1" or @"6"
-zlib.encode.Options        // struct { level: Level = .@"1", dict: ?[]const u8 = null }
+zlib.encode.Options        // struct { level: Level, dict: ?[]const u8 }; .init is level 1, no dictionary
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
     error{BufferTooSmall}!usize                       // the stream's length

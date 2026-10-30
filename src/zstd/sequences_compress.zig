@@ -80,20 +80,29 @@ pub const State = struct {
     /// reverts to Raw or RLE — never overwrites the table a later
     /// Repeat_Mode may reuse, and the revert restores only the small fields
     /// (`Header`), never the 12 KiB of table storage.
-    built: std.EnumArray(Alphabet, [2]fse_compress.Table) = .initUndefined(),
+    built: std.EnumArray(Alphabet, [2]fse_compress.Table),
     /// Which of each alphabet's two slots `tables` may resolve into. A
     /// build flips its alphabet's slot as it publishes the new table.
-    active: std.EnumArray(Alphabet, u1) = .initFill(0),
+    active: std.EnumArray(Alphabet, u1),
     /// What each alphabet last resolved to, `null` until the frame's first
     /// sequences section with a nonzero count. Repeat_Mode reuses it, the way
     /// the decoder reuses its own resolved table.
-    tables: std.EnumArray(Alphabet, ?Resolved) = .initFill(null),
+    tables: std.EnumArray(Alphabet, ?Resolved),
     /// The C's `FSE_repeat_valid` per alphabet: a table that covers its whole
     /// alphabet, which only a dictionary's entropy tables are promoted to
     /// (`ZSTD_dictNCountRepeat`, `zstd_compress.c:5044-5058`). No dictionary
     /// exists in this package, so nothing sets it and Repeat_Mode is never
     /// selected — exactly the C's own no-dictionary behavior.
-    repeat_valid: std.EnumSet(Alphabet) = .empty,
+    repeat_valid: std.EnumSet(Alphabet),
+
+    /// A frame state before its first sequences section: no table resolved,
+    /// both slots free, and no alphabet promoted.
+    pub const empty: State = .{
+        .built = .initUndefined(),
+        .active = .initFill(0),
+        .tables = .initFill(null),
+        .repeat_valid = .empty,
+    };
 
     /// The state's mutable fields apart from the table storage: everything a
     /// block's entropy attempt may redirect. The block layer snapshots one
@@ -760,7 +769,7 @@ test "a zero-sequence section is the single zero byte" {
     // stops here", and the C writes the 1-byte form. The state is
     // untouched: "The FSE tables used in Repeat_Mode are not updated."
     var target: [8]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const written = try write(&target, &.{}, &state);
     try testing.expectEqual(@as(usize, 1), written);
     try testing.expectEqualSlices(u8, &.{0x00}, target[0..1]);
@@ -795,7 +804,7 @@ test "the writer's sections decode back through the landed decoder" {
             produced = span + match_length;
         }
         var target: [16384]u8 = undefined;
-        var state: State = .{};
+        var state: State = .empty;
         const written = try write(&target, source[0..count], &state);
         // The decoder's own run, over a literals buffer with enough bytes.
         var literals_source: [16384]u8 = undefined;
@@ -807,7 +816,7 @@ test "the writer's sections decode back through the landed decoder" {
             }
         }
         var decoded: [64 * 1024]u8 = undefined;
-        var decode_state: sequences.State = .{};
+        var decode_state: sequences.State = .empty;
         const section = try sequences.decode(
             target[0..written],
             literals_source[0..literals_len],
@@ -857,7 +866,7 @@ test "the mode ladder follows the C's thresholds" {
     // Predefined over RLE at two or fewer sequences, RLE when one code
     // carries all, Predefined below 72 (lengths) / 36 (offsets) sequences or
     // when `mostFrequent < nbSeq >> (defaultNormLog - 1)`, FSE above.
-    var state: State = .{};
+    var state: State = .empty;
     var stats: Stats = .{};
     // One code carrying all 40 sequences, with another code present: RLE.
     stats.counts[3] = 40;
@@ -955,7 +964,7 @@ test "Repeat_Mode's section carries no table and reuses the previous one" {
         sequence.* = first[index];
     }
     var target: [4096]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const first_len = try write(&target, &first, &state);
     // The tables the first block resolved are now the frame's.
     for (description_order) |alphabet| {
@@ -982,7 +991,7 @@ test "Repeat_Mode's section carries no table and reuses the previous one" {
         }
     }
     var decoded: [64 * 1024]u8 = undefined;
-    var decode_state: sequences.State = .{};
+    var decode_state: sequences.State = .empty;
     const first_section = try sequences.decode(
         target[0..first_len],
         literals_source[0..literals_len],
@@ -1082,7 +1091,7 @@ test "the writer reproduces the reference encoder's own sequences section" {
     const decoded = try decodePredefinedSequences(&section);
     try testing.expect(decoded.count > 0);
     var target: [4096]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     const written = try write(&target, decoded.sequences[0..decoded.count], &state);
     try testing.expectEqualSlices(u8, &section, target[0..written]);
 }

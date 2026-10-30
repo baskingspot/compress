@@ -77,23 +77,35 @@ pub const flg_reserved = 0xe0;
 /// a large XLEN or an unterminated name costs bounded work and no memory.
 pub const HeaderParser = struct {
     /// The field being consumed, in `§2.3`'s order.
-    stage: Stage = .fixed,
+    stage: Stage,
     /// The FLG byte: the optional-field presence bits (`§2.3.1`).
-    flags: u8 = 0,
+    flags: u8,
     /// Bytes of the current fixed-width field consumed (XLEN, FHCRC).
-    taken: usize = 0,
+    taken: usize,
     /// XLEN (`§2.3.1.1`): the extra field's length, little-endian (`§2.1`).
-    extra_len: u16 = 0,
+    extra_len: u16,
     /// The extra field's bytes already skipped.
-    skipped: usize = 0,
+    skipped: usize,
     /// The NUL-scan bytes consumed in the current FNAME/FCOMMENT field,
     /// terminator included (the cap counts both).
-    scanned: usize = 0,
+    scanned: usize,
     /// The header CRC-32 so far: FHCRC's expected value is its low 16 bits
     /// (`§2.3.1`).
-    crc: u32 = 0,
+    crc: u32,
     /// The FHCRC value read from the wire.
-    fhcrc: u16 = 0,
+    fhcrc: u16,
+
+    /// A parser at the fixed header's first byte.
+    pub const init: HeaderParser = .{
+        .stage = .fixed,
+        .flags = 0,
+        .taken = 0,
+        .extra_len = 0,
+        .skipped = 0,
+        .scanned = 0,
+        .crc = 0,
+        .fhcrc = 0,
+    };
 
     /// The field being consumed.
     pub const Stage = enum { fixed, xlen, extra, name, comment, fhcrc, done };
@@ -311,7 +323,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
 
 /// Parse a whole header from `source` and return the parser.
 fn parseHeader(source: []const u8) HeaderError!HeaderParser {
-    var parser: HeaderParser = .{};
+    var parser: HeaderParser = .init;
     const consumed = try parser.feed(source);
     assert(parser.done());
     assert(consumed == source.len);
@@ -375,7 +387,7 @@ test "decode: the extra field is skipped with the XLEN bound" {
 
     // One byte short of the declared XLEN: the field is incomplete, so the
     // parser has not finished (the driver reports `Truncated`).
-    var partial: HeaderParser = .{};
+    var partial: HeaderParser = .init;
     _ = try partial.feed(header[0 .. header.len - 1]);
     try testing.expect(!partial.done());
 
@@ -449,7 +461,7 @@ test "decode: the parser is feed-boundary independent" {
     const source = golden.gunzip_cases[10].source;
     const full_header_len = source.len - 13;
     const whole = try parseHeader(source[0..full_header_len]);
-    var chunked: HeaderParser = .{};
+    var chunked: HeaderParser = .init;
     var at: usize = 0;
     while (!chunked.done()) {
         const n = @min(7, full_header_len - at);
@@ -496,7 +508,7 @@ test "decode: the trailer checks are specific" {
     // as ErrChecksum; here the caller learns which half failed).
     var member: [golden_max]u8 = undefined;
     const source = "hello world\n";
-    const len = try encode.compress(source, &member, .{});
+    const len = try encode.compress(source, &member, .init);
     const window = try testing.allocator.alloc(u8, 64 + sentinel.len);
     defer testing.allocator.free(window);
 
@@ -534,7 +546,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // (`Truncated`, `InvalidBlockType`, ...).
     var member: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &member, .{});
+    const len = try encode.compress(source, &member, .init);
     // BTYPE=11 (reserved, §3.2.3 of RFC 1951) in the first body byte: the
     // body's first three bits are BFINAL, BTYPE.
     member[header_len] |= 0b110;
@@ -545,7 +557,7 @@ test "decode: a corrupt body fails with flate's detail" {
 test "decode: the empty target is a valid cap for an empty member" {
     // `target` is a cap; an empty member needs no room.
     var member: [32]u8 = undefined;
-    const len = try encode.compress("", &member, .{});
+    const len = try encode.compress("", &member, .init);
     try testing.expectEqual(@as(usize, 0), try decompress(member[0..len], &.{}));
 }
 
@@ -554,7 +566,7 @@ test "decode: a bomb member is capped, never an overrun" {
     // overflowing write; the bytes past the cap are untouched.
     var member: [512]u8 = undefined;
     const source = "A" ** 4096;
-    const len = try encode.compress(source, &member, .{});
+    const len = try encode.compress(source, &member, .init);
     try testing.expect(len < member.len);
 
     var window: [4096 + @as(usize, sentinel.len)]u8 = undefined;

@@ -269,7 +269,7 @@ test "decode: the trailer check is specific" {
     // missing is `Truncated`.
     var stream: [64]u8 = undefined;
     const source = "hello world\n";
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
     const window = try testing.allocator.alloc(u8, 64 + @as(usize, sentinel.len));
     defer testing.allocator.free(window);
 
@@ -319,7 +319,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // (`Truncated`, `InvalidBlockType`, ...).
     var stream: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
     // BTYPE=11 (reserved, `rfc1951-deflate.txt §3.2.3`) in the first body
     // byte: the body's first three bits are BFINAL, BTYPE.
     stream[header_len] |= 0b110;
@@ -330,7 +330,7 @@ test "decode: a corrupt body fails with flate's detail" {
 test "decode: the empty target is a valid cap for an empty stream" {
     // `target` is a cap; an empty stream needs no room.
     var stream: [32]u8 = undefined;
-    const len = try encode.compress("", &stream, .{});
+    const len = try encode.compress("", &stream, .init);
     try testing.expectEqual(@as(usize, 0), try decompress(stream[0..len], &.{}, null));
 }
 
@@ -339,7 +339,7 @@ test "decode: a bomb stream is capped, never an overrun" {
     // are untouched.
     var stream: [512]u8 = undefined;
     const source = "A" ** 4096;
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
     try testing.expect(len < stream.len);
 
     var window: [4096 + @as(usize, sentinel.len)]u8 = undefined;
@@ -388,7 +388,7 @@ test "decode: the dictionary mismatch matrix" {
     // unused, so one reader can walk a mixed sequence of streams.
     var plain_stream: [64]u8 = undefined;
     const source = "hello, zlib";
-    const len = try encode.compress(source, &plain_stream, .{});
+    const len = try encode.compress(source, &plain_stream, .init);
     sentinel.fill(&target);
     const m = try decompress(plain_stream[0..len], &target, &golden.dictionary);
     try testing.expectEqualStrings(source, target[0..m]);
@@ -404,7 +404,7 @@ test "decode: a dictionary stream whose reach fits its window" {
     const dict = "she sells seashells by the seashore\n";
     const source = "she sells seashells she sells seashells by the seashore\n";
     var stream: [encode.maxCompressedLength(source.len)]u8 = undefined;
-    const len = try encode.compress(source, &stream, .{ .dict = dict });
+    const len = try encode.compress(source, &stream, .{ .level = .@"1", .dict = dict });
 
     var plain: [source.len + @as(usize, sentinel.len)]u8 = undefined;
     sentinel.fill(&plain);

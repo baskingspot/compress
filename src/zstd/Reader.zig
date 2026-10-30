@@ -190,7 +190,7 @@ staging: []u8,
 /// The window cap: the buffer type's `window_len`, stored at `init`.
 window_len: usize,
 /// The Frame_Header parse (`§3.1.1.1`), run across fills.
-header: frame.HeaderParser = .{},
+header: frame.HeaderParser,
 /// One frame's cross-block decode state (`frame.State`): the parsed header,
 /// the two entropy layers' tables, the frame's decoded length, and the XXH64
 /// fold. Present once the header is parsed.
@@ -200,11 +200,11 @@ frame_state: ?frame.State = null,
 /// frame state, and its content is the preset history. `null` is the
 /// no-dictionary reader. Borrowed for the reader's life.
 dict: ?*const Dictionary = null,
-phase: Phase = .start,
+phase: Phase,
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// frame's trailer is verified (`done`) or a failure sticks (`failed`,
 /// details in `err`).
-state: State = .streaming,
+state: State,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
 err: ?Error = null,
@@ -250,6 +250,9 @@ pub fn init(
         .staging = buffer[serving_len..],
         .input = input,
         .window_len = window_len,
+        .header = .init,
+        .phase = .start,
+        .state = .streaming,
         .dict = dict,
     };
 }

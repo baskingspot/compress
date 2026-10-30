@@ -50,7 +50,7 @@ pub const BitReader = struct {
     /// anywhere (`attach`); the one-shot's single slice keeps it at zero.
     /// u64: a stream's compressed input can run past 2^32 bytes, where the
     /// stream position does not fit a 32-bit `usize` (`just check-32`).
-    source_base: u64 = 0,
+    source_base: u64,
     /// Next source byte not yet loaded into `bits`, relative to `source`.
     /// A slice is at most an input buffer, so a `usize` is exact here.
     next_byte: usize,

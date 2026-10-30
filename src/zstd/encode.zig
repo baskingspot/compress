@@ -55,13 +55,16 @@ pub const Level = enum(u8) {
 /// `compress`'s options.
 pub const Options = struct {
     /// The compression level. Only the levels in `Level` are representable.
-    level: Level = .@"1",
+    level: Level,
     /// The dictionary the frame is compressed against (`§5`): its tables seed
     /// the frame's entropy state (with `ZSTD_loadCEntropy`'s promotions) and
     /// its content is the match region's virtual past. The frame names the
     /// dictionary's ID in its header (`§3.1.1.1.1.6`). `null` is a
     /// no-dictionary frame.
-    dict: ?*const Dictionary = null,
+    dict: ?*const Dictionary,
+
+    /// Level 1 with no dictionary.
+    pub const init: Options = .{ .level = .@"1", .dict = null };
 };
 
 /// Everything `compress` reports.
@@ -140,7 +143,7 @@ pub fn compressBuffered(
     // `zstd_compress.c:2309-2323`). An empty content attaches nothing and
     // matches nothing, but the frame still names the dictionary and seeds
     // its entropy state — the C's `cdictLen == 0` carve-out.
-    var dict: block_compress.Dict = .{};
+    var dict: block_compress.Dict = .empty;
     const params: match_compress.Params = if (options.dict) |d| p: {
         if (d.content.len == 0) break :p .forSource(level, source.len);
         const dict_params = d.matchParams(level);
@@ -149,6 +152,8 @@ pub fn compressBuffered(
                 .content = d.content,
                 .table = if (level == 1) &d.match else null,
                 .dfast = if (level == 3) &d.match_dfast else null,
+                .window_size = 0,
+                .frame_start = 0,
                 .low_limit = d.content.len,
                 .dict_limit = d.content.len,
                 .valid = true,
@@ -163,6 +168,8 @@ pub fn compressBuffered(
             .content = d.content,
             .table = null,
             .dfast = null,
+            .window_size = 0,
+            .frame_start = 0,
             .low_limit = 0,
             .dict_limit = d.content.len,
             .valid = true,
@@ -172,7 +179,7 @@ pub fn compressBuffered(
     const window_size: usize = @as(usize, 1) << @intCast(params.window_log);
     dict.window_size = window_size;
     var cursor = try writeFrameHeader(source.len, params, options.dict, target);
-    var state: block_compress.State = .{};
+    var state: block_compress.State = .init;
     if (options.dict) |d| block_compress.seedFromDict(&state, d);
     // The finder's tables hold frame offsets and start zeroed; only the
     // ladder's chosen widths are touched, as the C zeroes its allocated table
@@ -388,7 +395,7 @@ pub const frame_header_len_max = frame.magic_len + 1 + 1 + 4 + 8;
 fn expectDictRoundTrip(dict: *const Dictionary, source: []const u8) !usize {
     const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(frame_buffer);
-    const written = try compress(source, frame_buffer, .{ .dict = dict });
+    const written = try compress(source, frame_buffer, .{ .level = .@"1", .dict = dict });
     try testing.expect(written <= frame_buffer.len);
     const plain = try testing.allocator.alloc(u8, source.len);
     defer testing.allocator.free(plain);
@@ -443,7 +450,7 @@ fn firstBlock(frame_bytes: []const u8, frame_len: usize) !FirstBlock {
 fn expectRoundTrip(source: []const u8) !usize {
     const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(frame_buffer);
-    const written = try compress(source, frame_buffer, .{});
+    const written = try compress(source, frame_buffer, .init);
     try testing.expect(written <= frame_buffer.len);
     const plain = try testing.allocator.alloc(u8, source.len);
     defer testing.allocator.free(plain);
@@ -514,7 +521,7 @@ test "the frame header declares the exact size and the ladder's window" {
         .{ .size = 600 * 1024, .descriptor = 0x84, .window_log = 19 },
     };
     for (cases) |case| {
-        const written = try compress(source[0..case.size], target, .{});
+        const written = try compress(source[0..case.size], target, .init);
         const header = try frame.parseHeader(target[frame.magic_len..][0..written]);
         try testing.expectEqual(case.descriptor, header.descriptor);
         try testing.expectEqual(@as(?u64, case.size), header.content_size);
@@ -543,7 +550,7 @@ test "the empty frame is the CLI's 13 bytes" {
     // Last_Block; the CLI v1.5.7 writes exactly these 13 bytes for empty
     // input (verified with `printf '' | zstd -1 | xxd`).
     var target: [64]u8 = undefined;
-    const written = try compress(&.{}, &target, .{});
+    const written = try compress(&.{}, &target, .init);
     try testing.expectEqual(@as(usize, 13), written);
     try testing.expectEqualSlices(
         u8,
@@ -570,7 +577,7 @@ test "maxCompressedLength bounds every emission" {
     const bound = maxCompressedLength(source.len);
     const frame_buffer = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(frame_buffer);
-    const written = try compress(&source, frame_buffer, .{});
+    const written = try compress(&source, frame_buffer, .init);
     try testing.expect(written <= bound);
     // Three raw blocks (128 KiB, 128 KiB, 44 KiB), a 9-byte header (magic,
     // descriptor, the 4-byte Frame_Content_Size form), the trailer.
@@ -578,7 +585,7 @@ test "maxCompressedLength bounds every emission" {
     // One byte under the raw form's need fails before the last write.
     try testing.expectError(
         error.BufferTooSmall,
-        compress(&source, frame_buffer[0 .. written - 1], .{}),
+        compress(&source, frame_buffer[0 .. written - 1], .init),
     );
 }
 
@@ -601,7 +608,10 @@ test "level 3 round-trips through the landed decoder" {
                 maxCompressedLength(size),
             );
             defer testing.allocator.free(frame_buffer);
-            const written = try compress(source[0..size], frame_buffer, .{ .level = .@"3" });
+            const written = try compress(source[0..size], frame_buffer, .{
+                .level = .@"3",
+                .dict = null,
+            });
             const plain = try testing.allocator.alloc(u8, size);
             defer testing.allocator.free(plain);
             internal.sentinel.fill(plain);
@@ -619,7 +629,10 @@ test "level 3 round-trips through the landed decoder" {
                 maxCompressedLength(size),
             );
             defer testing.allocator.free(frame_buffer);
-            const written = try compress(source[0..size], frame_buffer, .{ .level = .@"3" });
+            const written = try compress(source[0..size], frame_buffer, .{
+                .level = .@"3",
+                .dict = null,
+            });
             const plain = try testing.allocator.alloc(u8, size);
             defer testing.allocator.free(plain);
             internal.sentinel.fill(plain);
@@ -701,7 +714,7 @@ test "our level-3 frame is the CLI's own bytes" {
         golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
-        const written = try compress(input, target, .{ .level = .@"3" });
+        const written = try compress(input, target, .{ .level = .@"3", .dict = null });
         try testing.expectEqual(case.expected.len, written);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // The CLI's frame decodes through our decoder to the input.
@@ -733,7 +746,7 @@ test "the level-3 pre-splitter cuts a full block at a chunk boundary" {
     fastmem.copy(u8, source[262144..][0..1000], source[0..1000]);
     const target = try testing.allocator.alloc(u8, maxCompressedLength(total));
     defer testing.allocator.free(target);
-    const written = try compress(source[0..total], target, .{ .level = .@"3" });
+    const written = try compress(source[0..total], target, .{ .level = .@"3", .dict = null });
     var cursor = headerLenFor(target, written);
     var blocks: usize = 0;
     var split_seen = false;
@@ -892,8 +905,8 @@ test "compress is deterministic" {
     defer testing.allocator.free(first);
     const second = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(second);
-    const first_len = try compress(&source, first, .{});
-    const second_len = try compress(&source, second, .{});
+    const first_len = try compress(&source, first, .init);
+    const second_len = try compress(&source, second, .init);
     try testing.expectEqual(first_len, second_len);
     try testing.expectEqualSlices(u8, first[0..first_len], second[0..second_len]);
 }
@@ -984,7 +997,7 @@ test "our level-1 frame is the CLI's own bytes" {
         golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
-        const written = try compress(input, target, .{});
+        const written = try compress(input, target, .init);
         try testing.expectEqual(case.expected.len, written);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // The CLI's frame decodes through our decoder to the input.
@@ -1036,7 +1049,7 @@ test "the witness inputs reproduce the CLI's frames, guarding three fixes' rever
     };
     var target: [700 * 1024]u8 = undefined;
     for (cases) |case| {
-        const written = try compress(case.source, &target, .{});
+        const written = try compress(case.source, &target, .init);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // and the frame decodes back through our decoder.
         var plain: [700 * 1024]u8 = undefined;
@@ -1056,14 +1069,14 @@ test "the emission ladder picks the CLI's block forms" {
     golden.fillShape(.rle, source[0..32768]);
     const rle_frame = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(rle_frame);
-    const rle_len = try compress(source[0..32768], rle_frame, .{});
+    const rle_len = try compress(source[0..32768], rle_frame, .init);
     const rle_header = try block.parseHeader(rle_frame[headerLenFor(rle_frame, rle_len)..]);
     try testing.expectEqual(block.BlockType.compressed, rle_header.block_type);
     // The random shape: one Raw block at exactly the block size.
     golden.fillShape(.random, source[0..32768]);
     const random_frame = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(random_frame);
-    const random_len = try compress(source[0..32768], random_frame, .{});
+    const random_len = try compress(source[0..32768], random_frame, .init);
     const random_offset = headerLenFor(random_frame, random_len);
     const random_header = try block.parseHeader(random_frame[random_offset..]);
     try testing.expectEqual(block.BlockType.raw, random_header.block_type);
@@ -1074,7 +1087,7 @@ test "the emission ladder picks the CLI's block forms" {
     golden.fillShape(.text, &big);
     const big_frame = try testing.allocator.alloc(u8, maxCompressedLength(big.len));
     defer testing.allocator.free(big_frame);
-    const big_len = try compress(&big, big_frame, .{});
+    const big_len = try compress(&big, big_frame, .init);
     var cursor = headerLenFor(big_frame, big_len);
     var blocks: usize = 0;
     while (true) {
@@ -1120,7 +1133,7 @@ test "the scan stops at the block's end, never restarting at it" {
     fillScanExitInput(&source);
     const target = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
     defer testing.allocator.free(target);
-    const written = try compress(&source, target, .{});
+    const written = try compress(&source, target, .init);
     try testing.expectEqual(golden.encode_scan_exit.len, written);
     try testing.expectEqualSlices(u8, &golden.encode_scan_exit, target[0..written]);
 }
@@ -1144,7 +1157,7 @@ test "the one-shot encodes a source over 4 GiB" {
         fastmem.set(u8, source, 0);
         const target = try testing.allocator.alloc(u8, 1 << 20);
         defer testing.allocator.free(target);
-        const written = try compress(source, target, .{});
+        const written = try compress(source, target, .init);
         try testing.expect(written < target.len);
         const header = try frame.parseHeader(target[frame.magic_len..written]);
         try testing.expectEqual(@as(?u64, total), header.content_size);
@@ -1206,7 +1219,10 @@ test "compress round-trips with a dictionary, both match-region shapes" {
         golden.fillShape(.text, source[0..size]);
         const frame_buffer = try testing.allocator.alloc(u8, maxCompressedLength(size));
         defer testing.allocator.free(frame_buffer);
-        const written = try compress(source[0..size], frame_buffer, .{ .dict = &raw });
+        const written = try compress(source[0..size], frame_buffer, .{
+            .level = .@"1",
+            .dict = &raw,
+        });
         const header = try frame.parseHeader(frame_buffer[frame.magic_len..written]);
         // A raw dictionary names no ID, so the header carries no DID field.
         try testing.expectEqual(@as(?u32, null), header.dictionary_id);
@@ -1283,7 +1299,7 @@ test "the with-dictionary frames are the CLI's own bytes" {
         golden.fillShape(case.shape, input);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(input.len));
         defer testing.allocator.free(target);
-        const written = try compress(input, target, .{ .dict = &trained });
+        const written = try compress(input, target, .{ .level = .@"1", .dict = &trained });
         try testing.expectEqual(case.expected.len, written);
         try testing.expectEqualSlices(u8, case.expected, target[0..written]);
         // The CLI's frame decodes through our decoder with the dictionary.
@@ -1323,7 +1339,7 @@ test "the with-dictionary fixtures the decode slice committed re-emit exactly" {
         const dict = try Dictionary.parse(case.dict);
         const target = try testing.allocator.alloc(u8, maxCompressedLength(case.plain.len));
         defer testing.allocator.free(target);
-        const written = try compress(case.plain, target, .{ .dict = &dict });
+        const written = try compress(case.plain, target, .{ .level = .@"1", .dict = &dict });
         try testing.expectEqualSlices(u8, case.frame, target[0..written]);
     }
 }
@@ -1339,14 +1355,14 @@ test "the byte class at level 1 is Treeless literals and Repeat sequences" {
     const target = try testing.allocator.alloc(u8, maxCompressedLength(golden.dict_big.len));
     defer testing.allocator.free(target);
 
-    const small = try compress(golden.dict_s00, target, .{ .dict = &trained });
+    const small = try compress(golden.dict_s00, target, .{ .level = .@"1", .dict = &trained });
     const small_block = try firstBlock(target, small);
     try testing.expectEqual(literals.BlockType.treeless, small_block.literals_type);
     try testing.expectEqual(sequences.Mode.repeat, small_block.modes.literals_lengths);
     try testing.expectEqual(sequences.Mode.repeat, small_block.modes.offsets);
     try testing.expectEqual(sequences.Mode.repeat, small_block.modes.match_lengths);
 
-    const big = try compress(golden.dict_big, target, .{ .dict = &trained });
+    const big = try compress(golden.dict_big, target, .{ .level = .@"1", .dict = &trained });
     const big_block = try firstBlock(target, big);
     try testing.expectEqual(literals.BlockType.treeless, big_block.literals_type);
     try testing.expectEqual(sequences.Mode.fse, big_block.modes.literals_lengths);

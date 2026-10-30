@@ -91,7 +91,12 @@ pub const small_table_entries_max = 1 << 16;
 /// wins; the level-1 finder has only `long` and leaves `small` empty.
 pub const Tables = struct {
     long: []u32,
-    small: []u32 = &.{},
+    small: []u32,
+
+    /// The level-1 finder's tables: only the long table; `small` stays empty.
+    pub fn init(long: []u32) Tables {
+        return .{ .long = long, .small = &.{} };
+    }
 };
 
 /// A found match: the sequence's bytes are `source[position..][0..length]`,
@@ -1344,7 +1349,7 @@ fn expectFind(source: []const u8, params: Params, rep_seed: [3]u32, block_start:
     try testing.expect(params.chain_log <= 16);
     var literals: [256 * 1024]u8 = undefined;
     var sequence_buffer: [256 * 1024 / 4 + 1]sequences_compress.Sequence = undefined;
-    var store: Store = .{ .literals = &literals, .sequences = &sequence_buffer };
+    var store: Store = .init(&literals, &sequence_buffer);
     var rep = rep_seed;
     find(
         source,

@@ -125,7 +125,10 @@ pub fn adler32(adler: u32, bytes: []const u8) u32 {
 pub const Checksum = struct {
     /// The running digest (`§8.2`); starts at the algorithm's initial value,
     /// 1 (`§8.2`: "s1 is initialized to 1").
-    adler: u32 = 1,
+    adler: u32,
+
+    /// A digest before any payload byte: the algorithm's initial value, 1.
+    pub const init: Checksum = .{ .adler = 1 };
 
     /// Fold one contiguous payload run directly: the one-shot encoder's
     /// route over `source`, no hook indirection. The state moves exactly as
@@ -227,7 +230,7 @@ test "adler32: incremental runs equal one pass" {
 
     // The same through the container's own state and hook: runs in order,
     // each byte once.
-    var checksum: Checksum = .{};
+    var checksum: Checksum = .init;
     const hook = checksum.hook();
     at = 0;
     while (at < bytes.len) : (at += nmax - 1) {
@@ -240,7 +243,7 @@ test "adler32: the streaming accounting through a container trailer" {
     // The state the container reads at the clean end: the trailer of a
     // stream is this value, big-endian (`§2.2`).
     const encode = @import("encode.zig");
-    var checksum: Checksum = .{};
+    var checksum: Checksum = .init;
     const hook = checksum.hook();
     const bytes = "checksums ride the codec boundary " ** 8;
     hook.update(bytes[0..100]);

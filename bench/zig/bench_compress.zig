@@ -310,17 +310,17 @@ fn compressOne(bench: *Bench, impl: []const u8, codec: []const u8, raw: []const 
     const target = bench.compressed;
     if (mem.eql(u8, impl, "zc")) {
         if (mem.eql(u8, codec, "flate"))
-            return compress.flate.encode.compress(raw, target, .{});
+            return compress.flate.encode.compress(raw, target, .init);
         if (mem.eql(u8, codec, "flate6"))
-            return compress.flate.encode.compress(raw, target, .{ .level = .@"6" });
+            return compress.flate.encode.compress(raw, target, .{ .level = .@"6", .dict = null });
         if (mem.eql(u8, codec, "gzip"))
-            return compress.gzip.encode.compress(raw, target, .{});
+            return compress.gzip.encode.compress(raw, target, .init);
         if (mem.eql(u8, codec, "zlib"))
-            return compress.zlib.encode.compress(raw, target, .{});
+            return compress.zlib.encode.compress(raw, target, .init);
         if (mem.eql(u8, codec, "zstd"))
-            return compress.zstd.encode.compress(raw, target, .{});
+            return compress.zstd.encode.compress(raw, target, .init);
         if (mem.eql(u8, codec, "zstd3"))
-            return compress.zstd.encode.compress(raw, target, .{ .level = .@"3" });
+            return compress.zstd.encode.compress(raw, target, .{ .level = .@"3", .dict = null });
         if (mem.eql(u8, codec, "brotli"))
             return compress.brotli.encode.compress(raw, target);
         if (mem.eql(u8, codec, "brotli-stream"))

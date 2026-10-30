@@ -10,7 +10,7 @@ test "a preset dictionary round-trips both directions" {
     const data = "the same bytes appear in the data, and the matches reach back into the dictionary";
 
     var stream: [128]u8 = undefined;
-    const stream_len = try zlib.encode.compress(data, &stream, .{ .dict = dict });
+    const stream_len = try zlib.encode.compress(data, &stream, .{ .level = .@"1", .dict = dict });
 
     var plain: [128]u8 = undefined;
     const plain_len = try zlib.decode.decompress(stream[0..stream_len], &plain, dict);
@@ -25,7 +25,7 @@ test "the wrong dictionary fails by name" {
     const data = "some data that matches the dictionary";
 
     var stream: [128]u8 = undefined;
-    const stream_len = try zlib.encode.compress(data, &stream, .{ .dict = dict });
+    const stream_len = try zlib.encode.compress(data, &stream, .{ .level = .@"1", .dict = dict });
 
     var plain: [128]u8 = undefined;
     try std.testing.expectError(

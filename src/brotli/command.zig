@@ -242,7 +242,7 @@ pub fn literalContext(mode: context.Mode, p1: u8, p2: u8) u6 {
 pub const Blocks = struct {
     /// `[category][0]` is the previous block type, `[category][1]` the
     /// current.
-    types: [3][2]u16 = .{ .{ 1, 0 }, .{ 1, 0 }, .{ 1, 0 } },
+    types: [3][2]u16,
     /// The remaining symbol count of the current block, from the header's
     /// first count or a switch's count (`§6`, `§10`).
     counts: [3]u32,
@@ -250,7 +250,10 @@ pub const Blocks = struct {
     /// The header's first counts: BLEN = 16777216 for a single-type category
     /// (`§10`), so its count never reaches zero within a meta-block.
     pub fn init(header: *const frame.Header) Blocks {
-        return .{ .counts = header.first_block_count };
+        return .{
+            .types = .{ .{ 1, 0 }, .{ 1, 0 }, .{ 1, 0 } },
+            .counts = header.first_block_count,
+        };
     }
 
     /// The current block type of `cat`.
@@ -400,8 +403,12 @@ pub fn copyMatch(window: []u8, pos: usize, match_distance: u32, length: u32) voi
 /// stream ... and it is not reset at meta-block boundaries", and the
 /// distance tables the current meta-block's NPOSTFIX/NDIRECT derive.
 pub const State = struct {
-    ring: distance.Ring = .{},
-    tables: distance.Tables = .{},
+    ring: distance.Ring,
+    tables: distance.Tables,
+
+    /// A stream state before its first meta-block: the §4 ring seed and empty
+    /// distance tables.
+    pub const init: State = .{ .ring = .init, .tables = .empty };
 
     /// §4 — derive this meta-block's distance tables from NPOSTFIX and
     /// NDIRECT (`§3.3`'s alphabet size, `16 + NDIRECT + (48 << NPOSTFIX)`).
@@ -444,25 +451,41 @@ pub const Window = struct {
 /// runs it in bounded steps as its ring makes room.
 pub const Cursor = struct {
     blocks: Blocks,
-    command: Command = .{
-        .insert_length = 0,
-        .copy_length = 0,
-        .implicit_distance = true,
-        .distance_context = 0,
-    },
+    command: Command,
     /// Insert bytes of `command` still to write.
-    insert_left: u32 = 0,
+    insert_left: u32,
     /// Copy bytes of `command` still to write.
-    copy_left: u32 = 0,
+    copy_left: u32,
     /// The copy's resolved distance (`§4`, `§8`).
-    distance: u32 = 0,
+    distance: u32,
     /// `§8` — the transformed word in flight and how much of it is out. The
     /// word is built here, not on the stack, because a ring can run out of
     /// room mid-word.
-    word: [dictionary.scratch_len]u8 = undefined,
-    word_left: u32 = 0,
-    word_written: u32 = 0,
-    phase: Phase = .command,
+    word: [dictionary.scratch_len]u8,
+    word_left: u32,
+    word_written: u32,
+    phase: Phase,
+
+    /// A cursor at the first command of the meta-block those `blocks` describe:
+    /// no insert, copy, distance, or word in flight.
+    pub fn init(blocks: Blocks) Cursor {
+        return .{
+            .blocks = blocks,
+            .command = .{
+                .insert_length = 0,
+                .copy_length = 0,
+                .implicit_distance = true,
+                .distance_context = 0,
+            },
+            .insert_left = 0,
+            .copy_left = 0,
+            .distance = 0,
+            .word = undefined,
+            .word_left = 0,
+            .word_written = 0,
+            .phase = .command,
+        };
+    }
 
     pub const Phase = enum {
         /// The next command's symbol and lengths (`§5`).
@@ -1066,7 +1089,7 @@ test "command stream: RFC 7932 §5's command decode" {
     // copy 2, implicit (the day-one fixture); symbol 423 is insert 4 and
     // copy 2118 with 24 copy extra bits; symbol 482 is insert 2000 with 10
     // insert extra bits.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     var br: bits.BitReader = .init(packer.slice());
     var tree: huffman.CommandTree = undefined;
     // A complete two-symbol set satisfies `build`'s Kraft precondition; the
@@ -1085,7 +1108,7 @@ test "command stream: RFC 7932 §5's command decode" {
     try testing.expectEqual(@as(u2, 0), one.distance_context);
 
     tree.single = 423;
-    packer = .{};
+    packer = .empty;
     packer.pack(0, 24);
     br = .init(packer.slice());
     const wide = try readCommand(bits.BitReader, &br, &tree);
@@ -1095,7 +1118,7 @@ test "command stream: RFC 7932 §5's command decode" {
     try testing.expectEqual(@as(u64, 24), br.bit_pos);
 
     tree.single = 482;
-    packer = .{};
+    packer = .empty;
     packer.pack(910, 10);
     br = .init(packer.slice());
     const long = try readCommand(bits.BitReader, &br, &tree);

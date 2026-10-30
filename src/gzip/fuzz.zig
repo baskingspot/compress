@@ -1429,7 +1429,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: flate.Writer.Buffer = undefined;
-    var w: flate.Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: flate.Writer = .init(&compressed.writer, &wbuf, .init);
     var encode_fold: Fold = .{};
     w.checksum = encode_fold.hook();
     var pos: usize = 0;

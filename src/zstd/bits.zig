@@ -414,14 +414,14 @@ fn mask64(count: u5) u64 {
 pub const ForwardWriter = struct {
     target: []u8,
     /// Whole bytes written to `target`.
-    written: usize = 0,
+    written: usize,
     /// Pending bits, lowest first: bit 0 is the next bit on the wire.
-    bits: u32 = 0,
+    bits: u32,
     /// Pending bits in `bits`, below 8 outside `writeBits`.
-    bit_count: u5 = 0,
+    bit_count: u5,
 
     pub fn init(target: []u8) ForwardWriter {
-        return .{ .target = target };
+        return .{ .target = target, .written = 0, .bits = 0, .bit_count = 0 };
     }
 
     /// Write the low `count` bits of `value`, least significant bit first.
@@ -471,15 +471,15 @@ pub const ForwardWriter = struct {
 pub const BackwardWriter = struct {
     target: []u8,
     /// Whole bytes written to `target`.
-    written: usize = 0,
+    written: usize,
     /// Pending bits, lowest first: bit 0 is the next bit on the wire.
-    bits: u64 = 0,
+    bits: u64,
     /// Pending bits in `bits`. A flush keeps it below 8, and the widest field
     /// is 31 bits, so no field ever straddles a flush it cannot fit.
-    bit_count: u6 = 0,
+    bit_count: u6,
 
     pub fn init(target: []u8) BackwardWriter {
-        return .{ .target = target };
+        return .{ .target = target, .written = 0, .bits = 0, .bit_count = 0 };
     }
 
     /// Write the low `count` bits of `value`, least significant bit at the

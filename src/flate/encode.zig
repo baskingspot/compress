@@ -402,11 +402,16 @@ pub fn distanceSymbol(distance: usize) DistanceSymbol {
 pub const BitWriter = struct {
     target: []u8,
     /// Whole bytes written into `target`.
-    pos: usize = 0,
+    pos: usize,
     /// Pending bits, LSB first: bit 0 is the next bit on the wire.
-    bits: u64 = 0,
+    bits: u64,
     /// Valid bits in `bits` (0-63, and below 8 outside `writeBits`).
-    bit_count: u6 = 0,
+    bit_count: u6,
+
+    /// A writer at the start of `target`, with no pending bits.
+    pub fn init(target: []u8) BitWriter {
+        return .{ .target = target, .pos = 0, .bits = 0, .bit_count = 0 };
+    }
 
     /// A block's start, so a block that bails to stored can be rewound.
     const Snapshot = struct { pos: usize, bits: u64, bit_count: u6 };
@@ -1210,11 +1215,11 @@ fn compressBlocks6(
     target: []u8,
 ) error{BufferTooSmall}!usize {
     const base = finder_origin;
-    var w: BitWriter = .{ .target = target };
+    var w: BitWriter = .init(target);
     var finder: Finder6 = undefined;
     finder.clear();
-    var emitter: dynamic.BlockWriter = .{};
-    var tokens: dynamic.TokenList = .{};
+    var emitter: dynamic.BlockWriter = .empty;
+    var tokens: dynamic.TokenList = .empty;
     if (preset) {
         // The dictionary seeds the tables exactly as klauspost's
         // `fillWindow` does: a full scan over its tail, tokens discarded.
@@ -1291,7 +1296,7 @@ pub fn compressBlockStream6(
     sync: bool,
 ) error{BufferTooSmall}!void {
     const window: Window(false) = .{ .dict = &.{}, .source = source };
-    var tokens: dynamic.TokenList = .{};
+    var tokens: dynamic.TokenList = .empty;
     if (prime_dict) {
         encodeTokens6(false, window, 0, block_start, &tokens, finder, base);
         tokens.reset();
@@ -1331,17 +1336,20 @@ pub const Level = enum(u8) {
     }
 };
 
-/// Encoder configuration. `.{}` is the default: level 1.
+/// Encoder configuration. `.init` is the default: level 1.
 pub const Options = struct {
     /// The compression level. Only the levels in `Level` are representable.
-    level: Level = .@"1",
+    level: Level,
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
     /// of the stream, which the finder's table is primed from and a match can
     /// reach into. Raw deflate names no dictionary, so the caller vouches for
     /// the bytes on both sides; zlib's FDICT/DICTID is the checked form
     /// (RFC 1950 §2.2). A dictionary longer than 32 KiB contributes only its
     /// last 32 KiB.
-    dict: ?[]const u8 = null,
+    dict: ?[]const u8,
+
+    /// Level 1 with no dictionary.
+    pub const init: Options = .{ .level = .@"1", .dict = null };
 };
 
 /// Compress `source` as one raw deflate stream into `target` and return the
@@ -1393,7 +1401,7 @@ fn compressBlocks(
         .@"1" => {},
     }
 
-    var w: BitWriter = .{ .target = target };
+    var w: BitWriter = .init(target);
 
     // One finder table for the whole stream, zeroed once (`FinderTable`):
     // entries are absolute stream positions (the dictionary's bytes are the
@@ -1443,7 +1451,7 @@ fn roundTrip(input: []const u8) !void {
     const bound = maxCompressedLength(input.len);
     const comp = try allocator.alloc(u8, bound);
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .{});
+    const clen = try compress(input, comp, .init);
     try testing.expect(clen <= bound);
     try golden.expectFinalEmptyBlock(comp[0..clen]);
 
@@ -1458,7 +1466,7 @@ test "compress: options — every level round-trips and carries its tag" {
     var decoded: [4096]u8 = undefined;
     const input = "the quick brown fox jumps over the lazy dog. " ** 8;
 
-    try testing.expectEqual(Level.@"1", (Options{}).level);
+    try testing.expectEqual(Level.@"1", Options.init.level);
     try testing.expectEqual(@as(u8, 1), @intFromEnum(Level.@"1"));
     try testing.expectEqual(@as(u8, 6), @intFromEnum(Level.@"6"));
     try testing.expectEqual(Level.@"1", Level.fromInt(1).?);
@@ -1466,7 +1474,7 @@ test "compress: options — every level round-trips and carries its tag" {
     try testing.expectEqual(@as(?Level, null), Level.fromInt(2));
     try testing.expectEqual(@as(?Level, null), Level.fromInt(0));
     for (std.enums.values(Level)) |level| {
-        const n = try compress(input, &comp, .{ .level = level });
+        const n = try compress(input, &comp, .{ .level = level, .dict = null });
         const dn = try decode.decompress(comp[0..n], &decoded, null);
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
     }
@@ -1483,10 +1491,10 @@ test "compress: level 6 emits a dynamic-Huffman block for compressible text" {
     const input = "the quick brown fox jumps over the lazy dog. " ** 400;
     const dynamic_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(dynamic_comp);
-    const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6" });
+    const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6", .dict = null });
     const fixed_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(fixed_comp);
-    const fixed_len = try compress(input, fixed_comp, .{ .level = .@"1" });
+    const fixed_len = try compress(input, fixed_comp, .{ .level = .@"1", .dict = null });
     try testing.expect(dynamic_len < fixed_len);
 
     // BFINAL=0, BTYPE=10: the first three bits are 1, 0, 0 (LSB first).
@@ -1557,7 +1565,7 @@ test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
     const gpa = testing.allocator;
     for (cases) |case| {
         var comp: [256]u8 = undefined;
-        const n = try compress(case.input, &comp, .{ .level = .@"6" });
+        const n = try compress(case.input, &comp, .{ .level = .@"6", .dict = null });
         try testing.expectEqualSlices(u8, case.want, comp[0..n]);
         const target = try gpa.alloc(u8, case.input.len + sentinel.len);
         defer gpa.free(target);
@@ -1614,7 +1622,7 @@ test "compress: level 6 round-trips every shape" {
             defer gpa.free(input);
             const comp = try gpa.alloc(u8, maxCompressedLength(len));
             defer gpa.free(comp);
-            const clen = compress(input, comp, .{ .level = .@"6" }) catch |err| {
+            const clen = compress(input, comp, .{ .level = .@"6", .dict = null }) catch |err| {
                 print("FAIL: {s} len {d}: {s}\n", .{ @tagName(shape), len, @errorName(err) });
                 return err;
             };
@@ -1717,7 +1725,7 @@ test "compress: empty input is the final empty block" {
     // block `03 00`. Spec: §3.2.6 — the fixed end-of-block code is seven zero
     // bits.
     var target: [4]u8 = undefined;
-    const n = try compress("", &target, .{});
+    const n = try compress("", &target, .init);
     try testing.expectEqual(@as(usize, 2), n);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x03, 0x00 }, target[0..n]);
     try testing.expectEqual(@as(usize, 2), maxCompressedLength(0));
@@ -1749,7 +1757,7 @@ test "compress: §3.2.4 stored fallback for incompressible input" {
     defer allocator.free(input);
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .{});
+    const clen = try compress(input, comp, .init);
 
     try testing.expectEqual(@as(u8, 0), comp[0] & 0b1); // BFINAL clear on data
     try testing.expectEqual(@as(u8, 0b00), (comp[0] >> 1) & 0b11); // BTYPE stored
@@ -1831,7 +1839,7 @@ test "compress: maxCompressedLength bounds every emission" {
             const bound = maxCompressedLength(len);
             const comp = try allocator.alloc(u8, bound);
             defer allocator.free(comp);
-            const clen = compress(input, comp, .{}) catch |err| {
+            const clen = compress(input, comp, .init) catch |err| {
                 print(
                     "FAIL: {s} len {d}: {s}\n",
                     .{ @tagName(shape), len, @errorName(err) },
@@ -1854,7 +1862,7 @@ test "compress: maxCompressedLength bounds every emission" {
         const bound = maxCompressedLength(input.len);
         const comp = try allocator.alloc(u8, bound);
         defer allocator.free(comp);
-        const clen = try compress(input, comp, .{});
+        const clen = try compress(input, comp, .init);
         try testing.expect(clen <= bound);
         try roundTrip(input);
     }
@@ -1863,9 +1871,9 @@ test "compress: maxCompressedLength bounds every emission" {
 test "compress: a target smaller than the output is BufferTooSmall" {
     // `error.BufferTooSmall` when `target` is too small.
     var target: [2]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, compress("hello, flate!", &target, .{}));
+    try testing.expectError(error.BufferTooSmall, compress("hello, flate!", &target, .init));
     // ... and the empty stream is the smallest legal output.
-    try testing.expectEqual(@as(usize, 2), try compress("", &target, .{}));
+    try testing.expectEqual(@as(usize, 2), try compress("", &target, .init));
 }
 
 test "compress: deterministic" {
@@ -1878,8 +1886,8 @@ test "compress: deterministic" {
     defer allocator.free(first);
     const second = try allocator.alloc(u8, bound);
     defer allocator.free(second);
-    const a = try compress(input, first, .{});
-    const b = try compress(input, second, .{});
+    const a = try compress(input, first, .init);
+    const b = try compress(input, second, .init);
     try testing.expectEqual(a, b);
     try testing.expectEqualSlices(u8, first[0..a], second[0..b]);
 }
@@ -1926,7 +1934,7 @@ test "compress: a match reaches back across a block boundary" {
 
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .{});
+    const clen = try compress(input, comp, .init);
     // The first block is incompressible (stored: 65540 bytes); the second is
     // one match of 31768 bytes (~125 chunks of 258).
     try testing.expect(clen > 65540);
@@ -1995,7 +2003,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
     const input = [_]u8{'A'} ** 21;
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(&input, comp, .{});
+    const clen = try compress(&input, comp, .init);
     const want = [_]u8{ 0x72, 0xc4, 0x06, 0x00, 0x03, 0x00 };
     try testing.expectEqualSlices(u8, &want, comp[0..clen]);
     try roundTrip(&input);
@@ -2017,7 +2025,7 @@ test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-f
     // distance-side extra-bit-order pin. An MSB-first reading of those extra
     // bits would give distance 73, past the 70-byte history.
     var target: [128]u8 = undefined;
-    var w: BitWriter = .{ .target = &target };
+    var w: BitWriter = .init(&target);
     try w.writeBits(1, 1); // BFINAL, matching the notes' stream
     try w.writeBits(1, 2); // BTYPE = 01, fixed
     var payload: u64 = 0;
@@ -2056,7 +2064,7 @@ test "emit: a dictionary match reaches in front of the output" {
     // EOB. The window is ["abcd"]["x"], so the match reads 'a','b','c','d'
     // and then continues at the output's start ('x', 'a').
     var target: [64]u8 = undefined;
-    var w: BitWriter = .{ .target = &target };
+    var w: BitWriter = .init(&target);
     try w.writeBits(1, 1); // BFINAL, matching the hand-built form
     try w.writeBits(1, 2); // BTYPE = 01, fixed
     var payload: u64 = 0;
@@ -2099,7 +2107,7 @@ test "compress: a preset dictionary is matchable history" {
     const plain = try allocator.alloc(u8, source.len + sentinel.len);
     defer allocator.free(plain);
 
-    const with_dict = try compress(source, comp, .{ .dict = dict });
+    const with_dict = try compress(source, comp, .{ .level = .@"1", .dict = dict });
     sentinel.fill(plain);
     const n = try decode.decompress(comp[0..with_dict], plain[0..source.len], dict);
     try testing.expectEqual(source.len, n);
@@ -2109,7 +2117,7 @@ test "compress: a preset dictionary is matchable history" {
     // The dictionary carried the stream: without it the same source is a few
     // literals per repetition, with it the repetitions are matches.
     var plain_comp: [maxCompressedLength(source.len)]u8 = undefined;
-    const without_dict = try compress(source, &plain_comp, .{});
+    const without_dict = try compress(source, &plain_comp, .init);
     try testing.expect(with_dict < without_dict / 2);
 
     // The stream depends on the dictionary's bytes: without it (or with a
@@ -2125,7 +2133,7 @@ test "compress: a preset dictionary is matchable history" {
 
     // An empty dictionary is no dictionary: byte-identical to `.{}`.
     var empty_comp: [maxCompressedLength(source.len)]u8 = undefined;
-    const empty_dict = try compress(source, &empty_comp, .{ .dict = "" });
+    const empty_dict = try compress(source, &empty_comp, .{ .level = .@"1", .dict = "" });
     try testing.expectEqualSlices(u8, plain_comp[0..without_dict], empty_comp[0..empty_dict]);
 }
 
@@ -2147,7 +2155,7 @@ test "compress: a dictionary longer than 32 KiB contributes only its tail" {
 
     // The dictionary's last 64 bytes: one match at distance 64.
     const tail = dict[history_len..];
-    const tail_len = try compress(tail, comp, .{ .dict = dict });
+    const tail_len = try compress(tail, comp, .{ .level = .@"1", .dict = dict });
     sentinel.fill(plain);
     const n = try decode.decompress(comp[0..tail_len], plain[0..64], dict);
     try testing.expectEqual(@as(usize, 64), n);
@@ -2157,8 +2165,8 @@ test "compress: a dictionary longer than 32 KiB contributes only its tail" {
     // The dictionary's first 64 bytes are outside the window: nothing to
     // match, so the stream is the stored form.
     const front = dict[0..64];
-    const front_len = try compress(front, comp, .{ .dict = dict });
-    const front_plain = try compress(front, comp, .{});
+    const front_len = try compress(front, comp, .{ .level = .@"1", .dict = dict });
+    const front_plain = try compress(front, comp, .init);
     try testing.expectEqual(front_plain, front_len);
     try testing.expect(tail_len < front_len / 2);
 }
@@ -2212,7 +2220,7 @@ test "compress: every length and distance code round trips" {
 
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(&input, comp, .{});
+    const clen = try compress(&input, comp, .init);
     try testing.expect(clen <= maxCompressedLength(input.len));
 
     const back = try allocator.alloc(u8, input.len + sentinel.len);

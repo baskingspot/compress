@@ -552,7 +552,7 @@ test "prefix codes: RFC 7932 §3.2's canonical construction example" {
         .{ .value = 0b1111, .len = 4 },
     };
     for (codes, 0..) |code, symbol| {
-        var packer: golden.Packer = .{};
+        var packer: golden.Packer = .empty;
         packCode(&packer, code.value, code.len);
         var br: bits.BitReader = .init(packer.slice());
         try testing.expectEqual(@as(u16, @intCast(symbol)), try tree.decode(bits.BitReader, &br));
@@ -574,12 +574,12 @@ test "prefix codes: a code longer than the root table takes the subtable" {
     // Symbol 14 (length 15) is the last of the ladder; symbol 15 shares the
     // length. Their canonical codes are 0b111111111111110 and
     // 0b111111111111111.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packCode(&packer, 0b111111111111110, 15);
     var br: bits.BitReader = .init(packer.slice());
     try testing.expectEqual(@as(u16, 14), try tree.decode(bits.BitReader, &br));
 
-    var second: golden.Packer = .{};
+    var second: golden.Packer = .empty;
     packCode(&second, 0b111111111111111, 15);
     var br2: bits.BitReader = .init(second.slice());
     try testing.expectEqual(@as(u16, 15), try tree.decode(bits.BitReader, &br2));
@@ -617,7 +617,7 @@ test "simple form: RFC 7932 §3.4's length patterns and the sorted order rule" {
     // NSYM = 2, symbols presented unordered (66, 65): both get length 1, and
     // "prefix codes of the same bit length must be assigned to the symbols
     // in sorted order", so 65 gets code 0 and 66 code 1.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packer.pack(1, 2); // simple
     packer.pack(1, 2); // NSYM - 1 = 1
     packer.pack(66, 8);
@@ -632,7 +632,7 @@ test "simple form: RFC 7932 §3.4's length patterns and the sorted order rule" {
     try testing.expectEqual(@as(u16, 66), try tree.decode(bits.BitReader, &one));
 
     // NSYM = 3: lengths 1, 2, 2 in presentation order.
-    var three: golden.Packer = .{};
+    var three: golden.Packer = .empty;
     three.pack(1, 2);
     three.pack(2, 2);
     three.pack(7, 8);
@@ -651,7 +651,7 @@ test "simple form: RFC 7932 §3.4's length patterns and the sorted order rule" {
     try testing.expectEqual(@as(u16, 9), try tree3.decode(bits.BitReader, &b2));
 
     // NSYM = 4 with tree-select 1: lengths 1, 2, 3, 3.
-    var four: golden.Packer = .{};
+    var four: golden.Packer = .empty;
     four.pack(1, 2);
     four.pack(3, 2);
     for ([_]u16{ 1, 2, 3, 4 }) |symbol| four.pack(symbol, 8);
@@ -662,7 +662,7 @@ test "simple form: RFC 7932 §3.4's length patterns and the sorted order rule" {
     try testing.expectEqual(@as(u64, four.bit_len), br4.bit_pos);
 
     // NSYM = 4 with tree-select 0: all four lengths are 2.
-    var flat: golden.Packer = .{};
+    var flat: golden.Packer = .empty;
     flat.pack(1, 2);
     flat.pack(3, 2);
     for ([_]u16{ 1, 2, 3, 4 }) |symbol| flat.pack(symbol, 8);
@@ -675,7 +675,7 @@ test "simple form: RFC 7932 §3.4's length patterns and the sorted order rule" {
 
 test "simple form: NSYM = 1 decodes with no bits, and §3.4's two rejections" {
     // NSYM = 1: the single symbol has the zero-length code.
-    var one: golden.Packer = .{};
+    var one: golden.Packer = .empty;
     one.pack(1, 2);
     one.pack(0, 2);
     one.pack(65, 8);
@@ -689,7 +689,7 @@ test "simple form: NSYM = 1 decodes with no bits, and §3.4's two rejections" {
     // RFC 7932 §3.4: "If the integer value is greater than or equal to the
     // alphabet size ... rejected as invalid." Reachable only on a
     // non-power-of-two alphabet (T7): the 704-symbol command alphabet.
-    var wide: golden.Packer = .{};
+    var wide: golden.Packer = .empty;
     wide.pack(1, 2);
     wide.pack(0, 2);
     wide.pack(704, 10);
@@ -701,7 +701,7 @@ test "simple form: NSYM = 1 decodes with no bits, and §3.4's two rejections" {
     );
 
     // RFC 7932 §3.4: "or the value is identical to a previous value".
-    var dup: golden.Packer = .{};
+    var dup: golden.Packer = .empty;
     dup.pack(1, 2);
     dup.pack(1, 2);
     dup.pack(65, 8);
@@ -721,7 +721,7 @@ test "complex form: RFC 7932 §3.5's 17 modifier and the length sequence" {
     // count — "repeat count = (8 * (repeat count - 2)) + (3..10 on the next 3
     // bits)" — to 8 * (10 - 2) + 0 + 3 = 67 zeros. Then two length-1 symbols
     // complete the Kraft sum (2 * 16384 = 32768) at symbols 67 and 68.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packer.pack(0, 2); // HSKIP = 0
     // §3.5's order: 1, 2, 3, 4, 0, 5, 17, ...
     packClLength(&packer, 1); // symbol 1: length 1
@@ -784,7 +784,7 @@ test "complex form: the Kraft checks and the repeat overrun are named errors" {
     // with space 0 — that is complete. Drop to a single length-2 symbol to
     // leave the code incomplete: 32 - 8 = 24 != 0, and only one non-zero
     // length is accepted, so use two.
-    var bad_cl: golden.Packer = .{};
+    var bad_cl: golden.Packer = .empty;
     bad_cl.pack(0, 2); // HSKIP = 0
     packClLength(&bad_cl, 2); // symbol 1: length 2 (8 of 32)
     packClLength(&bad_cl, 0); // symbol 2: 0
@@ -804,7 +804,7 @@ test "complex form: the Kraft checks and the repeat overrun are named errors" {
     // length-1 symbol followed by a 16 repeating it six times. Six length-1
     // codes would overshoot 32768, and the repeat's target is the previous
     // length, so the sequence must be rejected as the Kraft sum is missed.
-    var over: golden.Packer = .{};
+    var over: golden.Packer = .empty;
     over.pack(0, 2); // HSKIP = 0
     packClLength(&over, 1); // symbol 1: length 1
     // The code-length symbols 2, 3, 4, 0, 5, 17 and 6 stay zero; symbol 16
@@ -829,7 +829,7 @@ test "complex form: the single-symbol code-length code consumes no bits" {
     // code has one symbol whose code has zero length." Here the code-length
     // code is symbol 1 (length 1 written, then 17 zeros), and the main
     // sequence is two length-1 symbols read with no bits at all.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packer.pack(0, 2); // HSKIP = 0
     packClLength(&packer, 1); // symbol 1: length 1
     for (0..17) |_| packClLength(&packer, 0);

@@ -54,21 +54,21 @@ inner: flate.Reader,
 /// through `inner`.
 input: *Io.Reader,
 /// The header check (`§2.2`), run once, before the first body byte.
-header: framing.Header = .pending,
+header: framing.Header,
 /// The checksum state folded through flate's hook: the Adler-32 over the
 /// decoded bytes (`§2.2`).
-checksum: framing.Checksum = .{},
+checksum: framing.Checksum,
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// trailer is verified (`done`) or a failure sticks (`failed`, details in
 /// `err`).
-state: State = .streaming,
+state: State,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
-err: ?Error = null,
+err: ?Error,
 /// The stream's preset dictionary or null (`§2.2`), checked against the
 /// header's DICTID when FDICT is set. The driver hands it to the header check;
 /// the inner flate reader gets it too, as its window's preset history.
-dict: ?[]const u8 = null,
+dict: ?[]const u8,
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`): the lifecycle, the window hand-off, the
@@ -144,7 +144,7 @@ fn roundTrip(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
     const stream = compressed.written();
@@ -315,7 +315,7 @@ test "Reader: a doubled stream is a caller loop at the boundary" {
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "hello, zlib";
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
 
     var framed: [128 + 8]u8 = undefined;
     fastmem.copy(u8, framed[0..len], stream[0..len]);
@@ -438,7 +438,7 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
 
     for (0..decode.trailer_len) |at| {
         var bad = stream;
@@ -469,7 +469,7 @@ test "Reader: an over-the-end request still checks the trailer" {
     // 30-KiB request overflows the room at the consumer's position.
     const source = "the quick brown fox jumps over the lazy dog. " ** 950;
     var stream: [encode.maxCompressedLength(source.len)]u8 = undefined;
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
 
     // The good trailer: the over-the-end request reports the clean end
     // with the input exactly at the stream's last byte (the boundary
@@ -506,7 +506,7 @@ test "Reader: a truncated stream is Truncated at every prefix" {
     // cleanly.
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
-    const len = try encode.compress("hello world\n", &stream, .{});
+    const len = try encode.compress("hello world\n", &stream, .init);
     for (1..len) |prefix| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(stream[0..prefix]);
@@ -529,7 +529,7 @@ test "Reader: a contiguous request past the window fails" {
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&stream.writer, &wbuf, .{});
+    var w: Writer = .init(&stream.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -569,7 +569,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "poll";
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(stream[0..len]);
     var r: Reader = .init(&fixed_in, &rbuf, null);
@@ -590,7 +590,7 @@ test "Reader: a chunked input refills across the header and the body" {
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
 
     var framed: [144]u8 = undefined;
     fastmem.copy(u8, framed[0..len], stream[0..len]);
@@ -612,7 +612,7 @@ test "Reader: streamAll consumes one stream and leaves the rest" {
     const gpa = testing.allocator;
     var stream: [64]u8 = undefined;
     const source = "hello, zlib";
-    const len = try encode.compress(source, &stream, .{});
+    const len = try encode.compress(source, &stream, .init);
     var framed: [64 + 8]u8 = undefined;
     fastmem.copy(u8, framed[0..len], stream[0..len]);
     fastmem.set(u8, framed[len..][0..8], 0xaa);

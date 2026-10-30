@@ -188,7 +188,7 @@ fn reencodeRoundTrip(bytes: []const u8, smith: *Smith) !void {
     assert(bytes.len <= decode_window_len);
     const level = implementedLevel(smith);
     var compressed: [encode.maxCompressedLength(decode_window_len)]u8 = undefined;
-    const c_len = try encode.compress(bytes, &compressed, .{ .level = level });
+    const c_len = try encode.compress(bytes, &compressed, .{ .level = level, .dict = null });
     try testing.expect(c_len <= encode.maxCompressedLength(bytes.len));
 
     var plain: [decode_window_len + guard_len]u8 = undefined;
@@ -390,7 +390,7 @@ fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     var compressed_buf: [encode.maxCompressedLength(roundtrip_max)]u8 = undefined;
-    const c_len = try encode.compress(source, &compressed_buf, .{ .level = level });
+    const c_len = try encode.compress(source, &compressed_buf, .{ .level = level, .dict = null });
     const compressed = compressed_buf[0..c_len];
 
     // The documented bound, on every emission: `maxCompressedLength` is a
@@ -463,7 +463,10 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var source_in: Io.Reader = .fixed(input);
-    const consumed = try Writer.streamAll(&source_in, &compressed.writer, .{ .level = level });
+    const consumed = try Writer.streamAll(&source_in, &compressed.writer, .{
+        .level = level,
+        .dict = null,
+    });
     try testing.expectEqual(input.len, consumed);
     try testing.expectEqual(input.len, source_in.seek);
     const stream = compressed.written();
@@ -491,7 +494,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var compressed2: Io.Writer.Allocating = .init(gpa);
     defer compressed2.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed2.writer, &wbuf, .{ .level = level });
+    var w: Writer = .init(&compressed2.writer, &wbuf, .{ .level = level, .dict = null });
     var pos: usize = 0;
     var flushes: usize = 0;
     while (pos < input.len) {
@@ -570,7 +573,7 @@ fn fuzzStreamMachinery(_: void, smith: *Smith) anyerror!void {
     var expect: std.ArrayList(u8) = .empty;
     defer expect.deinit(gpa);
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
 
     // The op sources, sliced at Smith-chosen lengths.
     var a: [1024]u8 = undefined;
@@ -998,7 +1001,7 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
             const level = implementedLevel(smith);
             var plain_buf: [corrupt_source_max]u8 = undefined;
             const plain = plain_buf[0..buildShape(smith, &plain_buf)];
-            valid_len = try encode.compress(plain, &valid_buf, .{ .level = level });
+            valid_len = try encode.compress(plain, &valid_buf, .{ .level = level, .dict = null });
         },
         1 => valid_len = smith.slice(&valid_buf),
         else => {
@@ -1131,7 +1134,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];
 
     var compressed: [encode.maxCompressedLength(bomb_source_max)]u8 = undefined;
-    const c_len = try encode.compress(source, &compressed, .{ .level = level });
+    const c_len = try encode.compress(source, &compressed, .{ .level = level, .dict = null });
     const bomb = compressed[0..c_len];
     try testing.expect(c_len <= encode.maxCompressedLength(source.len));
     if (shape == .run and source.len >= 1024) {
@@ -1231,7 +1234,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{ .level = level });
+    var w: Writer = .init(&compressed.writer, &wbuf, .{ .level = level, .dict = null });
     var p: usize = 0;
     while (p < input.len) {
         const n = @min(input.len - p, rangeAtMost(smith, 1, 32 * 1024));

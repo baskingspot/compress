@@ -37,8 +37,11 @@ pub const Stream = struct {
 /// pack least significant bit first, prefix codes most significant bit
 /// first (`code`).
 pub const Packer = struct {
-    bytes: [512]u8 = @splat(0),
-    bit_len: usize = 0,
+    bytes: [512]u8,
+    bit_len: usize,
+
+    /// A packer at the start of an empty bit string.
+    pub const empty: Packer = .{ .bytes = @splat(0), .bit_len = 0 };
 
     pub fn pack(self: *Packer, value: u32, n: u5) void {
         var i: u5 = 0;

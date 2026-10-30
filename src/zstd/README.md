@@ -21,7 +21,7 @@ const zstd = @import("compress").zstd;
 fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
     const frame = try gpa.alloc(u8, zstd.encode.maxCompressedLength(data.len));
     defer gpa.free(frame);
-    const frame_len = try zstd.encode.compress(data, frame, .{});
+    const frame_len = try zstd.encode.compress(data, frame, .init);
     const plain = try gpa.alloc(u8, data.len); // the caller must know the size
     defer gpa.free(plain);
     const n = try zstd.decode.decompress(frame[0..frame_len], plain, null);
@@ -55,7 +55,7 @@ them in static or heap storage.
 
 ```zig
 fn compressTo(out: *std.Io.Writer, bytes: []const u8, buffer: *zstd.Writer.Buffer(19)) !void {
-    var w: zstd.Writer = .init(19, out, buffer, .{});
+    var w: zstd.Writer = .init(19, out, buffer, .init);
     try w.writer.writeAll(bytes);
     try w.finish(); // required: it writes the last block and the checksum
 }
@@ -67,7 +67,7 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader,
 }
 ```
 
-`zstd.Writer.streamAll(19, in, out, &buffer, .{})` and
+`zstd.Writer.streamAll(19, in, out, &buffer, .init)` and
 `zstd.Reader.streamAll(1024 * 1024, in, out, &buffer, null)` pump a whole
 stream in one call; `just example zstd encode FILE > FILE.zst` and
 `just example zstd decode FILE.zst > FILE` run the example CLI. The example's
@@ -118,7 +118,7 @@ zstd.encode.Buffer // literals 128 KiB + sequences 512 KiB + the long table 512 
     // (1 << 16 entries, its widest chainLog); 1.375 MiB
 zstd.encode.maxCompressedLength(input_len: usize) usize // 18-byte header cap + 3/block + input_len + 4
 zstd.encode.Level = enum(u8) { @"1" = 1, @"3" = 3 }  // the CLI scale's numbers
-zstd.encode.Options = struct { level: Level = .@"1", dict: ?*const Dictionary = null }
+zstd.encode.Options = struct { level: Level, dict: ?*const Dictionary } // .init: level 1, no dictionary
     // level: the implemented classes, named by the CLI-scale number:
     //   @"1": the level-1 class — the `zstd -1` byte pin.
     //   @"3": the double-fast (dfast) class — two hash tables (long + small),

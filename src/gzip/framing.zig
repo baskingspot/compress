@@ -22,10 +22,13 @@ const encode = @import("encode.zig");
 /// The inner codec's compression levels (flate's type, re-exported).
 pub const Level = flate.encode.Level;
 
-/// Encoder configuration. `.{}` is the default: level 1.
+/// Encoder configuration. `.init` is the default: level 1.
 pub const Options = struct {
     /// The compression level.
-    level: Level = .@"1",
+    level: Level,
+
+    /// Level 1.
+    pub const init: Options = .{ .level = .@"1" };
 };
 
 /// The failure detail a reader records in `err` once its state is `.failed`:
@@ -77,6 +80,9 @@ pub const Checksum = crc32.Checksum;
 /// The header parse state (`§2.3.1`), run once, before the first body byte.
 pub const Header = decode.HeaderParser;
 
+/// A header parse before its first byte: the shared driver's initial seat.
+pub const reader_header_init: Header = .init;
+
 /// The caller-provided decode window: flate's `Reader.Buffer`, 64 KiB
 /// (`[2 * history_len]u8`). gzip adds no buffer of its own.
 pub const ReaderBuffer = InnerReader.Buffer;
@@ -113,7 +119,7 @@ pub fn initReader(
 /// Wrap `output` with `buffer` as the inner flate writer's window and
 /// `options`' level fixed for the member's lifetime.
 pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return InnerWriter.init(output, buffer, .{ .level = options.level });
+    return InnerWriter.init(output, buffer, .{ .level = options.level, .dict = null });
 }
 
 /// Whether the header is complete.
@@ -170,7 +176,7 @@ pub fn bodyCompress(
     target: []u8,
     options: Options,
 ) error{BufferTooSmall}!usize {
-    return flate.encode.compress(source, target, .{ .level = options.level });
+    return flate.encode.compress(source, target, .{ .level = options.level, .dict = null });
 }
 
 /// The worst-case deflate body length (flate's bound).

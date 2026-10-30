@@ -135,9 +135,16 @@ comptime {
 pub const State = struct {
     /// `§9.2`, `§3`, `§6`, `§7` — the current meta-block's header. Written by
     /// `frame.nextMetaBlock` before any read of it.
-    header: frame.Header = undefined,
+    header: frame.Header,
     /// `§4`, `§9.3` — the distance ring and the derived distance tables.
-    commands: command.State = .{},
+    commands: command.State,
+
+    /// A decode state before its first meta-block. The header stays undefined
+    /// until `nextMetaBlock` fills it; the driver assembles the state in
+    /// place rather than copying this 691-KiB value into the frame.
+    pub fn init() State {
+        return .{ .header = undefined, .commands = .init };
+    }
 };
 
 /// Decode one brotli stream (`§9.1`'s header through the last meta-block's
@@ -164,7 +171,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
     // a per-call fixed cost that dominated small streams. Written this way
     // the header stays untouched until `nextMetaBlock` fills it.
     var state: State = undefined;
-    state.commands = .{};
+    state.commands = .init;
     var br: bits.BitReader = .init(source);
     const stream = try frame.readStreamHeader(bits.BitReader, &br);
     var pos: usize = 0;

@@ -5,6 +5,19 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `flate.encode.Options`, `gzip.encode.Options`, `zlib.encode.Options`, and
+  `zstd.encode.Options` require every field: replace `.{}` with `.init` (level
+  1, no dictionary) and name every field in a partial literal. Public structs
+  that carried field defaults now name a constructor too
+  (`brotli.distance.Ring.init`, `brotli.command.State.init`,
+  `flate.dynamic.TokenList.empty`, `flate.dynamic.HuffmanEncoder.empty`,
+  `gzip.crc32.Checksum.init`, `zlib.adler32.Checksum.init`,
+  `zstd.block_compress.State.init`, `zstd.frame.HeaderParser.init`,
+  `zstd.xxh64.State.init`, and their peers): construct through those instead
+  of a bare `.{}`.
+
 ## [0.1.0] - 2026-10-25
 
 ### Added

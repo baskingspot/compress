@@ -148,7 +148,7 @@ test "context map: RFC 7932 §7.3's RLEMAX, zero runs, and the IMTF bit" {
     // 1 repeats a zero 2..3 times (one extra bit), 2 is the value 1. The
     // map's simple tree gives symbol 0 code 0, symbol 1 code 10, symbol 2
     // code 11, so their wire values are 0, 01 and 11.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packer.pack(1, 1); // RLEMAX = 1 (the 5-bit form)
     packer.pack(0, 4);
     packer.pack(1, 2); // simple form
@@ -181,7 +181,7 @@ test "context map: a zero run past the map's end is RFC 7932 §7.3's refusal" {
     // tree gives symbol 0 code 0 (wire 0), symbol 1 code 10 (wire 01) and
     // symbol 2 code 11 (wire 11). Two zero values fill entries 0 and 1 of a
     // 3-entry map, then a repeat of two more would reach five.
-    var packer: golden.Packer = .{};
+    var packer: golden.Packer = .empty;
     packer.pack(1, 1); // RLEMAX = 1
     packer.pack(0, 4);
     packer.pack(1, 2); // simple form

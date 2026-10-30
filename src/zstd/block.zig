@@ -408,8 +408,8 @@ fn decodeFrame(bytes: []const u8, target: []u8) !usize {
     // fixture's descriptor back through it so each frame is checked against
     // the window it declares (`§3.1.1.1.2`).
     const window_size = frame.window.size(bytes[5]);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     var decoded_len: usize = 0;
     var cursor: usize = 6;
     while (true) {
@@ -447,8 +447,8 @@ fn expectFrame(bytes: []const u8, expected: []const u8) !void {
 /// expect `err`, with the sentinel proving the block wrote nothing: the
 /// failure came before its write.
 fn expectBlockError(err: Error, block_bytes: []const u8, target: []u8) !void {
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     internal.sentinel.fill(target);
     try testing.expectError(
         err,
@@ -477,8 +477,8 @@ fn expectFrameError(err: Error, bytes: []const u8) !void {
     try testing.expectEqualSlices(u8, &golden.frame_magic, bytes[0..4]);
     try testing.expectEqual(golden.frame_descriptor, bytes[4]);
     const window_size = frame.window.size(bytes[5]);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     var decoded_len: usize = 0;
     var cursor: usize = 6;
     while (true) {
@@ -557,8 +557,8 @@ test "decode copies a Raw block" {
     try expectFrame(&golden.frame_raw_empty, "");
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     const section = try decode(
         golden.frame_raw[6..],
         &target,
@@ -584,8 +584,8 @@ test "decode splats an RLE block" {
     try expectFrame(&golden.frame_rle, "AAAAAAAAAA");
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     const section = try decode(
         golden.frame_rle[6..],
         &target,
@@ -612,8 +612,8 @@ test "decode walks a multi-block chain" {
     // frame layer's cursor.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     var decoded_len: usize = 0;
     var cursor: usize = 6;
     for ([_]usize{ 7, 7, 4 }) |consumed| {
@@ -644,8 +644,8 @@ test "Raw and RLE blocks leave the frame's cross-block state alone" {
     // tables nor the Huffman tree move.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     var decoded_len: usize = 0;
     var cursor: usize = 6;
     while (true) {
@@ -698,8 +698,8 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     // maximum. The size is what is pinned, not the content.
     var target: [8]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ [_]u8{0} ** 8;
     try testing.expectError(
         error.BlockOversize,
@@ -739,8 +739,8 @@ test "decode fails on a target too small" {
     // compressed block whose output does not fit.
     var target: [100]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     try testing.expectError(
         error.BufferTooSmall,
         decode(
@@ -914,8 +914,8 @@ test "the history a match may read is the addressable span at the match" {
     // reference data it never produced.
     var bare: [16]u8 = undefined;
     internal.sentinel.fill(&bare);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     try testing.expectError(
         error.OffsetTooFar,
         decode(
@@ -987,8 +987,8 @@ test "decodeContent decodes a block whose header is already parsed" {
     try testing.expectEqual(@as(usize, 8), header.block_size);
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     const written = try decodeContent(
         header,
         golden.frame_raw[6 + block_header_len ..],

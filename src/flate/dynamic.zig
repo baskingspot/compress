@@ -76,15 +76,24 @@ const end_block_marker: Token = 256;
 pub const TokenList = struct {
     /// §3.2.5 — length codes 257-285 at 1-29; index 0 is the end-of-block
     /// symbol's slot (the literal tree's symbol 256).
-    extra_hist: [32]u16 = @splat(0),
+    extra_hist: [32]u16,
     /// §3.2.5 — distance codes 0-29.
-    off_hist: [32]u16 = @splat(0),
+    off_hist: [32]u16,
     /// Literal bytes 0-255.
-    lit_hist: [256]u16 = @splat(0),
+    lit_hist: [256]u16,
     /// Tokens in `tokens`.
-    n: u32 = 0,
+    n: u32,
     /// The block's tokens, in emission order.
-    tokens: [encode.max_block_size + 1]Token = undefined,
+    tokens: [encode.max_block_size + 1]Token,
+
+    /// An empty list for the next block: no tokens and zeroed histograms.
+    pub const empty: TokenList = .{
+        .extra_hist = @splat(0),
+        .off_hist = @splat(0),
+        .lit_hist = @splat(0),
+        .n = 0,
+        .tokens = undefined,
+    };
 
     /// Empty the list for the next block: the token count and the three
     /// histograms (the token array is overwritten as it is filled).
@@ -244,12 +253,19 @@ pub fn HuffmanEncoder(comptime alphabet_len: usize) type {
         const Self = @This();
 
         /// One code per symbol; length 0 means "not assigned".
-        codes: [alphabet_len]Code = @splat(.{ .bits = 0, .len = 0 }),
+        codes: [alphabet_len]Code,
         /// Scratch for `bitCounts`: `bit_count[n]` is the number of codes
         /// that are `n` bits long.
-        bit_count: [max_bits_limit + 1]i32 = @splat(0),
+        bit_count: [max_bits_limit + 1]i32,
         /// Scratch for `generate`: the non-zero-frequency symbols, sorted.
-        freq_cache: [literal_count + 1]LiteralNode = undefined,
+        freq_cache: [literal_count + 1]LiteralNode,
+
+        /// An encoder before `generate`: every code unassigned.
+        pub const empty: Self = .{
+            .codes = @splat(.{ .bits = 0, .len = 0 }),
+            .bit_count = @splat(0),
+            .freq_cache = undefined,
+        };
 
         /// §3.2.2/§3.2.7 — build the length-limited tree for `freq` and
         /// assign the canonical codes. `max_bits` caps every length (15 for
@@ -446,7 +462,7 @@ pub fn HuffmanEncoder(comptime alphabet_len: usize) type {
 /// The code-length tree of a literals-only block's distance section: a
 /// single symbol, code 0 in one bit (§3.2.7's one-code rule).
 const huff_offset: HuffmanEncoder(offset_code_count) = blk: {
-    var e: HuffmanEncoder(offset_code_count) = .{};
+    var e: HuffmanEncoder(offset_code_count) = .empty;
     e.codes[0] = .{ .bits = 0, .len = 1 };
     break :blk e;
 };
@@ -493,24 +509,38 @@ pub const BlockWriter = struct {
     /// must write its own table. Non-zero also means an end-of-block code is
     /// owed (the block's bits end without one; the next header or the stream
     /// ending flushes it).
-    last_header: i32 = 0,
+    last_header: i32,
     /// The last block was literals-only: the distance table does not cover
     /// the symbols a match block needs, so it can never be reused.
-    last_huff_man: bool = false,
+    last_huff_man: bool,
     /// The literal/length encoding of the last dynamic block.
-    literal_encoding: HuffmanEncoder(literal_count) = .{},
+    literal_encoding: HuffmanEncoder(literal_count),
     /// `writeBlockHuff`'s scratch tree: the literals-only candidate.
-    tmp_literal_encoding: HuffmanEncoder(literal_count) = .{},
+    tmp_literal_encoding: HuffmanEncoder(literal_count),
     /// The distance encoding of the last dynamic block.
-    offset_encoding: HuffmanEncoder(offset_code_count) = .{},
+    offset_encoding: HuffmanEncoder(offset_code_count),
     /// The code-length encoding of the last dynamic header.
-    codegen_encoding: HuffmanEncoder(codegen_code_count) = .{},
+    codegen_encoding: HuffmanEncoder(codegen_code_count),
     /// The §3.2.7 histograms of the block being written.
-    literal_freq: [257 + 32]u16 = @splat(0),
-    offset_freq: [32]u16 = @splat(0),
-    codegen_freq: [codegen_code_count]u16 = @splat(0),
+    literal_freq: [257 + 32]u16,
+    offset_freq: [32]u16,
+    codegen_freq: [codegen_code_count]u16,
     /// The run-length-encoded code lengths, `bad_code` terminated.
-    codegen: [literal_count + offset_code_count + 1]u8 = @splat(0),
+    codegen: [literal_count + offset_code_count + 1]u8,
+
+    /// A writer before its first block: no table open and empty histograms.
+    pub const empty: BlockWriter = .{
+        .last_header = 0,
+        .last_huff_man = false,
+        .literal_encoding = .empty,
+        .tmp_literal_encoding = .empty,
+        .offset_encoding = .empty,
+        .codegen_encoding = .empty,
+        .literal_freq = @splat(0),
+        .offset_freq = @splat(0),
+        .codegen_freq = @splat(0),
+        .codegen = @splat(0),
+    };
 
     /// Write the owed end-of-block code from the current literal table, if
     /// one is open (`last_header > 0`).
@@ -1033,7 +1063,7 @@ test "dynamic: the tree builder assigns §3.2.2 canonical codes" {
     freq[4] = 2;
     freq[10] = 1;
     freq[256] = 1; // the end-of-block symbol the emitter always adds
-    var enc: HuffmanEncoder(literal_count) = .{};
+    var enc: HuffmanEncoder(literal_count) = .empty;
     enc.generate(&freq, 15);
 
     var lens: [literal_count]u5 = undefined;
@@ -1069,7 +1099,7 @@ test "dynamic: the 15-bit cap holds on a pathological histogram" {
         b = next;
     }
     freq[256] = 1;
-    var enc: HuffmanEncoder(literal_count) = .{};
+    var enc: HuffmanEncoder(literal_count) = .empty;
     enc.generate(&freq, 15);
 
     var kraft: f64 = 0;
@@ -1094,7 +1124,7 @@ test "dynamic: the one-distance-code case is one bit (§3.2.7)" {
     // zero bits": a single used symbol takes code 0 in one bit.
     var freq: [offset_code_count]u16 = @splat(0);
     freq[0] = 1;
-    var enc: HuffmanEncoder(offset_code_count) = .{};
+    var enc: HuffmanEncoder(offset_code_count) = .empty;
     enc.generate(&freq, 15);
     try testing.expectEqual(@as(u5, 1), enc.codes[0].len);
     try testing.expectEqual(@as(u16, 0), enc.codes[0].bits);
@@ -1114,9 +1144,9 @@ test "dynamic: the codegen run codes follow §3.2.7 (16, 17, 18)" {
     // sequence and run-length encoded: 16 repeats the previous length 3-6
     // times (2 extra bits), 17 repeats zero 3-10 times (3 extra bits), 18
     // repeats zero 11-138 times (7 extra bits).
-    var w: BlockWriter = .{};
-    var lit: HuffmanEncoder(literal_count) = .{};
-    var off: HuffmanEncoder(offset_code_count) = .{};
+    var w: BlockWriter = .empty;
+    var lit: HuffmanEncoder(literal_count) = .empty;
+    var off: HuffmanEncoder(offset_code_count) = .empty;
     // Literal lengths 5,5,5,5 then zeros to 8; one distance length of 1.
     for (0..4) |i| lit.codes[i] = .{ .bits = 0, .len = 5 };
     lit.codes[7] = .{ .bits = 0, .len = 3 };
@@ -1134,8 +1164,8 @@ test "dynamic: the codegen run codes follow §3.2.7 (16, 17, 18)" {
 
     // A long zero run takes the code-18 form: 139 zeros split as 138 (the
     // code's maximum, n-11 = 127) plus one literal zero.
-    var lit2: HuffmanEncoder(literal_count) = .{};
-    var off2: HuffmanEncoder(offset_code_count) = .{};
+    var lit2: HuffmanEncoder(literal_count) = .empty;
+    var off2: HuffmanEncoder(offset_code_count) = .empty;
     lit2.codes[0] = .{ .bits = 0, .len = 2 };
     off2.codes[0] = .{ .bits = 0, .len = 1 };
     w.generateCodegen(140, 1, &lit2, &off2);
@@ -1151,22 +1181,22 @@ test "dynamic: the block dispatch picks the smallest form" {
     // symbols do not beat the fixed table is fixed; a compressible block is
     // dynamic. The choice is size arithmetic on the same histograms the
     // reference uses.
-    var w: BlockWriter = .{};
-    var tokens: TokenList = .{};
+    var w: BlockWriter = .empty;
+    var tokens: TokenList = .empty;
     var out: [1024]u8 = undefined;
     const input = "the quick brown fox jumps over the lazy dog. " ** 4;
 
     // Zero tokens: stored.
-    var bw: BitWriter = .{ .target = &out };
+    var bw: BitWriter = .init(&out);
     try w.writeBlockFast(&bw, &tokens, input, false);
     try testing.expectEqual(@as(u8, 0b000), out[0] & 0b111); // BFINAL=0, BTYPE=00
 
     // One literal per byte (no matches): the literals-only form, whose own
     // dispatch stores or builds a literals-only table — never a match table.
-    w = .{};
-    tokens = .{};
+    w = .empty;
+    tokens = .empty;
     tokens.addLiterals(input);
-    bw = .{ .target = &out };
+    bw = .init(&out);
     try w.writeBlockFast(&bw, &tokens, input, false);
     try testing.expect(out[0] & 0b1 == 0); // BFINAL clear on data blocks
 
@@ -1175,8 +1205,8 @@ test "dynamic: the block dispatch picks the smallest form" {
     // set and the next header — or the ending — writes the EOB).
     var big: [4000]u8 = undefined;
     for (0..big.len) |i| big[i] = @intCast(i % 8);
-    w = .{};
-    tokens = .{};
+    w = .empty;
+    tokens = .empty;
     tokens.addLiterals(big[0..8]);
     var remaining: usize = big.len - 8;
     while (remaining > 0) {
@@ -1184,7 +1214,7 @@ test "dynamic: the block dispatch picks the smallest form" {
         tokens.addMatchLong(chunk, 8);
         remaining -= chunk;
     }
-    bw = .{ .target = &out };
+    bw = .init(&out);
     try w.writeBlockFast(&bw, &tokens, &big, false);
     try testing.expectEqual(@as(u8, 0b100), out[0] & 0b111); // BFINAL=0, BTYPE=10
     try testing.expect(w.last_header > 0);

@@ -62,7 +62,7 @@ writer: Io.Writer,
 output: *Io.Writer,
 /// Whether the stream identifier has gone out. The identifier is written
 /// lazily: `finish` still emits it for an empty stream.
-started: bool = false,
+started: bool,
 
 /// The shared writer machinery (`src/internal/writer.zig`): the generated
 /// `Io.Writer` entries and the poisoned `finish`, over this writer's
@@ -81,6 +81,7 @@ pub fn init(output: *Io.Writer, buffer: *Buffer) Writer {
             .vtable = &Hooks.vtable,
         },
         .output = output,
+        .started = false,
     };
 }
 

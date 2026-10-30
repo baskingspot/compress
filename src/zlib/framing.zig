@@ -23,14 +23,17 @@ const encode = @import("encode.zig");
 /// The inner codec's compression levels (flate's type, re-exported).
 pub const Level = flate.encode.Level;
 
-/// Encoder configuration. `.{}` is the default: level 1, no dictionary.
+/// Encoder configuration. `.init` is the default: level 1, no dictionary.
 pub const Options = struct {
     /// The compression level.
-    level: Level = .@"1",
+    level: Level,
     /// The stream's preset dictionary or `null` (`§2.2`): on encode it sets
     /// FDICT and writes the Adler-32 of the whole slice as DICTID; on decode
     /// it is checked against the header's DICTID before any body byte.
-    dict: ?[]const u8 = null,
+    dict: ?[]const u8,
+
+    /// Level 1 with no dictionary.
+    pub const init: Options = .{ .level = .@"1", .dict = null };
 };
 
 /// The failure detail a `Reader` records in `err` once its state is
@@ -78,6 +81,9 @@ pub const Checksum = adler32.Checksum;
 /// Whether the header has been parsed: the check runs once, before the first
 /// body byte.
 pub const Header = enum { pending, parsed };
+
+/// A header check that has not run yet: the shared driver's initial seat.
+pub const reader_header_init: Header = .pending;
 
 /// The caller-provided decode window: flate's, re-exported; the container adds
 /// no buffer of its own. `[2 * history_len]u8`, 64 KiB.

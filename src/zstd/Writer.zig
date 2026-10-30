@@ -24,9 +24,9 @@ const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
 const assert = std.debug.assert;
+const testing = std.testing;
 
 const print = std.debug.print;
-const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 
 const fastmem = @import("fastmem");
@@ -169,32 +169,32 @@ window_len: usize,
 block_len: usize,
 /// Where the buffered block begins in `window`: the retained history's
 /// length.
-block_start: usize = 0,
+block_start: usize,
 /// The finder's parameters, from `window_log`.
 params: match_compress.Params,
 /// The frame's cross-block encoding state (`block_compress.State`): the
 /// entropy layers' tables, the repeat offsets, and the XXH64 fold.
-state: block_compress.State = .{},
+state: block_compress.State,
 /// The dictionary this frame compresses against, `null` for none: the
 /// entropy seed, the match region, and the ID the header names.
 dictionary: ?*const Dictionary = null,
 /// The dictionary's match state as the blocks see it (`block_compress.Dict`).
-dict: block_compress.Dict = .{},
+dict: block_compress.Dict,
 /// The frame position of `window[0]`: 0 until `compact` slides the window.
 /// It bounds the dictionary's validity (`§5`: the content stops being
 /// addressable once the output passes Window_Size) and is the base the
 /// attach scan's offsets count from.
-frame_start: usize = 0,
+frame_start: usize,
 /// The frame header goes out with the first emission, never at `init`.
-header_written: bool = false,
+header_written: bool,
 /// The frame's block bytes emitted so far and the frame bytes produced so
 /// far (the header and every block); the pre-splitter's `savings` is their
 /// difference (`zstd_compress.c:4602,4837`).
-block_consumed: i64 = 0,
-block_produced: i64 = 0,
+block_consumed: i64,
+block_produced: i64,
 /// Set by `finish`: the next block emitted carries Last_Block
 /// (`§3.1.1.2.1`).
-final: bool = false,
+final: bool,
 
 /// The C's running `savings` (`consumed - produced`): the frame's input
 /// consumed minus its output produced, the header included. The dfast
@@ -236,7 +236,7 @@ pub fn init(
         .window = &buffer.window,
         .literals = &buffer.literals,
         .target = &buffer.target,
-        .tables = .{ .long = &.{} },
+        .tables = .init(&.{}),
         .sequences = &buffer.sequences,
         .window_len = window_len,
         .block_len = block_len,
@@ -247,6 +247,14 @@ pub fn init(
             @intFromEnum(options.level),
             @intCast(window_log),
         ),
+        .block_start = 0,
+        .state = .init,
+        .dict = .empty,
+        .frame_start = 0,
+        .header_written = false,
+        .block_consumed = 0,
+        .block_produced = 0,
+        .final = false,
     };
     // The dictionary, when one is given: its entropy tables seed the frame's
     // state, its CDict tables are looked up by the attach scan, and its ID
@@ -263,6 +271,7 @@ pub fn init(
                 .table = if (options.level == .@"1") &d.match else null,
                 .dfast = if (options.level == .@"3") &d.match_dfast else null,
                 .window_size = window_len,
+                .frame_start = 0,
                 .low_limit = d.content.len,
                 .dict_limit = d.content.len,
                 .valid = true,
@@ -536,7 +545,7 @@ fn makeReaderBuffer(comptime window_len: usize) !*Reader.Buffer(window_len) {
 /// landed `Reader` at the same window log, and require identity with the
 /// sentinel rule. Returns the frame's length.
 fn expectRoundTrip(comptime window_log: usize, source: []const u8, chunk: usize) !usize {
-    return expectRoundTripLevel(window_log, source, chunk, .{});
+    return expectRoundTripLevel(window_log, source, chunk, .init);
 }
 
 /// `expectRoundTrip` at an explicit level: the frame's options are threaded
@@ -587,7 +596,7 @@ test "Writer: the empty frame is the header, one empty last block, and the check
     defer out.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+    var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
     try w.finish();
     try testing.expectEqualSlices(
         u8,
@@ -615,7 +624,7 @@ test "Writer: the frame header declares the window and no Frame_Content_Size" {
         defer out.deinit();
         const buffer = try makeBuffer(window_log);
         defer gpa.destroy(buffer);
-        var w: Writer = .init(window_log, &out.writer, buffer, .{});
+        var w: Writer = .init(window_log, &out.writer, buffer, .init);
         try w.writer.writeAll("hello, zstd");
         try w.finish();
         const header = try frame.parseHeader(out.written()[frame.magic_len..]);
@@ -636,7 +645,7 @@ test "Writer: the zero-data flush writes the header alone" {
     defer out.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+    var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
     try testing.expectEqual(@as(usize, 0), out.written().len);
     try w.writer.flush();
     try testing.expectEqualSlices(
@@ -722,13 +731,13 @@ test "Writer: the block split follows the block region, not the write sizes" {
     defer one.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &one.writer, buffer, .{});
+    var w: Writer = .init(default_window_log, &one.writer, buffer, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
     var chunked: Io.Writer.Allocating = .init(gpa);
     defer chunked.deinit();
-    var w2: Writer = .init(default_window_log, &chunked.writer, buffer, .{});
+    var w2: Writer = .init(default_window_log, &chunked.writer, buffer, .init);
     var pos: usize = 0;
     var step: usize = 1;
     while (pos < source.len) {
@@ -776,7 +785,7 @@ test "Writer: flush mid-stream ends at a block boundary" {
     defer out.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+    var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
     try w.writer.writeAll("hello, ");
     try w.writer.flush();
     const first = out.written().len;
@@ -846,13 +855,13 @@ test "Writer: the one-shot and the Writer agree on every block byte" {
 
     const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(source.len));
     defer gpa.free(one_shot);
-    const one_shot_len = try encode.compress(&source, one_shot, .{});
+    const one_shot_len = try encode.compress(&source, one_shot, .init);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+    var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
     try w.writer.writeAll(&source);
     try w.finish();
 
@@ -926,7 +935,7 @@ test "Writer: the CLI's own streaming frames, byte for byte" {
         defer out.deinit();
         const buffer = try makeBuffer(default_window_log);
         defer gpa.destroy(buffer);
-        var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+        var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
         try w.writer.writeAll(input);
         try w.finish();
         try testing.expectEqual(case.expected.len, out.written().len);
@@ -955,7 +964,7 @@ test "Writer: a small window still compresses against a dictionary" {
     defer out.deinit();
     const buffer = try gpa.create(Buffer(10));
     defer gpa.destroy(buffer);
-    var w: Writer = .init(10, &out.writer, buffer, .{ .dict = &trained });
+    var w: Writer = .init(10, &out.writer, buffer, .{ .level = .@"1", .dict = &trained });
     try w.writer.writeAll(&source);
     try w.finish();
     const plain = try gpa.alloc(u8, source.len + sentinel.len);
@@ -1008,7 +1017,10 @@ test "Writer: the with-dictionary frames are the CLI's pipe-form bytes" {
         defer out.deinit();
         const buffer = try makeBuffer(default_window_log);
         defer gpa.destroy(buffer);
-        var w: Writer = .init(default_window_log, &out.writer, buffer, .{ .dict = &trained });
+        var w: Writer = .init(default_window_log, &out.writer, buffer, .{
+            .level = .@"1",
+            .dict = &trained,
+        });
         try w.writer.writeAll(input);
         try w.finish();
         try testing.expectEqual(case.expected.len, out.written().len);
@@ -1036,7 +1048,7 @@ test "Writer: a finished or failed writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
-    var w: Writer = .init(default_window_log, &fixed_out, buffer, .{});
+    var w: Writer = .init(default_window_log, &fixed_out, buffer, .init);
     try w.writer.writeAll("a" ** 4096);
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
@@ -1044,7 +1056,7 @@ test "Writer: a finished or failed writer never reports a false success" {
     // Write and finish after finish.
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    var w2: Writer = .init(default_window_log, &out.writer, buffer, .{});
+    var w2: Writer = .init(default_window_log, &out.writer, buffer, .init);
     try w2.writer.writeAll("hello, zstd");
     try w2.finish();
     try testing.expectError(error.WriteFailed, w2.writer.writeAll("more"));
@@ -1068,7 +1080,7 @@ test "Writer: level 3 round-trips through the landed Reader" {
                 level3_default_window_log,
                 source[0..size],
                 0,
-                .{ .level = .@"3" },
+                .{ .level = .@"3", .dict = null },
             );
         }
     }
@@ -1079,20 +1091,30 @@ test "Writer: level 3 round-trips through the landed Reader" {
                 level3_default_window_log,
                 source[0..size],
                 0,
-                .{ .level = .@"3" },
+                .{ .level = .@"3", .dict = null },
             );
         }
     }
     // Chunked writes, the single-byte path included.
     golden.fillShape(.text, &source);
-    _ = try expectRoundTripLevel(level3_default_window_log, source[0..37], 1, .{ .level = .@"3" });
+    _ = try expectRoundTripLevel(level3_default_window_log, source[0..37], 1, .{
+        .level = .@"3",
+        .dict = null,
+    });
     _ = try expectRoundTripLevel(level3_default_window_log, source[0..4096], 1, .{
         .level = .@"3",
+        .dict = null,
     });
     golden.fillShape(.mixed, &source);
     inline for (.{ 14, 17, 21 }) |window_log| {
-        _ = try expectRoundTripLevel(window_log, source[0..3000], 1, .{ .level = .@"3" });
-        _ = try expectRoundTripLevel(window_log, &source, 997, .{ .level = .@"3" });
+        _ = try expectRoundTripLevel(window_log, source[0..3000], 1, .{
+            .level = .@"3",
+            .dict = null,
+        });
+        _ = try expectRoundTripLevel(window_log, &source, 997, .{
+            .level = .@"3",
+            .dict = null,
+        });
     }
 }
 
@@ -1125,7 +1147,7 @@ test "Writer: the level-3 pumps take the class's window" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var in: Io.Reader = .fixed(&source);
-    const consumed = try streamAllAlloc(gpa, &in, &out.writer, .{ .level = .@"3" });
+    const consumed = try streamAllAlloc(gpa, &in, &out.writer, .{ .level = .@"3", .dict = null });
     try testing.expectEqual(source.len, consumed);
     const header = try frame.parseHeader(out.written()[frame.magic_len..]);
     try testing.expectEqual(@as(u64, 1) << 21, header.window_size);
@@ -1155,7 +1177,7 @@ test "Writer: random write machinery sequences stay correct" {
         defer expect.deinit(gpa);
         const buffer = try makeBuffer(default_window_log);
         defer gpa.destroy(buffer);
-        var w: Writer = .init(default_window_log, &out.writer, buffer, .{});
+        var w: Writer = .init(default_window_log, &out.writer, buffer, .init);
 
         var ops: usize = 0;
         while (ops < 8) : (ops += 1) {
@@ -1229,12 +1251,12 @@ test "Writer: the streamAll pumps round-trip a whole input" {
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
     var fixed_in: Io.Reader = .fixed(source);
-    const consumed = try streamAll(default_window_log, &fixed_in, &out.writer, buffer, .{});
+    const consumed = try streamAll(default_window_log, &fixed_in, &out.writer, buffer, .init);
     try testing.expectEqual(source.len, consumed);
     // `in` is consumed exactly: the frame's end is the input's end.
     try testing.expectEqual(@as(usize, 0), fixed_in.bufferedLen());
 
-    const allocated = try streamAllAlloc(gpa, &fixed_in, &out.writer, .{});
+    const allocated = try streamAllAlloc(gpa, &fixed_in, &out.writer, .init);
     try testing.expectEqual(@as(usize, 0), allocated);
 
     const plain = try gpa.alloc(u8, source.len + sentinel.len);

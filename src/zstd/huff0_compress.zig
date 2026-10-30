@@ -68,10 +68,13 @@ const tablelog_max: u5 = 12;
 /// A symbol's histogram (`HIST_count`, `hist_compress.c`): the counts, the
 /// last symbol with a nonzero count, and the largest count.
 pub const Histogram = struct {
-    counts: [symbol_count_max]u32 = @splat(0),
+    counts: [symbol_count_max]u32,
     /// The last symbol with a nonzero count; 0 when every count is zero.
-    max_symbol: u16 = 0,
-    largest: u32 = 0,
+    max_symbol: u16,
+    largest: u32,
+
+    /// A histogram before any byte is counted: every count zero.
+    pub const empty: Histogram = .{ .counts = @splat(0), .max_symbol = 0, .largest = 0 };
 
     /// `HIST_FAST_THRESHOLD` (`hist.c:152`): below it the simple count wins
     /// (the parallel lanes' 4-KiB zeroing would cost more than the count).
@@ -83,7 +86,7 @@ pub const Histogram = struct {
     /// afterwards; at or above the threshold four parallel lanes break the
     /// store-to-load dependency a repeated byte would otherwise serialize.
     pub fn count(source: []const u8) Histogram {
-        var histogram: Histogram = .{};
+        var histogram: Histogram = .empty;
         if (source.len == 0) return histogram;
         if (source.len < fast_threshold) {
             for (source) |byte| histogram.counts[byte] += 1;
@@ -118,8 +121,11 @@ pub const Histogram = struct {
 /// One prefix code (`§4.2.1.3`): the code's bits, right-aligned, and its
 /// length. A zero length means the symbol has no code (its weight is zero).
 pub const Code = struct {
-    bits: u16 = 0,
-    len: u5 = 0,
+    bits: u16,
+    len: u5,
+
+    /// A symbol with no code: zero bits and zero length.
+    pub const zero: Code = .{ .bits = 0, .len = 0 };
 };
 
 /// A Huffman table ready to encode: the weights the tree description
@@ -211,7 +217,7 @@ pub fn buildTable(histogram: *const Histogram, source_len: u32) Error!Table {
         .weights = @splat(0),
         .symbol_count = 0,
         .max_bits = max_bits,
-        .codes = @splat(.{}),
+        .codes = @splat(.zero),
     };
     assignCodes(&table, &nodes, non_null_rank, max_symbol, max_bits);
     return table;
@@ -615,7 +621,7 @@ pub fn tableOfTree(tree: *const huff0.Tree) Table {
         .weights = @splat(0),
         .symbol_count = tree.symbol_count,
         .max_bits = tree.max_bits,
-        .codes = @splat(.{}),
+        .codes = @splat(.zero),
     };
     for (tree.weights[0..tree.symbol_count], 0..) |weight, symbol| {
         table.weights[symbol] = weight;

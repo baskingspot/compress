@@ -18,7 +18,7 @@ const gzip = @import("compress").gzip;
 fn roundTrip(gpa: std.mem.Allocator, data: []const u8) !void {
     const member = try gpa.alloc(u8, gzip.encode.maxCompressedLength(data.len));
     defer gpa.free(member);
-    const member_len = try gzip.encode.compress(data, member, .{});
+    const member_len = try gzip.encode.compress(data, member, .init);
 
     const plain = try gpa.alloc(u8, data.len); // the caller must know the size
     defer gpa.free(plain);
@@ -33,7 +33,7 @@ fn streamingRoundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
     var member: std.Io.Writer.Allocating = .init(gpa);
     defer member.deinit();
     var wbuf: gzip.Writer.Buffer = undefined;
-    var w: gzip.Writer = .init(&member.writer, &wbuf, .{});
+    var w: gzip.Writer = .init(&member.writer, &wbuf, .init);
     try w.writer.writeAll(input);
     try w.finish(); // required: it writes the trailer
 
@@ -45,7 +45,7 @@ fn streamingRoundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
 }
 ```
 
-`gzip.Writer.streamAll(in, out, .{})` and `gzip.Reader.streamAll(in, out)` are the
+`gzip.Writer.streamAll(in, out, .init)` and `gzip.Reader.streamAll(in, out)` are the
 one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 
 ## API
@@ -53,7 +53,7 @@ one-call versions; `just example gzip encode FILE > FILE.gz` runs them.
 ```zig
 // Names are relative to gzip = @import("compress").gzip
 encode.Level          // flate.encode.Level: @"1" or @"6"
-encode.Options        // struct { level: Level = .@"1" }
+encode.Options        // struct { level: Level }; .init is level 1
 encode.maxCompressedLength(input_len: usize) usize
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{BufferTooSmall}!usize

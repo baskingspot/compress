@@ -117,19 +117,29 @@ pub fn rebaseTable(tables: Tables, slide: usize) void {
 pub const State = struct {
     /// The Huffman tree a Treeless_Literals_Block reuses (`§3.1.1.3.1`), one
     /// per frame.
-    literals: literals_compress.State = .{},
+    literals: literals_compress.State,
     /// The three sequence tables a Repeat_Mode reuses (`§3.1.1.3.2.1`), one
     /// per frame.
-    sequences: sequences_compress.State = .{},
+    sequences: sequences_compress.State,
     /// `§3.1.1.5` — the repeat offsets, seeded {1, 4, 8}.
-    rep: [3]u32 = sequences.repeat_offsets_start,
+    rep: [3]u32,
     /// `§3.1.1` — the decoded bytes' XXH64, folded per block exactly as the
     /// decoder's `frame.State` folds it: Raw blocks inside their copy
     /// (`writeRaw`), Compressed and RLE blocks through `recordBlock`.
-    checksum: xxh64.State = .{},
+    checksum: xxh64.State,
     /// `§3.1.1.2.1` — the frame's first block is never RLE (the zstd ≤
     /// 1.4.3 CLI compatibility rule).
-    first_block: bool = true,
+    first_block: bool,
+
+    /// A frame's encoding state before its first block: empty entropy tables,
+    /// the §3.1.1.5 repcode seed, and the first-block rule armed.
+    pub const init: State = .{
+        .literals = .empty,
+        .sequences = .empty,
+        .rep = sequences.repeat_offsets_start,
+        .checksum = .init,
+        .first_block = true,
+    };
 
     /// Fold one Compressed or RLE block's decoded bytes — the block's source
     /// region — into the checksum. The decoder's `frame.State.recordBlock`
@@ -174,26 +184,38 @@ pub fn seedFromDict(state: *State, dict: *const Dictionary) void {
 /// `zstd_compress.c:4629-4630`). The zero value is a frame with no dictionary.
 pub const Dict = struct {
     /// The dictionary content; empty when the frame has none.
-    content: []const u8 = &.{},
+    content: []const u8,
     /// The CDict match table for the level-1 attach path; `null` when the
     /// frame's own table was pre-filled instead (the copy path).
-    table: ?*const match_compress.DictTable = null,
+    table: ?*const match_compress.DictTable,
     /// The CDict match tables for the level-3 attach path; `null` on the copy
     /// path, as above.
-    dfast: ?*const dfast_compress.DictTables = null,
+    dfast: ?*const dfast_compress.DictTables,
     /// The frame's declared Window_Size (`§3.1.1.1.2`): past it the content
     /// stops being addressable (`§5`).
-    window_size: usize = 0,
+    window_size: usize,
     /// The frame position of `source[0]`: 0 for the one-shot, the writer's
     /// retained-history origin otherwise.
-    frame_start: usize = 0,
+    frame_start: usize,
     /// The C's `window.lowLimit` and `window.dictLimit`, in virtual indices
     /// (the content starts at 0, the frame's output follows it).
-    low_limit: usize = 0,
-    dict_limit: usize = 0,
+    low_limit: usize,
+    dict_limit: usize,
     /// The C's `loadedDictEnd != 0`: whether the content is still
     /// addressable.
-    valid: bool = false,
+    valid: bool,
+
+    /// The zero value: a frame with no dictionary.
+    pub const empty: Dict = .{
+        .content = &.{},
+        .table = null,
+        .dfast = null,
+        .window_size = 0,
+        .frame_start = 0,
+        .low_limit = 0,
+        .dict_limit = 0,
+        .valid = false,
+    };
 
     /// The C's per-block window arithmetic, run before every block.
     fn advance(dict: *Dict, block_start: usize, block_end: usize) void {
@@ -459,10 +481,7 @@ fn writeCompressible(
     last_block: bool,
 ) error{BufferTooSmall}!usize {
     const block_source = source[block_start..][0..block_size];
-    var store: match_compress.Store = .{
-        .literals = scratch.literals,
-        .sequences = scratch.sequences,
-    };
+    var store: match_compress.Store = .init(scratch.literals, scratch.sequences);
     // The find and the entropy attempt both mutate the cross-block state; a
     // block that is not kept reverts it below. The reps must be captured
     // BEFORE the find: `find` updates them in place as it emits matches,
@@ -635,7 +654,7 @@ fn fill(buf: []u8, phrase: []const u8) void {
 
 /// The block-layer test rig: a frame state, the scratch, and the tables.
 const Rig = struct {
-    state: State = .{},
+    state: State,
     literals: [max_block_size]u8 = undefined,
     sequence_buffer: [max_sequences]sequences_compress.Sequence = undefined,
     long_table: [dfast_compress.long_table_entries_max]u32 = @splat(0),
@@ -663,7 +682,7 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
     var target: [max_block_size + 64]u8 = undefined;
     internal.sentinel.fill(&target);
     var scratch = rig.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     const written = try writeBlock(
         &rig.state,
         &dict,
@@ -679,8 +698,8 @@ fn expectBlockRoundTrip(rig: *Rig, source: []const u8, block_size: usize) !void 
     try testing.expect(written <= target.len);
     var decoded: [max_block_size]u8 = undefined;
     internal.sentinel.fill(&decoded);
-    var literals_state: literals.State = .{};
-    var sequences_state: sequences.State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: sequences.State = .empty;
     const section = try block.decode(
         target[0..written],
         &decoded,
@@ -707,9 +726,9 @@ test "the reps do not advance across a raw or rle block" {
     // zstd_compress.c:4155-4160); a capture after the find restores the
     // advanced values and the revert is a no-op. Found by the encode-side
     // fuzz wave: the next block's repcodes decoded to the wrong distances.
-    var rig: Rig = .{ .params = .{ .window_log = 10, .hash_log = 11, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(10, 11, 6) };
     var scratch = rig.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     var target: [max_block_size + 64]u8 = undefined;
 
     // Block one, compressible: the find advances the reps past their
@@ -770,14 +789,14 @@ test "the ladder stores tiny and incompressible blocks raw" {
     // RFC 8878 §3.1.1.2.2 — a Raw_Block holds the bytes verbatim. The C
     // refuses to attempt compression below 7 bytes (`zstd_compress.c:3267`)
     // and keeps the compressed form only past the minGain margin.
-    var rig: Rig = .{ .params = .{ .window_log = 10, .hash_log = 11, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(10, 11, 6) };
     var tiny: [6]u8 = undefined;
     for (&tiny, 0..) |*byte, index| byte.* = @intCast(index);
     try expectBlockRoundTrip(&rig, &tiny, tiny.len);
     // The block header's type is Raw.
     var target: [64]u8 = undefined;
     var scratch = rig.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     const written = try writeBlock(
         &rig.state,
         &dict,
@@ -800,7 +819,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     // (the compatibility rule above); a later all-one-value block is, and an
     // incompressible one is
     // Raw.
-    var rig: Rig = .{ .params = .{ .window_log = 13, .hash_log = 13, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(13, 13, 6) };
     var source: [6 * 1024]u8 = undefined;
     // Block 0: text, so the first block is Compressed and its table entries
     // cannot match the run that follows.
@@ -811,7 +830,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     var rng: std.Random.DefaultPrng = .init(0xBEEF);
     for (source[1024..5120]) |*byte| byte.* = rng.random().int(u8);
     var scratch = rig.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     var target: [max_block_size + 64]u8 = undefined;
     const first_written = try writeBlock(
         &rig.state,
@@ -868,7 +887,7 @@ test "the ladder picks RLE after the first block and Raw for noise" {
 test "a compressible block is Compressed and decodes back" {
     // RFC 8878 §3.1.1.3 — the Compressed_Block path: literals then
     // sequences, the block header's size the compressed length.
-    var rig: Rig = .{ .params = .{ .window_log = 15, .hash_log = 13, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
     var source: [16 * 1024]u8 = undefined;
     const phrase = "the quick brown fox jumps over the lazy dog. ";
     var index: usize = 0;
@@ -881,10 +900,13 @@ test "a compressible block is Compressed and decodes back" {
     // The same block again with a fresh table: the finder's table is
     // per-frame state, and a second scan of the same region is not a shape
     // the one-shot produces.
-    var fresh: Rig = .{ .params = rig.params };
+    var fresh: Rig = .{
+        .state = .init,
+        .params = rig.params,
+    };
     var target: [max_block_size + 64]u8 = undefined;
     var scratch = fresh.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     const written = try writeBlock(
         &fresh.state,
         &dict,
@@ -907,7 +929,7 @@ test "an all-literals block carries the nbSeq == 0 section" {
     // stops here" (the one-byte section), for a block the finder cannot
     // match: a skew the finder's 4-byte hash misses but the literals'
     // Huffman coding wins on.
-    var rig: Rig = .{ .params = .{ .window_log = 15, .hash_log = 13, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
     var source: [4096]u8 = undefined;
     var rng: std.Random.DefaultPrng = .init(0x5CEBE1);
     for (&source) |*byte| {
@@ -922,7 +944,7 @@ test "the checksum funnel folds every block exactly once" {
     // bytes, in order. The block layer's fold must agree with the one-shot
     // fold of the whole source, whatever mix of Raw, RLE, and Compressed
     // blocks it emits.
-    var rig: Rig = .{ .params = .{ .window_log = 15, .hash_log = 13, .mls = 6 } };
+    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
     var source: [24 * 1024]u8 = undefined;
     for (source[0..8192], 0..) |*byte, index| byte.* = @truncate((index * 7) % 41);
     fastmem.set(u8, source[8192..16384], 0x5a);
@@ -930,7 +952,7 @@ test "the checksum funnel folds every block exactly once" {
     for (source[16384..]) |*byte| byte.* = rng.random().int(u8);
     var target: [max_block_size + 64]u8 = undefined;
     var scratch = rig.scratch();
-    var dict: Dict = .{};
+    var dict: Dict = .empty;
     var offset: usize = 0;
     while (offset < source.len) {
         const size = @min(@as(usize, 8192), source.len - offset);
@@ -948,7 +970,7 @@ test "the checksum funnel folds every block exactly once" {
         );
         offset += size;
     }
-    var expected: xxh64.State = .{};
+    var expected: xxh64.State = .init;
     expected.update(&source);
     try testing.expectEqual(expected.final(), rig.state.checksum.final());
 }

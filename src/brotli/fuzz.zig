@@ -1582,7 +1582,7 @@ fn bombStream(mlen: u32, out: []u8) usize {
     // command stream cannot land on exactly are the refusals under test.
     assert(mlen >= 1);
     assert(mlen <= bomb_mlen_max);
-    var p: golden.Packer = .{};
+    var p: golden.Packer = .empty;
     // §9.1 — WBITS 10 (the 7-bit pattern 1, 0b000, 0b010): a 1,008-byte
     // window, so a `Buffer(10)` ring (1,024 bytes) admits the bomb and wraps
     // under its copies.
@@ -2441,7 +2441,7 @@ test "brotli fuzz: the bomb's MLEN boundary" {
 // trees in a capped category fails `TooManyTrees`, never a bigger region.
 test "brotli fuzz: the tree cap is TooManyTrees" {
     // NTREESL = 65: the literal trees' region holds 64.
-    var p: golden.Packer = .{};
+    var p: golden.Packer = .empty;
     packCompressedHead(&p);
     packCount(&p, 65);
     var target: [guard_len]u8 = undefined;
@@ -2450,7 +2450,7 @@ test "brotli fuzz: the tree cap is TooManyTrees" {
     try sentinel.expect(&target, 0);
 
     // NBLTYPESI = 65: the command trees are the region's command category.
-    var q: golden.Packer = .{};
+    var q: golden.Packer = .empty;
     packCompressedHead(&q);
     q.pack(0, 1); // NBLTYPESL = 1
     packCount(&q, 65);

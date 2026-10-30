@@ -188,13 +188,13 @@ ring: []u8,
 header: *frame.Header,
 /// The bit reader over the input's current slice (`StreamBits` attaches a
 /// fresh one whenever the input is pulled).
-bit_reader: bits.BitReader = .init(&[_]u8{}),
+bit_reader: bits.BitReader,
 /// The stream's produced count: `§8`'s window bound and dictionary class
 /// compare against it, and it keeps growing after the ring wraps.
-produced: u64 = 0,
+produced: u64,
 /// `§9.1` — the stream's window size, `(1 << WBITS) - 16`, once the header
 /// is parsed.
-window_size: u32 = 0,
+window_size: u32,
 /// The window in flight: the ring, the position of the next output byte, the
 /// produced count, and the meta-block's remaining MLEN. The command stream's
 /// `step` owns it for a compressed meta-block; the payload phase owns it for
@@ -202,16 +202,16 @@ window_size: u32 = 0,
 window: command.Window,
 /// The stream-scoped command state (`§4`'s four-distance ring and the
 /// distance tables each meta-block derives).
-commands: command.State = .{},
+commands: command.State,
 /// The command stream's resume point, while `phase == .commands`.
 cursor: command.Cursor = undefined,
 /// Whether the meta-block in flight is the stream's last (`§9.2`'s ISLAST).
-is_last: bool = false,
-phase: Phase = .header,
+is_last: bool,
+phase: Phase,
 /// The stream lifecycle (`src/internal/reader.zig`): `streaming` until the
 /// stream's last byte is decoded (`done`) or a failure sticks (`failed`,
 /// details in `err`).
-state: State = .streaming,
+state: State,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
 err: ?Error = null,
@@ -253,6 +253,13 @@ pub fn init(comptime window_wbits: usize, input: *Io.Reader, buffer: *Buffer(win
             .left = 0,
             .bound = 0,
         },
+        .bit_reader = .init(&[_]u8{}),
+        .produced = 0,
+        .window_size = 0,
+        .commands = .init,
+        .is_last = false,
+        .phase = .header,
+        .state = .streaming,
     };
 }
 
@@ -363,7 +370,7 @@ fn fill(r: *Reader) Error!usize {
                     .uncompressed => r.phase = .payload,
                     .compressed => {
                         r.commands.beginMetaBlock(r.header);
-                        r.cursor = .{ .blocks = command.Blocks.init(r.header) };
+                        r.cursor = .init(command.Blocks.init(r.header));
                         r.phase = .commands;
                     },
                 }

@@ -208,20 +208,20 @@ bits: Bits,
 /// digest is incomplete. Null costs one check per window fill and nothing per
 /// byte. This module writes no trailer.
 checksum: ?Checksum = null,
-phase: Phase = .block_header,
+phase: Phase,
 /// `§3.2.3` — "a distance cannot refer past the beginning of the output
 /// stream" is a stream-wide rule, not a window one, so the total decoded
 /// length is tracked beside the window's.
-total_out: u64 = 0,
+total_out: u64,
 /// Whether the current block is the stream's last (`§3.2.3`).
-final: bool = false,
+final: bool,
 /// The dynamic block's tables (`§3.2.7`), rebuilt per block.
-literal: decode.LitDecoder = .{},
-distance: decode.DistDecoder = .{},
+literal: decode.LitDecoder,
+distance: decode.DistDecoder,
 /// The stream lifecycle (src/internal/reader.zig): `streaming` until the
 /// final block's output is complete (`done`) or a failure sticks (`failed`,
 /// details in `err`).
-state: State = .streaming,
+state: State,
 /// Detailed error once `state == .failed`; the interface reports
 /// `error.ReadFailed`.
 err: ?Error = null,
@@ -263,10 +263,15 @@ pub fn init(input: *Io.Reader, buffer: *Buffer, dict: ?[]const u8) Reader {
             .vtable = &vtable,
         },
         .bits = .{ .input = input },
+        .phase = .block_header,
         // The dictionary is decoded history for the reach check (`§3.2.3`):
         // a distance may reach into it before the output has produced
         // anything, and the window slides it out naturally.
         .total_out = history.len,
+        .final = false,
+        .literal = .{},
+        .distance = .{},
+        .state = .streaming,
     };
 }
 
@@ -531,7 +536,7 @@ fn roundTrip(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -559,7 +564,7 @@ fn roundTripWithChecksum(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -569,7 +574,7 @@ fn roundTripWithChecksum(source: []const u8) !void {
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(compressed.written());
     var r: Reader = .init(&fixed_in, &rbuf, null);
-    var digest: golden.TestChecksum = .{};
+    var digest: golden.TestChecksum = .init;
     r.checksum = digest.hook();
     const n = try decodeInto(&r.reader, target);
     try testing.expectEqual(source.len, n);
@@ -816,7 +821,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
         var compressed: Io.Writer.Allocating = .init(gpa);
         defer compressed.deinit();
         var wbuf: Writer.Buffer = undefined;
-        var w: Writer = .init(&compressed.writer, &wbuf, .{});
+        var w: Writer = .init(&compressed.writer, &wbuf, .init);
         try w.writer.writeAll(source);
         try w.finish();
 
@@ -841,7 +846,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     const source = try makeSource(gpa, 100_000);
     defer gpa.free(source);
     try w.writer.writeAll(source);
@@ -874,7 +879,7 @@ test "Reader: a 32-KiB peek is served at any position" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -910,7 +915,7 @@ test "Reader: a request past the window fails with StreamTooLong" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -944,7 +949,7 @@ test "Reader: a consumer scanning for a delimiter past the window fails" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -968,7 +973,7 @@ test "Reader: a zero-length stream poll does not fail the stream" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&out.writer, &wbuf, .{});
+    var w: Writer = .init(&out.writer, &wbuf, .init);
     try w.writer.writeAll(src);
     try w.finish();
 
@@ -992,7 +997,7 @@ test "Reader: a stream ends cleanly and stickily" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .{});
+    var w: Writer = .init(&compressed.writer, &wbuf, .init);
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -1026,7 +1031,7 @@ test "Reader: random consumer machinery sequences stay correct" {
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var wbuf: Writer.Buffer = undefined;
-        var w: Writer = .init(&out.writer, &wbuf, .{});
+        var w: Writer = .init(&out.writer, &wbuf, .init);
         var p: usize = 0;
         while (p < input.len) {
             const n = @min(input.len - p, rand.intRangeAtMost(usize, 1, 90_000));
@@ -1159,7 +1164,7 @@ test "Reader: a preset dictionary pre-seeds the window" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&out.writer, &wbuf, .{ .dict = dict });
+    var w: Writer = .init(&out.writer, &wbuf, .{ .level = .@"1", .dict = dict });
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -1169,7 +1174,7 @@ test "Reader: a preset dictionary pre-seeds the window" {
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(out.written());
     var r: Reader = .init(&fixed_in, &rbuf, dict);
-    var digest: golden.TestChecksum = .{};
+    var digest: golden.TestChecksum = .init;
     r.checksum = digest.hook();
     const n = try decodeInto(&r.reader, target);
     try testing.expectEqual(source.len, n);
@@ -1189,7 +1194,7 @@ test "Reader: a preset dictionary pre-seeds the window" {
     var long_out: Io.Writer.Allocating = .init(gpa);
     defer long_out.deinit();
     var long_wbuf: Writer.Buffer = undefined;
-    var long_w: Writer = .init(&long_out.writer, &long_wbuf, .{ .dict = dict });
+    var long_w: Writer = .init(&long_out.writer, &long_wbuf, .{ .level = .@"1", .dict = dict });
     try long_w.writer.writeAll(long);
     try long_w.finish();
     var long_rbuf: Buffer = undefined;

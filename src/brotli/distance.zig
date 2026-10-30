@@ -31,7 +31,10 @@ pub const Error = error{
 /// the values 16, 15, 11, and 4".
 pub const Ring = struct {
     /// The distances, oldest first: the last distance is `last[3]`.
-    last: [4]u32 = .{ 16, 15, 11, 4 },
+    last: [4]u32,
+
+    /// §4's initial ring: 16, 15, 11, and 4, oldest first.
+    pub const init: Ring = .{ .last = .{ 16, 15, 11, 4 } };
 
     /// §4 — push a window reference. Symbol 0 and dictionary references are
     /// never pushed (the caller excludes them).
@@ -77,14 +80,22 @@ pub fn special(ring: *const Ring, code: u16) Error!u32 {
 /// reference's `CalculateDistanceLut` shape (`c/dec/decode.c`).
 pub const Tables = struct {
     /// §4 — NPOSTFIX, 0..3.
-    npostfix: u3 = 0,
+    npostfix: u3,
     /// §4 — the extra bits of each code; 0 for the direct codes and unused
     /// below 16.
-    extra_bits: [huffman.max_distance_alphabet_size]u5 = @splat(0),
+    extra_bits: [huffman.max_distance_alphabet_size]u5,
     /// §4 — the offset of each code: the reconstruction adds the extra bits
     /// shifted by NPOSTFIX. The direct codes' offsets are their distances
     /// (1..NDIRECT).
-    offset: [huffman.max_distance_alphabet_size]u32 = @splat(0),
+    offset: [huffman.max_distance_alphabet_size]u32,
+
+    /// Tables before the first meta-block derives them: NPOSTFIX 0 and empty
+    /// code entries.
+    pub const empty: Tables = .{
+        .npostfix = 0,
+        .extra_bits = @splat(0),
+        .offset = @splat(0),
+    };
 
     /// Fill the tables for `§3.3`'s declared alphabet size,
     /// `16 + NDIRECT + (48 << NPOSTFIX)`: the NDIRECT direct codes first
@@ -92,7 +103,7 @@ pub const Tables = struct {
     pub fn init(self: *Tables, npostfix: u3, ndirect: u8, alphabet_size: u16) void {
         assert(alphabet_size >= 16);
         assert(alphabet_size <= huffman.max_distance_alphabet_size);
-        self.* = .{ .npostfix = npostfix };
+        self.* = .{ .npostfix = npostfix, .extra_bits = @splat(0), .offset = @splat(0) };
 
         const postfix: u32 = @as(u32, 1) << npostfix;
         var code: u16 = 16;
@@ -149,7 +160,7 @@ test "distance ring: RFC 7932 §4's initialization and pushes" {
     // RFC 7932 §4 — "initialized by the values 16, 15, 11, and 4 (i.e., the
     // fourth-to-last is set to 16, the third-to-last to 15, the second-to-
     // last to 11, and the last distance to 4)".
-    var ring: Ring = .{};
+    var ring: Ring = .init;
     try testing.expectEqual(@as(u32, 16), ring.get(0));
     try testing.expectEqual(@as(u32, 15), ring.get(1));
     try testing.expectEqual(@as(u32, 11), ring.get(2));
@@ -168,7 +179,7 @@ test "distance: RFC 7932 §4's sixteen special codes" {
     // RFC 7932 §4's table against the initialized ring (16, 15, 11, 4):
     // 0..3 the four last distances, 4..9 the last ∓1..3, 10..15 the
     // second-to-last ∓1..3.
-    const ring: Ring = .{};
+    const ring: Ring = .init;
     const expected = [16]u32{ 4, 11, 15, 16, 3, 5, 2, 6, 1, 7, 10, 12, 9, 13, 8, 14 };
     for (expected, 0..) |want, code| {
         try testing.expectEqual(want, try special(&ring, @intCast(code)));
@@ -180,7 +191,7 @@ test "distance: a special code resolving to zero or less is refused" {
     // negative value, the stream should be rejected as invalid." With the
     // last distance 1, code 4 (last - 1) is zero and code 8 (last - 3) is
     // negative; the second-to-last-based codes read 11 and stay positive.
-    var ring: Ring = .{};
+    var ring: Ring = .init;
     ring.push(1);
     try testing.expectError(error.BadDistance, special(&ring, 4));
     try testing.expectError(error.BadDistance, special(&ring, 8));

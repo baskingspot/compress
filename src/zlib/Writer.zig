@@ -50,8 +50,8 @@ inner: flate.Writer,
 options: encode.Options,
 /// The Adler-32 of the input so far, folded in as flate emits each block
 /// (`§2.2`). `finish` writes it as the trailer.
-checksum: framing.Checksum = .{},
-header: Header = .pending,
+checksum: framing.Checksum,
+header: Header,
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`): the lazy header, the position sync, the
@@ -132,7 +132,7 @@ fn roundTrip(source: []const u8) !void {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     try w.writer.writeAll(source);
     try w.finish();
     try golden.expectHeader(out.written(), .@"1");
@@ -155,7 +155,7 @@ test "Writer: the emitted stream is the deterministic one" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6", .dict = null });
     try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w.finish();
     try golden.expectHeader(out.written(), .@"6");
@@ -165,7 +165,7 @@ test "Writer: the emitted stream is the deterministic one" {
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
     var buf2: Buffer = undefined;
-    var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6" });
+    var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6", .dict = null });
     try w2.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
     try w2.finish();
     try testing.expectEqualSlices(u8, out.written(), second.written());
@@ -179,7 +179,7 @@ test "Writer: the header is lazy and written before the first byte" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     try testing.expectEqual(@as(usize, 0), out.written().len);
 
     try w.writer.flush();
@@ -234,7 +234,7 @@ test "Writer: the trailer covers chunked writes with mid-stream flushes" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     var pos: usize = 0;
     var step: usize = 1;
     while (pos < source.len) {
@@ -261,7 +261,7 @@ test "Writer: the writableSliceGreedy path round-trips" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
 
     const total = 3 * flate.encode.max_block_size;
     var written: usize = 0;
@@ -301,7 +301,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var small: [16]u8 = undefined;
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
-    var w: Writer = .init(&fixed_out, &buf, .{});
+    var w: Writer = .init(&fixed_out, &buf, .init);
     try w.writer.writeAll("a" ** 4096);
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
@@ -309,7 +309,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     // Write and finish after finish.
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    var w2: Writer = .init(&out.writer, &buf, .{});
+    var w2: Writer = .init(&out.writer, &buf, .init);
     try w2.writer.writeAll("hello, zlib");
     try w2.finish();
     try testing.expectError(error.WriteFailed, w2.writer.writeAll("more"));
@@ -334,7 +334,7 @@ test "Writer: random write machinery sequences stay correct" {
         var expect: std.ArrayList(u8) = .empty;
         defer expect.deinit(gpa);
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .{});
+        var w: Writer = .init(&out.writer, &buf, .init);
 
         var ops: usize = 0;
         while (ops < 10) : (ops += 1) {
@@ -413,7 +413,7 @@ test "Writer: streamAll consumes its input exactly and writes one stream" {
     var in: Io.Reader = .fixed(source);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .{}));
+    try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .init));
     try testing.expectEqual(source.len, in.seek);
     try golden.expectHeader(out.written(), .@"1");
     try golden.expectTrailer(out.written(), source);
@@ -432,7 +432,7 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .dict = dict });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"1", .dict = dict });
     try testing.expectEqual(@as(usize, 0), out.written().len);
     try w.writer.flush();
     try testing.expectEqual(
@@ -452,7 +452,7 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     var plain_out: Io.Writer.Allocating = .init(gpa);
     defer plain_out.deinit();
     var plain_buf: Buffer = undefined;
-    var plain_w: Writer = .init(&plain_out.writer, &plain_buf, .{});
+    var plain_w: Writer = .init(&plain_out.writer, &plain_buf, .init);
     try plain_w.writer.writeAll(source);
     try plain_w.finish();
     try testing.expect(out.written().len < plain_out.written().len);
@@ -469,7 +469,7 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     var empty_out: Io.Writer.Allocating = .init(gpa);
     defer empty_out.deinit();
     var empty_buf: Buffer = undefined;
-    var empty_w: Writer = .init(&empty_out.writer, &empty_buf, .{ .dict = "" });
+    var empty_w: Writer = .init(&empty_out.writer, &empty_buf, .{ .level = .@"1", .dict = "" });
     try empty_w.writer.writeAll(source);
     try empty_w.finish();
     try testing.expectEqualSlices(u8, plain_out.written(), empty_out.written());
@@ -487,7 +487,7 @@ test "Writer: a dictionary round-trips through the streaming layer" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .dict = dict });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"1", .dict = dict });
     try w.writer.writeAll(source);
     try w.finish();
 

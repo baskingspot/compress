@@ -78,7 +78,7 @@ export fn encode(codec: u32, level: u32, source_len: u32) i32 {
                 source,
                 &output,
                 &zstd_buffer,
-                .{ .level = lvl },
+                .{ .level = lvl, .dict = null },
             ) catch return -3;
         },
         5 => compress.brotli.encode.compress(source, &output) catch return -3,

@@ -604,7 +604,10 @@ fn readBits(stream: []const u8, bit: usize, comptime count: u6) u64 {
 /// the `Checksum` interface; the containers bring the real CRC-32 and Adler-32
 /// kernels.
 pub const TestChecksum = struct {
-    value: u64 = 0,
+    value: u64,
+
+    /// A checksum before any byte: zero.
+    pub const init: TestChecksum = .{ .value = 0 };
 
     /// The hook's update entry (`Checksum.update_fn`).
     pub fn update(context: *anyopaque, bytes: []const u8) void {

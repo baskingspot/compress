@@ -205,12 +205,16 @@ pub const State = struct {
     /// The frame's own decode table, built by its first
     /// Compressed_Literals_Block; undefined until then, so initializing the
     /// frame that never builds one does not pay to zero it.
-    built: huff0.DecodeTable = undefined,
+    built: huff0.DecodeTable,
     /// The table a Treeless_Literals_Block reuses: the frame's own `built`
     /// once a Compressed section decoded, else the dictionary's table when
     /// one seeded the frame. `null` when neither exists; Treeless before
     /// that is `TreelessLiteralsFirst`.
-    table: ?*const huff0.DecodeTable = null,
+    table: ?*const huff0.DecodeTable,
+
+    /// A frame state before its first literals section: no decode table and no
+    /// reusable tree.
+    pub const empty: State = .{ .built = undefined, .table = null };
 };
 
 /// One decoded literals section.
@@ -467,7 +471,7 @@ const treeless_section: [5]u8 = .{ 0x43, 0x80, 0x00, 0x01, 0x0d };
 fn expectDecode(section: []const u8, expected: []const u8) !void {
     var target: [1280]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const decoded = try decode(section, &target, &state);
     try golden.expectDecoded(&target, decoded.bytes.len, expected);
     try testing.expectEqual(section.len, decoded.bytes_consumed);
@@ -575,7 +579,7 @@ test "decodeRaw copies Regenerated_Size bytes and stops there" {
     inline for (cases) |case| {
         var target: [8]u8 = undefined;
         internal.sentinel.fill(&target);
-        var state: State = .{};
+        var state: State = .empty;
         const section = try decode(case.section, &target, &state);
         try testing.expectEqualSlices(u8, &.{ 0xde, 0xad, 0xbe, 0xef, 0x00 }, section.bytes);
         try testing.expectEqual(case.header_len + 5, section.bytes_consumed);
@@ -588,7 +592,7 @@ test "decodeRaw fails when the declared size exceeds the block" {
     // content and by the caller's target; both failures write nothing.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     // rs = 31 declared, 3 content bytes present.
     try testing.expectError(
         error.LiteralsTooLarge,
@@ -617,7 +621,7 @@ test "decodeRle repeats the single content byte Regenerated_Size times" {
     // literals."
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     // Size_Format 01: rs = 9, one content byte, then the next section's byte.
     const section = try decode(&.{ 0x95, 0x00, 0x41, 0xff }, &target, &state);
     const expected = [_]u8{0x41} ** 9;
@@ -632,7 +636,7 @@ test "decodeRle's declared size is an amplification limit" {
     // target returns an error and writes nothing.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     // Size_Format 11: rs = 0xfffff, content byte 0x41.
     try testing.expectError(
         error.LiteralsTooLarge,
@@ -654,7 +658,7 @@ test "a compressed section's Regenerated_Size beyond the target fails" {
     // — and before the tree becomes the state the next block would reuse.
     var small: [3]u8 = undefined;
     internal.sentinel.fill(&small);
-    var state: State = .{};
+    var state: State = .empty;
     // `golden.pair_literals_section` decodes four literals.
     try testing.expectError(
         error.LiteralsTooLarge,
@@ -671,7 +675,7 @@ test "decodeCompressed decodes the hand-built one-stream sections" {
     // example's own bytes (errata 8195) and decodes to 0, 1, 5, 4.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&golden.pair_literals_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.pair_literals, section.bytes);
     try testing.expectEqual(golden.pair_literals_section.len, section.bytes_consumed);
@@ -681,7 +685,7 @@ test "decodeCompressed decodes the hand-built one-stream sections" {
 
     var errata_target: [16]u8 = undefined;
     internal.sentinel.fill(&errata_target);
-    var errata_state: State = .{};
+    var errata_state: State = .empty;
     const errata = try decode(&golden.pair_errata_literals_section, &errata_target, &errata_state);
     try testing.expectEqualSlices(u8, &golden.pair_errata_literals, errata.bytes);
     try internal.sentinel.expect(&errata_target, errata.bytes.len);
@@ -693,7 +697,7 @@ test "decodeCompressed decodes a real encoder's one-stream section" {
     // tree and one Huffman-coded stream, 120 literals from 37 content bytes.
     var target: [256]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&golden.literals_1stream_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.literals_1stream_expected, section.bytes);
     try testing.expectEqual(golden.literals_1stream_section.len, section.bytes_consumed);
@@ -706,7 +710,7 @@ test "decodeCompressed decodes a real encoder's four-stream section" {
     // content bytes.
     var target: [512]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&golden.literals_4stream_sf1_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.literals_4stream_sf1_expected, section.bytes);
     try testing.expectEqual(golden.literals_4stream_sf1_section.len, section.bytes_consumed);
@@ -719,7 +723,7 @@ test "decodeCompressed decodes the 14-bit four-stream form" {
     // content bytes.
     var target: [1100]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&golden.literals_4stream_sf2_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.literals_4stream_sf2_expected, section.bytes);
     try testing.expectEqual(golden.literals_4stream_sf2_section.len, section.bytes_consumed);
@@ -734,7 +738,7 @@ test "decodeCompressed reads the tree description before the streams" {
     // 0x62 symbols through that tree.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&golden.literals_fse_tree_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.literals_fse_tree_expected, section.bytes);
     try testing.expectEqual(golden.literals_fse_tree_section.len, section.bytes_consumed);
@@ -767,7 +771,7 @@ test "four-stream mode below 6 regenerated literals is LiteralsTooLarge" {
     // any stream is decoded.
     var target: [1280]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         error.LiteralsTooLarge,
         decode(&four_stream_below_min, &target, &state),
@@ -788,7 +792,7 @@ test "the jump table's sizes must fit the streams region" {
     // LiteralsTooLarge, and so is a region too short to hold the table.
     var target: [1280]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(error.LiteralsTooLarge, decode(&jump_table_overflow, &target, &state));
     try internal.sentinel.expect(&target, 0);
     try testing.expectError(error.LiteralsTooLarge, decode(&jump_table_truncated, &target, &state));
@@ -801,7 +805,7 @@ test "decodeCompressed rejects a Compressed_Size beyond the block" {
     // before the tree description is read.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     // cs = 8 declared, 2 content bytes present.
     try testing.expectError(
         error.LiteralsTooLarge,
@@ -817,7 +821,7 @@ test "a tree description that overruns Compressed_Size is malformed weights" {
     // read into the sequences section.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         error.MalformedHuffmanWeights,
         decode(&.{ 0x42, 0xc0, 0x00, 0x84, 0x43, 0x20 }, &target, &state),
@@ -832,7 +836,7 @@ test "decodeTreeless reuses the previous Compressed block's table" {
     // the CLI v1.5.7: a Compressed block (`golden.pair_literals_section`), then
     // a Treeless block whose stream is `golden.pair_stream`.
     var target: [16]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     internal.sentinel.fill(&target);
     const first = try decode(&golden.pair_literals_section, &target, &state);
     try testing.expectEqualSlices(u8, &golden.pair_literals, first.bytes);
@@ -852,7 +856,7 @@ test "decodeTreeless before any Compressed block is TreelessLiteralsFirst" {
     // corruption". The target stays untouched.
     var target: [16]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         error.TreelessLiteralsFirst,
         decode(&treeless_section, &target, &state),
@@ -865,7 +869,7 @@ test "the treeless table survives intervening Raw and RLE blocks" {
     // Compressed_Literals_Block": Raw, RLE, and Treeless blocks do not
     // update it, and a Treeless block after either still decodes.
     var target: [16]u8 = undefined;
-    var state: State = .{};
+    var state: State = .empty;
     _ = try decode(&golden.pair_literals_section, &target, &state);
 
     internal.sentinel.fill(&target);

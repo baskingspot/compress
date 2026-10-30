@@ -294,13 +294,16 @@ fn avalanche(value: u64) u64 {
 /// `WrongChecksum`.
 pub const State = struct {
     /// The four accumulators, seeded with zero (`§3.1.1`).
-    accumulator: Accumulator = .init(seed),
+    accumulator: Accumulator,
     /// The under-one-stripe tail: the bytes not yet folded into the accumulators.
-    buf: ArrayBuffer(u8, 32) = .empty,
+    buf: ArrayBuffer(u8, 32),
     /// The running total: **u64** — a checksummed frame past 2^32 is
     /// legitimate (the CLI writes them), and this count must not wrap on
     /// any target.
-    byte_count: u64 = 0,
+    byte_count: u64,
+
+    /// A checksum before any byte: the §3.1.1 seed, an empty tail, count 0.
+    pub const init: State = .{ .accumulator = .init(seed), .buf = .empty, .byte_count = 0 };
 
     /// Fold one contiguous run of decoded bytes into the checksum. Counting
     /// follows std's `XxHash64.update` with a `u64` count: buffered bytes are
@@ -424,7 +427,7 @@ test "xxh64: the incremental state equals the one-shot" {
     // The frame paths fold per block: the digest must be independent of
     // where the runs are cut, across the stripe boundaries.
     const bytes = "checksums ride the codec boundary " ** 40;
-    var state: State = .{};
+    var state: State = .init;
     var at: usize = 0;
     while (at < bytes.len) : (at += 7) {
         state.update(bytes[at..][0..@min(7, bytes.len - at)]);
@@ -446,7 +449,7 @@ test "xxh64: the golden frames' trailers" {
     };
     // golden.frame_checksum decodes to "abcd" (the literals 61 62 63 64);
     // the trailer is the low 4 bytes of XXH64("abcd", 0), little-endian.
-    var state: State = .{};
+    var state: State = .init;
     state.update("abcd");
     try testing.expectEqual(expected, state.final());
 }

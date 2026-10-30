@@ -227,24 +227,36 @@ pub const Header = struct {
 /// buffer holds only the magic's 4 bytes can still parse the header across
 /// reads. `parseHeader` drives it over a whole slice.
 pub const HeaderParser = struct {
-    stage: Stage = .descriptor,
+    stage: Stage,
     /// The Frame_Header_Descriptor byte, once read.
-    descriptor: u8 = 0,
+    descriptor: u8,
     /// The current field's bytes consumed so far.
-    taken: usize = 0,
+    taken: usize,
     /// The current field's little-endian value (the Dictionary_ID's up to
     /// four bytes, the FCS's up to eight). Both `taken` and this reset when
     /// a field completes: the Dictionary_ID and the Frame_Content_Size are
     /// separate fields that share them.
-    value: u64 = 0,
+    value: u64,
     /// Window_Size, 0 until its field is complete.
-    window_size: u64 = 0,
+    window_size: u64,
     /// `null` until its field is complete; `null` when FCS_Field_Size is 0.
-    content_size: ?u64 = null,
+    content_size: ?u64,
     /// `null` until its field is complete, and when DID_Field_Size is 0.
-    dictionary_id: ?u32 = null,
+    dictionary_id: ?u32,
     /// The Frame_Header's bytes consumed (`§3.1.1.1`: 2-14).
-    total: usize = 0,
+    total: usize,
+
+    /// A parser at the descriptor byte.
+    pub const init: HeaderParser = .{
+        .stage = .descriptor,
+        .descriptor = 0,
+        .taken = 0,
+        .value = 0,
+        .window_size = 0,
+        .content_size = null,
+        .dictionary_id = null,
+        .total = 0,
+    };
 
     /// The field being consumed, in Table 2's order.
     pub const Stage = enum { descriptor, window, dictionary, fcs, done };
@@ -373,7 +385,7 @@ pub const HeaderParser = struct {
 /// `Truncated`. The parser's own error is `ReservedBitSet`; the
 /// Dictionary_ID it reads is checked by `checkDictionary`.
 pub fn parseHeader(source: []const u8) Error!Header {
-    var parser: HeaderParser = .{};
+    var parser: HeaderParser = .init;
     const consumed = try parser.feed(source);
     if (!parser.done()) return error.Truncated;
     assert(consumed <= source.len);
@@ -422,19 +434,19 @@ pub const State = struct {
     header: Header,
     /// The Huffman tree a Treeless_Literals_Block reuses (`§3.1.1.3`), one
     /// per frame; a dictionary seeds its table pointer.
-    literals: literals.State = .{},
+    literals: literals.State,
     /// The three decoding tables and the repeat offsets a Repeat_Mode reuses
     /// (`§3.1.1.3`, `§3.1.1.5`), one per frame; a dictionary seeds its
     /// table pointers and its repeat offsets.
-    sequences: sequences.State = .{},
+    sequences: sequences.State,
     /// `§5` — the dictionary content, the preset history in front of the
     /// frame's output. Empty without a dictionary. Borrowed: the caller's
     /// dictionary must outlive the state (the same lifetime the seeded table
     /// pointers carry).
-    dict_content: []const u8 = &.{},
+    dict_content: []const u8,
     /// `§3.1.1` — the decoded bytes' XXH64, folded per block. A frame without
     /// the checksum flag folds nothing, since nothing will be verified.
-    checksum: xxh64.State = .{},
+    checksum: xxh64.State,
     /// The frame's decoded length so far: the block layer's `decoded_len` on
     /// the one-shot's contiguous path, and the running total that
     /// Frame_Content_Size is checked against (`§3.1.1.1.4`) everywhere. A
@@ -443,7 +455,7 @@ pub const State = struct {
     /// on 32-bit targets, where a wrap would panic in safe builds and be
     /// undefined behavior in ReleaseFast. Hostile input gets an error, never a
     /// crash.
-    decoded_len: u64 = 0,
+    decoded_len: u64,
 
     /// Start a new frame in `state`, initializing it in place. A `State` is
     /// about 16 KiB, mostly decoding-table payload that stays undefined until a
@@ -458,11 +470,10 @@ pub const State = struct {
     /// caller-owned dictionary, which must outlive the state.
     pub fn init(state: *State, header: Header, dict: ?*const Dictionary) void {
         state.header = header;
-        state.literals.table = null;
-        state.sequences.tables = @splat(null);
-        state.sequences.repeat_offsets = sequences.repeat_offsets_start;
+        state.literals = .empty;
+        state.sequences = .empty;
         state.dict_content = &.{};
-        state.checksum = .{};
+        state.checksum = .init;
         state.decoded_len = 0;
         const dictionary = dict orelse return;
         state.dict_content = dictionary.content;
@@ -882,7 +893,7 @@ test "parseHeader is byte-fed" {
     // must parse identically however the bytes are cut.
     const bytes = [_]u8{ 0x84, 0x00, 0x78, 0x56, 0x34, 0x12 };
     const whole = try parseHeader(&bytes);
-    var parser: HeaderParser = .{};
+    var parser: HeaderParser = .init;
     var cursor: usize = 0;
     while (cursor < bytes.len) {
         const consumed = try parser.feed(bytes[cursor..][0..1]);
@@ -897,13 +908,13 @@ test "parseHeader is byte-fed" {
     try testing.expectEqual(whole.bytes_consumed, parser.header().bytes_consumed);
     // The parser stops at the header's end: the block chain's first bytes are
     // not consumed (the one-shot's cursor depends on that).
-    var slack: HeaderParser = .{};
+    var slack: HeaderParser = .init;
     const with_block = bytes ++ [_]u8{0xff};
     const consumed = try slack.feed(&with_block);
     try testing.expectEqual(bytes.len, consumed);
     // An input end inside the header leaves the parser not-done, which is the
     // driver's `Truncated`.
-    var short: HeaderParser = .{};
+    var short: HeaderParser = .init;
     try testing.expectEqual(@as(usize, 1), try short.feed(&.{0x84}));
     try testing.expect(!short.done());
 }

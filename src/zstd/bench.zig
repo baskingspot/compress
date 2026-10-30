@@ -93,13 +93,13 @@ pub fn benchmarkZstdCompress(b: *testingx.B) !void {
                     const back = try bb.allocator.alloc(u8, raw.len);
                     defer bb.allocator.free(back);
                     // The one-shot's frame must round trip to the raw shape.
-                    const clen = try zstd.encode.compress(raw, comp, .{});
+                    const clen = try zstd.encode.compress(raw, comp, .init);
                     const verified = try zstd.decode.decompress(comp[0..clen], back, null);
                     if (verified != raw.len or !std.mem.eql(u8, back, raw))
                         return error.CorpusMismatch;
 
                     while (try bb.loop()) {
-                        const n = try zstd.encode.compress(raw, comp, .{});
+                        const n = try zstd.encode.compress(raw, comp, .init);
                         bb.keepAlive(n);
                     }
                     bb.setBytes(@intCast(raw.len));

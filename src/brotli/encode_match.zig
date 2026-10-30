@@ -370,11 +370,16 @@ pub fn initInsertCommand(insertlen: usize, out: *Command) void {
 /// (`last_insert_len_`).
 pub const Commands = struct {
     buffer: []Command,
-    len: usize = 0,
-    literals: usize = 0,
+    len: usize,
+    literals: usize,
     /// Literals after the last command, without a command of their own; the
     /// flush turns them into one (`InitInsertCommand`).
-    last_insert_len: usize = 0,
+    last_insert_len: usize,
+
+    /// An empty command buffer over `buffer`.
+    pub fn init(buffer: []Command) Commands {
+        return .{ .buffer = buffer, .len = 0, .literals = 0, .last_insert_len = 0 };
+    }
 
     pub fn reset(self: *Commands) void {
         self.len = 0;
@@ -396,7 +401,17 @@ pub const Matcher = struct {
     /// stores them newest-first, so index 0 is the last distance (4) and
     /// index 3 the fourth-to-last (16) — the same order the decoder's ring
     /// resolves symbol 0 through.
-    dist_cache: [4]i32 = .{ 4, 11, 15, 16 },
+    dist_cache: [4]i32,
+
+    /// A matcher over `hasher` and `window`: the §4 ring seeded 4, 11, 15, 16.
+    pub fn init(hasher: Hasher, window: Window, lgwin: u6) Matcher {
+        return .{
+            .hasher = hasher,
+            .window = window,
+            .lgwin = lgwin,
+            .dist_cache = .{ 4, 11, 15, 16 },
+        };
+    }
 
     /// The reference's `CreateBackwardReferences`: scan
     /// `[position, position + num_bytes)`, appending commands.
@@ -593,11 +608,11 @@ test "the matcher finds a copy and leaves the ring at the last distance" {
     // remaining nine bytes.
     const text = "abcabcabcabc";
     var buckets: [bucket_size]u32 = @splat(0);
-    var matcher: Matcher = .{
-        .hasher = .{ .buckets = &buckets },
-        .window = .{ .bytes = text, .mask = std.math.maxInt(usize) },
-        .lgwin = 22,
-    };
+    var matcher: Matcher = .init(
+        .{ .buckets = &buckets },
+        .{ .bytes = text, .mask = std.math.maxInt(usize) },
+        22,
+    );
     matcher.hasher.init();
     var command_buffer: [16]Command = @splat(.{
         .cmd_prefix = 0,
@@ -607,7 +622,7 @@ test "the matcher finds a copy and leaves the ring at the last distance" {
         .copy_len = 0,
         .dist_extra = 0,
     });
-    var commands: Commands = .{ .buffer = &command_buffer };
+    var commands: Commands = .init(&command_buffer);
     matcher.findReferences(0, text.len, &commands);
     try testing.expectEqual(@as(usize, 1), commands.len);
     try testing.expectEqual(@as(u32, 3), commands.buffer[0].insert_len);

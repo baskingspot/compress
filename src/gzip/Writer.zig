@@ -50,9 +50,9 @@ inner: flate.Writer,
 options: encode.Options,
 /// The checksum state folded as flate emits each block: CRC-32 over the input
 /// and the input length for ISIZE (`§2.3.1`).
-checksum: framing.Checksum = .{},
+checksum: framing.Checksum,
 /// Whether the header has been written (see `Header`).
-header: Header = .pending,
+header: Header,
 
 /// The shared container driver over this module's framing
 /// (`src/internal/container.zig`).
@@ -117,7 +117,7 @@ fn roundTrip(source: []const u8) !void {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     try w.writer.writeAll(source);
     try w.finish();
     try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
@@ -158,7 +158,7 @@ test "Writer: the header is lazy and written before the first byte" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     try testing.expectEqual(@as(usize, 0), out.written().len);
 
     try w.writer.flush();
@@ -213,7 +213,7 @@ test "Writer: the trailer covers chunked writes with mid-stream flushes" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
     var pos: usize = 0;
     var step: usize = 1;
     while (pos < source.len) {
@@ -240,7 +240,7 @@ test "Writer: the writableSliceGreedy path round-trips" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{});
+    var w: Writer = .init(&out.writer, &buf, .init);
 
     const total = 3 * flate.encode.max_block_size;
     var written: usize = 0;
@@ -280,7 +280,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var small: [16]u8 = undefined;
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
-    var w: Writer = .init(&fixed_out, &buf, .{});
+    var w: Writer = .init(&fixed_out, &buf, .init);
     try w.writer.writeAll("a" ** 4096);
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
@@ -288,7 +288,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     // Write and finish after finish.
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    var w2: Writer = .init(&out.writer, &buf, .{});
+    var w2: Writer = .init(&out.writer, &buf, .init);
     try w2.writer.writeAll("hello, gzip");
     try w2.finish();
     try testing.expectError(error.WriteFailed, w2.writer.writeAll("more"));
@@ -313,7 +313,7 @@ test "Writer: random write machinery sequences stay correct" {
         var expect: std.ArrayList(u8) = .empty;
         defer expect.deinit(gpa);
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .{});
+        var w: Writer = .init(&out.writer, &buf, .init);
 
         var ops: usize = 0;
         while (ops < 10) : (ops += 1) {
@@ -402,7 +402,7 @@ test "Writer: streamAll consumes its input exactly and writes one member" {
     var in: Io.Reader = .fixed(source);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .{}));
+    try testing.expectEqual(source.len, try Writer.streamAll(&in, &out.writer, .init));
     try testing.expectEqual(source.len, in.seek);
     try golden.expectHeader(out.written(), encode.xflFor(.@"1"));
     try golden.expectTrailer(out.written(), source);

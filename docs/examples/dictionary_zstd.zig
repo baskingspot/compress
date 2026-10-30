@@ -13,7 +13,7 @@ test "a raw dictionary round-trips both directions" {
     const dict: zstd.Dictionary = .initRaw(dict_file);
 
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const frame_len = try zstd.encode.compress(data, &frame, .{ .dict = &dict });
+    const frame_len = try zstd.encode.compress(data, &frame, .{ .level = .@"1", .dict = &dict });
 
     var plain: [64]u8 = undefined;
     const plain_len = try zstd.decode.decompress(frame[0..frame_len], &plain, &dict);
@@ -32,7 +32,7 @@ test "a raw dictionary frame is honest about what it needs" {
     const data = "the dictionary the frame was made with, and the data";
 
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const frame_len = try zstd.encode.compress(data, &frame, .{ .dict = &right });
+    const frame_len = try zstd.encode.compress(data, &frame, .{ .level = .@"1", .dict = &right });
 
     var plain: [128]u8 = undefined;
     try std.testing.expectError(

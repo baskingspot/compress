@@ -461,20 +461,28 @@ pub const State = struct {
     /// Storage for the tables a block builds (the FSE_Compressed and RLE
     /// modes), about 12 KB in all. Undefined until a mode writes a cell, so a
     /// new frame state does not pay to zero it.
-    built: [alphabet_count]SeqTable = undefined,
+    built: [alphabet_count]SeqTable,
     /// The table each alphabet last decoded with, `null` until the frame's
     /// first sequences section with a nonzero count. "The table used in the
     /// previous Compressed_Block with Number_Of_Sequences > 0 will be used
     /// again ... It also includes Predefined_Mode ... and RLE_Mode", so every
     /// mode stores its resolved table here — Predefined by pointer to the
     /// comptime table (no per-block copy), the built modes into `built`.
-    tables: [alphabet_count]?*const SeqTable = @splat(null),
+    tables: [alphabet_count]?*const SeqTable,
     /// Repeated_Offset1/2/3 "sorted in recency order, with Repeated_Offset1
     /// meaning 'most recent one'" (`§3.1.1.5`), seeded {1, 4, 8} "for the
     /// first block ... unless a dictionary is used". A dictionary's 12
     /// repcode bytes replace the seed; a raw dictionary has none, so it
     /// keeps the default.
-    repeat_offsets: [3]u32 = repeat_offsets_start,
+    repeat_offsets: [3]u32,
+
+    /// A frame state before its first sequences section: no resolved tables
+    /// and the §3.1.1.5 {1, 4, 8} repeat-offset seed.
+    pub const empty: State = .{
+        .built = undefined,
+        .tables = @splat(null),
+        .repeat_offsets = repeat_offsets_start,
+    };
 };
 
 /// `§3.1.1.5` — "For the first block, the starting offset history is
@@ -1052,8 +1060,8 @@ fn expectBlocks(blocks: []const FixtureBlock, expected: []const []const u8) !voi
     var target: [4096]u8 = undefined;
     internal.sentinel.fill(&target);
     var literals_scratch: [1024]u8 = undefined;
-    var literals_state: literals.State = .{};
-    var sequences_state: State = .{};
+    var literals_state: literals.State = .empty;
+    var sequences_state: State = .empty;
     var produced: usize = 0;
     for (blocks, expected) |block, want| {
         const literals_section = try literals.decode(
@@ -1090,7 +1098,7 @@ fn expectError(
 ) !void {
     var target: [512]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         err,
         decode(section, literals_bytes, &target, history_len, &.{}, 0, &state),
@@ -1233,7 +1241,7 @@ test "resolveTable stores every mode's table for Repeat_Mode" {
     // mode's resolved table lands in the frame state — and Repeat with
     // nothing to repeat is corruption. RLE_Mode's symbol byte is bounded by
     // the context's alphabet (the reference's `symbol > max` check).
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(error.RepeatModeFirst, resolveTable(.offsets, &.{}, .repeat, &state));
     try testing.expectEqual(@as(usize, 0), try resolveTable(.offsets, &.{}, .predefined, &state));
     try testing.expectEqual(@as(usize, 0), try resolveTable(.offsets, &.{}, .repeat, &state));
@@ -1548,7 +1556,7 @@ test "decode ends a zero-count section on the literals" {
         },
     };
     try expectBlocks(&blocks, &.{ &golden.zero_expected, &golden.zero_expected });
-    var state: State = .{};
+    var state: State = .empty;
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
     const section = try decode(
@@ -1596,7 +1604,7 @@ test "decode fails on the sequence bounds" {
     // caller's cap (the frame's Window_Size) still refuses it.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     const section = try decode(&far, &.{}, &target, 12, &.{}, 0, &state);
     try testing.expectEqual(@as(usize, 3), section.bytes_written);
     try internal.sentinel.expect(&target, 15);
@@ -1608,7 +1616,7 @@ test "decode fails on the sequence bounds" {
     // match needs 8, and the check comes before the write.
     var small: [7]u8 = undefined;
     internal.sentinel.fill(&small);
-    var small_state: State = .{};
+    var small_state: State = .empty;
     try testing.expectError(
         error.BufferTooSmall,
         decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x01 }, "abcde", &small, 0, &.{}, 0, &small_state),
@@ -1627,7 +1635,7 @@ test "a Number_of_Sequences past the block cannot amplify" {
     const section = [_]u8{ 0xff, 0xff, 0xff, 0x54, 0x00, 0x00, 0x00, 0x01 };
     var target: [72]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         error.BufferTooSmall,
         decode(&section, &.{}, &target, 8, &.{}, 0, &state),
@@ -1652,7 +1660,7 @@ test "decode fails on the bitstream's ends" {
     // section end is refused.
     var target: [64]u8 = undefined;
     internal.sentinel.fill(&target);
-    var state: State = .{};
+    var state: State = .empty;
     try testing.expectError(
         error.BitstreamNotConsumed,
         decode(&.{ 0x01, 0x54, 0x05, 0x00, 0x00, 0x02 }, "abcde", &target, 0, &.{}, 0, &state),

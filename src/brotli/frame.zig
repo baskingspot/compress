@@ -704,7 +704,7 @@ test "readCount: every value of RFC 7932 §9.2's variable-length code" {
     // xxx0111 → 9..16, xxxx1001 → 17..32, xxxxx1011 → 33..64,
     // xxxxxx1101 → 65..128, xxxxxxx1111 → 129..256.
     for (1..257) |count| {
-        var packer: golden.Packer = .{};
+        var packer: golden.Packer = .empty;
         packCount(&packer, @intCast(count));
         var br: bits.BitReader = .init(packer.slice());
         try testing.expectEqual(@as(u32, @intCast(count)), try readCount(bits.BitReader, &br));
@@ -845,7 +845,7 @@ test "compressed header: RFC 7932 §7.3's context map selects the tree" {
 
 test "compressed header: OQ8's tree cap fails TooManyTrees" {
     // NTREESL = 65: the region holds 64.
-    var p: golden.Packer = .{};
+    var p: golden.Packer = .empty;
     packMetaHead(&p, 1);
     p.pack(0, 1); // NBLTYPESL = 1
     p.pack(0, 1); // NBLTYPESI = 1
@@ -858,7 +858,7 @@ test "compressed header: OQ8's tree cap fails TooManyTrees" {
     try testing.expectError(error.TooManyTrees, parseHeader(p.slice(), &header));
 
     // NBLTYPESI = 65: the command trees are the region's command category.
-    var q: golden.Packer = .{};
+    var q: golden.Packer = .empty;
     packMetaHead(&q, 1);
     q.pack(0, 1); // NBLTYPESL = 1
     packCount(&q, 65); // NBLTYPESI = 65
@@ -886,7 +886,7 @@ test "compressed header: RFC 7932 §3.3's dynamic distance alphabet" {
             packSingle(p, symbol, 8); // distance
         }
     };
-    var p: golden.Packer = .{};
+    var p: golden.Packer = .empty;
     build.call(&p, 219);
     var header: Header = undefined;
     _ = try parseHeader(p.slice(), &header);
@@ -894,7 +894,7 @@ test "compressed header: RFC 7932 §3.3's dynamic distance alphabet" {
     try testing.expectEqual(@as(u8, 12), header.ndirect);
     try testing.expectEqual(@as(?u16, 219), header.trees.distance[0].single);
 
-    var over: golden.Packer = .{};
+    var over: golden.Packer = .empty;
     build.call(&over, 220);
     var rejected: Header = undefined;
     try testing.expectError(error.SimpleHuffmanAlphabet, parseHeader(over.slice(), &rejected));
@@ -928,7 +928,7 @@ test "compressed header: RFC 7932 §6's first block count" {
     // NBLTYPESL = 2 reads the literal block-type tree, the block-count tree,
     // and the first literal block count (§9.2). The count tree is a simple
     // NSYM = 1 code for symbol 3, whose range is 13..16 with two extra bits.
-    var p: golden.Packer = .{};
+    var p: golden.Packer = .empty;
     packMetaHead(&p, 1);
     packCount(&p, 2); // NBLTYPESL = 2
     p.pack(1, 2); // the literal block-type tree: simple form
