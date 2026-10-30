@@ -995,7 +995,7 @@ fn copyOverlapFill(dst: [*]u8, distance: usize, length: usize) void {
             // The period as one integer, broadcast to the chunk width; the
             // array->int->vector->array bitcasts are inverse mappings, so
             // the byte order cancels on any host.
-            const Word = std.meta.Int(.unsigned, 8 * period);
+            const Word = @Int(.unsigned, 8 * period);
             const Vec = @Vector(overlap_chunk / period, Word);
             const word: Word = @bitCast((dst - period)[0..period].*);
             const wide: Vec = @splat(word);

@@ -17,6 +17,7 @@ const std = @import("std");
 const Io = std.Io;
 const testing = std.testing;
 
+const print = std.debug.print;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const container = internal.container;
@@ -101,7 +102,7 @@ pub fn checkDictionary(
 ) error{ DictionaryRequired, DictionaryMismatch, Truncated, ReadFailed }!void {
     const bytes = dict orelse return error.DictionaryRequired;
     var id: [dict_id_len]u8 = undefined;
-    try container.readExact(input, &id);
+    try readExact(input, &id);
     if (readInt(u32, &id) != adler32.adler32(1, bytes)) return error.DictionaryMismatch;
 }
 
@@ -201,7 +202,7 @@ test "decode: the one-shot decodes the golden table" {
             else => window.len,
         };
         golden.checkOneShot(window, cap, tc.source, tc.dict, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }
@@ -222,7 +223,7 @@ test "decode: the std in-tree vectors and the divergence pins" {
             else => window.len,
         };
         golden.checkOneShot(window, cap, tc.source, tc.dict, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }
@@ -243,7 +244,7 @@ test "decode: the one-shot decodes the golden table's trailing-byte cases" {
             else => continue,
         };
         golden.checkOneShot(window, want.len, tc.source, tc.dict, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }

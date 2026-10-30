@@ -25,6 +25,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 const bits = @import("bits.zig");
 const block = @import("block.zig");
 const block_compress = @import("block_compress.zig");
@@ -92,5 +93,5 @@ test {
     _ = Dictionary;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

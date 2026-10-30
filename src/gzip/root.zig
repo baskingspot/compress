@@ -11,6 +11,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 pub const encode = @import("encode.zig");
 pub const decode = @import("decode.zig");
 /// A decompressing `Io.Reader` over one gzip member. Read through
@@ -31,5 +32,5 @@ test {
     _ = @import("crc32.zig");
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

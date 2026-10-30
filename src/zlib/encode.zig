@@ -262,10 +262,10 @@ test "encode: the bound holds for every shape" {
     for (std.enums.values(Level)) |level| {
         const len = try compress(noise, target, .{ .level = level });
         try testing.expectEqual(
-            framing.header_len + framing.bodyMaxCompressedLength(noise.len) + framing.trailer_len,
+            header_len + framing.bodyMaxCompressedLength(noise.len) + trailer_len,
             len,
         );
-        try testing.expectEqual(maxCompressedLength(noise.len) - framing.dict_id_len, len);
+        try testing.expectEqual(maxCompressedLength(noise.len) - dict_id_len, len);
     }
 }
 

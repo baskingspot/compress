@@ -15,6 +15,9 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+
+const Io = std.Io;
+const Allocator = std.mem.Allocator;
 const testing = std.testing;
 
 const fastmem = @import("fastmem");
@@ -214,7 +217,7 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
 /// The README's Usage snippet, as written: the caller allocates a cap, the
 /// decoded length is the return value, and exactly that many bytes reach the
 /// writer.
-fn decodeTo(gpa: std.mem.Allocator, stream: []const u8, out: *std.Io.Writer) !void {
+fn decodeTo(gpa: Allocator, stream: []const u8, out: *Io.Writer) !void {
     const plain = try gpa.alloc(u8, 1024 * 1024); // a cap; brotli records no size
     defer gpa.free(plain);
     const n = try decompress(stream, plain);
@@ -249,7 +252,7 @@ test "the layer types are reachable through the decode namespace" {
 test "README usage: one-shot decode over buffers the caller owns" {
     // The README's Usage snippet through its own shape: an allocator-owned
     // cap and the decoded length written out.
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try decodeTo(testing.allocator, golden.cli_text_q11.bytes, &out.writer);
     try testing.expectEqualStrings(golden.cli_text_q11.plain, out.written());

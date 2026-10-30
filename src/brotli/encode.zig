@@ -75,7 +75,7 @@ pub fn maxCompressedLength(input_len: usize) usize {
 /// threads 1 MiB or more.
 pub fn compress(source: []const u8, target: []u8) Error!usize {
     const lgwin = windowBitsFor(source.len);
-    var hash: [match.bucket_size]u32 = undefined;
+    var hash: [bucket_entries]u32 = undefined;
     var command_buffer: [max_commands]match.Command = undefined;
     var scratch: Scratch = undefined;
     var state: State = .{

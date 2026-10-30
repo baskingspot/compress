@@ -53,7 +53,7 @@ const guard_len: usize = 256;
 /// and widen here; every call site is inside a per-iteration cap.
 fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     assert(at_least <= at_most);
-    assert(at_most <= std.math.maxInt(u32));
+    assert(at_most <= math.maxInt(u32));
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 

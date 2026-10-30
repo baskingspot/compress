@@ -22,6 +22,8 @@
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
+
+const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 
@@ -399,7 +401,7 @@ fn countChunks(stream: []const u8) usize {
 }
 
 /// Decode a framed stream with `Reader`, for the round-trip checks.
-fn decodeFramed(gpa: std.mem.Allocator, stream: []const u8) ![]u8 {
+fn decodeFramed(gpa: Allocator, stream: []const u8) ![]u8 {
     var rbuf: Reader.Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(stream);
     var r: Reader = .init(&fixed_in, &rbuf);

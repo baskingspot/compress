@@ -7,6 +7,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 /// brotli (RFC 7932): one-shot `encode.compress` and `decode.decompress`, and
 /// the streaming `Reader` and `Writer`. Caller-owned buffers, no heap
 /// allocation. API: `src/brotli/README.md`. Format:
@@ -74,5 +75,5 @@ test {
     _ = zstd.decode.max_block_size;
     _ = zstd.decode.decompress;
     _ = zstd.Reader.streamAll;
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

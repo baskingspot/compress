@@ -31,6 +31,8 @@
 const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
+
+const Io = std.Io;
 const print = std.debug.print;
 
 const internal = @import("../internal/root.zig");
@@ -492,8 +494,8 @@ test "golden decode: the std divergence pins" {
 /// show what std accepts). Returns the decoded length into `target`, or the
 /// interface's coarse error.
 fn stdDecode(source: []const u8, target: []u8) !usize {
-    var input: std.Io.Reader = .fixed(source);
-    var output: std.Io.Writer = .fixed(target);
+    var input: Io.Reader = .fixed(source);
+    var output: Io.Writer = .fixed(target);
     var decompress: std.compress.flate.Decompress = .init(&input, .zlib, &.{});
     return decompress.reader.streamRemaining(&output);
 }

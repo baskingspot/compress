@@ -24,6 +24,8 @@ const std = @import("std");
 const Io = std.Io;
 const mem = std.mem;
 const assert = std.debug.assert;
+
+const print = std.debug.print;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
 
@@ -674,7 +676,7 @@ test "Writer: round-trips through the landed Reader" {
         for (sizes) |size| {
             golden.fillShape(shape, source[0..size]);
             _ = expectRoundTrip(default_window_log, source[0..size], 0) catch |err| {
-                std.debug.print("FAIL: {s} size {d}\n", .{ @tagName(shape), size });
+                print("FAIL: {s} size {d}\n", .{ @tagName(shape), size });
                 return err;
             };
         }
@@ -683,7 +685,7 @@ test "Writer: round-trips through the landed Reader" {
         for ([_]usize{ 100, 4096, 65536, 131072, 300000 }) |size| {
             golden.fillShape(shape, source[0..size]);
             _ = expectRoundTrip(default_window_log, source[0..size], 0) catch |err| {
-                std.debug.print("FAIL: {s} size {d}\n", .{ @tagName(shape), size });
+                print("FAIL: {s} size {d}\n", .{ @tagName(shape), size });
                 return err;
             };
         }

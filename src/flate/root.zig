@@ -14,6 +14,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 /// One-shot compression: `compress`, `maxCompressedLength`, and the encoder's
 /// `Options` and `Level`.
 pub const encode = @import("encode.zig");
@@ -36,5 +37,5 @@ test {
     _ = Reader;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

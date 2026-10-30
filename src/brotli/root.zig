@@ -12,6 +12,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 const bits = @import("bits.zig");
 const command = @import("command.zig");
 const context = @import("context.zig");
@@ -47,5 +48,5 @@ test {
     _ = Writer;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

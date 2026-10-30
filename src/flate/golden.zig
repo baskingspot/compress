@@ -18,6 +18,8 @@
 const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
+
+const Allocator = std.mem.Allocator;
 const print = std.debug.print;
 
 const fastmem = @import("fastmem");
@@ -829,7 +831,7 @@ pub const Shape = enum { text, random, html, rle, mixed };
 
 /// Allocate `len` bytes of `shape` with `allocator`; the caller frees them. The
 /// content is deterministic: `.random` and `.mixed` use fixed PRNG seeds.
-pub fn makeShape(allocator: std.mem.Allocator, shape: Shape, len: usize) ![]u8 {
+pub fn makeShape(allocator: Allocator, shape: Shape, len: usize) ![]u8 {
     const buf = try allocator.alloc(u8, len);
     switch (shape) {
         .text => {

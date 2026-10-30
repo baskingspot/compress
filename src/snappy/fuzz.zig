@@ -511,7 +511,7 @@ fn referenceDecode(stream: []const u8, plain: *Io.Writer.Allocating) !bool {
         switch (kind) {
             0x00, 0x01 => {
                 if (length < Writer.chunk_crc_len) return false;
-                if (length - Writer.chunk_crc_len > Writer.scratch_len) return false;
+                if (length - Writer.chunk_crc_len > scratch_max) return false;
                 if (kind == 0x01 and length - Writer.chunk_crc_len > Writer.max_chunk_len) {
                     return false;
                 }

@@ -15,6 +15,7 @@ const mem = std.mem;
 const testing = std.testing;
 const assert = std.debug.assert;
 
+const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
@@ -475,7 +476,7 @@ test "decode: the one-shot decodes the golden table's trailing-byte cases" {
             else => continue,
         };
         golden.checkOneShot(window, want.len, tc.source, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }

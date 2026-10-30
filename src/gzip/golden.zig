@@ -18,6 +18,7 @@ const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
 
+const print = std.debug.print;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const common = @import("common.zig");
@@ -397,7 +398,7 @@ test "golden decode: golang/go gunzipTests" {
             else => window.len,
         };
         checkOneShot(window, cap, tc.source, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }
@@ -416,7 +417,7 @@ test "golden decode: the std in-tree container members" {
             else => window.len,
         };
         checkOneShot(window, cap, tc.source, tc.expect) catch |err| {
-            std.debug.print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
+            print("\nFAIL ({s}): {s}\n", .{ tc.desc, @errorName(err) });
             return err;
         };
     }
@@ -433,7 +434,7 @@ test "golden decode: truncated streams fail at every prefix" {
         while (len < stream.len) : (len += 1) {
             const expect: Expect = .{ .fail_with = error.Truncated };
             checkOneShot(window, window.len, stream[0..len], expect) catch |err| {
-                std.debug.print("\nFAIL: prefix {d}/{d}: {s}\n", .{
+                print("\nFAIL: prefix {d}/{d}: {s}\n", .{
                     len, stream.len, @errorName(err),
                 });
                 return err;

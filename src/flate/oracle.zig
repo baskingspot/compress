@@ -18,6 +18,7 @@ const std = @import("std");
 const Io = std.Io;
 const print = std.debug.print;
 
+const Allocator = std.mem.Allocator;
 const flate = @import("compress").flate;
 
 /// Cap on the compressed stream the harness will read into memory.
@@ -26,7 +27,7 @@ const max_stream_len = 1 << 30;
 const max_input_len = 1 << 30;
 
 /// Read a whole file into the arena, for the optional dictionary argument.
-fn readFile(arena: std.mem.Allocator, io: Io, path: []const u8) ![]u8 {
+fn readFile(arena: Allocator, io: Io, path: []const u8) ![]u8 {
     const file = try Io.Dir.cwd().openFile(io, path, .{
         .allow_directory = false,
         .follow_symlinks = true,

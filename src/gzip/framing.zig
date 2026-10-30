@@ -31,7 +31,7 @@ pub const Options = struct {
 /// The failure detail a reader records in `err` once its state is `.failed`:
 /// flate's reader errors plus the header and trailer errors below. There is no
 /// `BufferTooSmall`: output goes through a fixed window, not a sized target.
-pub const Error = flate.Reader.Error || error{
+pub const Error = InnerReader.Error || error{
     BadHeader,
     HeaderTooLong,
     WrongHeaderChecksum,
@@ -79,11 +79,11 @@ pub const Header = decode.HeaderParser;
 
 /// The caller-provided decode window: flate's `Reader.Buffer`, 64 KiB
 /// (`[2 * history_len]u8`). gzip adds no buffer of its own.
-pub const ReaderBuffer = flate.Reader.Buffer;
+pub const ReaderBuffer = InnerReader.Buffer;
 
 /// The caller-provided encode buffer: flate's `Writer.Buffer`, 98303 bytes
 /// (`[max_block_size + history_len]u8`). gzip adds no buffer of its own.
-pub const WriterBuffer = flate.Writer.Buffer;
+pub const WriterBuffer = InnerWriter.Buffer;
 
 /// The inner codec's streaming types, as the driver reads them.
 pub const InnerReader = flate.Reader;
@@ -107,13 +107,13 @@ pub fn initReader(
     buffer: *ReaderBuffer,
     dict: ?[]const u8,
 ) InnerReader {
-    return flate.Reader.init(input, buffer, dict);
+    return InnerReader.init(input, buffer, dict);
 }
 
 /// Wrap `output` with `buffer` as the inner flate writer's window and
 /// `options`' level fixed for the member's lifetime.
 pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return flate.Writer.init(output, buffer, .{ .level = options.level });
+    return InnerWriter.init(output, buffer, .{ .level = options.level });
 }
 
 /// Whether the header is complete.

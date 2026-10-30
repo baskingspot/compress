@@ -18,10 +18,11 @@ test:
 fuzz LIMIT="10M":
     zig build test -Doptimize=ReleaseSafe -Dfuzz --fuzz={{ LIMIT }}
 
-[doc("Lint Zig, Python, Nix, Markdown, the workflows, and this justfile: ziglint, zig fmt, ruff, ty, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
+[doc("Lint Zig, Python, Nix, Markdown, the workflows, and this justfile: ziglint, the ast-grep rules, zig fmt, ruff, ty, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
     ziglint
+    baskingspot-lint src
     zig fmt --check src build.zig demo
     uv run scripts/check_binary_files.py
     uvx ruff check --line-length 100 scripts

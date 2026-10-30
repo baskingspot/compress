@@ -30,6 +30,8 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+
+const Io = std.Io;
 const testing = std.testing;
 const print = std.debug.print;
 const math = std.math;
@@ -1589,7 +1591,7 @@ test "compress: level 6 with a preset dictionary emits klauspost's bytes" {
     try golden.checkDecodeDict(target, comp[0..n], dict, source);
 
     // The one-shot and streaming layers agree with the same dictionary.
-    var out: std.Io.Writer.Allocating = .init(gpa);
+    var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: writer.Buffer = undefined;
     var w: writer = .init(&out.writer, &buf, .{ .level = .@"6", .dict = dict });

@@ -36,7 +36,7 @@ pub const Options = struct {
 /// The failure detail a `Reader` records in `err` once its state is
 /// `.failed`: flate's reader errors (without `BufferTooSmall`, since the
 /// decode window is fixed) plus this module's header and trailer errors.
-pub const Error = flate.Reader.Error || error{
+pub const Error = InnerReader.Error || error{
     BadHeader,
     DictionaryRequired,
     DictionaryMismatch,
@@ -81,11 +81,11 @@ pub const Header = enum { pending, parsed };
 
 /// The caller-provided decode window: flate's, re-exported; the container adds
 /// no buffer of its own. `[2 * history_len]u8`, 64 KiB.
-pub const ReaderBuffer = flate.Reader.Buffer;
+pub const ReaderBuffer = InnerReader.Buffer;
 
 /// The caller-provided compression buffer: flate's, re-exported; the container
 /// adds no buffer of its own. `[max_block_size + history_len]u8`, 98303 bytes.
-pub const WriterBuffer = flate.Writer.Buffer;
+pub const WriterBuffer = InnerWriter.Buffer;
 
 /// The inner codec's streaming types, as the driver reads them.
 pub const InnerReader = flate.Reader;
@@ -108,7 +108,7 @@ pub fn initReader(
     buffer: *ReaderBuffer,
     dict: ?[]const u8,
 ) InnerReader {
-    return flate.Reader.init(input, buffer, dict);
+    return InnerReader.init(input, buffer, dict);
 }
 
 /// The stream's preset dictionary, or null when there is none: an empty slice
@@ -124,7 +124,7 @@ fn dictionary(options: Options) ?[]const u8 {
 /// Wrap `output` with `buffer` as the inner flate writer's window and
 /// `options`' level and dictionary fixed for the stream's lifetime.
 pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return flate.Writer.init(output, buffer, .{
+    return InnerWriter.init(output, buffer, .{
         .level = options.level,
         .dict = dictionary(options),
     });

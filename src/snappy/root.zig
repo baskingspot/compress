@@ -15,6 +15,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 pub const decode = @import("decode.zig");
 pub const encode = @import("encode.zig");
 pub const Reader = @import("Reader.zig");
@@ -27,5 +28,5 @@ test {
     _ = Reader;
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

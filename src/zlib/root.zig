@@ -14,6 +14,7 @@
 
 const std = @import("std");
 
+const testing = std.testing;
 /// One-shot compression: `compress` and `maxCompressedLength`, plus the
 /// header and trailer helpers the streaming `Writer` is built from.
 pub const encode = @import("encode.zig");
@@ -39,5 +40,5 @@ test {
     _ = @import("adler32.zig");
     _ = @import("golden.zig");
     _ = @import("fuzz.zig");
-    std.testing.refAllDecls(@This());
+    testing.refAllDecls(@This());
 }

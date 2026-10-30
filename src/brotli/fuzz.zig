@@ -56,6 +56,8 @@
 const std = @import("std");
 const Io = std.Io;
 const assert = std.debug.assert;
+
+const print = std.debug.print;
 const testing = std.testing;
 const Smith = testing.Smith;
 const math = std.math;
@@ -971,13 +973,13 @@ fn fuzzTruncation(storage: *Storage, smith: *Smith) anyerror!void {
         // corpus has no vector whose refusal lives in the bytes a prefix
         // drops.
         if (vector.refusal == null) {
-            std.debug.print("brotli fuzz: prefix of {s} decoded {d} bytes\n", .{ vector.name, n });
+            print("brotli fuzz: prefix of {s} decoded {d} bytes\n", .{ vector.name, n });
             return error.ShortDecode;
         }
         return;
     } else |err| {
         if (!truncationRefusal(vector, err)) {
-            std.debug.print(
+            print(
                 "brotli fuzz: prefix of {s} cut at {d} refused with {t}\n",
                 .{ vector.name, cut, err },
             );
@@ -991,7 +993,7 @@ fn fuzzTruncation(storage: *Storage, smith: *Smith) anyerror!void {
         try testing.expectEqual(Stop.read_failed, streamed.stop);
         const detail = streamed.detail.?;
         if (detail != err) {
-            std.debug.print(
+            print(
                 "brotli fuzz: {s}'s prefix: one-shot {t}, reader {t}\n",
                 .{ vector.name, err, detail },
             );
@@ -1035,7 +1037,7 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
         .truncate => {
             if (result) |n| {
                 if (built.vector) |vector| {
-                    std.debug.print(
+                    print(
                         "brotli fuzz: prefix of {s} decoded {d} bytes\n",
                         .{ vector.name, n },
                     );
@@ -1044,7 +1046,7 @@ fn fuzzCorruption(_: void, smith: *Smith) anyerror!void {
             } else |err| {
                 const vector = built.vector orelse return;
                 if (!truncationRefusal(vector, err)) {
-                    std.debug.print(
+                    print(
                         "brotli fuzz: prefix of {s} refused with {t}\n",
                         .{ vector.name, err },
                     );
@@ -1148,7 +1150,7 @@ fn fuzzDifferential(storage: *Storage, smith: *Smith) anyerror!void {
         // reader's done state is checked before the writer is touched, which
         // the bomb test's exact-cap case pins.)
         if (streamed.stop != .end_of_stream or streamed.served != n) {
-            std.debug.print(
+            print(
                 "brotli fuzz: one-shot {d} bytes, reader {s} after {d}\n",
                 .{ n, @tagName(streamed.stop), streamed.served },
             );
@@ -1171,7 +1173,7 @@ fn expectOneShotRefusal(streamed: Streamed, one_err: decode.DecompressError) !vo
         // bytes — cannot have ended cleanly: that would mean the stream fit
         // after all.
         if (streamed.stop == .end_of_stream) {
-            std.debug.print(
+            print(
                 "brotli fuzz: one-shot BufferTooSmall, reader ended after {d}\n",
                 .{streamed.served},
             );
@@ -1182,11 +1184,11 @@ fn expectOneShotRefusal(streamed: Streamed, one_err: decode.DecompressError) !vo
     try testing.expectEqual(Stop.read_failed, streamed.stop);
     const detail = streamed.detail.?;
     const mapped = sharedName(detail) orelse {
-        std.debug.print("brotli fuzz: reader-only refusal {t} on a pump\n", .{detail});
+        print("brotli fuzz: reader-only refusal {t} on a pump\n", .{detail});
         return error.ReaderOnlyRefusal;
     };
     if (mapped != one_err) {
-        std.debug.print("brotli fuzz: one-shot {t}, reader {t}\n", .{ one_err, detail });
+        print("brotli fuzz: one-shot {t}, reader {t}\n", .{ one_err, detail });
         return error.ClassMismatch;
     }
 }
@@ -1498,11 +1500,11 @@ fn expectTerminal(
             // A clean end is the valid vectors' outcome, and it serves the
             // whole model and nothing else.
             if (vector.refusal != null) {
-                std.debug.print("brotli fuzz: {s} refused but the reader ended\n", .{vector.name});
+                print("brotli fuzz: {s} refused but the reader ended\n", .{vector.name});
                 return error.RefusalDecoded;
             }
             if (pos != vector.plain.len) {
-                std.debug.print(
+                print(
                     "brotli fuzz: {s} ended at {d} of {d}\n",
                     .{ vector.name, pos, vector.plain.len },
                 );
@@ -1521,14 +1523,14 @@ fn expectTerminal(
                 return;
             }
             const want = vector.refusal orelse {
-                std.debug.print(
+                print(
                     "brotli fuzz: {s} refused {t} with none expected\n",
                     .{ vector.name, detail },
                 );
                 return error.UnexpectedRefusal;
             };
             if (detail != want) {
-                std.debug.print(
+                print(
                     "brotli fuzz: {s} refused {t}, want {t}\n",
                     .{ vector.name, detail, want },
                 );
@@ -1695,7 +1697,7 @@ fn fuzzAmplification(storage: *Storage, smith: *Smith) anyerror!void {
         // and the ring is `Buffer(10)`).
         const detail = streamed.detail.?;
         if (!overrun or detail != error.BadBlockLength) {
-            std.debug.print("brotli fuzz: bomb refused {t}\n", .{detail});
+            print("brotli fuzz: bomb refused {t}\n", .{detail});
             return error.BombRefused;
         }
     }
@@ -1938,7 +1940,7 @@ fn prefixAt(comptime T: type, smith: *Smith, source: []const u8) !void {
             return;
         };
         if (symbol >= alphabet) {
-            std.debug.print(
+            print(
                 "brotli fuzz: readTree alphabet {d} decoded symbol {d}\n",
                 .{ alphabet, symbol },
             );
@@ -1980,7 +1982,7 @@ fn buildAt(comptime T: type, smith: *Smith) !void {
             var br: bits.BitReader = .init(&window_source);
             const symbol = try tree.decode(bits.BitReader, &br);
             if (symbol >= n) {
-                std.debug.print(
+                print(
                     "brotli fuzz: build n {d} window {d} decoded symbol {d}\n",
                     .{ n, window, symbol },
                 );
@@ -2183,7 +2185,7 @@ fn fuzzDictionary(_: void, smith: *Smith) anyerror!void {
     var model_buf: [dictionary.scratch_len]u8 = undefined;
     if (modelWord(&model_buf, word_id, length)) |want| {
         if (!mem.eql(u8, want, word)) {
-            std.debug.print(
+            print(
                 "brotli fuzz: word_id {d} length {d}: model {s} vs decoder {s}\n",
                 .{ word_id, length, want, word },
             );
@@ -2700,7 +2702,7 @@ test "brotli fuzz: an uncompressed payload across tiny input chunks" {
     defer testing.allocator.destroy(storage);
 
     var raw: [4096]u8 = undefined;
-    var rng: std.Random.DefaultPrng = .init(0xC144E);
+    var rng: DefaultPrng = .init(0xC144E);
     rng.random().bytes(&raw);
     var stream_buf: [golden.trivialBound(raw.len)]u8 = undefined;
     const stream = stream_buf[0..golden.trivialCompress(&raw, &stream_buf)];

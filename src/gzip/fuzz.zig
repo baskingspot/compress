@@ -1390,7 +1390,7 @@ test "gzip fuzz: checksum accounting" {
 /// a std CRC-32 state, and the reference is the one-shot hash over the same
 /// bytes.
 const Fold = struct {
-    crc: std.hash.crc.Crc32 = .init(),
+    crc: Crc32 = .init(),
 
     fn update(context: *anyopaque, bytes: []const u8) void {
         const self: *Fold = @ptrCast(@alignCast(context));
