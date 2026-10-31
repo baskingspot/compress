@@ -5,6 +5,8 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
 ### Changed
 
 - `flate.encode.Options`, `gzip.encode.Options`, `zlib.encode.Options`, and
