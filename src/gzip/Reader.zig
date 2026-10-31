@@ -151,7 +151,7 @@ fn roundTrip(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
     const member = compressed.written();
@@ -370,7 +370,7 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
 
     for (0..decode.trailer_len) |at| {
         var bad = member;
@@ -401,7 +401,7 @@ test "Reader: an over-the-end request still checks the trailer" {
     // 30-KiB request overflows the room at the consumer's position.
     const source = "the quick brown fox jumps over the lazy dog. " ** 950;
     var member: [encode.maxCompressedLength(source.len)]u8 = undefined;
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
 
     // The good trailer: the over-the-end request reports the clean end
     // with the input exactly at the member's last byte (the boundary
@@ -438,7 +438,7 @@ test "Reader: a truncated member is Truncated at every prefix" {
     // every prefix of a real member returns an error, never a clean end.
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
-    const len = try encode.compress("hello world\n", &member, .init);
+    const len = try encode.compress("hello world\n", &member, .{});
     for (1..len) |prefix| {
         var rbuf: Buffer = undefined;
         var fixed_in: Io.Reader = .fixed(member[0..prefix]);
@@ -462,7 +462,7 @@ test "Reader: a contiguous request past the window fails" {
     var member: Io.Writer.Allocating = .init(gpa);
     defer member.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&member.writer, &wbuf, .init);
+    var w: Writer = .init(&member.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -502,7 +502,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     const gpa = testing.allocator;
     var member: [64]u8 = undefined;
     const source = "poll";
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
     var rbuf: Buffer = undefined;
     var fixed_in: Io.Reader = .fixed(member[0..len]);
     var r: Reader = .init(&fixed_in, &rbuf);
@@ -523,7 +523,7 @@ test "Reader: a chunked input refills across the header and the body" {
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
 
     var framed: [144]u8 = undefined;
     fastmem.copy(u8, framed[0..len], member[0..len]);

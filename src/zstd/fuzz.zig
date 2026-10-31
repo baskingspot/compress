@@ -2769,7 +2769,6 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: encode
     const bound = encode.maxCompressedLength(source.len);
     const written = try encode.compress(source, compressed[0..bound], .{
         .level = level,
-        .dict = null,
     });
     try testing.expect(written <= bound);
     try expectTrailerConsistent(compressed[0..written], written, source, true);
@@ -2791,7 +2790,7 @@ fn expectOneShotEncodeRoundTrip(smith: *Smith, source: []const u8, level: encode
     // the cap held.
     const cap = rangeAtMost(smith, 0, written);
     sentinel.fill(&compressed);
-    if (encode.compress(source, compressed[0..cap], .{ .level = level, .dict = null })) |short| {
+    if (encode.compress(source, compressed[0..cap], .{ .level = level })) |short| {
         // A successful emission writes its frame into the target's front; a
         // block whose entropy attempt fails partway can leave bytes past the
         // returned length inside the target (the C's encoder does the same),
@@ -2828,7 +2827,6 @@ fn expectWriterEncodeRoundTrip(
         var efw: Io.Writer = .fixed(&empty);
         var ew: Writer = .init(Writer.default_window_log, &efw, &buffer, .{
             .level = level,
-            .dict = null,
         });
         try ew.finish();
         try expectTrailerConsistent(empty[0..efw.end], efw.end, "", true);
@@ -2841,7 +2839,6 @@ fn expectWriterEncodeRoundTrip(
 
     var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{
         .level = level,
-        .dict = null,
     });
     var pos: usize = 0;
     var flushes: usize = 0;
@@ -2969,11 +2966,11 @@ fn fuzzEncodeByteClass(_: void, smith: *Smith) anyerror!void {
 /// frame's length.
 fn oneShotByteClass(source: []const u8, out: []u8) !usize {
     const bound = encode.maxCompressedLength(source.len);
-    const written = try encode.compress(source, out[0..bound], .init);
+    const written = try encode.compress(source, out[0..bound], .{});
     try testing.expect(written <= bound);
     {
         var again: [class_bound]u8 = undefined;
-        const m = try encode.compress(source, again[0..bound], .init);
+        const m = try encode.compress(source, again[0..bound], .{});
         try testing.expectEqual(written, m);
         try testing.expectEqualSlices(u8, out[0..written], again[0..m]);
     }
@@ -3051,7 +3048,7 @@ fn writerByteClass(source: []const u8, out: []u8) !usize {
         &fixed_in,
         &fw,
         &buffer,
-        .init,
+        .{},
     );
     try testing.expectEqual(source.len, consumed);
     const written = fw.end;
@@ -3203,7 +3200,7 @@ fn fuzzEncodeCorruption(_: void, smith: *Smith) anyerror!void {
     const frame_len = if (writer_frame)
         try streamFrame(source[0..size], &frame_buf)
     else
-        try encode.compress(source[0..size], &frame_buf, .init);
+        try encode.compress(source[0..size], &frame_buf, .{});
 
     var mut_buf: [encode_mutation_max]u8 = undefined;
     const meta = mutateEncodeFrame(smith, &mut_buf, frame_buf[0..frame_len], mutation);
@@ -3215,7 +3212,7 @@ fn fuzzEncodeCorruption(_: void, smith: *Smith) anyerror!void {
 fn streamFrame(source: []const u8, out: []u8) !usize {
     var fw: Io.Writer = .fixed(out);
     var buffer: Writer.Buffer(Writer.default_window_log) = undefined;
-    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .init);
+    var w: Writer = .init(Writer.default_window_log, &fw, &buffer, .{});
     try w.writer.writeAll(source);
     try w.finish();
     return fw.end;
@@ -3490,7 +3487,7 @@ fn machineryCase(comptime window_log: usize, smith: *Smith) !void {
     var out: [machinery_out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&out);
     var buffer: Writer.Buffer(window_log) = undefined;
-    var w: Writer = .init(window_log, &fw, &buffer, .init);
+    var w: Writer = .init(window_log, &fw, &buffer, .{});
 
     var model: [machinery_max]u8 = undefined;
     var model_len: usize = 0;
@@ -3625,7 +3622,7 @@ fn writerPoison(smith: *Smith) !void {
         0 => {
             var out: [8]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
-            var w: Writer = .init(10, &fw, &buffer, .init);
+            var w: Writer = .init(10, &fw, &buffer, .{});
             try w.writer.writeAll("a" ** 512);
             try testing.expectError(error.WriteFailed, w.finish());
             try testing.expectError(error.WriteFailed, w.finish());
@@ -3638,7 +3635,7 @@ fn writerPoison(smith: *Smith) !void {
         1 => {
             var out: [256]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
-            var w: Writer = .init(10, &fw, &buffer, .init);
+            var w: Writer = .init(10, &fw, &buffer, .{});
             try w.writer.writeAll("hello, zstd");
             try w.finish();
             const complete = fw.end;
@@ -3652,7 +3649,7 @@ fn writerPoison(smith: *Smith) !void {
         else => {
             var out: [64]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
-            var w: Writer = .init(10, &fw, &buffer, .init);
+            var w: Writer = .init(10, &fw, &buffer, .{});
             try w.finish();
             const complete = fw.end;
             try testing.expectError(error.WriteFailed, w.writer.writeAll("late"));
@@ -3808,7 +3805,7 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
 
     var target: [encode_bound + guard_len]u8 = undefined;
     const bound = encode.maxCompressedLength(size);
-    const written = try encode.compress(source[0..size], target[0..bound], .init);
+    const written = try encode.compress(source[0..size], target[0..bound], .{});
     try testing.expect(written <= bound);
     try expectTrailerConsistent(target[0..written], written, source[0..size], true);
     // The dfast class's frames stay inside the same bound (its block size is
@@ -3818,7 +3815,7 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
         const written3 = try encode.compress(
             source[0..size],
             level3[0..bound],
-            .{ .level = .@"3", .dict = null },
+            .{ .level = .@"3" },
         );
         try testing.expect(written3 <= bound);
         try expectTrailerConsistent(level3[0..written3], written3, source[0..size], true);
@@ -3855,20 +3852,20 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
         const exact_cap = @max(raw_need, header_gate);
         sentinel.fill(&target);
         if (raw_need >= header_gate) {
-            const exact = try encode.compress(source[0..size], target[0..raw_need], .init);
+            const exact = try encode.compress(source[0..size], target[0..raw_need], .{});
             try testing.expectEqual(raw_need, exact);
             try sentinel.expect(&target, exact);
         } else {
             try testing.expectError(
                 error.BufferTooSmall,
-                encode.compress(source[0..size], target[0..raw_need], .init),
+                encode.compress(source[0..size], target[0..raw_need], .{}),
             );
             try sentinel.expect(&target, raw_need);
         }
         sentinel.fill(&target);
         try testing.expectError(
             error.BufferTooSmall,
-            encode.compress(source[0..size], target[0 .. exact_cap - 1], .init),
+            encode.compress(source[0..size], target[0 .. exact_cap - 1], .{}),
         );
         try sentinel.expect(&target, exact_cap - 1);
     }
@@ -3878,7 +3875,7 @@ fn fuzzEncodeAmplification(_: void, smith: *Smith) anyerror!void {
     const cap = rangeAtMost(smith, 0, bound);
     sentinel.fill(&target);
     var plain: [encode_out_max]u8 = undefined;
-    if (encode.compress(source[0..size], target[0..cap], .init)) |short| {
+    if (encode.compress(source[0..size], target[0..cap], .{})) |short| {
         // A successful emission writes its frame into the target's front; a
         // block whose entropy attempt fails partway can leave bytes past the
         // returned length inside the target (the C's encoder does the same),

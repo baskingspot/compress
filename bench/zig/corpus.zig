@@ -239,9 +239,9 @@ pub fn main(init: std.process.Init) !void {
             // One blob at a time: every encoder writes the same scratch, so
             // the write must complete before the next encode starts.
             const target = try arena.alloc(u8, maxCompressedLength(size));
-            try writeBlob(io, arena, dir, &sums, base_name, "flate", target, compress.flate.encode.compress(raw, target, .init));
-            try writeBlob(io, arena, dir, &sums, base_name, "gz", target, compress.gzip.encode.compress(raw, target, .init));
-            try writeBlob(io, arena, dir, &sums, base_name, "zz", target, compress.zlib.encode.compress(raw, target, .init));
+            try writeBlob(io, arena, dir, &sums, base_name, "flate", target, compress.flate.encode.compress(raw, target, .{}));
+            try writeBlob(io, arena, dir, &sums, base_name, "gz", target, compress.gzip.encode.compress(raw, target, .{}));
+            try writeBlob(io, arena, dir, &sums, base_name, "zz", target, compress.zlib.encode.compress(raw, target, .{}));
             try writeBlob(io, arena, dir, &sums, base_name, "snappy", target, compress.snappy.encode.compressBlock(raw, target));
             try writeZstdBlob(io, arena, dir, dir_path, shape, base_name, raw);
             try writeBrotliBlob(io, arena, dir, dir_path, base_name, raw);

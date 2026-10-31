@@ -17,7 +17,7 @@ test "corrupt input fails with a named error" {
     // early, and the error says so.
     const data = "a stream that will be cut short";
     var raw: [64]u8 = undefined;
-    const raw_len = try flate.encode.compress(data, &raw, .init);
+    const raw_len = try flate.encode.compress(data, &raw, .{});
     try std.testing.expectError(
         error.Truncated,
         flate.decode.decompress(raw[0 .. raw_len - 2], &plain, null),
@@ -35,7 +35,7 @@ test "corrupt input fails with a named error" {
 test "a target too small fails before writing past it" {
     const data = "a decoded stream that will not fit";
     var member: [64]u8 = undefined;
-    const member_len = try gzip.encode.compress(data, &member, .init);
+    const member_len = try gzip.encode.compress(data, &member, .{});
 
     var tiny: [4]u8 = @splat(0xAA);
     try std.testing.expectError(

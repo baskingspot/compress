@@ -508,7 +508,7 @@ test "decode: the trailer checks are specific" {
     // as ErrChecksum; here the caller learns which half failed).
     var member: [golden_max]u8 = undefined;
     const source = "hello world\n";
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
     const window = try testing.allocator.alloc(u8, 64 + sentinel.len);
     defer testing.allocator.free(window);
 
@@ -546,7 +546,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // (`Truncated`, `InvalidBlockType`, ...).
     var member: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
     // BTYPE=11 (reserved, §3.2.3 of RFC 1951) in the first body byte: the
     // body's first three bits are BFINAL, BTYPE.
     member[header_len] |= 0b110;
@@ -557,7 +557,7 @@ test "decode: a corrupt body fails with flate's detail" {
 test "decode: the empty target is a valid cap for an empty member" {
     // `target` is a cap; an empty member needs no room.
     var member: [32]u8 = undefined;
-    const len = try encode.compress("", &member, .init);
+    const len = try encode.compress("", &member, .{});
     try testing.expectEqual(@as(usize, 0), try decompress(member[0..len], &.{}));
 }
 
@@ -566,7 +566,7 @@ test "decode: a bomb member is capped, never an overrun" {
     // overflowing write; the bytes past the cap are untouched.
     var member: [512]u8 = undefined;
     const source = "A" ** 4096;
-    const len = try encode.compress(source, &member, .init);
+    const len = try encode.compress(source, &member, .{});
     try testing.expect(len < member.len);
 
     var window: [4096 + @as(usize, sentinel.len)]u8 = undefined;

@@ -536,7 +536,7 @@ fn roundTrip(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -564,7 +564,7 @@ fn roundTripWithChecksum(source: []const u8) !void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -821,7 +821,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
         var compressed: Io.Writer.Allocating = .init(gpa);
         defer compressed.deinit();
         var wbuf: Writer.Buffer = undefined;
-        var w: Writer = .init(&compressed.writer, &wbuf, .init);
+        var w: Writer = .init(&compressed.writer, &wbuf, .{});
         try w.writer.writeAll(source);
         try w.finish();
 
@@ -846,7 +846,7 @@ test "Reader: consumes input exactly through the stream's last byte" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     const source = try makeSource(gpa, 100_000);
     defer gpa.free(source);
     try w.writer.writeAll(source);
@@ -879,7 +879,7 @@ test "Reader: a 32-KiB peek is served at any position" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -915,7 +915,7 @@ test "Reader: a request past the window fails with StreamTooLong" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -949,7 +949,7 @@ test "Reader: a consumer scanning for a delimiter past the window fails" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -973,7 +973,7 @@ test "Reader: a zero-length stream poll does not fail the stream" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&out.writer, &wbuf, .init);
+    var w: Writer = .init(&out.writer, &wbuf, .{});
     try w.writer.writeAll(src);
     try w.finish();
 
@@ -997,7 +997,7 @@ test "Reader: a stream ends cleanly and stickily" {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
-    var w: Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: Writer = .init(&compressed.writer, &wbuf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -1031,7 +1031,7 @@ test "Reader: random consumer machinery sequences stay correct" {
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var wbuf: Writer.Buffer = undefined;
-        var w: Writer = .init(&out.writer, &wbuf, .init);
+        var w: Writer = .init(&out.writer, &wbuf, .{});
         var p: usize = 0;
         while (p < input.len) {
             const n = @min(input.len - p, rand.intRangeAtMost(usize, 1, 90_000));

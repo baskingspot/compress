@@ -105,7 +105,7 @@ test "encode: the emitted member is the deterministic one" {
     // reserved bits clear), MTIME=0, OS=255; XFL is informational.
     var target: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try compress(source, &target, .init);
+    const len = try compress(source, &target, .{});
     const member = target[0..len];
 
     try testing.expectEqual(@as(u8, 0x1f), member[0]);
@@ -136,7 +136,7 @@ test "encode: the empty member is the golden bytes" {
     // the zero CRC-32 and ISIZE. The hostile-header pins in fuzz.zig use the
     // same bytes.
     var target: [maxCompressedLength(0)]u8 = undefined;
-    const len = try compress("", &target, .init);
+    const len = try compress("", &target, .{});
     try testing.expectEqualSlices(u8, &[_]u8{
         0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0xff, // header
         0x03, 0x00, // final empty fixed block
@@ -169,12 +169,12 @@ test "encode: a small target fails, an exact one fits" {
     // unspecified. Nothing is ever written past the target.
     const source = "hello world\n";
     var member: [maxCompressedLength(source.len)]u8 = undefined;
-    const len = try compress(source, &member, .init);
+    const len = try compress(source, &member, .{});
 
     // The exact member length fits (the body compressed under the bound).
     var exact: [maxCompressedLength(source.len) + 8]u8 = undefined;
     sentinel.fill(&exact);
-    const exact_len = try compress(source, exact[0..len], .init);
+    const exact_len = try compress(source, exact[0..len], .{});
     try testing.expectEqual(len, exact_len);
     try testing.expectEqualSlices(u8, member[0..len], exact[0..len]);
     // The trailing sentinels are untouched: no write past the target.
@@ -183,13 +183,13 @@ test "encode: a small target fails, an exact one fits" {
     // One byte short: BufferTooSmall, and the sentinel past the target holds.
     var short: [maxCompressedLength(source.len) + 8]u8 = undefined;
     sentinel.fill(&short);
-    try testing.expectError(error.BufferTooSmall, compress(source, short[0 .. len - 1], .init));
+    try testing.expectError(error.BufferTooSmall, compress(source, short[0 .. len - 1], .{}));
     try sentinel.expect(&short, len - 1);
 
     // Too small for even the framing.
     var tiny: [header_len + trailer_len - 1]u8 = undefined;
     sentinel.fill(&tiny);
-    try testing.expectError(error.BufferTooSmall, compress(source, &tiny, .init));
+    try testing.expectError(error.BufferTooSmall, compress(source, &tiny, .{}));
     try sentinel.expect(&tiny, 0);
 }
 
@@ -208,7 +208,7 @@ test "encode: the bound holds for every shape" {
         defer testing.allocator.free(target);
         var rng: std.Random.DefaultPrng = .init(0xC0FFEE);
         for (target) |*byte| byte.* = rng.random().int(u8);
-        const len = try compress(source, target, .init);
+        const len = try compress(source, target, .{});
         try testing.expect(len <= maxCompressedLength(source.len));
     }
     // Incompressible bytes across four block splits: the bound is tight at
@@ -236,7 +236,7 @@ test "encode: the golden outputs re-encode to decodable members" {
             else => continue, // Reject cases have no payload to re-encode.
         };
         if (maxCompressedLength(source.len) > member.len) continue;
-        const len = try compress(source, &member, .init);
+        const len = try compress(source, &member, .{});
         sentinel.fill(&plain);
         const decoded = try decode.decompress(member[0..len], plain[0..source.len]);
         try testing.expectEqual(source.len, decoded);

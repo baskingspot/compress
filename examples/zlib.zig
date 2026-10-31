@@ -30,7 +30,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn encode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {
     _ = arena;
-    _ = try zlib.Writer.streamAll(in, out, .init);
+    _ = try zlib.Writer.streamAll(in, out, .{});
 }
 
 fn decode(arena: Allocator, in: *Io.Reader, out: *Io.Writer) !void {

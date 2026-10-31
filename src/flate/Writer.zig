@@ -287,7 +287,7 @@ fn roundTrip(source: []const u8) !void {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll(source);
     try w.finish();
 
@@ -305,7 +305,7 @@ test "Writer: empty input is the final empty block" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.finish();
     try testing.expectEqualSlices(u8, &[_]u8{ 0x03, 0x00 }, out.written());
 }
@@ -318,7 +318,7 @@ test "Writer: no data block carries BFINAL" {
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 40);
     try w.finish();
     try testing.expect(out.written().len > 2);
@@ -358,7 +358,7 @@ test "Writer: blocks are maximal and the split follows the block size" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll(source);
     try w.finish();
     try testing.expectEqual(source.len + 5 * 16 + 2, out.written().len);
@@ -368,7 +368,7 @@ test "Writer: blocks are maximal and the split follows the block size" {
     // end a block early; this test makes none.
     var chunked: Io.Writer.Allocating = .init(gpa);
     defer chunked.deinit();
-    var w2: Writer = .init(&chunked.writer, &buf, .init);
+    var w2: Writer = .init(&chunked.writer, &buf, .{});
     var pos: usize = 0;
     var step: usize = 1;
     while (pos < source.len) {
@@ -397,7 +397,7 @@ test "Writer: history reaches back across emitted blocks" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll(source);
     try w.finish();
     // The first block is incompressible (stored: 65540 bytes); the second is
@@ -415,7 +415,7 @@ test "Writer: flush mid-stream emits the partial block and stays usable" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     try w.writer.writeAll("hello, ");
     try w.writer.flush();
     const first = out.written().len;
@@ -445,7 +445,7 @@ test "Writer: writableSliceGreedy on a full block emits, never drops" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
 
     // Fill the region exactly, without forcing a drain.
     try w.writer.writeAll("a" ** max_block_size);
@@ -489,7 +489,7 @@ test "Writer: a stream crossing the 4-GiB window-base wrap round-trips" {
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .init);
+        var w: Writer = .init(&out.writer, &buf, .{});
         w.window_base = base;
 
         // Mixed input: repeated phrases (long matches that cross compacts)
@@ -539,7 +539,7 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6", .dict = null });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll(input);
     try w.finish();
     // Random bytes cannot beat the stored form, so the stream is exactly
@@ -555,7 +555,7 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     // The one-shot path emits the identical stream, byte for byte.
     const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(input_len));
     defer gpa.free(one_shot);
-    const clen = try encode.compress(input, one_shot, .{ .level = .@"6", .dict = null });
+    const clen = try encode.compress(input, one_shot, .{ .level = .@"6" });
     try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
 }
 
@@ -571,7 +571,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var small: [8]u8 = undefined;
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
-    var w: Writer = .init(&fixed_out, &buf, .init);
+    var w: Writer = .init(&fixed_out, &buf, .{});
     try w.writer.writeAll("a" ** 4096);
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
@@ -579,7 +579,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     // Write and finish after finish.
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    var w2: Writer = .init(&out.writer, &buf, .init);
+    var w2: Writer = .init(&out.writer, &buf, .{});
     try w2.writer.writeAll("hello, flate");
     try w2.finish();
     try testing.expectError(error.WriteFailed, w2.writer.writeAll("more"));
@@ -604,7 +604,7 @@ test "Writer: random write machinery sequences stay correct" {
         var expect: std.ArrayList(u8) = .empty;
         defer expect.deinit(gpa);
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .init);
+        var w: Writer = .init(&out.writer, &buf, .{});
 
         var ops: usize = 0;
         while (ops < 10) : (ops += 1) {
@@ -732,7 +732,7 @@ test "Writer: the checksum hook folds every emitted byte exactly once, in order"
         var expect: std.ArrayList(u8) = .empty;
         defer expect.deinit(gpa);
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .init);
+        var w: Writer = .init(&out.writer, &buf, .{});
         var digest: golden.TestChecksum = .init;
         w.checksum = digest.hook();
 
@@ -806,13 +806,13 @@ test "Writer: the checksum hook folds multi-block streams and changes no byte" {
         var plain: Io.Writer.Allocating = .init(gpa);
         defer plain.deinit();
         var buf: Buffer = undefined;
-        var w: Writer = .init(&plain.writer, &buf, .init);
+        var w: Writer = .init(&plain.writer, &buf, .{});
         try pumpChunked(&w, source);
 
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var hooked_buf: Buffer = undefined;
-        var w2: Writer = .init(&out.writer, &hooked_buf, .init);
+        var w2: Writer = .init(&out.writer, &hooked_buf, .{});
         var digest: golden.TestChecksum = .init;
         w2.checksum = digest.hook();
         try pumpChunked(&w2, source);
@@ -830,7 +830,7 @@ test "Writer: the checksum hook folds a rebased direct-slice write in order" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .init);
+    var w: Writer = .init(&out.writer, &buf, .{});
     var digest: golden.TestChecksum = .init;
     w.checksum = digest.hook();
 
@@ -943,7 +943,7 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     var plainest: Io.Writer.Allocating = .init(gpa);
     defer plainest.deinit();
     var buf3: Buffer = undefined;
-    var w3: Writer = .init(&plainest.writer, &buf3, .init);
+    var w3: Writer = .init(&plainest.writer, &buf3, .{});
     try w3.writer.writeAll(source);
     try w3.finish();
     try testing.expectEqualSlices(u8, plainest.written(), plain.written());
@@ -968,7 +968,7 @@ test "Writer: random call sequences round-trip at both levels" {
             var expect: std.ArrayList(u8) = .empty;
             defer expect.deinit(gpa);
             var buf: Buffer = undefined;
-            var w: Writer = .init(&out.writer, &buf, .{ .level = level, .dict = null });
+            var w: Writer = .init(&out.writer, &buf, .{ .level = level });
             var ops: usize = 0;
             while (ops < 20) : (ops += 1) {
                 var b: [9000]u8 = undefined;
@@ -1030,7 +1030,7 @@ test "Writer: a flushed tiny block is stored at level 6" {
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var buf: Buffer = undefined;
-    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6", .dict = null });
+    var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
     try w.writer.writeAll(data[0..1]);
     try w.writer.flush();
     try w.writer.writeAll(data[1..2]);

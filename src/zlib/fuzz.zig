@@ -347,7 +347,7 @@ fn expectFailure(result: zlib.decode.DecompressError!usize) !void {
 fn reencodeRoundTrip(bytes: []const u8) !void {
     assert(bytes.len <= corrupt_out_max);
     var stream: [zlib.encode.maxCompressedLength(corrupt_out_max)]u8 = undefined;
-    const s_len = try zlib.encode.compress(bytes, &stream, .{ .level = .@"1", .dict = null });
+    const s_len = try zlib.encode.compress(bytes, &stream, .{ .level = .@"1" });
     try testing.expect(s_len <= zlib.encode.maxCompressedLength(bytes.len));
 
     var plain: [corrupt_out_max + guard_len]u8 = undefined;
@@ -398,7 +398,7 @@ fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
     // The marker room rides the same buffer: the stream followed by markers is
     // one contiguous slice.
     var stream_buf: [zlib.encode.maxCompressedLength(roundtrip_max) + marker_len]u8 = undefined;
-    const s_len = try zlib.encode.compress(source, &stream_buf, .{ .level = level, .dict = null });
+    const s_len = try zlib.encode.compress(source, &stream_buf, .{ .level = level });
     const stream = stream_buf[0..s_len];
 
     // The documented bound, on every emission.
@@ -721,7 +721,7 @@ fn fuzzHeaderTrailerCorruption(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     var mut_buf: [corrupt_mut_max]u8 = undefined;
-    const s_len = try zlib.encode.compress(source, &mut_buf, .{ .level = level, .dict = null });
+    const s_len = try zlib.encode.compress(source, &mut_buf, .{ .level = level });
     const meta = mutateStream(smith, &mut_buf, s_len);
     const mutated = mut_buf[0..meta.len];
 
@@ -786,7 +786,6 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var source_in: Io.Reader = .fixed(input);
     const consumed = try zlib.Writer.streamAll(&source_in, &stream_out.writer, .{
         .level = level,
-        .dict = null,
     });
     try testing.expectEqual(input.len, consumed);
     try testing.expectEqual(input.len, source_in.seek);
@@ -847,7 +846,7 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
     var stream2: Io.Writer.Allocating = .init(gpa);
     defer stream2.deinit();
     var wbuf: zlib.Writer.Buffer = undefined;
-    var w: zlib.Writer = .init(&stream2.writer, &wbuf, .{ .level = level, .dict = null });
+    var w: zlib.Writer = .init(&stream2.writer, &wbuf, .{ .level = level });
     var pos: usize = 0;
     var flushes: usize = 0;
     while (pos < input.len) {
@@ -913,7 +912,7 @@ fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
     var expect: std.ArrayList(u8) = .empty;
     defer expect.deinit(gpa);
     var wbuf: zlib.Writer.Buffer = undefined;
-    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level, .dict = null });
+    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level });
 
     // The op sources, sliced at Smith-chosen lengths.
     var a: [1024]u8 = undefined;
@@ -1047,7 +1046,7 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
     var wbuf: zlib.Writer.Buffer = undefined;
-    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level, .dict = null });
+    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level });
     var p: usize = 0;
     var flushes: usize = 0;
     while (p < input.len) {
@@ -1305,7 +1304,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
     var stream: Io.Writer.Allocating = .init(gpa);
     defer stream.deinit();
     var wbuf: zlib.Writer.Buffer = undefined;
-    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level, .dict = null });
+    var w: zlib.Writer = .init(&stream.writer, &wbuf, .{ .level = level });
     var pos: usize = 0;
     var flushes: usize = 0;
     while (pos < input.len) {
@@ -1417,7 +1416,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: flate.Writer.Buffer = undefined;
-    var w: flate.Writer = .init(&compressed.writer, &wbuf, .init);
+    var w: flate.Writer = .init(&compressed.writer, &wbuf, .{});
     var encode_fold: Fold = .{};
     w.checksum = encode_fold.hook();
     var pos: usize = 0;
@@ -1503,7 +1502,7 @@ fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];
 
     var stream_buf: [zlib.encode.maxCompressedLength(bomb_source_max)]u8 = undefined;
-    const s_len = try zlib.encode.compress(source, &stream_buf, .{ .level = level, .dict = null });
+    const s_len = try zlib.encode.compress(source, &stream_buf, .{ .level = level });
     const stream = stream_buf[0..s_len];
     try testing.expect(s_len <= zlib.encode.maxCompressedLength(source.len));
     if (shape == .run and source.len >= 1024) {

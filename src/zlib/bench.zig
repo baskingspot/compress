@@ -134,7 +134,7 @@ pub fn benchmarkZlibCompress(b: *testingx.B) !void {
                     defer bb.allocator.free(comp);
 
                     while (try bb.loop()) {
-                        const n = try zlib.encode.compress(input, comp, .init);
+                        const n = try zlib.encode.compress(input, comp, .{});
                         bb.keepAlive(n);
                     }
                     bb.setBytes(@intCast(input.len));
@@ -157,7 +157,7 @@ pub fn benchmarkZlibDecompress(b: *testingx.B) !void {
                     const bound = zlib.encode.maxCompressedLength(input.len);
                     const comp = try bb.allocator.alloc(u8, bound);
                     defer bb.allocator.free(comp);
-                    const clen = try zlib.encode.compress(input, comp, .init);
+                    const clen = try zlib.encode.compress(input, comp, .{});
 
                     const back = try bb.allocator.alloc(u8, input.len);
                     defer bb.allocator.free(back);
@@ -185,7 +185,7 @@ pub fn benchmarkZlibRatio(b: *testingx.B) !void {
                     const bound = zlib.encode.maxCompressedLength(input.len);
                     const comp = try bb.allocator.alloc(u8, bound);
                     defer bb.allocator.free(comp);
-                    const clen = try zlib.encode.compress(input, comp, .init);
+                    const clen = try zlib.encode.compress(input, comp, .{});
                     const ratio = @as(f64, @floatFromInt(clen)) /
                         @as(f64, @floatFromInt(input.len));
                     try bb.reportMetric(ratio, "ratio");
@@ -213,7 +213,7 @@ pub fn benchmarkFlateCompress(b: *testingx.B) !void {
                     defer bb.allocator.free(comp);
 
                     while (try bb.loop()) {
-                        const n = try flate.encode.compress(input, comp, .init);
+                        const n = try flate.encode.compress(input, comp, .{});
                         bb.keepAlive(n);
                     }
                     bb.setBytes(@intCast(input.len));
@@ -236,7 +236,7 @@ pub fn benchmarkFlateDecompress(b: *testingx.B) !void {
                     const bound = flate.encode.maxCompressedLength(input.len);
                     const comp = try bb.allocator.alloc(u8, bound);
                     defer bb.allocator.free(comp);
-                    const clen = try flate.encode.compress(input, comp, .init);
+                    const clen = try flate.encode.compress(input, comp, .{});
 
                     const back = try bb.allocator.alloc(u8, input.len);
                     defer bb.allocator.free(back);

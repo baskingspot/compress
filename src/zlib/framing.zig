@@ -23,17 +23,15 @@ const encode = @import("encode.zig");
 /// The inner codec's compression levels (flate's type, re-exported).
 pub const Level = flate.encode.Level;
 
-/// Encoder configuration. `.init` is the default: level 1, no dictionary.
+/// Encoder configuration. `.{}` is the default: level 1, no dictionary.
+// ast-grep-ignore: public-struct-field-default -- options bag: call sites override one knob
 pub const Options = struct {
     /// The compression level.
-    level: Level,
+    level: Level = .@"1",
     /// The stream's preset dictionary or `null` (`§2.2`): on encode it sets
     /// FDICT and writes the Adler-32 of the whole slice as DICTID; on decode
     /// it is checked against the header's DICTID before any body byte.
-    dict: ?[]const u8,
-
-    /// Level 1 with no dictionary.
-    pub const init: Options = .{ .level = .@"1", .dict = null };
+    dict: ?[]const u8 = null,
 };
 
 /// The failure detail a `Reader` records in `err` once its state is

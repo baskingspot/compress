@@ -11,15 +11,15 @@ test "the encoders size their own targets" {
     const data = "a target sized by the encoder, not by a guess";
 
     var member: [gzip.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const member_len = try gzip.encode.compress(data, &member, .init);
+    const member_len = try gzip.encode.compress(data, &member, .{});
     try std.testing.expect(member_len <= member.len);
 
     var stream: [zlib.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const stream_len = try zlib.encode.compress(data, &stream, .init);
+    const stream_len = try zlib.encode.compress(data, &stream, .{});
     try std.testing.expect(stream_len <= stream.len);
 
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const frame_len = try zstd.encode.compress(data, &frame, .init);
+    const frame_len = try zstd.encode.compress(data, &frame, .{});
     try std.testing.expect(frame_len <= frame.len);
 
     // snappy's raw-block form: with the exact size, `compressBlock` cannot
@@ -47,7 +47,7 @@ test "snappy reads the decoded length from the block header" {
     // zstd frame the caller produced may name it in the header, but the
     // decode still takes a target cap and returns the decoded length.
     var frame: [zstd.encode.maxCompressedLength(data.len)]u8 = undefined;
-    const frame_len = try zstd.encode.compress(data, &frame, .init);
+    const frame_len = try zstd.encode.compress(data, &frame, .{});
     var plain: [64]u8 = undefined;
     const plain_len = try zstd.decode.decompress(frame[0..frame_len], &plain, null);
     try std.testing.expectEqualSlices(u8, data, plain[0..plain_len]);

@@ -144,7 +144,7 @@ test "encode: the emitted stream is the deterministic one" {
     // multiple of 31 as one MSB-order u16 (§2.2).
     var target: [256]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 4;
-    const len = try compress(source, &target, .init);
+    const len = try compress(source, &target, .{});
     const stream = target[0..len];
 
     try testing.expectEqual(@as(u8, 0x78), stream[0]);
@@ -171,7 +171,7 @@ test "encode: the empty stream is the golden bytes" {
     // (`03 00`, flate's uniform ending), and the Adler-32 of nothing, 1. The
     // hostile-header pins in `fuzz.zig` carry the same bytes.
     var target: [maxCompressedLength(0)]u8 = undefined;
-    const len = try compress("", &target, .init);
+    const len = try compress("", &target, .{});
     try testing.expectEqualSlices(u8, &[_]u8{
         0x78, 0x01, // header: CM=8, CINFO=7, FLEVEL 0, FCHECK 1
         0x03, 0x00, // final empty fixed block
@@ -193,7 +193,7 @@ test "encode: FLEVEL follows the level bands" {
     // Each level emits a stream carrying the matching byte.
     var target: [64]u8 = undefined;
     for (std.enums.values(Level)) |level| {
-        const len = try compress("x", &target, .{ .level = level, .dict = null });
+        const len = try compress("x", &target, .{ .level = level });
         try testing.expectEqual(flgFor(level, false), target[1]);
         const header = @as(u16, target[0]) * 256 + @as(u16, target[1]);
         try testing.expectEqual(@as(u16, 0), header % 31);
@@ -208,12 +208,12 @@ test "encode: a small target fails, an exact one fits" {
     // unspecified. Nothing is ever written past the target.
     const source = "hello world\n";
     var stream: [maxCompressedLength(source.len)]u8 = undefined;
-    const len = try compress(source, &stream, .init);
+    const len = try compress(source, &stream, .{});
 
     // The exact stream length fits (the body compressed under the bound).
     var exact: [maxCompressedLength(source.len) + 8]u8 = undefined;
     sentinel.fill(&exact);
-    const exact_len = try compress(source, exact[0..len], .init);
+    const exact_len = try compress(source, exact[0..len], .{});
     try testing.expectEqual(len, exact_len);
     try testing.expectEqualSlices(u8, stream[0..len], exact[0..len]);
     // The trailing sentinels are untouched: no write past the target.
@@ -222,13 +222,13 @@ test "encode: a small target fails, an exact one fits" {
     // One byte short: BufferTooSmall, and the sentinel past the target holds.
     var short: [maxCompressedLength(source.len) + 8]u8 = undefined;
     sentinel.fill(&short);
-    try testing.expectError(error.BufferTooSmall, compress(source, short[0 .. len - 1], .init));
+    try testing.expectError(error.BufferTooSmall, compress(source, short[0 .. len - 1], .{}));
     try sentinel.expect(&short, len - 1);
 
     // Too small for even the framing.
     var tiny: [header_len + trailer_len - 1]u8 = undefined;
     sentinel.fill(&tiny);
-    try testing.expectError(error.BufferTooSmall, compress(source, &tiny, .init));
+    try testing.expectError(error.BufferTooSmall, compress(source, &tiny, .{}));
     try sentinel.expect(&tiny, 0);
 }
 
@@ -247,7 +247,7 @@ test "encode: the bound holds for every shape" {
         defer testing.allocator.free(target);
         var rng: std.Random.DefaultPrng = .init(0xC0FFEE);
         for (target) |*byte| byte.* = rng.random().int(u8);
-        const len = try compress(source, target, .init);
+        const len = try compress(source, target, .{});
         try testing.expect(len <= maxCompressedLength(source.len));
     }
     // Incompressible bytes across four block splits: the stored fallback hits
@@ -260,7 +260,7 @@ test "encode: the bound holds for every shape" {
     const target = try testing.allocator.alloc(u8, maxCompressedLength(noise.len));
     defer testing.allocator.free(target);
     for (std.enums.values(Level)) |level| {
-        const len = try compress(noise, target, .{ .level = level, .dict = null });
+        const len = try compress(noise, target, .{ .level = level });
         try testing.expectEqual(
             header_len + framing.bodyMaxCompressedLength(noise.len) + trailer_len,
             len,
@@ -281,7 +281,7 @@ test "encode: the golden payloads re-encode to decodable streams" {
             else => continue, // Reject cases have no payload to re-encode.
         };
         if (maxCompressedLength(source.len) > stream.len) continue;
-        const len = try compress(source, &stream, .init);
+        const len = try compress(source, &stream, .{});
         sentinel.fill(&plain);
         const decoded = try decode.decompress(stream[0..len], plain[0..source.len], null);
         try testing.expectEqual(source.len, decoded);
@@ -349,7 +349,7 @@ test "encode: a dictionary round-trips and carries the stream" {
     // with flate's `InvalidMatch`, the proof that the stream references the
     // preset history).
     var plain_stream: [maxCompressedLength(source.len)]u8 = undefined;
-    const plain_len = try compress(source, &plain_stream, .init);
+    const plain_len = try compress(source, &plain_stream, .{});
     try testing.expect(len * 2 < plain_len);
 
     // No dictionary: `DictionaryRequired`, before any body byte.
@@ -379,7 +379,7 @@ test "encode: an empty dictionary is no dictionary" {
     var with_null: [128]u8 = undefined;
     const source = "the quick brown fox jumps over the lazy dog. " ** 2;
     const a = try compress(source, &with_empty, .{ .level = .@"1", .dict = "" });
-    const b = try compress(source, &with_null, .init);
+    const b = try compress(source, &with_null, .{});
     try testing.expectEqual(b, a);
     try testing.expectEqualSlices(u8, with_null[0..b], with_empty[0..a]);
     try testing.expectEqual(@as(u8, 0), with_empty[1] & decode.flg_fdict);

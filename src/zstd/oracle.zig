@@ -121,7 +121,6 @@ pub fn main(init: std.process.Init) !u8 {
         const target = try arena.alloc(u8, zstd.encode.maxCompressedLength(source.len));
         const frame_len = zstd.encode.compress(source, target, .{
             .level = level,
-            .dict = null,
         }) catch |err| {
             print("zstd-oracle: {s}\n", .{@errorName(err)});
             return 1;
@@ -137,7 +136,7 @@ pub fn main(init: std.process.Init) !u8 {
         }
         const level = if (args.len == 4) try parseLevel(args[3]) else .@"1";
         const source = try file_reader.interface.allocRemaining(arena, .limited(max_input_len));
-        const options: zstd.encode.Options = .{ .level = level, .dict = null };
+        const options: zstd.encode.Options = .{ .level = level };
         var in: Io.Reader = .fixed(source);
         if (level == .@"3") {
             const buffer = try arena.create(

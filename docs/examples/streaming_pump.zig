@@ -9,7 +9,7 @@ fn streamingRoundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
     defer member.deinit();
 
     var wbuf: gzip.Writer.Buffer = undefined;
-    var w: gzip.Writer = .init(&member.writer, &wbuf, .init);
+    var w: gzip.Writer = .init(&member.writer, &wbuf, .{});
     try w.writer.writeAll(input);
     try w.finish();
 
@@ -34,7 +34,7 @@ test "streamAll pumps a whole stream in one call" {
     var member: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer member.deinit();
     var in: std.Io.Reader = .fixed(input);
-    _ = try gzip.Writer.streamAll(&in, &member.writer, .init);
+    _ = try gzip.Writer.streamAll(&in, &member.writer, .{});
 
     var back: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer back.deinit();
@@ -52,7 +52,7 @@ test "the caller owns the streaming buffer" {
 
     var wbuf: gzip.Writer.Buffer = undefined; // [98303]u8: a stack local is fine
     var in: std.Io.Reader = .fixed("caller-owned, stack-sized");
-    var w: gzip.Writer = .init(&out.writer, &wbuf, .init);
+    var w: gzip.Writer = .init(&out.writer, &wbuf, .{});
     try w.writer.writeAll("caller-owned, stack-sized");
     try w.finish();
     _ = &in;

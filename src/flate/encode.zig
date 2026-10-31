@@ -1336,20 +1336,18 @@ pub const Level = enum(u8) {
     }
 };
 
-/// Encoder configuration. `.init` is the default: level 1.
+/// Encoder configuration. `.{}` is the default: level 1.
+// ast-grep-ignore: public-struct-field-default -- options bag: call sites override one knob
 pub const Options = struct {
     /// The compression level. Only the levels in `Level` are representable.
-    level: Level,
+    level: Level = .@"1",
     /// The stream's preset dictionary or `null` (`§3.2.3`): history in front
     /// of the stream, which the finder's table is primed from and a match can
     /// reach into. Raw deflate names no dictionary, so the caller vouches for
     /// the bytes on both sides; zlib's FDICT/DICTID is the checked form
     /// (RFC 1950 §2.2). A dictionary longer than 32 KiB contributes only its
     /// last 32 KiB.
-    dict: ?[]const u8,
-
-    /// Level 1 with no dictionary.
-    pub const init: Options = .{ .level = .@"1", .dict = null };
+    dict: ?[]const u8 = null,
 };
 
 /// Compress `source` as one raw deflate stream into `target` and return the
@@ -1451,7 +1449,7 @@ fn roundTrip(input: []const u8) !void {
     const bound = maxCompressedLength(input.len);
     const comp = try allocator.alloc(u8, bound);
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .init);
+    const clen = try compress(input, comp, .{});
     try testing.expect(clen <= bound);
     try golden.expectFinalEmptyBlock(comp[0..clen]);
 
@@ -1466,7 +1464,7 @@ test "compress: options — every level round-trips and carries its tag" {
     var decoded: [4096]u8 = undefined;
     const input = "the quick brown fox jumps over the lazy dog. " ** 8;
 
-    try testing.expectEqual(Level.@"1", Options.init.level);
+    try testing.expectEqual(Level.@"1", @as(Options, .{}).level);
     try testing.expectEqual(@as(u8, 1), @intFromEnum(Level.@"1"));
     try testing.expectEqual(@as(u8, 6), @intFromEnum(Level.@"6"));
     try testing.expectEqual(Level.@"1", Level.fromInt(1).?);
@@ -1474,7 +1472,7 @@ test "compress: options — every level round-trips and carries its tag" {
     try testing.expectEqual(@as(?Level, null), Level.fromInt(2));
     try testing.expectEqual(@as(?Level, null), Level.fromInt(0));
     for (std.enums.values(Level)) |level| {
-        const n = try compress(input, &comp, .{ .level = level, .dict = null });
+        const n = try compress(input, &comp, .{ .level = level });
         const dn = try decode.decompress(comp[0..n], &decoded, null);
         try testing.expectEqualSlices(u8, input, decoded[0..dn]);
     }
@@ -1491,10 +1489,10 @@ test "compress: level 6 emits a dynamic-Huffman block for compressible text" {
     const input = "the quick brown fox jumps over the lazy dog. " ** 400;
     const dynamic_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(dynamic_comp);
-    const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6", .dict = null });
+    const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6" });
     const fixed_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(fixed_comp);
-    const fixed_len = try compress(input, fixed_comp, .{ .level = .@"1", .dict = null });
+    const fixed_len = try compress(input, fixed_comp, .{ .level = .@"1" });
     try testing.expect(dynamic_len < fixed_len);
 
     // BFINAL=0, BTYPE=10: the first three bits are 1, 0, 0 (LSB first).
@@ -1565,7 +1563,7 @@ test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
     const gpa = testing.allocator;
     for (cases) |case| {
         var comp: [256]u8 = undefined;
-        const n = try compress(case.input, &comp, .{ .level = .@"6", .dict = null });
+        const n = try compress(case.input, &comp, .{ .level = .@"6" });
         try testing.expectEqualSlices(u8, case.want, comp[0..n]);
         const target = try gpa.alloc(u8, case.input.len + sentinel.len);
         defer gpa.free(target);
@@ -1622,7 +1620,7 @@ test "compress: level 6 round-trips every shape" {
             defer gpa.free(input);
             const comp = try gpa.alloc(u8, maxCompressedLength(len));
             defer gpa.free(comp);
-            const clen = compress(input, comp, .{ .level = .@"6", .dict = null }) catch |err| {
+            const clen = compress(input, comp, .{ .level = .@"6" }) catch |err| {
                 print("FAIL: {s} len {d}: {s}\n", .{ @tagName(shape), len, @errorName(err) });
                 return err;
             };
@@ -1725,7 +1723,7 @@ test "compress: empty input is the final empty block" {
     // block `03 00`. Spec: §3.2.6 — the fixed end-of-block code is seven zero
     // bits.
     var target: [4]u8 = undefined;
-    const n = try compress("", &target, .init);
+    const n = try compress("", &target, .{});
     try testing.expectEqual(@as(usize, 2), n);
     try testing.expectEqualSlices(u8, &[_]u8{ 0x03, 0x00 }, target[0..n]);
     try testing.expectEqual(@as(usize, 2), maxCompressedLength(0));
@@ -1757,7 +1755,7 @@ test "compress: §3.2.4 stored fallback for incompressible input" {
     defer allocator.free(input);
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .init);
+    const clen = try compress(input, comp, .{});
 
     try testing.expectEqual(@as(u8, 0), comp[0] & 0b1); // BFINAL clear on data
     try testing.expectEqual(@as(u8, 0b00), (comp[0] >> 1) & 0b11); // BTYPE stored
@@ -1839,7 +1837,7 @@ test "compress: maxCompressedLength bounds every emission" {
             const bound = maxCompressedLength(len);
             const comp = try allocator.alloc(u8, bound);
             defer allocator.free(comp);
-            const clen = compress(input, comp, .init) catch |err| {
+            const clen = compress(input, comp, .{}) catch |err| {
                 print(
                     "FAIL: {s} len {d}: {s}\n",
                     .{ @tagName(shape), len, @errorName(err) },
@@ -1862,7 +1860,7 @@ test "compress: maxCompressedLength bounds every emission" {
         const bound = maxCompressedLength(input.len);
         const comp = try allocator.alloc(u8, bound);
         defer allocator.free(comp);
-        const clen = try compress(input, comp, .init);
+        const clen = try compress(input, comp, .{});
         try testing.expect(clen <= bound);
         try roundTrip(input);
     }
@@ -1871,9 +1869,9 @@ test "compress: maxCompressedLength bounds every emission" {
 test "compress: a target smaller than the output is BufferTooSmall" {
     // `error.BufferTooSmall` when `target` is too small.
     var target: [2]u8 = undefined;
-    try testing.expectError(error.BufferTooSmall, compress("hello, flate!", &target, .init));
+    try testing.expectError(error.BufferTooSmall, compress("hello, flate!", &target, .{}));
     // ... and the empty stream is the smallest legal output.
-    try testing.expectEqual(@as(usize, 2), try compress("", &target, .init));
+    try testing.expectEqual(@as(usize, 2), try compress("", &target, .{}));
 }
 
 test "compress: deterministic" {
@@ -1886,8 +1884,8 @@ test "compress: deterministic" {
     defer allocator.free(first);
     const second = try allocator.alloc(u8, bound);
     defer allocator.free(second);
-    const a = try compress(input, first, .init);
-    const b = try compress(input, second, .init);
+    const a = try compress(input, first, .{});
+    const b = try compress(input, second, .{});
     try testing.expectEqual(a, b);
     try testing.expectEqualSlices(u8, first[0..a], second[0..b]);
 }
@@ -1934,7 +1932,7 @@ test "compress: a match reaches back across a block boundary" {
 
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(input, comp, .init);
+    const clen = try compress(input, comp, .{});
     // The first block is incompressible (stored: 65540 bytes); the second is
     // one match of 31768 bytes (~125 chunks of 258).
     try testing.expect(clen > 65540);
@@ -2003,7 +2001,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
     const input = [_]u8{'A'} ** 21;
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(&input, comp, .init);
+    const clen = try compress(&input, comp, .{});
     const want = [_]u8{ 0x72, 0xc4, 0x06, 0x00, 0x03, 0x00 };
     try testing.expectEqualSlices(u8, &want, comp[0..clen]);
     try roundTrip(&input);
@@ -2117,7 +2115,7 @@ test "compress: a preset dictionary is matchable history" {
     // The dictionary carried the stream: without it the same source is a few
     // literals per repetition, with it the repetitions are matches.
     var plain_comp: [maxCompressedLength(source.len)]u8 = undefined;
-    const without_dict = try compress(source, &plain_comp, .init);
+    const without_dict = try compress(source, &plain_comp, .{});
     try testing.expect(with_dict < without_dict / 2);
 
     // The stream depends on the dictionary's bytes: without it (or with a
@@ -2166,7 +2164,7 @@ test "compress: a dictionary longer than 32 KiB contributes only its tail" {
     // match, so the stream is the stored form.
     const front = dict[0..64];
     const front_len = try compress(front, comp, .{ .level = .@"1", .dict = dict });
-    const front_plain = try compress(front, comp, .init);
+    const front_plain = try compress(front, comp, .{});
     try testing.expectEqual(front_plain, front_len);
     try testing.expect(tail_len < front_len / 2);
 }
@@ -2220,7 +2218,7 @@ test "compress: every length and distance code round trips" {
 
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
-    const clen = try compress(&input, comp, .init);
+    const clen = try compress(&input, comp, .{});
     try testing.expect(clen <= maxCompressedLength(input.len));
 
     const back = try allocator.alloc(u8, input.len + sentinel.len);
