@@ -35,6 +35,7 @@ const State = internal.reader.State;
 const VTable = internal.reader.VTable;
 const common = @import("common.zig");
 const readVarInt = common.readVarInt;
+const readInt = common.readInt;
 /// The checksum hook's type: a container's state plus its byte-fold function
 /// (`Checksum.zig`). It is re-exported here so a container can name it
 /// through this namespace (one type across build modules) and assign it to
@@ -132,7 +133,10 @@ const Bits = struct {
         assert(n <= max_peek_bits);
         try self.bufferBits(n);
         const buffered = self.input.buffer[self.input.seek..self.input.end];
-        const window = readVarInt(u64, buffered[0..@min(buffered.len, 8)]);
+        const window = if (buffered.len >= 8)
+            readInt(u64, buffered[0..8])
+        else
+            readVarInt(u64, buffered[0..@min(buffered.len, 8)]);
         return (window >> self.consumed) & ((@as(u64, 1) << n) - 1);
     }
 
@@ -416,6 +420,7 @@ fn decodeSymbols(r: *Reader) Error!usize {
         .dynamic_match => |length| return r.copyMatchStep(length, false),
         else => {},
     }
+    if (r.fastPathReady()) return r.fastSymbols();
     const fixed = r.phase == .fixed_block;
     const literal = if (fixed) &decode.fixed_literal else &r.literal;
     const symbol = try literal.decode(Bits, &r.bits);
@@ -439,6 +444,145 @@ fn decodeSymbols(r: *Reader) Error!usize {
     else
         .{ .dynamic_match = @intCast(length) };
     return 0;
+}
+
+/// The input bytes the fast path needs buffered: one refill's 8-byte load
+/// past the bytes already loaded. Below this, symbols take the slow path.
+const fast_input_len = 16;
+/// The window room the fast path needs: the longest match (`§3.2.5`) plus
+/// the 16 bytes its chunked copy may write past the match's end.
+const fast_room = max_match_len + 16;
+
+/// Whether `fastSymbols` can run: the input has `fast_input_len` bytes
+/// buffered and the window has `fast_room` free.
+fn fastPathReady(r: *const Reader) bool {
+    const input = r.bits.input;
+    return input.end - input.seek >= fast_input_len and
+        r.reader.buffer.len - r.reader.end >= fast_room;
+}
+
+/// The fast path through a Huffman block (`§3.2.7`): whole symbols, matches
+/// included, decoded from a local 64-bit bit buffer loaded straight from the
+/// input's buffered bytes, until the block ends, the input has fewer than
+/// `fast_input_len` bytes left to load, or the window has less than
+/// `fast_room` free. It stops only between symbols, writes `input`'s
+/// position and `bits.consumed` back exactly, and checks what the slow path
+/// checks, so the two decode the same streams the same way. Returns the
+/// bytes added.
+fn fastSymbols(r: *Reader) Error!usize {
+    const input = r.bits.input;
+    const fixed = r.phase == .fixed_block;
+    const literal = if (fixed) &decode.fixed_literal else &r.literal;
+    const distance = if (fixed) &decode.fixed_distance else &r.distance;
+    const in = input.buffer[input.seek..input.end];
+    const out = r.reader.buffer;
+    const start = r.reader.end;
+    var end = start;
+    // The bit buffer holds `count` valid bits; `in[0..pos]` is loaded. Each
+    // refill tops it up to at least 56 bits, enough for the widest symbol:
+    // a 15-bit length code, 5 extra bits, a 15-bit distance code, and 13
+    // extra bits. Bits above `count` are 0 or the next input bits, so the
+    // OR of the next load leaves them as they are.
+    var bits: u64 = readInt(u64, in[0..8]);
+    var pos: usize = 7;
+    var count: u6 = 56;
+    bits >>= r.bits.consumed;
+    count -= r.bits.consumed;
+    var ended = false;
+    while (pos + 8 <= in.len and out.len - end >= fast_room) {
+        bits |= readInt(u64, in[pos..][0..8]) << count;
+        pos += (63 - count) >> 3;
+        count |= 56;
+        var lit = try fastResolve(decode.LitDecoder, literal, bits);
+        if (lit.symbol < 256) {
+            bits >>= lit.len;
+            count -= lit.len;
+            out[end] = @intCast(lit.symbol);
+            end += 1;
+            // A second symbol from the same refill, when 15 bits remain:
+            // photographs are mostly runs of literals. A length code needs
+            // 33 bits after its own, so it waits for the next refill unless
+            // they are there or one can load them.
+            if (count < 15) continue;
+            lit = try fastResolve(decode.LitDecoder, literal, bits);
+            if (lit.symbol < 256) {
+                bits >>= lit.len;
+                count -= lit.len;
+                out[end] = @intCast(lit.symbol);
+                end += 1;
+                continue;
+            }
+            if (lit.symbol == 256 or count - lit.len < 33 and pos + 8 > in.len) continue;
+            if (count - lit.len < 33) {
+                bits |= readInt(u64, in[pos..][0..8]) << count;
+                pos += (63 - count) >> 3;
+                count |= 56;
+            }
+        }
+        bits >>= lit.len;
+        count -= lit.len;
+        if (lit.symbol == 256) {
+            ended = true;
+            break;
+        }
+        // §3.2.6: values 286-287 never occur in the compressed data.
+        if (lit.symbol > 285) return error.InvalidCode;
+        const length_index: usize = lit.symbol - 257;
+        const length_bits: u6 = decode.length_extra[length_index];
+        const len: usize = @intCast(decode.length_base[length_index] + low(bits, length_bits));
+        bits >>= length_bits;
+        count -= length_bits;
+        const dist = try fastResolve(decode.DistDecoder, distance, bits);
+        // §3.2.6: distance codes 30-31 never occur.
+        if (dist.symbol > 29) return error.InvalidCode;
+        bits >>= dist.len;
+        count -= dist.len;
+        const distance_bits: u6 = decode.distance_extra[dist.symbol];
+        const distance_base = decode.distance_base[dist.symbol];
+        const match_distance: usize = @intCast(distance_base + low(bits, distance_bits));
+        bits >>= distance_bits;
+        count -= distance_bits;
+        // §3.2.3 — no distance past the beginning of the output stream.
+        if (match_distance > r.total_out + (end - start)) return error.InvalidMatch;
+        assert(match_distance <= end);
+        // 16 or 8 bytes at a time, past the match's end into the free
+        // window: a chunk's source ends at or before its destination.
+        if (match_distance >= 16) {
+            var i: usize = 0;
+            while (i < len) : (i += 16) {
+                fastmem.copy(u8, out[end + i ..][0..16], out[end + i - match_distance ..][0..16]);
+            }
+        } else if (match_distance >= 8) {
+            var i: usize = 0;
+            while (i < len) : (i += 8) {
+                fastmem.copy(u8, out[end + i ..][0..8], out[end + i - match_distance ..][0..8]);
+            }
+        } else {
+            decode.copyMatch(out, end, match_distance, len);
+        }
+        end += len;
+    }
+    const used = pos * 8 - count;
+    input.toss(used / 8);
+    r.bits.consumed = @intCast(used % 8);
+    const added = end - start;
+    r.reader.end = end;
+    r.total_out += added;
+    if (ended) try r.endBlock();
+    return added;
+}
+
+/// The fast path's symbol lookup: the primary table's entry when it is a
+/// whole code, else the chained chase.
+inline fn fastResolve(comptime Table: type, table: *const Table, bits: u64) Error!decode.Resolved {
+    const entry = table.lookup[@intCast(bits & Table.mask)];
+    if (entry & 0xF == 0 or entry == 0xFFFF) return table.resolve(bits) orelse error.InvalidCode;
+    return .{ .symbol = entry >> 4, .len = @intCast(entry & 0xF) };
+}
+
+/// The low `n` bits of `bits`.
+inline fn low(bits: u64, n: u6) u64 {
+    return bits & ((@as(u64, 1) << n) - 1);
 }
 
 /// A match's distance (`§3.2.5`), then the copy: `§3.2.3`'s reach check
@@ -1129,6 +1273,108 @@ test "Reader: a corrupt stream fails and stays failed" {
         try testing.expectEqual(tc.want, r.err.?);
         var sink: Io.Writer.Discarding = .init(&.{});
         try testing.expectError(error.ReadFailed, r.reader.stream(&sink.writer, .unlimited));
+    }
+}
+
+/// An input that hands over one byte per read into a 4-byte buffer, so the
+/// decoder never has `fast_input_len` bytes buffered and every symbol takes
+/// the slow path.
+const OneByte = struct {
+    data: []const u8,
+    buffer: [4]u8 = undefined,
+    reader: Io.Reader,
+
+    fn init(o: *OneByte, data: []const u8) void {
+        o.* = .{
+            .data = data,
+            .reader = .{
+                .vtable = &.{ .stream = stream },
+                .buffer = &o.buffer,
+                .seek = 0,
+                .end = 0,
+            },
+        };
+    }
+
+    fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
+        const o: *OneByte = @fieldParentPtr("reader", r);
+        if (o.data.len == 0) return error.EndOfStream;
+        const n = try w.write(o.data[0..limit.minInt(1)]);
+        o.data = o.data[n..];
+        return n;
+    }
+};
+
+/// The bytes `input` decodes to, or the decode error.
+fn decodeAll(gpa: mem.Allocator, input: *Io.Reader) !union(enum) { ok: []u8, err: Error } {
+    var rbuf: Buffer = undefined;
+    var r: Reader = .init(input, &rbuf, null);
+    var out: Io.Writer.Allocating = .init(gpa);
+    errdefer out.deinit();
+    _ = r.reader.streamRemaining(&out.writer) catch |err| switch (err) {
+        error.ReadFailed => {
+            out.deinit();
+            return .{ .err = r.err.? };
+        },
+        else => return err,
+    };
+    return .{ .ok = try out.toOwnedSlice() };
+}
+
+test "Reader: the fast path decodes what the slow path decodes" {
+    // RFC 1951 §3.2.5-§3.2.7: the fast path (whole symbols from a local bit
+    // buffer) and the slow path (one symbol per step through `Bits`) must
+    // agree on every stream, valid or not: the same bytes, or the same
+    // error. The fixed input takes the fast path wherever 16 bytes are
+    // buffered; the one-byte input never does.
+    const gpa = testing.allocator;
+    const source = try makeSource(gpa, 300_000);
+    defer gpa.free(source);
+    // Matches at every distance class, 1 to 32768, and literal runs.
+    var rng: DefaultPrng = .init(0x5EED);
+    var i: usize = 40_000;
+    while (i < source.len) : (i += 1 + rng.random().uintLessThan(usize, 64)) {
+        const dist = @min(i, @as(usize, 1) << rng.random().uintLessThan(u5, 16));
+        const len = @min(source.len - i, 3 + rng.random().uintLessThan(usize, 256));
+        for (0..len) |k| source[i + k] = source[i + k - dist];
+        i += len;
+    }
+    var streams: std.ArrayList([]u8) = .empty;
+    defer {
+        for (streams.items) |x| gpa.free(x);
+        streams.deinit(gpa);
+    }
+    for ([_]encode.Level{ .@"1", .@"6" }) |level| {
+        const target = try gpa.alloc(u8, encode.maxCompressedLength(source.len));
+        defer gpa.free(target);
+        const n = try encode.compress(source, target, .{ .level = level });
+        try streams.append(gpa, try gpa.dupe(u8, target[0..n]));
+    }
+    for (golden.stream_cases) |tc| try streams.append(gpa, try gpa.dupe(u8, tc.source));
+    // Corrupt copies: a flipped bit anywhere hits a table, a distance, a
+    // length, or a block boundary.
+    const goods = [2][]const u8{ streams.items[0], streams.items[1] };
+    for (goods) |good| {
+        for (0..40) |_| {
+            const bad = try gpa.dupe(u8, good);
+            bad[rng.random().uintLessThan(usize, bad.len)] ^= @as(u8, 1) << rng.random().int(u3);
+            try streams.append(gpa, bad);
+        }
+    }
+    for (streams.items, 0..) |stream, k| {
+        var fixed_in: Io.Reader = .fixed(stream);
+        const fast = try decodeAll(gpa, &fixed_in);
+        defer if (fast == .ok) gpa.free(fast.ok);
+        var one: OneByte = undefined;
+        one.init(stream);
+        const slow = try decodeAll(gpa, &one.reader);
+        defer if (slow == .ok) gpa.free(slow.ok);
+        try testing.expectEqual(std.meta.activeTag(slow), std.meta.activeTag(fast));
+        switch (slow) {
+            .ok => |want| try testing.expectEqualSlices(u8, want, fast.ok),
+            .err => |want| try testing.expectEqual(want, fast.err),
+        }
+        if (k < 2) try testing.expectEqualSlices(u8, source, fast.ok);
     }
 }
 

@@ -14,6 +14,18 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   decodes straight from the input `Io.Reader` through a bit reader with a few
   bytes of lookahead: a Huffman block has no compressed length, so there is no
   staging region. std's decoder works the same way (flate-notes §5.4).
+- The Reader decodes Huffman blocks on a fast path (`fastSymbols`) whenever
+  the input has 16 bytes buffered and the window 274 bytes free: whole
+  symbols, matches included, from a local 64-bit bit buffer loaded straight
+  from the input's buffer with a branchless refill (to at least 56 bits, the
+  widest length and distance pair), up to two literals per refill, and
+  16- or 8-byte match copies that may write past the match into the free
+  window. It stops only between symbols and writes the bit position back,
+  so the one-symbol-per-step path resumes exactly; the test "the fast path
+  decodes what the slow path decodes" pins their agreement on valid and
+  corrupt streams. The literal/length primary table is 10 bits (9 before):
+  measured faster on PNG image data, where 10-bit literal codes are common.
+  Numbers: docs/slop/results/flate-fast-inflate-20261101.md.
 - Level 1 is fixed Huffman with a stored fallback (OQ1). Fixed emission needs
   no header, precode, or table build, and zlib-ng's fastest level is fixed-only
   too (flate-notes §5.3). The cost is ratio: a literal takes 8-9 bits against

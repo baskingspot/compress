@@ -5,6 +5,13 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- `flate.Reader`, and so `zlib.Reader`, `gzip.Reader`, and the zlib and gzip
+  one-shot decoders, inflate Huffman blocks 2 to 2.6 times faster: symbols
+  decode from a 64-bit bit buffer over the input's buffered bytes, and the
+  literal/length table's primary lookup is 10 bits.
+
 ## [0.2.0] - 2026-10-31
 
 ### Changed

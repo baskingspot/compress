@@ -355,8 +355,36 @@ pub fn HuffmanDecoder(
             }
             return error.InvalidCode;
         }
+
+        /// The primary table's index mask: `lookup[peeked & mask]` packs
+        /// `(symbol << 4) | code_len` for every code no longer than
+        /// `lookup_bits`, and has a zero `code_len` otherwise.
+        pub const mask = lookup_mask;
+
+        /// The symbol and code length whose code starts `peeked`, which
+        /// holds at least `max_bits` valid bits, or null for a bit pattern
+        /// no code matches. The streaming `Reader`'s fast path decodes
+        /// through this from its own bit buffer when the primary entry is
+        /// not a whole code.
+        pub fn resolve(self: *const Self, peeked: u64) ?Resolved {
+            const entry = self.lookup[@intCast(peeked & lookup_mask)];
+            if (entry == invalid) return null;
+            if ((entry & 0xF) != 0) return .{ .symbol = entry >> 4, .len = @intCast(entry & 0xF) };
+            var symbol = entry >> 4;
+            while (symbol != chain_end) {
+                const node = self.chain[symbol];
+                if ((peeked & ((@as(u64, 1) << node.len) - 1)) == node.wire) {
+                    return .{ .symbol = symbol, .len = node.len };
+                }
+                symbol = node.next;
+            }
+            return null;
+        }
     };
 }
+
+/// A decoded Huffman symbol and the length of its code.
+pub const Resolved = struct { symbol: u16, len: u6 };
 
 /// The code's wire value: `code` is the canonical numeral (`§3.2.2`), whose
 /// MSB is transmitted first, so the low `len` bits of the result are the code
@@ -400,9 +428,9 @@ fn checkLengths(comptime kind: TreeKind, lens: []const u4) TreeError!void {
 }
 
 /// Decode table for the literal/length alphabet: 288 symbols, codes up to 15
-/// bits, a 9-bit primary table. Symbols 286-287 are reserved (`§3.2.6`) and
+/// bits, a 10-bit primary table. Symbols 286-287 are reserved (`§3.2.6`) and
 /// callers reject them.
-pub const LitDecoder = HuffmanDecoder(288, 15, 9, .literal_length);
+pub const LitDecoder = HuffmanDecoder(288, 15, 10, .literal_length);
 /// Decode table for the distance alphabet: 32 symbols, codes up to 15 bits, a
 /// 9-bit primary table. Codes 30-31 are reserved (`§3.2.6`) and callers reject
 /// them.
