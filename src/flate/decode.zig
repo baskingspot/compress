@@ -226,10 +226,13 @@ pub const TreeKind = enum {
 ///
 /// A code's wire bits are read MSB-of-code first (`§3.1.1`), so bit 0 of a
 /// table index is the first bit on the wire and the index's low `len` bits are
-/// the code. `lookup[i]` packs `(symbol << 4) | code_len`; `code_len == 0`
-/// marks a primary slot whose codes are all longer than `lookup_bits` (the
-/// chain head is in the same field), and `invalid` marks a slot no code
-/// matches (`error.InvalidCode`).
+/// the code. The low 16 bits of `lookup[i]` pack `(symbol << 4) | code_len`;
+/// `code_len == 0` marks a primary slot whose codes are all longer than
+/// `lookup_bits` (the chain head is in the same field), and 0xFFFF marks a
+/// slot no code matches (`error.InvalidCode`). The literal/length and
+/// distance tables' entries are 32 bits, with what a decoder needs beyond
+/// the symbol packed beside it (`fast`), so one load decodes a whole
+/// symbol.
 ///
 /// Public because the streaming `Reader` builds the same tables and decodes
 /// through the same code: the two layers differ in where the bits come from and
@@ -242,8 +245,12 @@ pub fn HuffmanDecoder(
 ) type {
     const table_size = 1 << lookup_bits;
     const lookup_mask: u16 = table_size - 1;
-    const invalid: u16 = 0xFFFF;
     const chain_end: u16 = 0xFFFF;
+    const Entry = if (kind == .precode) u16 else u32;
+    // The symbol field's width: a distance entry keeps its total bit count
+    // above a 5-bit symbol.
+    const symbol_mask: u16 = if (kind == .distance) 0x1F else 0xFFF;
+    const invalid: Entry = 0xFFFF | fast.exceptional(kind);
 
     return struct {
         const Self = @This();
@@ -263,7 +270,7 @@ pub fn HuffmanDecoder(
         // linked into a chain head. An `@splat` default here would be a second
         // full fill per build, through the scalar compiler-rt memset on
         // aarch64.
-        lookup: [table_size]u16 = undefined,
+        lookup: [table_size]Entry = undefined,
         chain: [alphabet_size]Chain = undefined,
 
         /// Build the table from `lens`: the code length of each symbol, in
@@ -278,52 +285,65 @@ pub fn HuffmanDecoder(
             assert(lens.len <= alphabet_size);
             assert(kind != .literal_length or lens.len > 256);
             try checkLengths(kind, lens);
-            // fastmem over `@splat`: the splat lowers to the scalar
-            // compiler-rt memset on aarch64, while `invalid` (0xFFFF, all
-            // bytes equal) dispatches to the vectorized byte kernel. The
-            // comptime branch serves the fixed tables, built at comptime.
-            if (@inComptime()) {
-                self.lookup = @splat(invalid);
-            } else {
-                fastmem.set(u16, &self.lookup, invalid);
-            }
 
             var count: [max_bits + 1]u16 = @splat(0);
-            for (lens) |len| {
-                if (len != 0) count[len] += 1;
+            for (lens) |len| count[len] += 1;
+
+            // The symbols in canonical order, by code length and then by
+            // symbol (`§3.2.2`): `sorted[first[len]..]` has the codes of
+            // length `len`, whose numerals count up from `next_code[len]`.
+            var first: [max_bits + 2]u16 = undefined;
+            first[1] = 0;
+            for (1..max_bits + 1) |len| first[len + 1] = first[len] + count[len];
+            var sorted: [alphabet_size]u16 = undefined;
+            var at = first;
+            for (lens, 0..) |len, symbol| {
+                if (len == 0) continue;
+                sorted[at[len]] = @intCast(symbol);
+                at[len] += 1;
             }
 
             // RFC 1951 §3.2.2, step 2: bl_count -> next_code.
             var next_code: [max_bits + 1]u16 = @splat(0);
             var code: u16 = 0;
+            count[0] = 0;
             for (1..max_bits + 1) |bits| {
                 code = (code + count[bits - 1]) << 1;
                 next_code[bits] = code;
             }
 
-            var chain_heads: [table_size]u16 = undefined;
-            // `chain_end` is 0xFFFF: all bytes equal, the vectorized fill
-            // (the comptime branch is the fixed tables again).
-            if (@inComptime()) {
-                chain_heads = @splat(chain_end);
-            } else {
-                fastmem.set(u16, &chain_heads, chain_end);
-            }
-            for (lens, 0..) |len, symbol| {
-                if (len == 0) continue;
-                const wire = wireBits(next_code[len], len);
-                next_code[len] += 1;
-                if (len <= lookup_bits) {
-                    // Every primary index whose low `len` bits are the code.
-                    var i: usize = wire;
-                    while (i < table_size) : (i += @as(usize, 1) << len) {
-                        self.lookup[i] = (@as(u16, @intCast(symbol)) << 4) | len;
+            // The primary table a length at a time: the first 2^len slots
+            // hold every code up to `len` bits, so doubling them repeats the
+            // shorter codes across the next length's slots, and each code of
+            // that length then takes one slot. Slots no short code fills
+            // stay `invalid`: those of long codes, and the rest of an
+            // incomplete code.
+            self.lookup[0] = invalid;
+            self.lookup[1] = invalid;
+            for (1..lookup_bits + 1) |len| {
+                const half = @as(usize, 1) << @intCast(len - 1);
+                if (len > 1) {
+                    if (@inComptime()) {
+                        for (0..half) |i| self.lookup[half + i] = self.lookup[i];
+                    } else {
+                        fastmem.copy(Entry, self.lookup[half..][0..half], self.lookup[0..half]);
                     }
-                } else {
+                }
+                for (sorted[first[len]..first[len + 1]], 0..) |symbol, k| {
+                    const wire = wireBits(next_code[len] + @as(u16, @intCast(k)), @intCast(len));
+                    self.lookup[wire] = fast.entry(kind, symbol, @intCast(len));
+                }
+            }
+
+            // Long codes, chained from their primary slot.
+            for (lookup_bits + 1..max_bits + 1) |len| {
+                for (sorted[first[len]..first[len + 1]], 0..) |symbol, k| {
+                    const wire = wireBits(next_code[len] + @as(u16, @intCast(k)), @intCast(len));
                     const index = wire & lookup_mask;
-                    self.chain[symbol] = .{ .wire = wire, .len = len, .next = chain_heads[index] };
-                    chain_heads[index] = @intCast(symbol);
-                    self.lookup[index] = @as(u16, @intCast(symbol)) << 4;
+                    const head: u16 = @truncate(self.lookup[index]);
+                    const next = if (head == 0xFFFF) chain_end else (head >> 4) & symbol_mask;
+                    self.chain[symbol] = .{ .wire = wire, .len = @intCast(len), .next = next };
+                    self.lookup[index] = symbol << 4 | fast.exceptional(kind);
                 }
             }
         }
@@ -338,13 +358,13 @@ pub fn HuffmanDecoder(
             // The primary table is indexed by the next `lookup_bits` bits,
             // which is exactly the code for codes no longer than that.
             const peeked = try br.peek(max_bits);
-            const entry = self.lookup[@intCast(peeked & lookup_mask)];
-            if (entry == invalid) return error.InvalidCode;
+            const entry: u16 = @truncate(self.lookup[@intCast(peeked & lookup_mask)]);
+            if (entry == 0xFFFF) return error.InvalidCode;
             if ((entry & 0xF) != 0) {
                 _ = try br.take(@intCast(entry & 0xF));
-                return entry >> 4;
+                return (entry >> 4) & symbol_mask;
             }
-            var symbol = entry >> 4;
+            var symbol = (entry >> 4) & symbol_mask;
             while (symbol != chain_end) {
                 const node = self.chain[symbol];
                 if ((peeked & ((@as(u64, 1) << node.len) - 1)) == node.wire) {
@@ -356,9 +376,9 @@ pub fn HuffmanDecoder(
             return error.InvalidCode;
         }
 
-        /// The primary table's index mask: `lookup[peeked & mask]` packs
-        /// `(symbol << 4) | code_len` for every code no longer than
-        /// `lookup_bits`, and has a zero `code_len` otherwise.
+        /// The primary table's index mask: `lookup[peeked & mask]` is the
+        /// entry for every code no longer than `lookup_bits`, and has a
+        /// zero `code_len` otherwise.
         pub const mask = lookup_mask;
 
         /// The symbol and code length whose code starts `peeked`, which
@@ -367,10 +387,12 @@ pub fn HuffmanDecoder(
         /// through this from its own bit buffer when the primary entry is
         /// not a whole code.
         pub fn resolve(self: *const Self, peeked: u64) ?Resolved {
-            const entry = self.lookup[@intCast(peeked & lookup_mask)];
-            if (entry == invalid) return null;
-            if ((entry & 0xF) != 0) return .{ .symbol = entry >> 4, .len = @intCast(entry & 0xF) };
-            var symbol = entry >> 4;
+            const entry: u16 = @truncate(self.lookup[@intCast(peeked & lookup_mask)]);
+            if (entry == 0xFFFF) return null;
+            if ((entry & 0xF) != 0) {
+                return .{ .symbol = (entry >> 4) & symbol_mask, .len = @intCast(entry & 0xF) };
+            }
+            var symbol = (entry >> 4) & symbol_mask;
             while (symbol != chain_end) {
                 const node = self.chain[symbol];
                 if ((peeked & ((@as(u64, 1) << node.len) - 1)) == node.wire) {
@@ -385,6 +407,53 @@ pub fn HuffmanDecoder(
 
 /// A decoded Huffman symbol and the length of its code.
 pub const Resolved = struct { symbol: u16, len: u6 };
+
+/// The 32-bit entries of the literal/length and distance tables. The low 16
+/// bits are `HuffmanDecoder`'s `(symbol << 4) | code_len` (with, in a
+/// distance entry, the total bit count above the symbol); the rest saves a
+/// decoder the per-symbol table lookups:
+///
+///   - literal/length: bit 31 (`literal`) for symbols 0-255, whose value is
+///     bits 4-11; bit 30 (`exceptional`) for the end-of-block code, the
+///     reserved symbols 286-287, a slot of longer codes, and a slot no code
+///     matches; otherwise a length, with its code and extra bits' total in
+///     bits 16-20 and its base in bits 21-29;
+///   - distance: bit 31 (`exceptional`) for codes 30-31 and the two kinds of
+///     slot; otherwise the code and extra bits' total in bits 9-13 and the
+///     base in bits 16-30.
+///
+/// A length or distance is `base + (bits & mask(total)) >> code_len`.
+pub const fast = struct {
+    pub const literal: u32 = 1 << 31;
+
+    pub fn exceptional(comptime kind: TreeKind) if (kind == .precode) u16 else u32 {
+        return switch (kind) {
+            .literal_length => 1 << 30,
+            .distance => 1 << 31,
+            .precode => 0,
+        };
+    }
+
+    /// The entry for a code of `len` bits for `symbol`.
+    pub fn entry(comptime kind: TreeKind, symbol: u16, len: u4) if (kind == .precode) u16 else u32 {
+        const low = symbol << 4 | len;
+        switch (kind) {
+            .precode => return low,
+            .literal_length => {
+                if (symbol < 256) return literal | low;
+                if (symbol == 256 or symbol > 285) return exceptional(kind) | low;
+                const i = symbol - 257;
+                const total: u32 = @as(u32, len) + length_extra[i];
+                return @as(u32, length_base[i]) << 21 | total << 16 | low;
+            },
+            .distance => {
+                if (symbol > 29) return exceptional(kind) | low;
+                const total: u32 = @as(u32, len) + distance_extra[symbol];
+                return @as(u32, distance_base[symbol]) << 16 | total << 9 | low;
+            },
+        }
+    }
+};
 
 /// The code's wire value: `code` is the canonical numeral (`§3.2.2`), whose
 /// MSB is transmitted first, so the low `len` bits of the result are the code
@@ -430,7 +499,7 @@ fn checkLengths(comptime kind: TreeKind, lens: []const u4) TreeError!void {
 /// Decode table for the literal/length alphabet: 288 symbols, codes up to 15
 /// bits, a 10-bit primary table. Symbols 286-287 are reserved (`§3.2.6`) and
 /// callers reject them.
-pub const LitDecoder = HuffmanDecoder(288, 15, 10, .literal_length);
+pub const LitDecoder = HuffmanDecoder(288, 15, 11, .literal_length);
 /// Decode table for the distance alphabet: 32 symbols, codes up to 15 bits, a
 /// 9-bit primary table. Codes 30-31 are reserved (`§3.2.6`) and callers reject
 /// them.

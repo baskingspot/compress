@@ -198,6 +198,48 @@ const Bits = struct {
     }
 };
 
+/// A bit source over the bytes `input` already buffers, for a dynamic
+/// block's header (`§3.2.7`): `Bits` checks the input and may fill it on
+/// every read, which costs a small image as much as its pixels. It never
+/// reads past the buffered bytes: a read that needs more is
+/// `error.Truncated`, and the caller decodes the header again through
+/// `Bits`, which fills. Every other error is the stream's, since every bit
+/// it looked at was real.
+const BufferedBits = struct {
+    pub const ErrorSet = ReaderError;
+
+    bytes: []const u8,
+    /// Bits consumed from `bytes`.
+    pos: usize,
+
+    fn init(b: *const Bits) BufferedBits {
+        return .{ .bytes = b.input.buffer[b.input.seek..b.input.end], .pos = b.consumed };
+    }
+
+    pub fn peek(self: *BufferedBits, n: u6) ErrorSet!u64 {
+        if (self.bytes.len * 8 - self.pos < n) return error.Truncated;
+        const at = self.pos / 8;
+        const rest = self.bytes[at..];
+        const window = if (rest.len >= 8)
+            readInt(u64, rest[0..8])
+        else
+            readVarInt(u64, rest[0..@min(rest.len, 8)]);
+        return (window >> @intCast(self.pos % 8)) & ((@as(u64, 1) << n) - 1);
+    }
+
+    pub fn take(self: *BufferedBits, n: u6) ErrorSet!u64 {
+        const value = try self.peek(n);
+        self.pos += n;
+        return value;
+    }
+
+    /// Consume from `b` what this source consumed.
+    fn commit(self: *const BufferedBits, b: *Bits) void {
+        b.input.toss(self.pos / 8);
+        b.consumed = @intCast(self.pos % 8);
+    }
+};
+
 const Reader = @This();
 
 /// The `Io.Reader` interface: read the decoded bytes through `&r.reader`.
@@ -359,7 +401,7 @@ fn step(r: *Reader) Error!usize {
                 .stored => try r.readStoredHeader(),
                 .fixed => r.phase = .fixed_block,
                 .dynamic => {
-                    try decode.readDynamicHeader(Bits, &r.bits, &r.literal, &r.distance);
+                    try @call(.never_inline, readDynamicHeader, .{r});
                     r.phase = .dynamic_block;
                 },
                 .reserved => return error.InvalidBlockType,
@@ -368,6 +410,18 @@ fn step(r: *Reader) Error!usize {
         },
         .stored_block => |remaining| return r.copyStored(remaining),
         else => return r.decodeSymbols(),
+    }
+}
+
+/// `§3.2.7` — a dynamic block's header, from the buffered input when it
+/// holds the whole header, and through `Bits` otherwise.
+fn readDynamicHeader(r: *Reader) Error!void {
+    var buffered: BufferedBits = .init(&r.bits);
+    if (decode.readDynamicHeader(BufferedBits, &buffered, &r.literal, &r.distance)) |_| {
+        buffered.commit(&r.bits);
+    } else |err| switch (err) {
+        error.Truncated => try decode.readDynamicHeader(Bits, &r.bits, &r.literal, &r.distance),
+        else => return err,
     }
 }
 
@@ -449,9 +503,10 @@ fn decodeSymbols(r: *Reader) Error!usize {
 /// The input bytes the fast path needs buffered: one refill's 8-byte load
 /// past the bytes already loaded. Below this, symbols take the slow path.
 const fast_input_len = 16;
-/// The window room the fast path needs: the longest match (`§3.2.5`) plus
-/// the 16 bytes its chunked copy may write past the match's end.
-const fast_room = max_match_len + 16;
+/// The window room the fast path needs: the longest match (`§3.2.5`), the
+/// 16 bytes its chunked copy may write past the match's end, and the three
+/// literals before it from the same refill.
+const fast_room = max_match_len + 16 + 8;
 
 /// Whether `fastSymbols` can run: the input has `fast_input_len` bytes
 /// buffered and the window has `fast_room` free.
@@ -470,6 +525,9 @@ fn fastPathReady(r: *const Reader) bool {
 /// checks, so the two decode the same streams the same way. Returns the
 /// bytes added.
 fn fastSymbols(r: *Reader) Error!usize {
+    const fast = decode.fast;
+    const lit_exceptional = fast.exceptional(.literal_length);
+    const dist_exceptional = fast.exceptional(.distance);
     const input = r.bits.input;
     const fixed = r.phase == .fixed_block;
     const literal = if (fixed) &decode.fixed_literal else &r.literal;
@@ -482,66 +540,110 @@ fn fastSymbols(r: *Reader) Error!usize {
     // refill tops it up to at least 56 bits, enough for the widest symbol:
     // a 15-bit length code, 5 extra bits, a 15-bit distance code, and 13
     // extra bits. Bits above `count` are 0 or the next input bits, so the
-    // OR of the next load leaves them as they are.
+    // OR of the next load leaves them as they are, and a refill never
+    // changes the bits below `count`.
     var bits: u64 = readInt(u64, in[0..8]);
     var pos: usize = 7;
     var count: u6 = 56;
     bits >>= r.bits.consumed;
     count -= r.bits.consumed;
     var ended = false;
-    while (pos + 8 <= in.len and out.len - end >= fast_room) {
+    // A refill loads `in[pos..][0..8]`; a symbol may write `fast_room`
+    // bytes. `fastPathReady` checked both once.
+    const in_last = in.len - 8;
+    const out_last = out.len - fast_room;
+    while (pos <= in_last and end <= out_last) {
         bits |= readInt(u64, in[pos..][0..8]) << count;
         pos += (63 - count) >> 3;
         count |= 56;
-        var lit = try fastResolve(decode.LitDecoder, literal, bits);
-        if (lit.symbol < 256) {
-            bits >>= lit.len;
-            count -= lit.len;
-            out[end] = @intCast(lit.symbol);
+        var e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
+        if (e & fast.literal != 0) {
+            // Up to four literals from one refill: photographs are mostly
+            // runs of literals. A literal decoded here has a code in the
+            // primary table, at most 11 bits, so after three there are 23
+            // bits left, enough to look up and resolve the next code.
+            bits >>= @intCast(e & 0xF);
+            count -= @intCast(e & 0xF);
+            out[end] = @truncate(e >> 4);
             end += 1;
-            // A second symbol from the same refill, when 15 bits remain:
-            // photographs are mostly runs of literals. A length code needs
-            // 33 bits after its own, so it waits for the next refill unless
-            // they are there or one can load them.
-            if (count < 15) continue;
-            lit = try fastResolve(decode.LitDecoder, literal, bits);
-            if (lit.symbol < 256) {
-                bits >>= lit.len;
-                count -= lit.len;
-                out[end] = @intCast(lit.symbol);
+            e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
+            if (e & fast.literal != 0) {
+                bits >>= @intCast(e & 0xF);
+                count -= @intCast(e & 0xF);
+                out[end] = @truncate(e >> 4);
                 end += 1;
-                continue;
+                e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
+                if (e & fast.literal != 0) {
+                    bits >>= @intCast(e & 0xF);
+                    count -= @intCast(e & 0xF);
+                    out[end] = @truncate(e >> 4);
+                    end += 1;
+                    e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
+                    if (e & fast.literal != 0) {
+                        bits >>= @intCast(e & 0xF);
+                        count -= @intCast(e & 0xF);
+                        out[end] = @truncate(e >> 4);
+                        end += 1;
+                        continue;
+                    }
+                }
             }
-            if (lit.symbol == 256 or count - lit.len < 33 and pos + 8 > in.len) continue;
-            if (count - lit.len < 33) {
+            // A length and its distance take up to 48 bits. The entry stays
+            // valid across the refill, which only adds bits above `count`.
+            if (count < 48) {
+                if (pos > in_last) break;
                 bits |= readInt(u64, in[pos..][0..8]) << count;
                 pos += (63 - count) >> 3;
                 count |= 56;
             }
         }
-        bits >>= lit.len;
-        count -= lit.len;
-        if (lit.symbol == 256) {
-            ended = true;
-            break;
+        if (e & lit_exceptional != 0) {
+            const code_len: u6 = @intCast(e & 0xF);
+            if (code_len != 0) {
+                // §3.2.6: values 286-287 never occur in the compressed data.
+                if ((e >> 4) & 0xFFF != 256) return error.InvalidCode;
+                bits >>= code_len;
+                count -= code_len;
+                ended = true;
+                break;
+            }
+            // A code longer than the table's index, or none.
+            const res = literal.resolve(bits) orelse return error.InvalidCode;
+            e = fast.entry(.literal_length, res.symbol, @intCast(res.len));
+            if (e & fast.literal != 0) {
+                bits >>= @intCast(e & 0xF);
+                count -= @intCast(e & 0xF);
+                out[end] = @truncate(e >> 4);
+                end += 1;
+                continue;
+            }
+            if (e & lit_exceptional != 0) {
+                if (res.symbol != 256) return error.InvalidCode;
+                bits >>= @intCast(res.len);
+                count -= @intCast(res.len);
+                ended = true;
+                break;
+            }
         }
-        // §3.2.6: values 286-287 never occur in the compressed data.
-        if (lit.symbol > 285) return error.InvalidCode;
-        const length_index: usize = lit.symbol - 257;
-        const length_bits: u6 = decode.length_extra[length_index];
-        const len: usize = @intCast(decode.length_base[length_index] + low(bits, length_bits));
-        bits >>= length_bits;
-        count -= length_bits;
-        const dist = try fastResolve(decode.DistDecoder, distance, bits);
-        // §3.2.6: distance codes 30-31 never occur.
-        if (dist.symbol > 29) return error.InvalidCode;
-        bits >>= dist.len;
-        count -= dist.len;
-        const distance_bits: u6 = decode.distance_extra[dist.symbol];
-        const distance_base = decode.distance_base[dist.symbol];
-        const match_distance: usize = @intCast(distance_base + low(bits, distance_bits));
-        bits >>= distance_bits;
-        count -= distance_bits;
+        const len_total: u6 = @intCast((e >> 16) & 0x1F);
+        // `len_total` is at most 20 bits, so the truncation keeps them all.
+        const len_extra: u32 = @truncate(low(bits, len_total) >> @intCast(e & 0xF));
+        const len: usize = (e >> 21) + len_extra;
+        bits >>= len_total;
+        count -= len_total;
+        var d = distance.lookup[@intCast(bits & decode.DistDecoder.mask)];
+        if (d & dist_exceptional != 0) {
+            const res = distance.resolve(bits) orelse return error.InvalidCode;
+            // §3.2.6: distance codes 30-31 never occur.
+            if (res.symbol > 29) return error.InvalidCode;
+            d = fast.entry(.distance, res.symbol, @intCast(res.len));
+        }
+        const dist_total: u6 = @intCast((d >> 9) & 0x1F);
+        // `dist_total` is at most 28 bits, so the truncation keeps them all.
+        const dist_extra: u32 = @truncate(low(bits, dist_total) >> @intCast(d & 0xF));
+        const match_distance: usize = ((d >> 16) & 0x7FFF) + dist_extra;
+        bits >>= dist_total;
+        count -= dist_total;
         // §3.2.3 — no distance past the beginning of the output stream.
         if (match_distance > r.total_out + (end - start)) return error.InvalidMatch;
         assert(match_distance <= end);
@@ -570,14 +672,6 @@ fn fastSymbols(r: *Reader) Error!usize {
     r.total_out += added;
     if (ended) try r.endBlock();
     return added;
-}
-
-/// The fast path's symbol lookup: the primary table's entry when it is a
-/// whole code, else the chained chase.
-inline fn fastResolve(comptime Table: type, table: *const Table, bits: u64) Error!decode.Resolved {
-    const entry = table.lookup[@intCast(bits & Table.mask)];
-    if (entry & 0xF == 0 or entry == 0xFFFF) return table.resolve(bits) orelse error.InvalidCode;
-    return .{ .symbol = entry >> 4, .len = @intCast(entry & 0xF) };
 }
 
 /// The low `n` bits of `bits`.

@@ -15,17 +15,27 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   bytes of lookahead: a Huffman block has no compressed length, so there is no
   staging region. std's decoder works the same way (flate-notes §5.4).
 - The Reader decodes Huffman blocks on a fast path (`fastSymbols`) whenever
-  the input has 16 bytes buffered and the window 274 bytes free: whole
+  the input has 16 bytes buffered and the window 282 bytes free: whole
   symbols, matches included, from a local 64-bit bit buffer loaded straight
   from the input's buffer with a branchless refill (to at least 56 bits, the
-  widest length and distance pair), up to two literals per refill, and
+  widest length and distance pair), up to four literals per refill, and
   16- or 8-byte match copies that may write past the match into the free
   window. It stops only between symbols and writes the bit position back,
   so the one-symbol-per-step path resumes exactly; the test "the fast path
   decodes what the slow path decodes" pins their agreement on valid and
-  corrupt streams. The literal/length primary table is 10 bits (9 before):
-  measured faster on PNG image data, where 10-bit literal codes are common.
-  Numbers: docs/slop/results/flate-fast-inflate-20261101.md.
+  corrupt streams. Numbers: docs/slop/results/flate-fast-inflate-20261101.md.
+- The literal/length and distance tables' entries are 32 bits (`fast` in
+  decode.zig): beside the symbol and code length they carry a literal flag,
+  an exceptional flag (end of block, reserved, chained long code, invalid),
+  the total bits the symbol and its extra bits take, and the length or
+  distance base, so the fast path decodes a whole symbol from one load. The
+  literal/length primary table is 11 bits, built a length at a time by
+  doubling the filled prefix, with no fill of the whole table first; a
+  dynamic header is parsed from the buffered input with its own bit buffer
+  when enough is buffered. Measured faster on PNG image data, the icons'
+  small streams included: docs/slop/results/flate-packed-entries-20261102.md.
+  Rejected there: a pattern copy for distances under 8 and a byte broadcast
+  for distance 1 (slower on RGBA images).
 - Level 1 is fixed Huffman with a stored fallback (OQ1). Fixed emission needs
   no header, precode, or table build, and zlib-ng's fastest level is fixed-only
   too (flate-notes §5.3). The cost is ratio: a literal takes 8-9 bits against

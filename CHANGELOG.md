@@ -11,6 +11,11 @@ All notable changes to compress are recorded here. The format follows
   one-shot decoders, inflate Huffman blocks 2 to 2.6 times faster: symbols
   decode from a 64-bit bit buffer over the input's buffered bytes, and the
   literal/length table's primary lookup is 10 bits.
+- `flate.Reader` inflates a further 1.25 to 1.6 times faster on PNG image
+  data, small icon streams included: table entries carry each symbol's
+  length or distance base and bit counts, the literal/length table is 11
+  bits and builds without a full fill, and up to four literals decode per
+  refill.
 
 ## [0.2.0] - 2026-10-31
 
