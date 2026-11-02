@@ -13,6 +13,11 @@ default:
 test:
     TESTINGX_FORMAT=verbose zig build test
 
+[doc("Unit tests on a big-endian target, s390x under qemu-user. ReleaseSafe, because in Debug the two 4-GiB zstd frame tests outrun the runner's 10-minute timeout under emulation")]
+[group("test")]
+test-be:
+    zig build test -Dtarget=s390x-linux-musl -fqemu -Doptimize=ReleaseSafe --summary all
+
 [doc("Fuzz every codec's targets for an iteration budget with a K, M, or G suffix, for example `just fuzz 1M`. The budget is per fuzz target. ReleaseSafe only, because a Debug fuzz run hits ziglang/zig#30655")]
 [group("test")]
 fuzz LIMIT="10M":
@@ -65,9 +70,9 @@ check-32:
     wasmtime zig-out/bin/zstd-probe32.wasm
     wasmtime zig-out/bin/brotli-probe32.wasm
 
-[doc("Everything CI runs: the unit tests, lint, the cross-target compile gate, and the docs build")]
+[doc("Everything CI runs: the unit tests, natively and big-endian, lint, the cross-target compile gate, and the docs build")]
 [group("ci")]
-ci: test lint check-baseline bench-check doc
+ci: test test-be lint check-baseline bench-check doc
 
 [private]
 api:

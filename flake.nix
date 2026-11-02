@@ -55,6 +55,8 @@
               # itself with zig cc.
               zstd
               gzip
+              # `just test-be` runs the unit tests on a big-endian target.
+              qemu-user
             ];
 
             env = {

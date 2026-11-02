@@ -3,6 +3,9 @@
 # not fail CI: a break on a 32-bit target gets fixed after the fact.
 jobs:
   - recipe: test
+  # The unit tests on s390x under qemu-user: the only big-endian coverage,
+  # since every other target is little-endian.
+  - recipe: test-be
   - recipe: lint
   - recipe: doc
   - recipe: check-target x86_64-linux

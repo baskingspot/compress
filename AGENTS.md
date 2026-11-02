@@ -143,10 +143,15 @@ onto a nearly-full disk):
 
 - `just test`: unit tests for every codec, under the testingx plain-text runner.
   Must pass before a commit.
+- `just test-be`: the unit tests on s390x under qemu-user, the only
+  big-endian target, in ReleaseSafe (Debug's 4-GiB zstd frame tests outrun
+  the runner's timeout under emulation). A vector compare bitcast to an
+  integer puts element 0 in the most significant bit there; this is the
+  gate that sees it.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
-- `just ci`: everything CI runs: `just test`, `just lint`, and
-  `just check-baseline`.
+- `just ci`: everything CI runs: `just test`, `just test-be`, `just lint`,
+  and `just check-baseline`.
 - `just lint`: ziglint over `.ziglint.zon` paths, `zig fmt --check` over
   `src/` and `build.zig`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
   `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
