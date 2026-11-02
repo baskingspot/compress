@@ -1,0 +1,27 @@
+                                                     │ docs/slop/results/flate-fast-loop-photos-20261102/base-zs.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-zs.txt │
+                                                     │                            sec/op                             │                sec/op                  vs base               │
+Inflate/icon_16-actions_address_book_new-16x16                                                           3.156µ ± 2%                             3.149µ ± 3%       ~ (p=0.645 n=10)
+Inflate/icon_512-actions_address_book_new-512x512                                                        730.8µ ± 2%                             704.6µ ± 1%  -3.58% (p=0.002 n=10)
+Inflate/icon_64-actions_address_book_new-64x64                                                           18.09µ ± 2%                             18.06µ ± 1%       ~ (p=0.393 n=10)
+Inflate/photo_kodak-kodim01-768x512                                                                      4.810m ± 4%                             4.654m ± 1%  -3.24% (p=0.000 n=10)
+Inflate/photo_tecnick-RGB_OR_1200x1200_001-1200x1200                                                     11.68m ± 2%                             11.27m ± 2%  -3.50% (p=0.000 n=10)
+Inflate/photo_wikipedia-001-1276x850                                                                     11.04m ± 2%                             10.70m ± 2%  -3.06% (p=0.000 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097                                                              32.12m ± 3%                             30.91m ± 4%  -3.75% (p=0.004 n=10)
+Inflate/test-dice-800x600                                                                                1.659m ± 1%                             1.597m ± 1%  -3.71% (p=0.000 n=10)
+Inflate/textures_pk-_pkf_water1-128x128                                                                  117.2µ ± 2%                             107.5µ ± 1%  -8.21% (p=0.000 n=10)
+Inflate/textures_plants-plant_02-1024x1316                                                               5.832m ± 4%                             5.693m ± 1%  -2.39% (p=0.000 n=10)
+geomean                                                                                                  994.0µ                                  962.1µ       -3.21%
+
+                                                     │ docs/slop/results/flate-fast-loop-photos-20261102/base-zs.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-zs.txt │
+                                                     │                              B/s                              │                  B/s                   vs base               │
+Inflate/icon_16-actions_address_book_new-16x16                                                          232.1Mi ± 1%                            232.6Mi ± 3%       ~ (p=0.645 n=10)
+Inflate/icon_512-actions_address_book_new-512x512                                                       1.002Gi ± 2%                            1.039Gi ± 1%  +3.71% (p=0.002 n=10)
+Inflate/icon_64-actions_address_book_new-64x64                                                          647.8Mi ± 2%                            648.9Mi ± 1%       ~ (p=0.393 n=10)
+Inflate/photo_kodak-kodim01-768x512                                                                     233.9Mi ± 4%                            241.8Mi ± 1%  +3.34% (p=0.000 n=10)
+Inflate/photo_tecnick-RGB_OR_1200x1200_001-1200x1200                                                    352.8Mi ± 2%                            365.6Mi ± 2%  +3.62% (p=0.000 n=10)
+Inflate/photo_wikipedia-001-1276x850                                                                    281.0Mi ± 2%                            289.9Mi ± 2%  +3.16% (p=0.000 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097                                                             713.1Mi ± 3%                            740.9Mi ± 4%  +3.90% (p=0.004 n=10)
+Inflate/test-dice-800x600                                                                               827.9Mi ± 1%                            859.8Mi ± 1%  +3.85% (p=0.000 n=10)
+Inflate/textures_pk-_pkf_water1-128x128                                                                 400.1Mi ± 2%                            435.9Mi ± 1%  +8.95% (p=0.000 n=10)
+Inflate/textures_plants-plant_02-1024x1316                                                              661.1Mi ± 4%                            677.3Mi ± 1%  +2.45% (p=0.000 n=10)
+geomean                                                                                                 472.9Mi                                 488.5Mi       +3.31%

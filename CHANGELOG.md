@@ -58,6 +58,9 @@ All notable changes to compress are recorded here. The format follows
   33% faster: a block's Huffman tables build without counting and sorting
   symbol by symbol, its header decodes from a bit buffer, and Adler-32 folds
   without multiplies.
+- `flate.Reader` inflates 2 to 6% faster on photographs' TIFF strips and PNG
+  image data, and up to 17% on images with long runs: the fast loop reads its
+  input through a cursor.
 
 ### Fixed
 

@@ -567,27 +567,31 @@ fn fastSymbols(r: *Reader) Error!usize {
     const out = r.reader.buffer;
     const start = r.reader.end;
     var end = start;
-    // The bit buffer holds `count` valid bits; `in[0..pos]` is loaded. Each
+    // The bit buffer holds `count` valid bits; `in` up to `ip` is loaded. Each
     // refill tops it up to at least 56 bits, enough for the widest symbol:
     // a 15-bit length code, 5 extra bits, a 15-bit distance code, and 13
     // extra bits. Bits above `count` are 0 or the next input bits, so the
     // OR of the next load leaves them as they are, and a refill never
     // changes the bits below `count`.
     var bits: u64 = readInt(u64, in[0..8]);
-    var pos: usize = 7;
+    // `ip` is the first input byte not yet counted in `bits`: a cursor
+    // rather than an index, so the loop keeps no base pointer for `in`
+    // live beside it. Every load of `ip[0..8]` follows a check that `ip`
+    // is at most `in_last`, which keeps the load inside `in`.
+    var ip: [*]const u8 = in.ptr + 7;
     var count: u32 = 56;
     bits >>= r.bits.consumed;
     count -= r.bits.consumed;
     var ended = false;
     // The output so far is `reach +% end` bytes.
     const reach = r.total_out -% start;
-    // A refill loads `in[pos..][0..8]`; a symbol may write `fast_room`
-    // bytes. `fastPathReady` checked both once.
-    const in_last = in.len - 8;
+    // A refill loads `ip[0..8]`; a symbol may write `fast_room` bytes.
+    // `fastPathReady` checked both once.
+    const in_last = @intFromPtr(in.ptr) + in.len - 8;
     const out_last = out.len - fast_room;
-    while (pos <= in_last and end <= out_last) {
-        bits |= readInt(u64, in[pos..][0..8]) << @truncate(count);
-        pos += (63 - count) >> 3;
+    while (@intFromPtr(ip) <= in_last and end <= out_last) {
+        bits |= readInt(u64, ip[0..8]) << @truncate(count);
+        ip += (63 - count) >> 3;
         count |= 56;
         var e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
         if (e & fast.literal != 0) {
@@ -624,9 +628,9 @@ fn fastSymbols(r: *Reader) Error!usize {
             // A length and its distance take up to 48 bits. The entry stays
             // valid across the refill, which only adds bits above `count`.
             if (count < 48) {
-                if (pos > in_last) break;
-                bits |= readInt(u64, in[pos..][0..8]) << @truncate(count);
-                pos += (63 - count) >> 3;
+                if (@intFromPtr(ip) > in_last) break;
+                bits |= readInt(u64, ip[0..8]) << @truncate(count);
+                ip += (63 - count) >> 3;
                 count |= 56;
             }
         }
@@ -697,7 +701,7 @@ fn fastSymbols(r: *Reader) Error!usize {
         }
         end += len;
     }
-    const used = pos * 8 - count;
+    const used = (@intFromPtr(ip) - @intFromPtr(in.ptr)) * 8 - count;
     input.toss(used / 8);
     r.bits.consumed = @intCast(used % 8);
     const added = end - start;

@@ -1,0 +1,11 @@
+                                   │ docs/slop/results/flate-fast-loop-photos-20261102/base-tc.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-tc.txt │
+                                   │                            sec/op                             │                sec/op                 vs base                │
+Inflate/test-testcard-256x256                                                          80.68µ ± 4%                            72.92µ ± 2%   -9.61% (p=0.000 n=10)
+Inflate/test-testcard_rgba-256x256                                                     91.18µ ± 3%                            77.95µ ± 4%  -14.51% (p=0.000 n=10)
+geomean                                                                                85.77µ                                 75.40µ       -12.10%
+
+                                   │ docs/slop/results/flate-fast-loop-photos-20261102/base-tc.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-tc.txt │
+                                   │                              B/s                              │                 B/s                   vs base                │
+Inflate/test-testcard-256x256                                                         2.270Gi ± 4%                           2.511Gi ± 2%  +10.64% (p=0.000 n=10)
+Inflate/test-testcard_rgba-256x256                                                    2.008Gi ± 3%                           2.349Gi ± 4%  +16.97% (p=0.000 n=10)
+geomean                                                                               2.135Gi                                2.429Gi       +13.76%

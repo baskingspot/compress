@@ -1,0 +1,27 @@
+                                                  │ docs/slop/results/flate-fast-loop-photos-20261102/base-z.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-z.txt │
+                                                  │                            sec/op                            │                sec/op                 vs base               │
+Inflate/icon_16-actions_address_book_new-16x16                                                       3.748µ ± 5%                            3.735µ ± 1%       ~ (p=0.469 n=10)
+Inflate/icon_512-actions_address_book_new-512x512                                                    590.7µ ± 1%                            568.2µ ± 2%  -3.81% (p=0.001 n=10)
+Inflate/icon_64-actions_address_book_new-64x64                                                       20.80µ ± 4%                            20.74µ ± 2%       ~ (p=0.529 n=10)
+Inflate/photo_kodak-kodim01-768x512                                                                  3.632m ± 1%                            3.545m ± 2%  -2.38% (p=0.002 n=10)
+Inflate/photo_wikipedia-001-1276x850                                                                 8.611m ± 2%                            8.277m ± 2%  -3.87% (p=0.000 n=10)
+Inflate/pngimg-air_pump_PNG5-999x772                                                                 2.272m ± 1%                            2.146m ± 2%  -5.51% (p=0.000 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097                                                          30.02m ± 2%                            29.02m ± 3%  -3.33% (p=0.002 n=10)
+Inflate/test-dice-800x600                                                                            1.664m ± 4%                            1.578m ± 1%  -5.18% (p=0.000 n=10)
+Inflate/textures_pk-_0mod_button1-64x64                                                              10.72µ ± 6%                            10.69µ ± 3%       ~ (p=0.739 n=10)
+Inflate/textures_plants-plant_02-1024x1316                                                           5.982m ± 2%                            5.735m ± 2%  -4.12% (p=0.000 n=10)
+geomean                                                                                              633.9µ                                 615.3µ       -2.94%
+
+                                                  │ docs/slop/results/flate-fast-loop-photos-20261102/base-z.txt │ docs/slop/results/flate-fast-loop-photos-20261102/new-z.txt │
+                                                  │                             B/s                              │                 B/s                   vs base               │
+Inflate/icon_16-actions_address_book_new-16x16                                                      264.6Mi ± 5%                           265.6Mi ± 1%       ~ (p=0.469 n=10)
+Inflate/icon_512-actions_address_book_new-512x512                                                   1.654Gi ± 1%                           1.719Gi ± 2%  +3.96% (p=0.001 n=10)
+Inflate/icon_64-actions_address_book_new-64x64                                                      754.0Mi ± 4%                           756.5Mi ± 2%       ~ (p=0.529 n=10)
+Inflate/photo_kodak-kodim01-768x512                                                                 309.9Mi ± 1%                           317.5Mi ± 2%  +2.43% (p=0.002 n=10)
+Inflate/photo_wikipedia-001-1276x850                                                                360.4Mi ± 2%                           375.0Mi ± 2%  +4.03% (p=0.000 n=10)
+Inflate/pngimg-air_pump_PNG5-999x772                                                                1.265Gi ± 1%                           1.339Gi ± 2%  +5.83% (p=0.000 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097                                                        1017.6Mi ± 2%                          1052.6Mi ± 3%  +3.44% (p=0.001 n=10)
+Inflate/test-dice-800x600                                                                           1.075Gi ± 3%                           1.134Gi ± 1%  +5.47% (p=0.000 n=10)
+Inflate/textures_pk-_0mod_button1-64x64                                                             369.9Mi ± 6%                           371.2Mi ± 3%       ~ (p=0.754 n=10)
+Inflate/textures_plants-plant_02-1024x1316                                                          859.6Mi ± 2%                           896.6Mi ± 2%  +4.30% (p=0.000 n=10)
+geomean                                                                                             667.0Mi                                687.2Mi       +3.03%
