@@ -34,9 +34,6 @@ pub const Error = error{
     ExuberantNibble,
     /// `§9.2` — MSKIPBYTES > 1 with an all-zero last byte.
     ExuberantMetaNibble,
-    /// A meta-block declares more trees in a category than the
-    /// comptime-capped region holds (`huffman.max_trees`).
-    TooManyTrees,
 };
 
 /// The composed error set of the header layers for a bit source of `Bits`'s
@@ -104,8 +101,8 @@ pub const MetaBlock = struct {
 
 /// The compressed meta-block header's arena (`§9.2`'s tail, `§3`, `§6`,
 /// `§7`): the parameters, the context models, and the tree region. About
-/// 690 KiB at the tree cap, so it lives in a caller-owned stack or static
-/// object — never a copy.
+/// 2.6 MiB, so it lives in a caller-owned stack or static object — never a
+/// copy.
 pub const Header = struct {
     /// `§4` — NPOSTFIX, 0..3, and NDIRECT: the 4-bit field left-shifted by
     /// NPOSTFIX (0..120).
@@ -178,14 +175,9 @@ pub fn nextMetaBlock(comptime Bits: type, br: *Bits, header: *Header) Errors(Bit
 /// insert-and-copy lengths, distances (`§3`).
 pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Errors(Bits)!void {
     for (0..3) |cat| {
+        // NBLTYPESI is also the command tree count; the region holds the
+        // format's 256 in every category.
         const count = try readCount(Bits, br);
-        // NBLTYPESI is the command tree count: its trees are the region's
-        // command category, so it is capped. The literal and distance
-        // categories size only the modes array and the maps, which the
-        // format's own 256 ceiling fits.
-        if (cat == @intFromEnum(Category.command) and count > huffman.max_trees) {
-            return error.TooManyTrees;
-        }
         header.block_types[cat] = @intCast(count);
         if (count == 1) {
             header.first_block_count[cat] = 1 << 24;
@@ -222,7 +214,6 @@ pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Err
     // §9.2, §7.3 — NTREESL, then the literal context map if NTREESL >= 2;
     // "otherwise, the context map has only zero values".
     const num_literal_trees = try readCount(Bits, br);
-    if (num_literal_trees > huffman.max_trees) return error.TooManyTrees;
     header.num_trees[@intFromEnum(Category.literal)] = @intCast(num_literal_trees);
     const literal_map = header.context.literal_map[0 .. 64 * header.block_types[0]];
     if (num_literal_trees >= 2) {
@@ -239,7 +230,6 @@ pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Err
 
     // NTREESD, then the distance context map.
     const num_distance_trees = try readCount(Bits, br);
-    if (num_distance_trees > huffman.max_trees) return error.TooManyTrees;
     header.num_trees[@intFromEnum(Category.distance)] = @intCast(num_distance_trees);
     const distance_map = header.context.distance_map[0 .. 4 * header.block_types[2]];
     if (num_distance_trees >= 2) {
@@ -843,27 +833,41 @@ test "compressed header: RFC 7932 §7.3's context map selects the tree" {
     for (header.context.distance_map[0..4]) |value| try testing.expectEqual(@as(u8, 0), value);
 }
 
-test "compressed header: OQ8's tree cap fails TooManyTrees" {
-    // NTREESL = 65: the region holds 64.
+test "compressed header: 256 trees in every category, the format's ceiling" {
+    // NBLTYPESI = NTREESL = NTREESD = 256, each tree a one-symbol code whose
+    // symbol is its index (modulo the 64-symbol distance alphabet), so the
+    // last literal and command trees hold 255 and the last distance tree 63.
     var p: golden.Packer = .empty;
     packMetaHead(&p, 1);
     p.pack(0, 1); // NBLTYPESL = 1
-    p.pack(0, 1); // NBLTYPESI = 1
+    packCount(&p, 256); // NBLTYPESI = 256
+    packSingle(&p, 0, 9); // block-type code over 258 symbols
+    packSingle(&p, 0, 5); // block-count code: symbol 0
+    p.pack(0, 2); // first block count: 1 + 0
     p.pack(0, 1); // NBLTYPESD = 1
     p.pack(0, 2); // NPOSTFIX = 0
     p.pack(0, 4); // NDIRECT = 0
     p.pack(0, 2); // mode LSB6
-    packCount(&p, 65); // NTREESL = 65
+    for (0..2) |_| {
+        // NTREESL, then NTREESD: 256, and a map of all 255 (no RLE, a
+        // one-symbol code over 256 values, no inverse move-to-front).
+        packCount(&p, 256);
+        p.pack(0, 1);
+        packSingle(&p, 255, 8);
+        p.pack(0, 1);
+    }
+    for (0..256) |i| packSingle(&p, @intCast(i), 8); // literal
+    for (0..256) |i| packSingle(&p, @intCast(i), 10); // insert-and-copy
+    for (0..256) |i| packSingle(&p, @intCast(i % 64), 6); // distance, 64 symbols
     var header: Header = undefined;
-    try testing.expectError(error.TooManyTrees, parseHeader(p.slice(), &header));
-
-    // NBLTYPESI = 65: the command trees are the region's command category.
-    var q: golden.Packer = .empty;
-    packMetaHead(&q, 1);
-    q.pack(0, 1); // NBLTYPESL = 1
-    packCount(&q, 65); // NBLTYPESI = 65
-    var command: Header = undefined;
-    try testing.expectError(error.TooManyTrees, parseHeader(q.slice(), &command));
+    _ = try parseHeader(p.slice(), &header);
+    try testing.expectEqual([3]u16{ 256, 256, 256 }, header.num_trees);
+    try testing.expectEqual(@as(u16, 256), header.block_types[1]);
+    for (header.context.literal_map[0..64]) |value| try testing.expectEqual(@as(u8, 255), value);
+    for (header.context.distance_map[0..4]) |value| try testing.expectEqual(@as(u8, 255), value);
+    try testing.expectEqual(@as(?u16, 255), header.trees.literal[255].single);
+    try testing.expectEqual(@as(?u16, 255), header.trees.command[255].single);
+    try testing.expectEqual(@as(?u16, 63), header.trees.distance[255].single);
 }
 
 test "compressed header: RFC 7932 §3.3's dynamic distance alphabet" {
@@ -901,9 +905,9 @@ test "compressed header: RFC 7932 §3.3's dynamic distance alphabet" {
 }
 
 test "compressed header: the arena's byte figure" {
-    // The README's Stack bullet states this figure: the tree region (OQ8's
-    // cap) plus the context-model arena. It moves with either.
-    try testing.expectEqual(@as(usize, 707_204), @sizeOf(Header));
+    // The README's Stack bullet states this figure: the tree region (256
+    // trees a category) plus the context-model arena. It moves with either.
+    try testing.expectEqual(@as(usize, 2_732_428), @sizeOf(Header));
 }
 
 test "compressed header: RFC 7932 §6's block-count rows tile the count space" {

@@ -56,8 +56,8 @@ marked **[sketch call]** and collected at the end.
   rows and its file form 10..19 by input size, so 22 — the reference encoder
   library's own default — refuses every pipe-produced stream. 24 is the
   format's maximum, so the default refuses nothing conformant, and the price is
-  the figure: `DefaultBuffer` is 16,777,216 + 707,204 = 17,484,420 bytes
-  (about 16.7 MiB) against `Buffer(22)`'s 4,901,508 (about 4.7). The ring is a
+  the figure: `DefaultBuffer` is 16,777,216 + 2,732,428 = 19,509,644 bytes
+  (about 18.6 MiB) against `Buffer(22)`'s 6,926,732 (about 6.6). The ring is a
   power-of-two buffer with the `-16` in the bound arithmetic (`§9.1`'s window
   size), the C's `ringbuffer`/`ringbuffer_mask` shape. The RFC's §12 progressive-growth
   recommendation (start small, grow per meta-block) is a deliberate non-goal:
@@ -71,8 +71,7 @@ marked **[sketch call]** and collected at the end.
   the C detects the overrun as a negative remaining length at the meta-block's
   end (`decode.c:1338`, `:2838`), which is the same class. `DictionaryRequired`
   is recorded in the notes only — the dictionary ships, so it has no surface.
-  `WindowTooLarge` is streaming-only; `TooManyTrees` comes from OQ8's cap; the
-  Io names (`StreamTooLong`, `ReadFailed`, `EndOfStream`) are the pattern
+  `WindowTooLarge` is streaming-only; the Io names (`StreamTooLong`, `ReadFailed`, `EndOfStream`) are the pattern
   book's. The C's error list (`c/include/brotli/decode.h:64-113`) and the Go
   port's names mirror ours one for one, which is what makes the CLI's `-v`
   rendering (`reason: FORMAT_PADDING_2 (-15)`) usable as an oracle assertion.
@@ -86,15 +85,16 @@ marked **[sketch call]** and collected at the end.
   (122,784 bytes + the transform tables): no allocation, no per-instance cost,
   paid once in binary size. There is no dictionary-supplying API, and the
   custom/compound dictionary surfaces are out of scope (OQ7).
-- **The tree region is comptime-capped (OQ8).** The caller-owned `Buffer`
-  carries a tree region sized for a comptime-capped **64 trees per category**;
-  a meta-block declaring more fails `TooManyTrees`, and the cap is documented
-  and raisable. The alternatives were rejected: the full 256-cap region costs
-  ~2.7 MB of tables against a 4-MiB-class window (the C heap-allocates per
-  meta-block; this package's posture is zero allocation), and an
-  allocator-taking `Reader.init` for the tree region alone would make every
-  streaming caller allocate for a worst case no measured stream approaches
-  (every stream the sweep produced uses single digits). **The landed shape
+- **The tree region holds the format's 256 trees per category (OQ8).** The
+  caller-owned `Buffer` carries a tree region sized for **256 trees per
+  category**, the format's ceiling, so every conformant stream fits. OQ8 first
+  landed a 64-tree cap (`TooManyTrees` past it), on a sweep whose streams used
+  single digits; brotli 1.2.0 at q4 to q9 writes up to 256 literal trees on
+  inputs of a megabyte and up to 106 distance trees on 8 MiB of source
+  (docs/slop/results/brotli-256-trees-20261102.md), so the region grew to the
+  ceiling. The rejected alternative is unchanged: an allocator-taking
+  `Reader.init` for the tree region alone (the C heap-allocates per
+  meta-block; this package's posture is zero allocation). **The landed shape
   (slice 2):** `huffman.Tree` is a two-level table — a 256-entry root table
   indexed by the next eight wire bits, then one subtable per root prefix whose
   codes run long, sized by the longest code in that prefix's group; the
@@ -104,22 +104,23 @@ marked **[sketch call]** and collected at the end.
   table is bounded by the reference's *proven* ceiling (`kMaxHuffmanTableSize`,
   13.4% over the alphabet size; THIRD_PARTY.md), so the region is a comptime
   array, never an allocation: 2,528 B per literal tree, 4,328 per command
-  tree, 3,688 per distance tree, 2,656/1,616/1,880 for the
-  block-type/block-count/context-map trees — `huffman.Trees` is **689,512 B**,
-  and `frame.Header` (the trees plus the 17,664-byte context arena — the
-  modes and the two maps) is **707,204 B**, the README's "about 691 KiB". The
-  cap applies to the three *tree* categories (NTREESL, NBLTYPESI, NTREESD);
-  NBLTYPESL/NBLTYPESD are not capped — they size the modes array and the maps,
-  and the format's own 256-value ceiling fits (the literal map is 64 × 256 =
-  16 KiB). The build checks the computed table size against the ceiling and
+  tree, 3,688 per distance tree, 2,656/1,616/2,656 for the
+  block-type/block-count/context-map trees — `huffman.Trees` is
+  **2,714,736 B**, and `frame.Header` (the trees, the 17,664-byte context
+  arena — the modes and the two maps — and padding) is **2,732,428 B**, the README's "about
+  2.6 MiB". Only the trees a meta-block declares are written, so a stream's
+  resident memory follows its tree counts. NBLTYPESL/NBLTYPESD size the modes
+  array and the maps, which the format's own 256-value ceiling fits (the
+  literal map is 64 × 256 = 16 KiB). The build checks the computed table size against the ceiling and
   returns `BadHuffmanCode` if it ever exceeds it: no conformant code-length set
   can (F2), and the check is what makes the region a hard bound rather than a
-  hope. **[sketch call, landed]** the one-shot carries the same region as a
-  comptime stack local (about 691 KiB at the cap, 707,204 bytes for
-  `frame.Header`), because `decompress(source, target)` has no buffer
-  parameter; the README's Stack bullet states the figure. If it bites, a
-  `decompressBuffered` addition follows the zstd `compressBuffered` precedent
-  without reshaping the two names.
+  hope. **[sketch call, landed]** the one-shot's region lives in
+  `decode.Buffer` (2,735,048 bytes: `frame.Header` plus the command state):
+  `decompressBuffered` and `decompressCounted` take one the caller places,
+  the zstd `compressBuffered` precedent, and `decompress(source, target)`
+  keeps one on the stack as the convenience form. It was a stack local
+  only until the region grew to 256 trees: 2.6 MiB is past macOS's 512 KiB
+  secondary-thread stack, and image's rule keeps work memory off the stack.
 - **Extensions are out of scope (OQ7, T3).** The large-window extension: the
   RFC's invalid 0010001 pattern is refused with `BadWindowBits`, and the CLI's
   forced leniency (`BROTLI_DECODER_PARAM_LARGE_WINDOW` set unconditionally,
@@ -285,7 +286,7 @@ invalid-stream class (`§9.3`), never `BufferTooSmall`.
   layer that gains a name fails the build rather than leaking an undocumented
   error, and the `try`s in `decompress` prove every layer name is in the set
   (their return types are the layers' composed sets).
-- **The shared state is two fields.** `decode.State` bundles the current
+- **The shared state is two fields.** `decode.Buffer` bundles the current
   meta-block's `frame.Header` and the stream-scoped `command.State` (`§4`'s
   ring plus the derived tables). The streaming `Reader` reuses the shape with
   its header arena in the caller's `Buffer`; the walk itself stays the
@@ -294,8 +295,8 @@ invalid-stream class (`§9.3`), never `BufferTooSmall`.
 - **The layers stay reachable under `decode`** (OQ2): `decode.prefix`,
   `decode.context`, `decode.distance`, `decode.dictionary`, `decode.command`,
   and `decode.frame`, each one line of doc, the zstd/flate precedent. The
-  README's API block documents `decompress`, `decompressCounted`, and
-  `DecompressError` only; the
+  README's API block documents `decompress`, `decompressBuffered`,
+  `decompressCounted`, `Buffer`, and `DecompressError` only; the
   reachable layers are the same kind of internal surface `flate.decode` and
   `zstd.decode` carry.
 - **The §11.1 trivial compressor moved to `golden.zig`** (`trivialBound`,
@@ -908,7 +909,7 @@ helpers. Its pure pieces are extracted. The encoder carries no Tracy zones
   first-switch symbol 0, T5's last-metadata corner, T7's
   simple-code widths, T6's error-or-difference rule, the walk's boundary (an
   over-end peek reaches the stream end through `rebase` — the pattern book's
-  entry, `src/internal/AGENTS.md`), the `TooManyTrees` cap, and slice 2's
+  entry, `src/internal/AGENTS.md`), 256 trees in a category, and slice 2's
   surfaces: both tree forms' rejection sites (the two Kraft equalities, the
   repeat overruns, the §3.4 symbol rules), the code-length-code's HSKIP ladder
   and the 16/17 modifier arithmetic, the single-symbol code-length code, the
@@ -1036,13 +1037,14 @@ recorded fleet run, never local numbers.
 
 Collected for the review; each is also marked **[sketch call]** above.
 
-1. **The one-shot's tree region is a stack local (landed; 691 KiB at the
-   cap).** The register fixed the streaming `Buffer`'s tree region and the
+1. **The one-shot's tree region (landed: a caller-placed `decode.Buffer`).**
+   The register fixed the streaming `Buffer`'s tree region and the
    one-shot's lack of a window, but not where the one-shot's trees live.
-   Options were a stack local (chosen), a caller-buffer form
-   (`decompressBuffered`), or an allocator. If the figure bites, the buffered
-   form is the zstd `compressBuffered` remedy, an addition that does not
-   reshape the two names.
+   Options were a stack local (first chosen, at 691 KiB), a caller-buffer
+   form, or an allocator. When the region grew to 256 trees (2.6 MiB), the
+   buffered form landed as the zstd `compressBuffered` remedy:
+   `decompressBuffered` and `decompressCounted` take the `Buffer`, and
+   `decompress` keeps the stack form.
 2. **The `BadStreamStart` split.** The notes name it (OQ3, OQ5) but give it no
    §3 taxonomy row; the sketch reads it as the walk's next-stream refusal, with
    `BadWindowBits` for a stream's own header.
@@ -1053,8 +1055,9 @@ Collected for the review; each is also marked **[sketch call]** above.
    wants exactly one stream drives `Reader`.
 5. **The tree region's byte figure (landed).** The ~650 KiB budget used the
    reference's two-level table shape; the implementation's shape set the final
-   number — `frame.Header` is 707,204 bytes (the tree region plus the context
-   arena), the README's Stack figure.
+   number — `frame.Header` was 707,204 bytes at the 64-tree cap and is
+   2,732,428 at the format's 256 (the tree region plus the context arena),
+   the README's Stack figure.
 6. **Literals decode straight through.** No staging region: a literal's context
    is the output's own last two bytes, so literals are written directly into
    `target` (one-shot) or the history ring (streaming), and the streaming

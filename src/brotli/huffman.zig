@@ -10,9 +10,9 @@
 //! a pure peek-and-take structure; the reference's `BrotliReadSymbol` has the
 //! same shape (`c/dec/huffman.c`).
 //!
-//! The table region is comptime-capped: `max_trees` trees per category
-//! and, per tree, the reference's proven ceiling on the two-level table's
-//! size. Nothing here allocates.
+//! The table region holds the format's ceiling: `max_trees` (256) trees per
+//! category and, per tree, the reference's proven ceiling on the two-level
+//! table's size. Nothing here allocates.
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -33,10 +33,11 @@ pub const max_distance_alphabet_size = 16 + 120 + (48 << 3);
 pub const max_block_type_alphabet_size = 256 + 2;
 pub const max_context_map_alphabet_size = max_trees + 16;
 
-/// The comptime cap on trees per tree category. The format allows up
-/// to 256; a meta-block declaring more fails `error.TooManyTrees`, and the
-/// cap is raisable by editing this constant (the region grows with it).
-pub const max_trees = 64;
+/// Trees per tree category: the format's ceiling (§9.2's NBLTYPESI,
+/// NTREESL, and NTREESD count to 256), so every stream fits. brotli 1.2.0
+/// writes more than 64 literal trees at q4 to q9 on inputs of a megabyte,
+/// and more than 64 distance trees on larger ones.
+pub const max_trees = 256;
 
 /// §3.4, §3.5 — the prefix-code layer's refusals.
 pub const Error = error{
@@ -285,8 +286,7 @@ pub const ContextMapTree = Tree(max_context_map_alphabet_size);
 /// One meta-block's tree region: `max_trees` trees in each tree
 /// category, the three block-type and block-count trees of §6, and the
 /// context-map tree of §7.3 (the literal map's, then the distance map's).
-/// About 672 KiB at the cap: a caller-owned stack or `Buffer` object, never
-/// a copy.
+/// About 2.6 MiB: a caller-owned stack or `Buffer` object, never a copy.
 pub const Trees = struct {
     /// NTREESL literal trees.
     literal: [max_trees]LiteralTree,
@@ -843,9 +843,9 @@ test "complex form: the single-symbol code-length code consumes no bits" {
     try testing.expectEqual(@as(u16, 0), try tree.decode(bits.BitReader, &zero));
 }
 
-test "tree region: OQ8's cap and its byte figure" {
-    // The cap is a compile-time constant, and the region it sizes is what the
+test "tree region: the format's 256 trees and its byte figure" {
+    // The region holds the format's ceiling, and its size is what the
     // README's Stack bullet states. A change to either must move both.
-    try testing.expectEqual(@as(usize, 64), max_trees);
-    try testing.expectEqual(@as(usize, 689_512), @sizeOf(Trees));
+    try testing.expectEqual(@as(usize, 256), max_trees);
+    try testing.expectEqual(@as(usize, 2_714_736), @sizeOf(Trees));
 }

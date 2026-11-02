@@ -52,12 +52,12 @@ pub fn Buffer(comptime window_wbits: usize) type {
 /// The default window cap, 24 — the format's maximum (`§9.1`). The
 /// reference CLI's pipe form emits WBITS 24 for every stream it writes,
 /// and its file form 10..19 by input size, so 24 decodes both
-/// unconfigured; `Buffer(22)` (4.7 MiB rather than 16.7) decodes the file
+/// unconfigured; `Buffer(22)` (6.6 MiB rather than 18.6) decodes the file
 /// family only.
 pub const default_window_wbits: usize = 24;
 
 /// `Buffer(default_window_wbits)`: a 16 MiB ring plus the tree region, about
-/// 16.7 MiB — keep it in static or heap storage.
+/// 18.6 MiB — keep it in static or heap storage.
 pub const DefaultBuffer = Buffer(default_window_wbits);
 
 /// The reader's error set: the one-shot decoder's `DecompressError` without
@@ -99,9 +99,6 @@ pub const Error = error{
     BadTransform,
     /// `§8` — a dictionary reference's word length is outside 4..24.
     BadDictionary,
-    /// This decoder's instantiation — a meta-block declares more than
-    /// 64 trees in a category.
-    TooManyTrees,
     /// `§9.1` — the stream's WBITS is above the instantiated `window_wbits`.
     /// Reported once the header is parsed, before any meta-block byte.
     WindowTooLarge,
@@ -700,19 +697,20 @@ fn expectStreamError(
 
 test "Reader: the buffer's size is the README's figure" {
     // The README's figures: the ring is `1 << window_wbits` bytes, the tree
-    // region is the meta-block header arena (`frame.Header`, 707,204 bytes at
-    // OQ8's cap). `Buffer(24)` is 16,777,216 + 707,204 = 17,484,420 bytes,
-    // about 16.7 MiB; `Buffer(22)` is about 4.7.
-    try testing.expectEqual(@as(usize, 707_204), @sizeOf(frame.Header));
-    try testing.expectEqual(@as(usize, 17_484_420), @sizeOf(DefaultBuffer));
-    try testing.expectEqual(@as(usize, 4_901_508), @sizeOf(Buffer(22)));
+    // region is the meta-block header arena (`frame.Header`, 2,732,428
+    // bytes for 256 trees a category). `Buffer(24)` is 16,777,216 +
+    // 2,732,428 = 19,509,644 bytes, about 18.6 MiB; `Buffer(22)` is about
+    // 6.6.
+    try testing.expectEqual(@as(usize, 2_732_428), @sizeOf(frame.Header));
+    try testing.expectEqual(@as(usize, 19_509_644), @sizeOf(DefaultBuffer));
+    try testing.expectEqual(@as(usize, 6_926_732), @sizeOf(Buffer(22)));
 }
 
 test "Reader: the error vocabulary is the README's list" {
     // The comptime block above checks the names one for one; this pins the
     // count, so a name that vanished along with its README line cannot pass.
-    // 17 one-shot names, minus `BufferTooSmall`, plus this layer's five.
-    try testing.expectEqual(@as(usize, 21), @typeInfo(Error).error_set.?.len);
+    // 16 one-shot names, minus `BufferTooSmall`, plus this layer's five.
+    try testing.expectEqual(@as(usize, 20), @typeInfo(Error).error_set.?.len);
 }
 
 test "Reader: the README's streaming snippet decodes a stream" {

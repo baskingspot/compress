@@ -37,7 +37,7 @@ pub const Stream = struct {
 /// pack least significant bit first, prefix codes most significant bit
 /// first (`code`).
 pub const Packer = struct {
-    bytes: [512]u8,
+    bytes: [2048]u8,
     bit_len: usize,
 
     /// A packer at the start of an empty bit string.

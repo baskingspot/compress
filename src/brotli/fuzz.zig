@@ -288,7 +288,6 @@ fn sharedName(err: Reader.Error) ?decode.DecompressError {
         error.BadDistance => error.BadDistance,
         error.BadTransform => error.BadTransform,
         error.BadDictionary => error.BadDictionary,
-        error.TooManyTrees => error.TooManyTrees,
         // The reader's own names: pinned by the target that reaches them,
         // never by the one-shot's verdict.
         error.WindowTooLarge,
@@ -309,6 +308,9 @@ const Storage = struct {
     read_out: [out_max + guard_len]u8 = undefined,
     /// The one-shot's target when it decodes the counted stream again.
     again: [out_max]u8 = undefined,
+    /// The one-shot's state, reused from call to call: its contents never
+    /// carry over.
+    one_shot: decode.Buffer = undefined,
     ring10: Reader.Buffer(10) = undefined,
     ring16: Reader.Buffer(16) = undefined,
     ring24: Reader.DefaultBuffer = undefined,
@@ -1106,7 +1108,7 @@ fn fuzzDifferential(storage: *Storage, smith: *Smith) anyerror!void {
     const source = built.source;
 
     sentinel.fill(&storage.out);
-    const counted = decode.decompressCounted(source, storage.out[0..out_max]);
+    const counted = decode.decompressCounted(source, storage.out[0..out_max], &storage.one_shot);
     try sentinel.expect(&storage.out, out_max);
     const one = if (counted) |c| c.target_len else |err| err;
     if (counted) |c| {
@@ -1114,10 +1116,12 @@ fn fuzzDifferential(storage: *Storage, smith: *Smith) anyerror!void {
         // shorter prefix is a stream (`§10`).
         try testing.expect(c.source_len <= source.len);
         const again = &storage.again;
-        try testing.expectEqual(c, try decode.decompressCounted(source[0..c.source_len], again));
+        const stream = source[0..c.source_len];
+        const recount = try decode.decompressCounted(stream, again, &storage.one_shot);
+        try testing.expectEqual(c, recount);
         try testing.expectError(
             error.Truncated,
-            decode.decompressCounted(source[0 .. c.source_len - 1], again),
+            decode.decompressCounted(source[0 .. c.source_len - 1], again, &storage.one_shot),
         );
     } else |_| {}
 
@@ -1884,8 +1888,8 @@ fn checkHeader(header: *const frame.Header) !void {
     try testing.expect(header.ndirect <= 120);
     try testing.expect(header.ndirect % (@as(u8, 1) << header.npostfix) == 0);
     for (0..3) |cat| {
-        // §9.2 — NBLTYPES* and NTREES* are 1..256 on the wire; the tree
-        // categories are capped at OQ8's 64.
+        // §9.2 — NBLTYPES* and NTREES* are 1..256 on the wire, all of
+        // which the tree region holds.
         try testing.expect(header.block_types[cat] >= 1 and header.block_types[cat] <= 256);
         try testing.expect(header.num_trees[cat] >= 1);
         try testing.expect(header.num_trees[cat] <= huffman.max_trees);
@@ -1912,7 +1916,6 @@ fn isFrameRefusal(err: anyerror) bool {
         error.ReservedBit,
         error.ExuberantNibble,
         error.ExuberantMetaNibble,
-        error.TooManyTrees,
         error.SimpleHuffmanAlphabet,
         error.SimpleHuffmanSame,
         error.BadCodeLengthCode,
@@ -2460,25 +2463,26 @@ test "brotli fuzz: the bomb's MLEN boundary" {
     for (storage.read_out[0..drained.served]) |byte| try testing.expectEqual(@as(u8, 'A'), byte);
 }
 
-// OQ8's tree cap through the public entry point: a meta-block declaring 65
-// trees in a capped category fails `TooManyTrees`, never a bigger region.
-test "brotli fuzz: the tree cap is TooManyTrees" {
-    // NTREESL = 65: the literal trees' region holds 64.
+// The format's tree ceiling through the public entry point: a meta-block
+// declaring 256 trees in a category is read on, so a stream cut off there
+// is `Truncated`, with nothing written.
+test "brotli fuzz: 256 trees in a category are read on" {
+    // NTREESL = 256.
     var p: golden.Packer = .empty;
     packCompressedHead(&p);
-    packCount(&p, 65);
+    packCount(&p, 256);
     var target: [guard_len]u8 = undefined;
     sentinel.fill(&target);
-    try testing.expectError(error.TooManyTrees, decode.decompress(p.slice(), &target));
+    try testing.expectError(error.Truncated, decode.decompress(p.slice(), &target));
     try sentinel.expect(&target, 0);
 
-    // NBLTYPESI = 65: the command trees are the region's command category.
+    // NBLTYPESI = 256, the command trees' count.
     var q: golden.Packer = .empty;
     packCompressedHead(&q);
     q.pack(0, 1); // NBLTYPESL = 1
-    packCount(&q, 65);
+    packCount(&q, 256);
     sentinel.fill(&target);
-    try testing.expectError(error.TooManyTrees, decode.decompress(q.slice(), &target));
+    try testing.expectError(error.Truncated, decode.decompress(q.slice(), &target));
     try sentinel.expect(&target, 0);
 }
 

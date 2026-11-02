@@ -34,8 +34,12 @@ fn decode(gpa: std.mem.Allocator, stream: []const u8, out: *std.Io.Writer) !void
 }
 ```
 
+`decompress` keeps its 2.6 MiB state on the stack. To keep it off the
+thread, place a `brotli.decode.Buffer` in static or heap storage and call
+`decompressBuffered(stream, plain, &buffer)`.
+
 Streaming, through the `std.Io` interfaces. The default buffer is about
-16.7 MiB: keep it in static or heap storage.
+18.6 MiB: keep it in static or heap storage.
 
 ```zig
 fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
@@ -56,11 +60,15 @@ decodes every stream in `in` in one call; `just example brotli decode FILE.br
 const brotli = @import("compress").brotli; // two names: `decode`, `Reader`
 
 // One-shot decode: one stream, header through last byte. `target` is a cap;
-// the return value is the decoded length.
+// the return value is the decoded length. Its state rides the stack.
 brotli.decode.decompress(source: []const u8, target: []u8) DecompressError!usize
-// The same decode, also returning the stream's length in `source` (through
-// its last byte, so `source[source_len..]` is whatever followed it).
-brotli.decode.decompressCounted(source: []const u8, target: []u8) DecompressError!Decompressed
+// The same decode with its state in a `Buffer` you place (about 2.6 MiB,
+// no initialization needed; its contents are unspecified after a call).
+brotli.decode.decompressBuffered(source: []const u8, target: []u8, buffer: *Buffer) DecompressError!usize
+brotli.decode.Buffer = struct { header: the meta-block tree region, commands: ... };
+// The buffered decode, also returning the stream's length in `source`
+// (through its last byte, so `source[source_len..]` is whatever followed it).
+brotli.decode.decompressCounted(source: []const u8, target: []u8, buffer: *Buffer) DecompressError!Decompressed
 brotli.decode.Decompressed = struct { target_len: usize, source_len: usize };
 brotli.decode.DecompressError = error{
     BufferTooSmall,      // `target` cannot hold the decoded stream
@@ -84,8 +92,6 @@ brotli.decode.DecompressError = error{
     BadDistance,         // a special distance code resolves to zero or less
     BadTransform,        // a transform id above 120, or a word the transform empties
     BadDictionary,       // a dictionary reference's word length is outside 4..24
-    // this decoder's instantiation:
-    TooManyTrees,        // a meta-block declares more than 64 trees in a category
 };
 
 // Streaming decode: one `Reader` decodes one stream. You own the `Buffer`,
@@ -207,7 +213,7 @@ The pin is the CLI, and the CLI's file form is not always the reference
   the sliding window and the meta-block trees in the `Buffer` you give it: a
   `(1 << window_wbits)`-byte history ring — the window bound is
   `(1 << window_wbits) - 16` (§9.1) — plus the tree region. The default
-  `Buffer(24)` is about 16.7 MiB; `Buffer(22)` is about 4.7 MiB. A `Writer`
+  `Buffer(24)` is about 18.6 MiB; `Buffer(22)` is about 6.6 MiB. A `Writer`
   keeps the history ring (twice the window plus a 16-KiB mirror), the q3
   bucket table, the delayed commands, the tree-build scratch, and the input
   and output windows in its `Buffer`: `Writer.DefaultBuffer` is 9,097,172
@@ -274,13 +280,15 @@ The pin is the CLI, and the CLI's file form is not always the reference
 - **Stack.** The per-meta-block scratch is comptime and KiB-scale: the
   symbol lists and code lengths of a tree description, the distance-code
   tables derived from NPOSTFIX and NDIRECT, and the 38-byte transformed-word
-  buffer. `decompress` also carries the meta-block header arena as a stack
-  local — about 691 KiB, nearly all of it the tree region: a two-level table
-  per tree, 64 trees per category at the cap, sized by the reference's proven
+  buffer. The one-shot's state, `decode.Buffer`, is about 2.6 MiB, nearly
+  all of it the meta-block tree region: a two-level table per tree, 256
+  trees per category (the format's ceiling), sized by the reference's proven
   ceiling (about 2.5 KiB per literal tree, 4.3 KiB per command tree, 3.7 KiB
-  per distance tree) — so give decoding threads 1 MiB or more. A `Reader`
-  keeps that region in its `Buffer` instead, and its own stack stays
-  KiB-scale. `compress` carries the 256-KiB bucket table, the
+  per distance tree). Only the trees a meta-block declares are written.
+  `decompressBuffered` and `decompressCounted` keep it where you place it,
+  so their stack stays KiB-scale; `decompress` carries it as a stack local,
+  so give its threads 4 MiB or more. A `Reader` keeps the region in its
+  `Buffer`, and its own stack stays KiB-scale. `compress` carries the 256-KiB bucket table, the
   delayed-command buffer, and the tree-build scratch as comptime locals —
   about 600 KiB — so give encoding threads 1 MiB or more; a `Writer` keeps
   all three in its `Buffer`.
@@ -297,12 +305,6 @@ The pin is the CLI, and the CLI's file form is not always the reference
   unconditionally — any stream can reference it, so there is nothing to
   configure — and a custom or shared dictionary is outside RFC 7932: a stream
   encoded with one is not an RFC 7932 stream, and its distances fail naturally.
-- **The tree cap.** A meta-block that declares more than 64 trees in a
-  category fails `TooManyTrees`; the format allows up to 256 per category. The
-  region is comptime-sized so the decode stays allocation-free. The alternative
-  — an allocator-taking `Reader.init` for the tree region alone — would make
-  every streaming caller allocate for a worst case no measured stream
-  approaches; raise the cap instead if a real one ever trips it.
 - **No extensions.** The large-window streams the reference CLI tolerates, and
   the custom/compound dictionary surfaces, are out of scope (the RFC's own
   invalid pattern is refused; no `--large_window`-style flag exists).

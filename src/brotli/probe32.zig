@@ -99,7 +99,7 @@ const Generator = struct {
 const stall_limit: usize = 4;
 
 /// The generator's input buffer and the reader's `Buffer(16)` (a 64 KiB ring
-/// plus the 707,204-byte meta-block arena). Both are static: they are far
+/// plus the 2,732,428-byte meta-block arena). Both are static: they are far
 /// past a stack local's size.
 var in_buf: [1 << 16]u8 = undefined;
 var buffer: brotli.Reader.Buffer(16) = undefined;

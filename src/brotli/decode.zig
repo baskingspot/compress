@@ -80,9 +80,6 @@ pub const DecompressError = error{
     BadTransform,
     /// `§8` — a dictionary reference's word length is outside 4..24.
     BadDictionary,
-    /// This decoder's instantiation — a meta-block declares more than
-    /// 64 trees in a category.
-    TooManyTrees,
 };
 
 comptime {
@@ -108,7 +105,6 @@ comptime {
         "BadDistance",
         "BadTransform",
         "BadDictionary",
-        "TooManyTrees",
     };
     @setEvalBranchQuota(100_000);
     const set = @typeInfo(DecompressError).error_set.?;
@@ -129,22 +125,18 @@ comptime {
 /// meta-block boundaries", plus the distance tables each meta-block's
 /// NPOSTFIX and NDIRECT derive).
 ///
-/// About 691 KiB, nearly all of it the tree region, so `decompress` keeps it
-/// on the stack; the streaming `Reader` keeps the same two fields, its header
-/// arena in the caller's `Buffer`.
-pub const State = struct {
+/// About 2.6 MiB, nearly all of it the tree region (256 trees in each
+/// category, the format's ceiling). `decompressBuffered` and
+/// `decompressCounted` keep it in one the caller places, in static or heap
+/// memory; `decompress` puts one on the stack. Its contents need no
+/// initialization and are unspecified after a call. The streaming `Reader`
+/// keeps the same two fields, its header arena in its own `Buffer`.
+pub const Buffer = struct {
     /// `§9.2`, `§3`, `§6`, `§7` — the current meta-block's header. Written by
     /// `frame.nextMetaBlock` before any read of it.
     header: frame.Header,
     /// `§4`, `§9.3` — the distance ring and the derived distance tables.
     commands: command.State,
-
-    /// A decode state before its first meta-block. The header stays undefined
-    /// until `nextMetaBlock` fills it; the driver assembles the state in
-    /// place rather than copying this 691-KiB value into the frame.
-    pub fn init() State {
-        return .{ .header = undefined, .commands = .init };
-    }
 };
 
 /// Decode one brotli stream (`§9.1`'s header through the last meta-block's
@@ -161,10 +153,18 @@ pub const State = struct {
 /// zero bytes.
 ///
 /// On any error `target` can hold partial output, which must not be used.
-/// The state is about 691 KiB of stack, nearly all of it the meta-block tree
-/// region, so give decoding threads 1 MiB or more. Nothing is allocated.
+/// The convenience form: its `Buffer`, about 2.6 MiB, rides this frame, so
+/// give decoding threads 4 MiB or more of stack. `decompressBuffered` is the
+/// same decode over a caller-placed `Buffer`. Nothing is allocated.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
-    return (try decompressCounted(source, target)).target_len;
+    var buffer: Buffer = undefined;
+    return decompressBuffered(source, target, &buffer);
+}
+
+/// `decompress` over a caller-placed `Buffer` instead of the stack, so the
+/// thread needs only the layers' KiB-scale scratch. The result is the same.
+pub fn decompressBuffered(source: []const u8, target: []u8, buffer: *Buffer) DecompressError!usize {
+    return (try decompressCounted(source, target, buffer)).target_len;
 }
 
 /// What `decompressCounted` decoded: the bytes it wrote to `target`, and the
@@ -174,15 +174,20 @@ pub const Decompressed = struct {
     source_len: usize,
 };
 
-/// `decompress`, also reporting the stream's length in `source`, so a caller
-/// can find the bytes after the stream or refuse them. Same errors and costs.
-pub fn decompressCounted(source: []const u8, target: []u8) DecompressError!Decompressed {
-    // The fields are initialized separately, never as one aggregate: a
-    // `.{}` whole-struct store lowers to a memcpy of a 709,824-byte comptime
-    // constant into the frame (the header's `undefined` bytes ride along),
-    // a per-call fixed cost that dominated small streams. Written this way
-    // the header stays untouched until `nextMetaBlock` fills it.
-    var state: State = undefined;
+/// `decompressBuffered`, also reporting the stream's length in `source`, so
+/// a caller can find the bytes after the stream or refuse them. Same errors
+/// and costs.
+pub fn decompressCounted(
+    source: []const u8,
+    target: []u8,
+    buffer: *Buffer,
+) DecompressError!Decompressed {
+    // Only the command state is initialized: a whole-struct store would
+    // write all 2.6 MiB (or memcpy a comptime constant that size), a
+    // per-call fixed cost that dominates small streams. The header stays
+    // untouched until `nextMetaBlock` fills it, and only the trees a
+    // meta-block declares are written.
+    const state = buffer;
     state.commands = .init;
     var br: bits.BitReader = .init(source);
     const stream = try frame.readStreamHeader(bits.BitReader, &br);
@@ -238,6 +243,9 @@ pub fn decompressCounted(source: []const u8, target: []u8) DecompressError!Decom
 // fill), §8 (the dictionary class). The fixtures are `golden.zig`'s, each
 // verified with the pinned CLI (brotli 1.2.0).
 // ---------------------------------------------------------------------------
+
+/// The buffered forms' state for the tests: static, as a caller keeps it.
+var test_buffer: Buffer = undefined;
 
 /// The README's Usage snippet, as written: the caller allocates a cap, the
 /// decoded length is the return value, and exactly that many bytes reach the
@@ -519,15 +527,25 @@ test "decompressCounted reports the stream's last byte" {
         n += 1;
     }
     for (cases[0..n]) |case| {
-        const exact = try decompressCounted(case.bytes, &target);
+        const exact = try decompressCounted(case.bytes, &target, &test_buffer);
         try testing.expectEqual(case.plain_len, exact.target_len);
         try testing.expectEqual(case.bytes.len, exact.source_len);
         // Trailing bytes, including ones that could begin another stream,
         // leave the count where it was.
         fastmem.copy(u8, framed[0..case.bytes.len], case.bytes);
         fastmem.set(u8, framed[case.bytes.len..][0..5], 0x06);
-        const tailed = try decompressCounted(framed[0 .. case.bytes.len + 5], &target);
+        const tailed_source = framed[0 .. case.bytes.len + 5];
+        const tailed = try decompressCounted(tailed_source, &target, &test_buffer);
         try testing.expectEqual(exact, tailed);
+    }
+}
+
+test "decompressBuffered: any prior contents of the buffer decode the same" {
+    var target: [golden.cli_text_q11.plain.len]u8 = undefined;
+    for ([_]u8{ 0x00, 0x5a, 0xff }) |fill| {
+        fastmem.set(u8, std.mem.asBytes(&test_buffer), fill);
+        const n = try decompressBuffered(golden.cli_text_q11.bytes, &target, &test_buffer);
+        try testing.expectEqualSlices(u8, golden.cli_text_q11.plain, target[0..n]);
     }
 }
 

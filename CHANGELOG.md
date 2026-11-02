@@ -7,8 +7,12 @@ All notable changes to compress are recorded here. The format follows
 
 ### Added
 
-- `brotli.decode.decompressCounted`: the one-shot decode, also returning the
-  stream's length in `source`, so a caller can find or refuse trailing bytes.
+- `brotli.decode.decompressBuffered` and `brotli.decode.Buffer`: the
+  one-shot decode with its state (about 2.6 MiB, the meta-block tree region)
+  in memory the caller places instead of on the stack.
+- `brotli.decode.decompressCounted(source, target, buffer)`: the buffered
+  one-shot decode, also returning the stream's length in `source`, so a
+  caller can find or refuse trailing bytes.
 - `flate.encode.Level` gains `@"7"` and `@"9"`: hash chains with lazy match
   evaluation, smaller output than level 6 at lower speed, through `flate`,
   `zlib`, and `gzip`, one-shot and `Writer`.
@@ -21,6 +25,14 @@ All notable changes to compress are recorded here. The format follows
 
 ### Changed
 
+- `brotli` decodes meta-blocks with up to 256 trees in each category, the
+  format's ceiling, where it refused more than 64 with `TooManyTrees`;
+  brotli 1.2.0 writes up to 256 literal trees at q4 to q9 on inputs of a
+  megabyte. The tree region grows to match: `brotli.Reader.DefaultBuffer`
+  is about 18.6 MiB (was 16.7), and `brotli.decode.decompress` keeps about
+  2.6 MiB on the stack (was 691 KiB); `decompressBuffered` keeps it off the
+  stack. `TooManyTrees` is gone from `DecompressError` and
+  `Reader.Error`.
 - `flate.Writer.Buffer`, and so `zlib.Writer.Buffer` and
   `gzip.Writer.Buffer`, is a struct holding the window (`window`, the
   former 98,303-byte array) and a block emission's token list and
