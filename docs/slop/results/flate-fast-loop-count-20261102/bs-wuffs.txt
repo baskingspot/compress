@@ -1,0 +1,27 @@
+                                                  │   new.txt   │              wuffs.txt              │
+                                                  │   sec/op    │   sec/op     vs base                │
+Inflate/icon_16-actions_address_book_new-16x16      5.683µ ± 1%   6.656µ ± 3%  +17.11% (p=0.000 n=10)
+Inflate/icon_512-actions_address_book_new-512x512   703.8µ ± 1%   673.4µ ± 2%   -4.32% (p=0.000 n=10)
+Inflate/icon_64-actions_address_book_new-64x64      25.71µ ± 1%   29.30µ ± 0%  +13.97% (p=0.000 n=10)
+Inflate/photo_kodak-kodim01-768x512                 4.248m ± 0%   4.002m ± 1%   -5.79% (p=0.001 n=10)
+Inflate/photo_mosaic-50mp-8192x6144                 309.0m ± 2%   341.9m ± 1%  +10.66% (p=0.000 n=10)
+Inflate/photo_wikipedia-001-1276x850                9.697m ± 1%   9.633m ± 1%        ~ (p=0.190 n=10)
+Inflate/pngimg-air_pump_PNG5-999x772                2.680m ± 1%   2.721m ± 1%   +1.53% (p=0.001 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097         34.73m ± 0%   43.88m ± 1%  +26.35% (p=0.000 n=10)
+Inflate/test-dice-800x600                           1.935m ± 3%   1.747m ± 1%   -9.71% (p=0.000 n=10)
+Inflate/textures_plants-plant_02-1024x1316          6.656m ± 0%   6.883m ± 3%   +3.42% (p=0.000 n=10)
+geomean                                             2.087m        2.185m        +4.71%
+
+                                                  │   new.txt    │               wuffs.txt               │
+                                                  │     B/s      │      B/s       vs base                │
+Inflate/icon_16-actions_address_book_new-16x16      174.5Mi ± 1%    149.1Mi ± 3%  -14.59% (p=0.000 n=10)
+Inflate/icon_512-actions_address_book_new-512x512   1.388Gi ± 1%    1.451Gi ± 2%   +4.51% (p=0.000 n=10)
+Inflate/icon_64-actions_address_book_new-64x64      610.2Mi ± 1%    535.4Mi ± 0%  -12.25% (p=0.000 n=10)
+Inflate/photo_kodak-kodim01-768x512                 264.9Mi ± 0%    281.2Mi ± 1%   +6.14% (p=0.001 n=10)
+Inflate/photo_mosaic-50mp-8192x6144                 466.1Mi ± 2%    421.2Mi ± 1%   -9.63% (p=0.000 n=10)
+Inflate/photo_wikipedia-001-1276x850                320.1Mi ± 1%    322.2Mi ± 1%        ~ (p=0.197 n=10)
+Inflate/pngimg-air_pump_PNG5-999x772                1.072Gi ± 1%    1.056Gi ± 1%   -1.50% (p=0.001 n=10)
+Inflate/screenshot_web-amazon_com-1313x6097         879.6Mi ± 0%    696.1Mi ± 1%  -20.86% (p=0.000 n=10)
+Inflate/test-dice-800x600                           946.5Mi ± 3%   1048.3Mi ± 1%  +10.76% (p=0.000 n=10)
+Inflate/textures_plants-plant_02-1024x1316          772.6Mi ± 0%    747.1Mi ± 3%   -3.31% (p=0.000 n=10)
+geomean                                             578.9Mi         552.9Mi        -4.50%

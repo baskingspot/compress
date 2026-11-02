@@ -544,16 +544,18 @@ fn fastSymbols(r: *Reader) Error!usize {
     // changes the bits below `count`.
     var bits: u64 = readInt(u64, in[0..8]);
     var pos: usize = 7;
-    var count: u6 = 56;
+    var count: u32 = 56;
     bits >>= r.bits.consumed;
     count -= r.bits.consumed;
     var ended = false;
+    // The output so far is `reach +% end` bytes.
+    const reach = r.total_out -% start;
     // A refill loads `in[pos..][0..8]`; a symbol may write `fast_room`
     // bytes. `fastPathReady` checked both once.
     const in_last = in.len - 8;
     const out_last = out.len - fast_room;
     while (pos <= in_last and end <= out_last) {
-        bits |= readInt(u64, in[pos..][0..8]) << count;
+        bits |= readInt(u64, in[pos..][0..8]) << @truncate(count);
         pos += (63 - count) >> 3;
         count |= 56;
         var e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
@@ -563,25 +565,25 @@ fn fastSymbols(r: *Reader) Error!usize {
             // primary table, at most 11 bits, so after three there are 23
             // bits left, enough to look up and resolve the next code.
             bits >>= @intCast(e & 0xF);
-            count -= @intCast(e & 0xF);
+            count -= e & 0xF;
             out[end] = @truncate(e >> 4);
             end += 1;
             e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
             if (e & fast.literal != 0) {
                 bits >>= @intCast(e & 0xF);
-                count -= @intCast(e & 0xF);
+                count -= e & 0xF;
                 out[end] = @truncate(e >> 4);
                 end += 1;
                 e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
                 if (e & fast.literal != 0) {
                     bits >>= @intCast(e & 0xF);
-                    count -= @intCast(e & 0xF);
+                    count -= e & 0xF;
                     out[end] = @truncate(e >> 4);
                     end += 1;
                     e = literal.lookup[@intCast(bits & decode.LitDecoder.mask)];
                     if (e & fast.literal != 0) {
                         bits >>= @intCast(e & 0xF);
-                        count -= @intCast(e & 0xF);
+                        count -= e & 0xF;
                         out[end] = @truncate(e >> 4);
                         end += 1;
                         continue;
@@ -592,7 +594,7 @@ fn fastSymbols(r: *Reader) Error!usize {
             // valid across the refill, which only adds bits above `count`.
             if (count < 48) {
                 if (pos > in_last) break;
-                bits |= readInt(u64, in[pos..][0..8]) << count;
+                bits |= readInt(u64, in[pos..][0..8]) << @truncate(count);
                 pos += (63 - count) >> 3;
                 count |= 56;
             }
@@ -612,7 +614,7 @@ fn fastSymbols(r: *Reader) Error!usize {
             e = fast.entry(.literal_length, res.symbol, @intCast(res.len));
             if (e & fast.literal != 0) {
                 bits >>= @intCast(e & 0xF);
-                count -= @intCast(e & 0xF);
+                count -= e & 0xF;
                 out[end] = @truncate(e >> 4);
                 end += 1;
                 continue;
@@ -645,7 +647,7 @@ fn fastSymbols(r: *Reader) Error!usize {
         bits >>= dist_total;
         count -= dist_total;
         // §3.2.3 — no distance past the beginning of the output stream.
-        if (match_distance > r.total_out + (end - start)) return error.InvalidMatch;
+        if (match_distance > reach +% end) return error.InvalidMatch;
         assert(match_distance <= end);
         // 16 or 8 bytes at a time, past the match's end into the free
         // window: a chunk's source ends at or before its destination.

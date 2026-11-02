@@ -16,6 +16,8 @@ All notable changes to compress are recorded here. The format follows
   length or distance base and bit counts, the literal/length table is 11
   bits and builds without a full fill, and up to four literals decode per
   refill.
+- `flate.Reader` inflates 4 to 13% faster again on PNG image data: the fast
+  loop's bit count and match reach check are cheaper.
 
 ## [0.2.0] - 2026-10-31
 
