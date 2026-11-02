@@ -1,4 +1,4 @@
-//! Raw DEFLATE (RFC 1951) encoder, levels 1 and 6. `compress` splits the input
+//! Raw DEFLATE (RFC 1951) encoder, levels 1, 6, 7, and 9. `compress` splits the input
 //! into blocks of at most 65535 bytes and encodes each from a greedy match
 //! finder: level 1 as fixed-Huffman symbols or a stored block when that is
 //! smaller (`§3.2.4`); level 6 as klauspost/compress's level-6 class — their
@@ -18,7 +18,9 @@
 //! into it. The level-6 finder (`Finder6`, `encodeTokens6`) is their
 //! `fastEncL6`: a 4-byte-hash table plus a 7-byte-hash table with two
 //! candidates per slot, the same window shape, and the same dictionary
-//! priming (a full scan over the dictionary's tail).
+//! priming (a full scan over the dictionary's tail). Levels 7 and 9 are the
+//! lazy hash-chain finder in `lazy.zig` (RFC 1951 §4) over level 6's block
+//! emitter.
 //!
 //! The streaming `Writer` is built on `BitWriter`, `compressBlockStream`,
 //! `compressBlockStream6`, `emitStoredBlock`, and `writeFinalEmptyBlock`,
@@ -59,6 +61,7 @@ const distance_extra = decode.distance_extra;
 const dynamic = @import("dynamic.zig");
 const golden = @import("golden.zig");
 const writer = @import("Writer.zig");
+pub const lazy = @import("lazy.zig");
 
 /// The encoder's block size: 65535, the stored-block LEN cap (`§3.2.4`), so any
 /// block can fall back to stored. `compress` splits input at it; the streaming
@@ -122,7 +125,7 @@ inline fn load32(source: []const u8, pos: usize) u32 {
 /// case: `Window(false)` is `source` alone, and its accessors compile to the
 /// same loads as a bare `source` (no branch on `dict.len` in the finder's hot
 /// loops).
-fn Window(comptime preset: bool) type {
+pub fn Window(comptime preset: bool) type {
     return struct {
         const Self = @This();
 
@@ -133,12 +136,12 @@ fn Window(comptime preset: bool) type {
         source: []const u8,
 
         /// The window position of `source[index]`.
-        inline fn at(self: Self, index: usize) usize {
+        pub inline fn at(self: Self, index: usize) usize {
             return if (preset) self.dict.len + index else index;
         }
 
         /// The byte at window position `pos`.
-        inline fn byte(self: Self, pos: usize) u8 {
+        pub inline fn byte(self: Self, pos: usize) u8 {
             if (preset and pos < self.dict.len) return self.dict[pos];
             return self.source[if (preset) pos - self.dict.len else pos];
         }
@@ -147,7 +150,7 @@ fn Window(comptime preset: bool) type {
         /// the stream's own region (`start >= dict.len`), so this is a plain
         /// `source` slice; the finder's blocks and literal runs are always
         /// there.
-        inline fn sourceSlice(self: Self, start: usize, end: usize) []const u8 {
+        pub inline fn sourceSlice(self: Self, start: usize, end: usize) []const u8 {
             const offset = if (preset) self.dict.len else 0;
             assert(start >= offset);
             assert(end >= start);
@@ -158,7 +161,7 @@ fn Window(comptime preset: bool) type {
         /// The 4 bytes at window position `pos` (`§3.2.5`'s match confirm).
         /// Only a dictionary position can straddle the two regions, and then
         /// by at most 3 bytes.
-        inline fn load32At(self: Self, pos: usize) u32 {
+        pub inline fn load32At(self: Self, pos: usize) u32 {
             if (preset and pos < self.dict.len) {
                 if (pos + 4 <= self.dict.len) return load32(self.dict, pos);
                 var bytes: [4]u8 = undefined;
@@ -190,7 +193,7 @@ fn Window(comptime preset: bool) type {
         /// the exact mismatch byte. The caller guarantees `a < b` and that
         /// `b < limit <= dict.len + source.len` (the 8-byte loop bounds `b`,
         /// and `a` trails it).
-        fn matchLength(self: Self, a: usize, b: usize, limit: usize) usize {
+        pub fn matchLength(self: Self, a: usize, b: usize, limit: usize) usize {
             assert(a < b);
             var p = a;
             var q = b;
@@ -1276,6 +1279,83 @@ fn compressBlocks6(
     return w.pos;
 }
 
+/// The lazy levels' one-shot block loop: split `source` at
+/// `max_block_size`, as level 6 does, and end with the final empty block.
+/// The finder's tables persist across blocks; a dictionary's positions are
+/// linked into them first.
+fn compressBlocksLazy(
+    comptime preset: bool,
+    window: Window(preset),
+    source: []const u8,
+    target: []u8,
+    params: lazy.Params,
+) error{BufferTooSmall}!usize {
+    const base = finder_origin;
+    var w: BitWriter = .init(target);
+    var finder: lazy.Finder = undefined;
+    finder.clear();
+    var emitter: dynamic.BlockWriter = .empty;
+    var tokens: dynamic.TokenList = .empty;
+    if (preset) lazy.prime(preset, window, &finder, 0, window.dict.len, base);
+    var block_start: usize = 0;
+    while (block_start < source.len) {
+        const block_end = @min(block_start + max_block_size, source.len);
+        try lazy.compressBlock(
+            preset,
+            false,
+            window,
+            window.at(block_start),
+            window.at(block_end),
+            &w,
+            &tokens,
+            &finder,
+            &emitter,
+            base,
+            params,
+            block_end == source.len,
+        );
+        block_start = block_end;
+    }
+    try emitter.flushEob(&w);
+    try writeFinalEmptyBlock(&w);
+    try w.finish();
+    assert(w.pos <= maxCompressedLength(source.len));
+    return w.pos;
+}
+
+/// The streaming lazy block encode for the `Writer`: as
+/// `compressBlockStream6`, with the lazy finder and `params`.
+pub fn compressBlockStreamLazy(
+    source: []const u8,
+    block_start: usize,
+    block_end: usize,
+    w: *BitWriter,
+    finder: *lazy.Finder,
+    emitter: *dynamic.BlockWriter,
+    base: u32,
+    params: lazy.Params,
+    prime_dict: bool,
+    sync: bool,
+) error{BufferTooSmall}!void {
+    const window: Window(false) = .{ .dict = &.{}, .source = source };
+    if (prime_dict) lazy.prime(false, window, finder, 0, block_start, base);
+    var tokens: dynamic.TokenList = .empty;
+    try lazy.compressBlock(
+        false,
+        true,
+        window,
+        block_start,
+        block_end,
+        w,
+        &tokens,
+        finder,
+        emitter,
+        base,
+        params,
+        sync,
+    );
+}
+
 /// The streaming level-6 block encode for the `Writer`: `source` is the
 /// window (history followed by the block), `block_start`/`block_end` are
 /// window positions, and `base` is the absolute stream position of
@@ -1326,6 +1406,13 @@ pub const Level = enum(u8) {
     /// dynamic dispatch. Byte-identical to klauspost/compress's flate at
     /// level 6 (the pinned module version).
     @"6" = 6,
+    /// Lazy matching over hash chains (`lazy.zig`, RFC 1951 §4) with a
+    /// short search: dynamic-Huffman blocks from a finder that holds each
+    /// match while it searches the next position.
+    @"7" = 7,
+    /// Lazy matching over hash chains with a long search: the smallest
+    /// output, the slowest level.
+    @"9" = 9,
 
     /// The level for a zlib-scale number, or `null` when this encoder does
     /// not implement it. Use this at a boundary where the number comes from
@@ -1348,7 +1435,33 @@ pub const Options = struct {
     /// (RFC 1950 §2.2). A dictionary longer than 32 KiB contributes only its
     /// last 32 KiB.
     dict: ?[]const u8 = null,
+    /// How the lazy levels (7 and 9) weigh short matches; levels 1 and 6
+    /// ignore it.
+    strategy: Strategy = .default,
 };
+
+/// What the lazy levels expect of the data.
+pub const Strategy = enum {
+    /// Any data: matches of 4 bytes and more.
+    default,
+    /// Data a predictor has turned into small residuals, such as PNG's
+    /// filtered rows or TIFF's predictor 2: matches shorter than 6 bytes are
+    /// coded as literals, which the dynamic code makes cheaper there.
+    filtered,
+};
+
+/// The lazy finder's search effort for `level`, or null for the greedy
+/// levels (1 and 6).
+pub fn lazyParams(level: Level, strategy: Strategy) ?lazy.Params {
+    const min = lazy.min_match;
+    var p: lazy.Params = switch (level) {
+        .@"1", .@"6" => return null,
+        .@"7" => .{ .chain = 32, .lazy = 16, .nice = 128, .good = 8, .min_len = min },
+        .@"9" => .{ .chain = 1024, .lazy = 258, .nice = 258, .good = 32, .min_len = min },
+    };
+    if (strategy == .filtered) p.min_len = 6;
+    return p;
+}
 
 /// Compress `source` as one raw deflate stream into `target` and return the
 /// number of bytes written. A `target` of `maxCompressedLength(source.len)`
@@ -1396,6 +1509,10 @@ fn compressBlocks(
 ) error{BufferTooSmall}!usize {
     switch (options.level) {
         .@"6" => return compressBlocks6(preset, window, source, target),
+        .@"7", .@"9" => {
+            const params = lazyParams(options.level, options.strategy).?;
+            return compressBlocksLazy(preset, window, source, target, params);
+        },
         .@"1" => {},
     }
 
@@ -1633,6 +1750,95 @@ test "compress: level 6 round-trips every shape" {
                 return err;
             };
         }
+    }
+}
+
+test "compress: the lazy levels round-trip every shape with both strategies" {
+    // RFC 1951 §4 — lazy match evaluation over hash chains.
+    // Hash chains and lazy evaluation through the whole encoder, at the sizes
+    // that exercise the block split, the cross-block reach, the chain's
+    // window bound, and the stored fallback.
+    const gpa = testing.allocator;
+    inline for (.{
+        golden.Shape.text, golden.Shape.random, golden.Shape.html,
+        golden.Shape.rle,  golden.Shape.mixed,
+    }) |shape| {
+        for ([_]usize{ 0, 1, 3, 4, 5, 13, 127, 1000, 65535, 65536, 140_000 }) |len| {
+            const input = try golden.makeShape(gpa, shape, len);
+            defer gpa.free(input);
+            const comp = try gpa.alloc(u8, maxCompressedLength(len));
+            defer gpa.free(comp);
+            const target = try gpa.alloc(u8, len + sentinel.len);
+            defer gpa.free(target);
+            for ([_]Level{ .@"7", .@"9" }) |level| {
+                for (std.enums.values(Strategy)) |strategy| {
+                    const options: Options = .{ .level = level, .strategy = strategy };
+                    const clen = try compress(input, comp, options);
+                    try testing.expect(clen <= maxCompressedLength(len));
+                    try golden.expectFinalEmptyBlock(comp[0..clen]);
+                    golden.checkDecode(target, comp[0..clen], input) catch |err| {
+                        print("FAIL: {s} len {d} level {t} {t}\n", .{
+                            @tagName(shape), len, level, strategy,
+                        });
+                        return err;
+                    };
+                }
+            }
+        }
+    }
+}
+
+test "compress: the lazy levels find what the greedy one misses" {
+    // RFC 1951 §4 — lazy match evaluation.
+    // The levels are a ladder: on the corpus's text, where a held match
+    // often loses to a longer one a byte later, the lazy levels' output is
+    // no larger than level 6's, and level 9's no larger than level 7's.
+    const gpa = testing.allocator;
+    const input = try golden.makeShape(gpa, .text, 200_000);
+    defer gpa.free(input);
+    const comp = try gpa.alloc(u8, maxCompressedLength(input.len));
+    defer gpa.free(comp);
+    const n6 = try compress(input, comp, .{ .level = .@"6" });
+    const n7 = try compress(input, comp, .{ .level = .@"7" });
+    const n9 = try compress(input, comp, .{ .level = .@"9" });
+    try testing.expect(n7 <= n6);
+    try testing.expect(n9 <= n7);
+}
+
+test "compress: the filtered strategy codes short matches as literals" {
+    // RFC 1951 §3.2.5 — a match codes as length and distance, or literals.
+    // Five-byte repeats in random bytes: the default strategy matches them,
+    // the filtered one codes them as literals, so the streams differ and
+    // both decode to the input.
+    var input: [4096]u8 = undefined;
+    var rng: DefaultPrng = .init(0x5EED);
+    rng.random().bytes(&input);
+    var i: usize = 1000;
+    while (i + 5 <= input.len) : (i += 37) fastmem.copy(u8, input[i..][0..5], input[0..5]);
+    var a: [maxCompressedLength(4096)]u8 = undefined;
+    var b: [maxCompressedLength(4096)]u8 = undefined;
+    const na = try compress(&input, &a, .{ .level = .@"7" });
+    const nb = try compress(&input, &b, .{ .level = .@"7", .strategy = .filtered });
+    try testing.expect(!std.mem.eql(u8, a[0..na], b[0..nb]));
+    var out: [4096]u8 = undefined;
+    try testing.expectEqualSlices(u8, &input, out[0..try decode.decompress(b[0..nb], &out, null)]);
+}
+
+test "compress: the lazy levels match into a preset dictionary" {
+    // RFC 1950 §2.2 — FDICT; RFC 1951 §3.2 — back-references into it.
+    // The dictionary's positions are linked into the chains before the first
+    // block, so a source that repeats the dictionary is one long match.
+    const dict = "the quick brown fox jumps over the lazy dog, twice over. " ** 4;
+    const source = dict[0..200];
+    var with: [512]u8 = undefined;
+    var without: [512]u8 = undefined;
+    var out: [512]u8 = undefined;
+    for ([_]Level{ .@"7", .@"9" }) |level| {
+        const nw = try compress(source, &with, .{ .level = level, .dict = dict });
+        const nn = try compress(source, &without, .{ .level = level });
+        try testing.expect(nw < nn);
+        const dn = try decode.decompress(with[0..nw], &out, dict);
+        try testing.expectEqualSlices(u8, source, out[0..dn]);
     }
 }
 

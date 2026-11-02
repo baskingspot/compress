@@ -5,6 +5,15 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `flate.encode.Level` gains `@"7"` and `@"9"`: hash chains with lazy match
+  evaluation, smaller output than level 6 at lower speed, through `flate`,
+  `zlib`, and `gzip`, one-shot and `Writer`.
+- `flate.encode.Options.strategy`, and the same field on `zlib.encode.Options`
+  and `gzip.encode.Options`: `.filtered` tunes levels 7 and 9 for predictor
+  residuals such as PNG's filtered rows.
+
 ### Changed
 
 - `flate.Reader`, and so `zlib.Reader`, `gzip.Reader`, and the zlib and gzip

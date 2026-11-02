@@ -100,9 +100,21 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked level: 1 (fixed-Huffman) or 6 (dynamic Huffman).
+/// A Smith-picked level: any of `Level`'s, in its order (pick 0 is level
+/// 1, pick 1 level 6, then the lazy levels).
 fn implementedLevel(smith: *Smith) zlib.encode.Level {
-    return if (rangeAtMost(smith, 0, 1) == 0) .@"1" else .@"6";
+    const levels = comptime std.enums.values(zlib.encode.Level);
+    return levels[rangeAtMost(smith, 0, levels.len - 1)];
+}
+
+/// The level a seed's byte names: 6, 7, or 9, and level 1 for any other.
+fn levelFromByte(byte: u8) zlib.encode.Level {
+    return switch (byte) {
+        6 => .@"6",
+        7 => .@"7",
+        9 => .@"9",
+        else => .@"1",
+    };
 }
 
 /// How many `stream` calls decoding `plain_len` bytes may take: each call
@@ -280,6 +292,7 @@ fn flgFor(level: zlib.encode.Level) u8 {
     const flevel: u8 = switch (level) {
         .@"1" => 0,
         .@"6" => 2,
+        .@"7", .@"9" => 3,
     };
     // The minimal FCHECK: (31 - r) % 31, r = (CMF*256 + FLEVEL<<6) % 31.
     const r = (@as(u16, 0x78) * 256 + @as(u16, flevel) * 64) % 31;
@@ -391,7 +404,7 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// followed by marker bytes decodes identically (bytes after ADLER32 are not
 /// part of the stream).
 fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level: zlib.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
+    const level: zlib.encode.Level = levelFromByte(smith.value(u8));
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
@@ -1496,7 +1509,7 @@ const amplification_corpus: []const []const u8 = &.{
 /// stored-only level decodes the same source through the passthrough path, so
 /// the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
-    const level: zlib.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
+    const level: zlib.encode.Level = levelFromByte(smith.value(u8));
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];

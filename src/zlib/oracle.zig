@@ -90,7 +90,7 @@ pub fn main(init: std.process.Init) !u8 {
                 return 1;
             };
             break :level zlib.encode.Level.fromInt(number) orelse {
-                print("zlib-oracle: level must be 1 or 6, got {d}\n", .{number});
+                print("zlib-oracle: level must be 1, 6, 7, or 9, got {d}\n", .{number});
                 return 1;
             };
         } else .@"1";

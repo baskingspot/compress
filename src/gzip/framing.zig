@@ -22,11 +22,17 @@ const encode = @import("encode.zig");
 /// The inner codec's compression levels (flate's type, re-exported).
 pub const Level = flate.encode.Level;
 
+/// How the lazy levels weigh short matches (flate's type, re-exported).
+pub const Strategy = flate.encode.Strategy;
+
 /// Encoder configuration. `.{}` is the default: level 1.
 // ast-grep-ignore: public-struct-field-default -- options bag: call sites override one knob
 pub const Options = struct {
     /// The compression level.
     level: Level = .@"1",
+    /// How the lazy levels (7 and 9) weigh short matches; levels 1 and 6
+    /// ignore it.
+    strategy: Strategy = .default,
 };
 
 /// The failure detail a reader records in `err` once its state is `.failed`:
@@ -117,7 +123,10 @@ pub fn initReader(
 /// Wrap `output` with `buffer` as the inner flate writer's window and
 /// `options`' level fixed for the member's lifetime.
 pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return InnerWriter.init(output, buffer, .{ .level = options.level });
+    return InnerWriter.init(output, buffer, .{
+        .level = options.level,
+        .strategy = options.strategy,
+    });
 }
 
 /// Whether the header is complete.
@@ -174,7 +183,10 @@ pub fn bodyCompress(
     target: []u8,
     options: Options,
 ) error{BufferTooSmall}!usize {
-    return flate.encode.compress(source, target, .{ .level = options.level });
+    return flate.encode.compress(source, target, .{
+        .level = options.level,
+        .strategy = options.strategy,
+    });
 }
 
 /// The worst-case deflate body length (flate's bound).

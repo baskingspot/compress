@@ -62,6 +62,7 @@ const ending_len = (7 + 15 + 10 + 7) / 8;
 const Finder = union(enum) {
     l1: encode.FinderTable,
     l6: encode.Finder6,
+    lazy: encode.lazy.Finder,
 };
 
 const Writer = @This();
@@ -86,8 +87,8 @@ buffer: *Buffer,
 /// The match-finder state, persistent across the stream's blocks: level 1's
 /// table (entries are absolute stream positions, so a block pays a strided
 /// priming pass over its history, never a 128-KiB re-zero) or level 6's two
-/// tables. Null until the first block that runs the match finder, so a
-/// never-emitted stream does not initialize it.
+/// tables, or the lazy levels' chains. Null until the first block that runs
+/// the match finder, so a never-emitted stream does not initialize it.
 finder: ?Finder = null,
 /// Level 6's dynamic-block emitter state: the trees that persist across
 /// blocks and the reuse bookkeeping. Unused at level 1.
@@ -153,6 +154,33 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
     };
 }
 
+/// The lazy levels' block encode, continuing `start`'s bits; returns the
+/// writer's state after the block. Out of line, and taking the bit writer by
+/// value so that `emitBlock`'s own stays in registers: given its address,
+/// level 1's inlined loop kept it in memory and ran 6% slower.
+noinline fn emitLazy(w: *Writer, start: encode.BitWriter, block_end: usize) encode.BitWriter {
+    var bw = start;
+    var prime_dict = false;
+    if (w.finder == null) {
+        w.finder = .{ .lazy = undefined };
+        w.finder.?.lazy.clear();
+        prime_dict = w.block_start > 0;
+    }
+    encode.compressBlockStreamLazy(
+        w.buffer[0..block_end],
+        w.block_start,
+        block_end,
+        &bw,
+        &w.finder.?.lazy,
+        &w.emitter,
+        w.window_base +% encode.finder_origin,
+        encode.lazyParams(w.options.level, w.options.strategy).?,
+        prime_dict,
+        w.finishing,
+    ) catch unreachable;
+    return bw;
+}
+
 /// Complete the stream: emit the buffered partial block, write the final
 /// empty fixed block, and flush `output`. The stream is complete only after
 /// this call, and the writer is unusable afterwards.
@@ -178,7 +206,7 @@ fn writeEnding(w: *Writer) Io.Writer.Error!void {
         .bits = w.bits,
         .bit_count = w.bit_count,
     };
-    if (w.options.level == .@"6") w.emitter.flushEob(&bw) catch unreachable;
+    if (w.options.level != .@"1") w.emitter.flushEob(&bw) catch unreachable;
     encode.writeFinalEmptyBlock(&bw) catch unreachable;
     bw.finish() catch unreachable;
     w.bits = 0;
@@ -235,6 +263,8 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
             prime_dict,
             w.finishing,
         ) catch unreachable;
+    } else if (w.options.level != .@"1") {
+        bw = emitLazy(w, bw, block_end);
     } else {
         if (w.finder == null) {
             w.finder = .{ .l1 = undefined };
@@ -485,11 +515,13 @@ test "Writer: a stream crossing the 4-GiB window-base wrap round-trips" {
         math.maxInt(u32) - 400_000,
         0x8000_0000,
     };
-    for (bases) |base| {
+    for (bases, 0..) |base, i| {
+        // Level 1's table and the lazy level's chains, by turns.
+        const level: encode.Level = if (i % 2 == 0) .@"1" else .@"7";
         var out: Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         var buf: Buffer = undefined;
-        var w: Writer = .init(&out.writer, &buf, .{});
+        var w: Writer = .init(&out.writer, &buf, .{ .level = level });
         w.window_base = base;
 
         // Mixed input: repeated phrases (long matches that cross compacts)
@@ -557,6 +589,30 @@ test "Writer: level 6 round-trips through the stream, dispatch included" {
     defer gpa.free(one_shot);
     const clen = try encode.compress(input, one_shot, .{ .level = .@"6" });
     try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
+}
+
+test "Writer: the lazy levels stream the one-shot bytes" {
+    // RFC 1951 §4 — lazy match evaluation, through the streaming window.
+    // The streaming and one-shot layers split blocks alike and keep the
+    // chains across them, so without a flush they agree byte for byte.
+    const gpa = testing.allocator;
+    const input = try golden.makeShape(gpa, .mixed, 3 * max_block_size + 17);
+    defer gpa.free(input);
+    const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(input.len));
+    defer gpa.free(one_shot);
+    for ([_]encode.Level{ .@"7", .@"9" }) |level| {
+        for (std.enums.values(encode.Strategy)) |strategy| {
+            const options: encode.Options = .{ .level = level, .strategy = strategy };
+            var out: Io.Writer.Allocating = .init(gpa);
+            defer out.deinit();
+            var buf: Buffer = undefined;
+            var w: Writer = .init(&out.writer, &buf, options);
+            try w.writer.writeAll(input);
+            try w.finish();
+            const clen = try encode.compress(input, one_shot, options);
+            try testing.expectEqualSlices(u8, one_shot[0..clen], out.written());
+        }
+    }
 }
 
 test "Writer: a failed or finished writer never reports a false success" {

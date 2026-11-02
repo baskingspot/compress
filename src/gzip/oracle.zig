@@ -75,7 +75,7 @@ pub fn main(init: std.process.Init) !u8 {
                 return 1;
             };
             break :level gzip.encode.Level.fromInt(number) orelse {
-                print("gzip-oracle: level must be 1 or 6, got {d}\n", .{number});
+                print("gzip-oracle: level must be 1, 6, 7, or 9, got {d}\n", .{number});
                 return 1;
             };
         } else .@"1";

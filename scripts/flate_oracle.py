@@ -161,6 +161,10 @@ def check(desc: str, data: bytes, cap: int) -> None:
     # that pattern shifted into the last three bytes; either way the final
     # byte is zero and the bit before it is the ending's BTYPE bit.
     assert ours[-1] == 0x00, f"our encode ({desc}): final byte {ours[-1]:#x}"
+    # The lazy levels, which no reference pins, into the oracle's decode.
+    for level in (7, 9):
+        got = python_decompress(our_compress(data, level))
+        assert got == data, f"our encode ({desc}, level {level}): oracle decoded {len(got)} bytes"
 
 
 # The generated conformance shapes (oracle_common.SHAPES): the same bytes in

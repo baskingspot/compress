@@ -34,6 +34,8 @@ const framing = @import("framing.zig");
 pub const Options = framing.Options;
 /// The compression levels this encoder takes (flate's, re-exported).
 pub const Level = framing.Level;
+/// How the lazy levels weigh short matches (flate's, re-exported).
+pub const Strategy = framing.Strategy;
 /// RFC 1950 §2.2 — the header's length: CMF and FLG.
 pub const header_len = framing.header_len;
 /// RFC 1950 §2.2 — the DICTID's length, behind a set FDICT flag: the
@@ -79,7 +81,8 @@ pub fn writeDictId(target: *[dict_id_len]u8, dict: []const u8) void {
 
 /// The FLG byte `compress` writes for `level` (`§2.2`): FLEVEL in bits 6-7,
 /// FDICT (bit 5) set exactly when `fdict` is, FCHECK in bits 0-4. FLEVEL
-/// follows the bands C zlib and Go use: level 1 gives 0 and level 6 gives 2.
+/// follows the bands C zlib and Go use: level 1 gives 0, level 6 gives 2,
+/// and levels 7 and 9 give 3.
 /// It is only a hint ("not needed for decompression"). FCHECK is the smallest
 /// value that makes `CMF*256 + FLG` a multiple of 31, as the RFC requires
 /// ("CMF and FLG, when viewed as a 16-bit unsigned integer stored in MSB order
@@ -91,6 +94,7 @@ pub fn flgFor(level: Level, fdict: bool) u8 {
     const flevel: u8 = switch (level) {
         .@"1" => 0,
         .@"6" => 2,
+        .@"7", .@"9" => 3,
     };
     const fdict_bit: u8 = if (fdict) decode.flg_fdict else 0;
     return flevel << 6 | fdict_bit | fcheck(flevel, fdict);
@@ -182,11 +186,13 @@ test "encode: the empty stream is the golden bytes" {
 test "encode: FLEVEL follows the level bands" {
     // RFC 1950 §2.2 — FLEVEL is informational ("not needed for
     // decompression"); the bands are C zlib's and Go's: level 1 -> 0, level
-    // 6 -> 2. python3's zlib (the C reference) writes 78 01 at level 1 and
-    // 78 9c at level 6.
+    // 6 -> 2, levels 7 to 9 -> 3. python3's zlib (the C reference) writes
+    // 78 01 at level 1, 78 9c at level 6, and 78 da at levels 7 and 9.
     const cases = [_]struct { level: Level, flg: u8 }{
         .{ .level = .@"1", .flg = 0x01 },
         .{ .level = .@"6", .flg = 0x9c },
+        .{ .level = .@"7", .flg = 0xda },
+        .{ .level = .@"9", .flg = 0xda },
     };
     for (cases) |case| try testing.expectEqual(case.flg, flgFor(case.level, false));
 

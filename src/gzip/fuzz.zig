@@ -105,9 +105,21 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked level: 1 (fixed-Huffman) or 6 (dynamic Huffman).
+/// A Smith-picked level: any of `Level`'s, in its order (pick 0 is level
+/// 1, pick 1 level 6, then the lazy levels).
 fn implementedLevel(smith: *Smith) gzip.encode.Level {
-    return if (rangeAtMost(smith, 0, 1) == 0) .@"1" else .@"6";
+    const levels = comptime std.enums.values(gzip.encode.Level);
+    return levels[rangeAtMost(smith, 0, levels.len - 1)];
+}
+
+/// The level a seed's byte names: 6, 7, or 9, and level 1 for any other.
+fn levelFromByte(byte: u8) gzip.encode.Level {
+    return switch (byte) {
+        6 => .@"6",
+        7 => .@"7",
+        9 => .@"9",
+        else => .@"1",
+    };
 }
 
 /// How many `stream` calls decoding `plain_len` bytes may take: each call
@@ -281,7 +293,8 @@ fn expectGzipHeader(member: []const u8, level: gzip.encode.Level) !void {
 fn xflFor(level: gzip.encode.Level) u8 {
     return switch (level) {
         .@"1" => 4,
-        .@"6" => 0,
+        .@"6", .@"7" => 0,
+        .@"9" => 2,
     };
 }
 
@@ -392,7 +405,7 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// emitted member is the deterministic one, and a member followed by marker
 /// bytes decodes identically (bytes after the trailer are ignored).
 fn fuzzOneShotRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level: gzip.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
+    const level: gzip.encode.Level = levelFromByte(smith.value(u8));
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
@@ -1509,7 +1522,7 @@ const amplification_corpus: []const []const u8 = &.{
 /// untouched). The stored-only level decodes the same source through the
 /// passthrough path, so the cap rule is not a property of the match finder.
 fn fuzzAmplification(_: void, smith: *Smith) anyerror!void {
-    const level: gzip.encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
+    const level: gzip.encode.Level = levelFromByte(smith.value(u8));
     const shape = smith.value(Shape);
     var source_buf: [bomb_source_max]u8 = undefined;
     const source = source_buf[0..buildBomb(smith, shape, &source_buf)];

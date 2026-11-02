@@ -23,6 +23,9 @@ const encode = @import("encode.zig");
 /// The inner codec's compression levels (flate's type, re-exported).
 pub const Level = flate.encode.Level;
 
+/// How the lazy levels weigh short matches (flate's type, re-exported).
+pub const Strategy = flate.encode.Strategy;
+
 /// Encoder configuration. `.{}` is the default: level 1, no dictionary.
 // ast-grep-ignore: public-struct-field-default -- options bag: call sites override one knob
 pub const Options = struct {
@@ -32,6 +35,9 @@ pub const Options = struct {
     /// FDICT and writes the Adler-32 of the whole slice as DICTID; on decode
     /// it is checked against the header's DICTID before any body byte.
     dict: ?[]const u8 = null,
+    /// How the lazy levels (7 and 9) weigh short matches; levels 1 and 6
+    /// ignore it.
+    strategy: Strategy = .default,
 };
 
 /// The failure detail a `Reader` records in `err` once its state is
@@ -131,6 +137,7 @@ pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) I
     return InnerWriter.init(output, buffer, .{
         .level = options.level,
         .dict = dictionary(options),
+        .strategy = options.strategy,
     });
 }
 
@@ -194,6 +201,7 @@ pub fn bodyCompress(
     return flate.encode.compress(source, target, .{
         .level = options.level,
         .dict = dictionary(options),
+        .strategy = options.strategy,
     });
 }
 

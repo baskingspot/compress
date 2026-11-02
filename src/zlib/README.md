@@ -79,8 +79,10 @@ fn decompressTo(out: *std.Io.Writer, in: *std.Io.Reader) !void {
 // One-shot. `dict` is the stream's preset dictionary or `null` (§2.2): on
 // encode it sets FDICT and writes the Adler-32 of the whole slice as DICTID;
 // on decode it is checked against the header's DICTID before any body byte.
-zlib.encode.Level          // flate.encode.Level: @"1" or @"6"
-zlib.encode.Options        // struct { level: Level, dict: ?[]const u8 }; .init is level 1, no dictionary
+zlib.encode.Level          // flate.encode.Level: @"1", @"6", @"7", or @"9"
+zlib.encode.Strategy       // flate.encode.Strategy: default, or filtered for predictor residuals
+zlib.encode.Options        // struct { level: Level, dict: ?[]const u8, strategy: Strategy }
+                           // .init is level 1, no dictionary, the default strategy
 zlib.encode.maxCompressedLength(input_len: usize) usize
 zlib.encode.compress(source: []const u8, target: []u8, options: Options)
     error{BufferTooSmall}!usize                       // the stream's length
@@ -175,7 +177,8 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
 
 ## Limitations
 
-- Only flate's levels 1 and 6 exist: `Level` cannot represent another number.
+- Only flate's levels 1, 6, 7, and 9 exist: `Level` cannot represent another
+  number.
 - Level 1 writes fixed-Huffman and stored blocks only, so its output is larger
   than level 6's; the decoder handles every block type.
 

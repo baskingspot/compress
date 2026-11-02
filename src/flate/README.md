@@ -6,12 +6,15 @@ only `std` and [fastmem](https://github.com/baskingspot/fastmem), and never allo
 The spec is vendored at `docs/specs/rfc1951-deflate.txt`.
 
 The decoder handles stored, fixed-Huffman, and dynamic-Huffman blocks. The
-encoder has two levels. Level 1 is a greedy match finder in the style of
+encoder has four levels. Level 1 is a greedy match finder in the style of
 klauspost/compress level 1 that emits fixed-Huffman blocks, storing any block
 that would not shrink. Level 6 is klauspost/compress's level-6 class: their
 wider two-table greedy finder, dynamic-Huffman blocks, and the per-block
 stored/fixed/dynamic dispatch, byte-identical to their flate at level 6 (the
-pinned module version). "Raw" means no container: the gzip (RFC 1952) and zlib
+pinned module version). Levels 7 and 9 search hash chains with lazy match
+evaluation (RFC 1951 §4), 7 briefly and 9 at length, for smaller output at lower
+speed, and a `filtered` strategy tunes them for predictor residuals such as PNG's
+filtered rows. "Raw" means no container: the gzip (RFC 1952) and zlib
 (RFC 1950) packages wrap this one.
 
 ## Usage
@@ -55,8 +58,9 @@ entry points and `options.dict` on the encode ones.
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{BufferTooSmall}!usize
 encode.maxCompressedLength(input_len: usize) usize  // input_len + 5 * ceil(input_len / 65535) + 2
-encode.Level = enum(u8) { @"1" = 1, @"6" = 6 }    // the zlib scale's numbers
-encode.Options = struct { level: Level, dict: ?[]const u8 } // .init: level 1, no dictionary
+encode.Level = enum(u8) { @"1" = 1, @"6" = 6, @"7" = 7, @"9" = 9 } // the zlib scale's numbers
+encode.Options = struct { level: Level, dict: ?[]const u8, strategy: Strategy }
+    // .init: level 1, no dictionary, the default strategy
     // level: the implemented classes, named by the zlib-scale number:
     //   @"1": fixed-Huffman blocks over the level-1 finder, or a stored
     //         block when that is smaller.
@@ -65,10 +69,20 @@ encode.Options = struct { level: Level, dict: ?[]const u8 } // .init: level 1, n
     //         stored/fixed/dynamic dispatch. Byte-identical to
     //         klauspost/compress's flate at level 6 (the pinned module
     //         version).
+    //   @"7": hash chains with lazy match evaluation (§4), up to 32
+    //         candidates a search, and dynamic-Huffman blocks. Smaller
+    //         than level 6, and slower.
+    //   @"9": the same finder with up to 1024 candidates a search: the
+    //         smallest output, the slowest level.
     // Another level is not representable. A numeric level from a config
     // maps with `Level.fromInt` and handles the refusal at that boundary.
     // dict: preset history in front of the stream (§3.2.3). The caller vouches
     // for the bytes on both sides; zlib's FDICT/DICTID is the checked form.
+    // strategy: what levels 7 and 9 expect of the data; levels 1 and 6 ignore it.
+encode.Strategy = enum { default, filtered }
+    //   default: any data; matches of 4 bytes and more.
+    //   filtered: predictor residuals (PNG's filtered rows, TIFF's predictor 2):
+    //             matches shorter than 6 bytes are coded as literals.
 encode.max_block_size = 65535, encode.history_len = 32768  // block size; match reach
 
 decode.decompress(source: []const u8, target: []u8, dict: ?[]const u8) DecompressError!usize
@@ -132,7 +146,8 @@ declarations in `encode` and `decode` are shared internals.
 - **Output.** Deterministic, but not canonical: other encoders emit other valid streams.
 - **Stack.** `compress` keeps a 128 KiB match-finder table on the stack at
   level 1; at level 6 it keeps 384 KiB of finder tables, a 257 KiB token list,
-  and the tree scratch, about 650 KiB in all. A `Writer` is about 392 KiB (it
+  and the tree scratch, about 650 KiB in all; at levels 7 and 9 it keeps
+  256 KiB of hash chains in place of the level-6 tables. A `Writer` is about 392 KiB (it
   reserves the level-6 tables at every level), `Writer.Buffer` adds 96 KiB,
   and a level-6 block emission uses about 320 KiB more, so `Writer.streamAll`
   peaks near 810 KiB. A `Reader` is about 4 KiB plus its 64 KiB buffer;
@@ -158,7 +173,7 @@ declarations in `encode` and `decode` are shared internals.
 ## Limitations
 
 - Level 1 emits fixed-Huffman blocks only: codes spend 8 or 9 bits per literal,
-  so its output is larger than level 6's. Levels 2-5 and 7-9 are not
+  so its output is larger than level 6's. Levels 2-5 and 8 are not
   implemented, and `Level` cannot represent them.
 - A preset dictionary on raw flate is unverified: no container carries an
   identifier, so the caller vouches for the bytes on both sides. The zlib
@@ -169,7 +184,8 @@ declarations in `encode` and `decode` are shared internals.
 `just test` runs the unit tests: vectors ported from Go's `compress/flate` suite, RFC 1951's
 worked examples, round trips, and overrun checks on every decode. `just flate-oracle`
 cross-checks both directions against python3's `zlib`, pins level 1's bytes, and checks
-level 6 against klauspost/compress's flate at level 6 byte for byte. `just fuzz` runs the
+level 6 against klauspost/compress's flate at level 6 byte for byte, and decodes levels 7
+and 9 with python3's `zlib`. `just fuzz` runs the
 fuzz targets, and `just bench` runs the local benchmarks. Local numbers are not
 performance claims; a claim names the run that produced it.
 

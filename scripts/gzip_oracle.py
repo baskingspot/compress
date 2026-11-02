@@ -69,7 +69,7 @@ text = shapes["text"]
 long_text = shapes["long text (multi-block)"]
 
 # 1. Our encode -> the C reference's decode, every level, over the shapes.
-levels = ("1", "6")
+levels = ("1", "6", "7", "9")
 rows = 0
 for desc, data in shapes.items():
     for level in levels:

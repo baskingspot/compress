@@ -57,9 +57,21 @@ fn rangeAtMost(smith: *Smith, at_least: usize, at_most: usize) usize {
     return smith.valueRangeAtMost(u32, @intCast(at_least), @intCast(at_most));
 }
 
-/// A Smith-picked level: 1 (fixed-Huffman) or 6 (dynamic Huffman).
+/// A Smith-picked level: any of `Level`'s, in its order (pick 0 is level
+/// 1, pick 1 level 6, then the lazy levels).
 fn implementedLevel(smith: *Smith) encode.Level {
-    return if (rangeAtMost(smith, 0, 1) == 0) .@"1" else .@"6";
+    const levels = comptime std.enums.values(encode.Level);
+    return levels[rangeAtMost(smith, 0, levels.len - 1)];
+}
+
+/// The level a seed's byte names: 6, 7, or 9, and level 1 for any other.
+fn levelFromByte(byte: u8) encode.Level {
+    return switch (byte) {
+        6 => .@"6",
+        7 => .@"7",
+        9 => .@"9",
+        else => .@"1",
+    };
 }
 
 /// Every stream this codec writes ends with the final empty fixed block:
@@ -385,12 +397,14 @@ const roundtrip_corpus: []const []const u8 = &.{
 /// final empty fixed block (`03 00` where byte-aligned), and the decode writes
 /// nothing past the decoded length.
 fn fuzzRoundTrip(_: void, smith: *Smith) anyerror!void {
-    const level: encode.Level = if (smith.value(u8) == 6) .@"6" else .@"1";
+    const level: encode.Level = levelFromByte(smith.value(u8));
+    const strategy: encode.Strategy = if (rangeAtMost(smith, 0, 1) == 0) .default else .filtered;
     var source_buf: [roundtrip_max]u8 = undefined;
     const source = source_buf[0..buildShape(smith, &source_buf)];
 
     var compressed_buf: [encode.maxCompressedLength(roundtrip_max)]u8 = undefined;
-    const c_len = try encode.compress(source, &compressed_buf, .{ .level = level });
+    const options: encode.Options = .{ .level = level, .strategy = strategy };
+    const c_len = try encode.compress(source, &compressed_buf, options);
     const compressed = compressed_buf[0..c_len];
 
     // The documented bound, on every emission: `maxCompressedLength` is a

@@ -96,11 +96,27 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   block as stored before the finder runs. The one-shot path is unaffected
   (its sub-128-byte final block takes the close-time branch), so the byte pin
   holds; the `Writer` test with a flushed 1-byte block pins the divergence.
-- The `Writer`'s finder state is a union of the two level classes, so a
+- Levels 7 and 9 (`lazy.zig`) are original, from RFC 1951 §4: hash chains on
+  a 4-byte hash (`head[1 << 15]` plus `prev[32768]`, 256 KiB, only the heads
+  cleared per stream; a link is reached only through a position this stream
+  inserted) with lazy evaluation. They exist for PNG, whose filtered rows lost
+  3.7 to 9% against zlib's level 6 `Z_FILTERED` at our greedy level 6
+  (docs/slop/results/flate-lazy-png-20261101.md). The `filtered` strategy
+  raises the minimum match to 6; 5 and 6 measured best on filtered rows, 4
+  and 7 worse. One block per 64 KiB input, as level 6: splitting at 16K or 8K
+  tokens measured larger on PNG data and would have broken the
+  `maxCompressedLength` bound's one-stored-header-per-65535 arithmetic.
+  Lazy blocks go through `writeBlockFast`, so the stored/fixed/dynamic
+  dispatch and the bound hold as at level 6.
+- The `Writer`'s finder state is a union of the level classes (the lazy
+  tables fit inside the level-6 ones), so a
   level-1 `Writer` reserves the level-6 tables (392 KiB total against the old
   128 KiB). The alternative — two optional fields — is 512 KiB, and an
   allocator-taking `init` would break the committed signature. Documented in
   the README's Stack paragraph.
+- `emitLazy` is out of line and takes the `BitWriter` by value: passing
+  `&bw` from `emitBlock` made it escape, and level 1's inlined block loop then
+  kept the bit writer in memory instead of registers, 6% slower.
 - Writer layout (OQ4). `Writer.Buffer` is the retained history followed by the
   block region, so the encoder's window is one contiguous slice. The block
   region (`writer.buffer`) is always the `max_block_size` bytes after the
@@ -141,8 +157,8 @@ touching one.
 - The 3-byte input buffer. A 16-bit peek can start 7 bits into a byte, and
   `Io.Reader.fill` asserts its capacity, so a narrower buffer cannot show the
   decoder enough bits. Widening any peek raises this floor for every container.
-- The level is an enum: `encode.Level` has `@"1"` and `@"6"` only, named by
-  the zlib scale, so an unimplemented level is unrepresentable. `gzip` and
+- The level is an enum: `encode.Level` has `@"1"`, `@"6"`, `@"7"`, and `@"9"`
+  only, named by the zlib scale, so an unimplemented level is unrepresentable. `gzip` and
   `zlib` re-export the type and the shared container driver takes it as is.
 - A contiguous read the window cannot hold is `error.ReadFailed` with
   `err == .StreamTooLong`, never an assert.

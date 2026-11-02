@@ -27,6 +27,8 @@ const framing = @import("framing.zig");
 pub const Options = framing.Options;
 /// The compression levels this encoder takes (flate's, re-exported).
 pub const Level = framing.Level;
+/// How the lazy levels weigh short matches (flate's, re-exported).
+pub const Strategy = framing.Strategy;
 /// RFC 1952 §2.3 — the fixed header's length.
 pub const header_len = framing.header_len;
 /// RFC 1952 §2.3 — the trailer's length.
@@ -69,13 +71,14 @@ pub fn writeTrailer(target: *[trailer_len]u8, crc: u32, len: u32) void {
 }
 
 /// The XFL byte for `level` (`§2.3.1`: 2 means "maximum compression", 4
-/// means "fastest algorithm"): 4 for level 1 and 0 for level 6, the bands C
-/// zlib and Go use. The field is informational (`§2.3.1.2`) and reflects the
+/// means "fastest algorithm"): 4 for level 1, 2 for level 9, and 0 for the
+/// rest, the bands C zlib and Go use. The field is informational (`§2.3.1.2`) and reflects the
 /// requested level, not what the encoder did with it.
 pub fn xflFor(level: Level) u8 {
     return switch (level) {
         .@"1" => 4,
-        .@"6" => 0,
+        .@"6", .@"7" => 0,
+        .@"9" => 2,
     };
 }
 
@@ -151,6 +154,8 @@ test "encode: XFL follows the level bands" {
     const cases = [_]struct { level: Level, xfl: u8 }{
         .{ .level = .@"1", .xfl = 4 },
         .{ .level = .@"6", .xfl = 0 },
+        .{ .level = .@"7", .xfl = 0 },
+        .{ .level = .@"9", .xfl = 2 },
     };
     for (cases) |case| try testing.expectEqual(case.xfl, xflFor(case.level));
 
