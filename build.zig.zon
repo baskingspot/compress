@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .fastmem = .{
-            .url = "git+https://github.com/baskingspot/fastmem#c87adb88dcc1765cc889be4e51d59a01e1db5462",
-            .hash = "fastmem-0.0.0-W3bwdyOqBgCfq7hg9gtr_UuFX1aw_XBaxqXz-MHC4GmQ",
+            .url = "https://baskingspot.dev/fastmem/v0.2.0.tar.gz",
+            .hash = "fastmem-0.2.0-W3bwd4b0BgAzDPkV0NbYrRbzchboxxPvL6UVP5uhUS7X",
         },
         // Development-only: the test runner, benchmarks, and comptime
         // fixtures. Lazy so consumers of the library never fetch it.
