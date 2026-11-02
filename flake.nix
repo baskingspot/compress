@@ -29,35 +29,38 @@
               config.devShells."zig-0-16"
             ];
 
-            packages = with pkgs; [
-              uv
-              # nixpkgs' goperf is the golang.org/x/perf package. It supplies the
-              # benchstat that the bench recipes use.
-              goperf
-              pv
-              # The bench/ fleet harness (bench/README.md): opentofu reads the
-              # shared fleet stack's outputs; go builds the klauspost competitor
-              # driver; cmake configures the zlib-ng competitor build.
-              opentofu
-              go
-              cmake
-              # The 32-bit proof lane (`just check-32`): wasmtime runs the
-              # wasm32-wasi probe where the large-total wraps are observable.
-              wasmtime
-              # The conformance lanes' reference CLI (brotli-notes.md's verified
-              # incantations): the same tag as the C reference pin.
-              brotli
-              # The conformance lanes' reference CLIs (zstd-notes.md's verified
-              # incantations, the gzip oracle's streaming rows): the flake pins
-              # the oracles, not the box. zlib-the-library needs no system dep —
-              # the Python oracles ride CPython's bundled zlib, and the
-              # competitor arms are sha-pinned tarballs the harness builds
-              # itself with zig cc.
-              zstd
-              gzip
-              # `just test-be` runs the unit tests on a big-endian target.
-              qemu-user
-            ];
+            packages =
+              with pkgs;
+              [
+                uv
+                # nixpkgs' goperf is the golang.org/x/perf package. It supplies the
+                # benchstat that the bench recipes use.
+                goperf
+                pv
+                # The bench/ fleet harness (bench/README.md): opentofu reads the
+                # shared fleet stack's outputs; go builds the klauspost competitor
+                # driver; cmake configures the zlib-ng competitor build.
+                opentofu
+                go
+                cmake
+                # The 32-bit proof lane (`just check-32`): wasmtime runs the
+                # wasm32-wasi probe where the large-total wraps are observable.
+                wasmtime
+                # The conformance lanes' reference CLI (brotli-notes.md's verified
+                # incantations): the same tag as the C reference pin.
+                brotli
+                # The conformance lanes' reference CLIs (zstd-notes.md's verified
+                # incantations, the gzip oracle's streaming rows): the flake pins
+                # the oracles, not the box. zlib-the-library needs no system dep —
+                # the Python oracles ride CPython's bundled zlib, and the
+                # competitor arms are sha-pinned tarballs the harness builds
+                # itself with zig cc.
+                zstd
+                gzip
+              ]
+              # `just test-be` runs the unit tests on a big-endian target;
+              # qemu-user builds only for Linux hosts.
+              ++ lib.optionals stdenv.hostPlatform.isLinux [ qemu-user ];
 
             env = {
               UV_PYTHON = "${pkgs.python315}/bin/python3";
