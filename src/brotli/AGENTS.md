@@ -294,7 +294,8 @@ invalid-stream class (`§9.3`), never `BufferTooSmall`.
 - **The layers stay reachable under `decode`** (OQ2): `decode.prefix`,
   `decode.context`, `decode.distance`, `decode.dictionary`, `decode.command`,
   and `decode.frame`, each one line of doc, the zstd/flate precedent. The
-  README's API block documents `decompress` and `DecompressError` only; the
+  README's API block documents `decompress`, `decompressCounted`, and
+  `DecompressError` only; the
   reachable layers are the same kind of internal surface `flate.decode` and
   `zstd.decode` carry.
 - **The §11.1 trivial compressor moved to `golden.zig`** (`trivialBound`,

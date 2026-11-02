@@ -58,6 +58,10 @@ const brotli = @import("compress").brotli; // two names: `decode`, `Reader`
 // One-shot decode: one stream, header through last byte. `target` is a cap;
 // the return value is the decoded length.
 brotli.decode.decompress(source: []const u8, target: []u8) DecompressError!usize
+// The same decode, also returning the stream's length in `source` (through
+// its last byte, so `source[source_len..]` is whatever followed it).
+brotli.decode.decompressCounted(source: []const u8, target: []u8) DecompressError!Decompressed
+brotli.decode.Decompressed = struct { target_len: usize, source_len: usize };
 brotli.decode.DecompressError = error{
     BufferTooSmall,      // `target` cannot hold the decoded stream
     // stream header and meta-block ladder (§9.1, §9.2):
@@ -254,7 +258,8 @@ The pin is the CLI, and the CLI's file form is not always the reference
   means structurally valid, not intact — integrity is a container's job, and
   brotli has no container.
 - **After the stream.** `decompress` ignores whatever follows the stream's last
-  byte. `Reader` consumes `input` exactly through the stream's last byte and
+  byte; `decompressCounted` returns where that byte is, for a caller that
+  needs the bytes after it or must refuse them. `Reader` consumes `input` exactly through the stream's last byte and
   leaves the rest unread, so the input position at a clean end is the next
   stream's first byte. A second stream there is not an error: `streamAll` reads
   it as the walk's next iteration, and a plain `Reader` simply leaves it

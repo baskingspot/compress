@@ -7,6 +7,8 @@ All notable changes to compress are recorded here. The format follows
 
 ### Added
 
+- `brotli.decode.decompressCounted`: the one-shot decode, also returning the
+  stream's length in `source`, so a caller can find or refuse trailing bytes.
 - `flate.encode.Level` gains `@"7"` and `@"9"`: hash chains with lazy match
   evaluation, smaller output than level 6 at lower speed, through `flate`,
   `zlib`, and `gzip`, one-shot and `Writer`.

@@ -25,7 +25,8 @@
 //!     deterministic (`§9.1`'s 0010001, `§10`'s truncation rule, T4's
 //!     trailing bytes)
 //!   - `fuzzDifferential`: the one-shot against the `Reader` — verdict,
-//!     class, bytes, the `§9.1` window cap, and the exact boundary (T4)
+//!     class, bytes, the `§9.1` window cap, and the exact boundary (T4),
+//!     which `decode.decompressCounted` must report
 //!   - `fuzzReaderMachinery`: the consumer surface (`peek`/`take`/`discard`/
 //!     `stream`/poll), the ring wrap, `StreamTooLong`, the sticky end
 //!   - `fuzzAmplification`: caps below, at, and above the decoded length, and
@@ -306,6 +307,8 @@ const Storage = struct {
     out: [out_max + guard_len]u8 = undefined,
     /// The streaming decode's drain buffer.
     read_out: [out_max + guard_len]u8 = undefined,
+    /// The one-shot's target when it decodes the counted stream again.
+    again: [out_max]u8 = undefined,
     ring10: Reader.Buffer(10) = undefined,
     ring16: Reader.Buffer(16) = undefined,
     ring24: Reader.DefaultBuffer = undefined,
@@ -1103,8 +1106,20 @@ fn fuzzDifferential(storage: *Storage, smith: *Smith) anyerror!void {
     const source = built.source;
 
     sentinel.fill(&storage.out);
-    const one = decode.decompress(source, storage.out[0..out_max]);
+    const counted = decode.decompressCounted(source, storage.out[0..out_max]);
     try sentinel.expect(&storage.out, out_max);
+    const one = if (counted) |c| c.target_len else |err| err;
+    if (counted) |c| {
+        // The stream's own bytes decode alone to the same result, and no
+        // shorter prefix is a stream (`§10`).
+        try testing.expect(c.source_len <= source.len);
+        const again = &storage.again;
+        try testing.expectEqual(c, try decode.decompressCounted(source[0..c.source_len], again));
+        try testing.expectError(
+            error.Truncated,
+            decode.decompressCounted(source[0 .. c.source_len - 1], again),
+        );
+    } else |_| {}
 
     // The input's handover: whole at once, or in chunks from the four-byte
     // floor the reader's `StreamBits` seam needs (`README.md`).
@@ -1142,6 +1157,14 @@ fn fuzzDifferential(storage: *Storage, smith: *Smith) anyerror!void {
             try testing.expectEqual(source.len, streamed.consumed);
         }
     }
+
+    if (counted) |c| {
+        // T4 — the one-shot's count is the boundary an unbuffered reader
+        // stops at.
+        if (chunk.len == 0 and streamed.stop == .end_of_stream) {
+            try testing.expectEqual(c.source_len, streamed.consumed);
+        }
+    } else |_| {}
 
     if (one) |n| {
         // The one-shot decoded the whole stream inside the cap: the reader

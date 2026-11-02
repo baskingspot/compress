@@ -153,9 +153,8 @@ pub const State = struct {
 /// The format records no decoded length, so `target` is a cap: the decoded
 /// bytes are also the match history (`§8`), and a stream that would write
 /// past the cap fails `error.BufferTooSmall` before that write. Bytes after
-/// the stream's last byte are ignored, and the number consumed is not
-/// reported; the C reference's one-shot decoder is also single-stream. Use
-/// `brotli.Reader` for the stream boundary.
+/// the stream's last byte are ignored; `decompressCounted` reports where the
+/// stream ended.
 ///
 /// Zero bytes of input is `Truncated` (no stream began; the empty stream is
 /// the single byte `06`), and a stream of only empty meta-blocks decodes to
@@ -165,6 +164,19 @@ pub const State = struct {
 /// The state is about 691 KiB of stack, nearly all of it the meta-block tree
 /// region, so give decoding threads 1 MiB or more. Nothing is allocated.
 pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
+    return (try decompressCounted(source, target)).target_len;
+}
+
+/// What `decompressCounted` decoded: the bytes it wrote to `target`, and the
+/// bytes of `source` the stream took, through its last byte.
+pub const Decompressed = struct {
+    target_len: usize,
+    source_len: usize,
+};
+
+/// `decompress`, also reporting the stream's length in `source`, so a caller
+/// can find the bytes after the stream or refuse them. Same errors and costs.
+pub fn decompressCounted(source: []const u8, target: []u8) DecompressError!Decompressed {
     // The fields are initialized separately, never as one aggregate: a
     // `.{}` whole-struct store lowers to a memcpy of a 709,824-byte comptime
     // constant into the frame (the header's `undefined` bytes ride along),
@@ -211,7 +223,13 @@ pub fn decompress(source: []const u8, target: []u8) DecompressError!usize {
         }
     }
     assert(pos <= target.len);
-    return pos;
+    // Every way out of the ladder ends on a byte boundary: the empty last
+    // meta-block and the last compressed one align, and metadata is whole
+    // bytes (`§9.2`).
+    assert(br.atByteBoundary());
+    assert(br.source_base == 0);
+    assert(br.bit_pos / 8 <= source.len);
+    return .{ .target_len = pos, .source_len = @intCast(br.bit_pos / 8) };
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +490,45 @@ test "the stream ends at its last byte; trailing bytes are the caller's" {
     // A second stream there is not decoded either: one call, one stream.
     fastmem.copy(u8, framed[stream.len..][0..stream.len], stream);
     try expectDecode(framed[0 .. 2 * stream.len], golden.hand_stream.plain);
+}
+
+test "decompressCounted reports the stream's last byte" {
+    // RFC 7932 §9.2, §9.3 — every stream ends on a byte boundary: after the
+    // empty last meta-block's fill, the last compressed meta-block's fill,
+    // or a metadata payload's whole bytes. The count is that boundary, with
+    // or without bytes after it.
+    var target: [4096]u8 = undefined;
+    var framed: [4096]u8 = undefined;
+    const Case = struct { bytes: []const u8, plain_len: usize };
+    var cases: [64]Case = undefined;
+    var n: usize = 0;
+    for (golden.empty_streams) |stream| {
+        cases[n] = .{ .bytes = stream, .plain_len = 0 };
+        n += 1;
+    }
+    for (golden.last_metadata_streams) |stream| {
+        cases[n] = .{ .bytes = stream, .plain_len = 0 };
+        n += 1;
+    }
+    for (golden.metadata_streams ++ golden.uncompressed_streams) |stream| {
+        cases[n] = .{ .bytes = stream.bytes, .plain_len = stream.plain.len };
+        n += 1;
+    }
+    for ([_]golden.Stream{ golden.hand_stream, golden.cli_text_q11 }) |stream| {
+        cases[n] = .{ .bytes = stream.bytes, .plain_len = stream.plain.len };
+        n += 1;
+    }
+    for (cases[0..n]) |case| {
+        const exact = try decompressCounted(case.bytes, &target);
+        try testing.expectEqual(case.plain_len, exact.target_len);
+        try testing.expectEqual(case.bytes.len, exact.source_len);
+        // Trailing bytes, including ones that could begin another stream,
+        // leave the count where it was.
+        fastmem.copy(u8, framed[0..case.bytes.len], case.bytes);
+        fastmem.set(u8, framed[case.bytes.len..][0..5], 0x06);
+        const tailed = try decompressCounted(framed[0 .. case.bytes.len + 5], &target);
+        try testing.expectEqual(exact, tailed);
+    }
 }
 
 test "the last byte's fill must be zero (RFC 7932 §9.3)" {
