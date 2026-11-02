@@ -1222,7 +1222,8 @@ fn compressBlocks6(
     var finder: Finder6 = undefined;
     finder.clear();
     var emitter: dynamic.BlockWriter = .empty;
-    var tokens: dynamic.TokenList = .empty;
+    var tokens: dynamic.TokenList = undefined;
+    tokens.clear();
     if (preset) {
         // The dictionary seeds the tables exactly as klauspost's
         // `fillWindow` does: a full scan over its tail, tokens discarded.
@@ -1295,7 +1296,8 @@ fn compressBlocksLazy(
     var finder: lazy.Finder = undefined;
     finder.clear();
     var emitter: dynamic.BlockWriter = .empty;
-    var tokens: dynamic.TokenList = .empty;
+    var tokens: dynamic.TokenList = undefined;
+    tokens.clear();
     if (preset) lazy.prime(preset, window, &finder, 0, window.dict.len, base);
     var block_start: usize = 0;
     while (block_start < source.len) {
@@ -1339,7 +1341,8 @@ pub fn compressBlockStreamLazy(
 ) error{BufferTooSmall}!void {
     const window: Window(false) = .{ .dict = &.{}, .source = source };
     if (prime_dict) lazy.prime(false, window, finder, 0, block_start, base);
-    var tokens: dynamic.TokenList = .empty;
+    var tokens: dynamic.TokenList = undefined;
+    tokens.clear();
     try lazy.compressBlock(
         false,
         true,
@@ -1376,7 +1379,8 @@ pub fn compressBlockStream6(
     sync: bool,
 ) error{BufferTooSmall}!void {
     const window: Window(false) = .{ .dict = &.{}, .source = source };
-    var tokens: dynamic.TokenList = .empty;
+    var tokens: dynamic.TokenList = undefined;
+    tokens.clear();
     if (prime_dict) {
         encodeTokens6(false, window, 0, block_start, &tokens, finder, base);
         tokens.reset();

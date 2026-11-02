@@ -87,9 +87,14 @@ buffer: *Buffer,
 /// The match-finder state, persistent across the stream's blocks: level 1's
 /// table (entries are absolute stream positions, so a block pays a strided
 /// priming pass over its history, never a 128-KiB re-zero) or level 6's two
-/// tables, or the lazy levels' chains. Null until the first block that runs
-/// the match finder, so a never-emitted stream does not initialize it.
-finder: ?Finder = null,
+/// tables, or the lazy levels' chains. Undefined until `finder_ready`: the
+/// first block that runs the match finder sets it up, so neither `init` nor a
+/// never-emitted stream writes its hundreds of KiB. (An optional would not
+/// do: setting one to null stores its undefined payload, which the compiler
+/// may turn into a memset of the whole union.)
+finder: Finder,
+/// Whether `finder` holds this stream's tables.
+finder_ready: bool,
 /// Level 6's dynamic-block emitter state: the trees that persist across
 /// blocks and the reuse bookkeeping. Unused at level 1.
 emitter: dynamic.BlockWriter,
@@ -134,24 +139,38 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
     // A preset dictionary is the window's oldest bytes: its tail fills the
     // history region in front of the block region, exactly where earlier
     // blocks' bytes sit once the stream has written them (`§3.2.3`).
+    var w: Writer = undefined;
+    w.initInPlace(output, buffer, options);
+    return w;
+}
+
+/// Start a deflate stream in `w`, as `init` does, writing the fields in
+/// place. `w.* = .init(...)` builds the writer elsewhere and copies all of
+/// it in, finder tables included, about 392 KiB per stream: the larger part
+/// of a short stream's cost. Use this to start a stream in memory that held
+/// an earlier writer, or any `undefined` `Writer`.
+pub fn initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void {
+    // A preset dictionary is the window's oldest bytes: its tail fills the
+    // history region in front of the block region, exactly where earlier
+    // blocks' bytes sit once the stream has written them (`§3.2.3`).
     const history = decode.dictHistory(options.dict);
     fastmem.copy(u8, buffer[0..history.len], history);
-    return .{
-        .writer = .{
-            .buffer = buffer[history.len..][0..max_block_size],
-            .end = 0,
-            .vtable = &Hooks.vtable,
-        },
-        .output = output,
-        .buffer = buffer,
-        .options = options,
-        .emitter = .empty,
-        .finishing = false,
-        .window_base = 0,
-        .block_start = history.len,
-        .bits = 0,
-        .bit_count = 0,
+    w.writer = .{
+        .buffer = buffer[history.len..][0..max_block_size],
+        .end = 0,
+        .vtable = &Hooks.vtable,
     };
+    w.output = output;
+    w.options = options;
+    w.checksum = null;
+    w.buffer = buffer;
+    w.finder_ready = false;
+    w.emitter = .empty;
+    w.finishing = false;
+    w.window_base = 0;
+    w.block_start = history.len;
+    w.bits = 0;
+    w.bit_count = 0;
 }
 
 /// The lazy levels' block encode, continuing `start`'s bits; returns the
@@ -161,9 +180,10 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 noinline fn emitLazy(w: *Writer, start: encode.BitWriter, block_end: usize) encode.BitWriter {
     var bw = start;
     var prime_dict = false;
-    if (w.finder == null) {
+    if (!w.finder_ready) {
         w.finder = .{ .lazy = undefined };
-        w.finder.?.lazy.clear();
+        w.finder_ready = true;
+        w.finder.lazy.clear();
         prime_dict = w.block_start > 0;
     }
     encode.compressBlockStreamLazy(
@@ -171,7 +191,7 @@ noinline fn emitLazy(w: *Writer, start: encode.BitWriter, block_end: usize) enco
         w.block_start,
         block_end,
         &bw,
-        &w.finder.?.lazy,
+        &w.finder.lazy,
         &w.emitter,
         w.window_base +% encode.finder_origin,
         encode.lazyParams(w.options.level, w.options.strategy).?,
@@ -243,9 +263,10 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     // allows.
     if (w.options.level == .@"6") {
         var prime_dict = false;
-        if (w.finder == null) {
+        if (!w.finder_ready) {
             w.finder = .{ .l6 = undefined };
-            w.finder.?.l6.clear();
+            w.finder_ready = true;
+            w.finder.l6.clear();
             // The window's front is the preset dictionary when a stream
             // starts with one: its length is the block start before the
             // first emission.
@@ -257,7 +278,7 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
             w.block_start,
             block_end,
             &bw,
-            &w.finder.?.l6,
+            &w.finder.l6,
             &w.emitter,
             base,
             prime_dict,
@@ -266,16 +287,17 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     } else if (w.options.level != .@"1") {
         bw = emitLazy(w, bw, block_end);
     } else {
-        if (w.finder == null) {
+        if (!w.finder_ready) {
             w.finder = .{ .l1 = undefined };
-            fastmem.set(u32, &w.finder.?.l1, 0);
+            w.finder_ready = true;
+            fastmem.set(u32, &w.finder.l1, 0);
         }
         encode.compressBlockStream(
             w.buffer[0..block_end],
             w.block_start,
             block_end,
             &bw,
-            &w.finder.?.l1,
+            &w.finder.l1,
             w.window_base,
         ) catch unreachable;
     }

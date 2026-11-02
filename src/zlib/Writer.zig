@@ -76,6 +76,15 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
     return Hooks.init(output, buffer, options);
 }
 
+/// Start a stream in `w`, as `init` does, writing the fields in place.
+/// `w.* = .init(...)` builds the writer elsewhere and copies all of it in,
+/// about 392 KiB per stream: the larger part of a short stream's cost. Use this
+/// to start a stream in memory that held an earlier writer, or any `undefined`
+/// `Writer`.
+pub fn initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void {
+    Hooks.initInPlace(w, output, buffer, options);
+}
+
 /// Complete the stream: write the header if it is still pending, the
 /// buffered data as a last block, the empty final block that ends the deflate
 /// stream, and the Adler-32 trailer (`§2.2`), then flush `output`. A stream
@@ -198,6 +207,35 @@ test "Writer: the header is lazy and written before the first byte" {
     try golden.expectHeader(out.written(), .@"1");
     try golden.expectTrailer(out.written(), "xy");
     try decodeStream(out.written(), "xy");
+}
+
+test "Writer: initInPlace starts a stream in a used writer's memory" {
+    // RFC 1950 §2.2 — each stream is a header, a deflate body, and the
+    // Adler-32: a writer restarted in place over a finished one writes each
+    // stream as a fresh `init` would, so as the one-shot encoder does.
+    const gpa = testing.allocator;
+    const input = "the quick brown fox jumps over the lazy dog. " ** 3000;
+    const cases = [_]encode.Options{
+        .{ .level = .@"7", .dict = "the lazy dog", .strategy = .filtered },
+        .{ .level = .@"6", .dict = null },
+        .{ .level = .@"1", .dict = "fox" },
+        .{ .level = .@"9", .dict = null },
+    };
+    const one_shot = try gpa.alloc(u8, encode.maxCompressedLength(input.len));
+    defer gpa.free(one_shot);
+    const w = try gpa.create(Writer);
+    defer gpa.destroy(w);
+    const buf = try gpa.create(Buffer);
+    defer gpa.destroy(buf);
+    for (cases) |options| {
+        var out: Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        w.initInPlace(&out.writer, buf, options);
+        try w.writer.writeAll(input);
+        try w.finish();
+        const n = try encode.compress(input, one_shot, options);
+        try testing.expectEqualSlices(u8, one_shot[0..n], out.written());
+    }
 }
 
 test "Writer: round-trips" {

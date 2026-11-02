@@ -94,6 +94,8 @@ zlib.decode.DecompressError = flate.decode.DecompressError || error{
 // Streaming: write through `w.writer`, read through `r.reader`
 zlib.Writer.Buffer = [98303]u8
 zlib.Writer.init(output: *Io.Writer, buffer: *Buffer, options: Options) Writer
+zlib.Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: Options) void
+    // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
 zlib.Writer.finish(w: *Writer) Io.Writer.Error!void
 zlib.Writer.streamAll(in: *Io.Reader, out: *Io.Writer, options: Options)
     error{ ReadFailed, WriteFailed }!usize            // input bytes consumed

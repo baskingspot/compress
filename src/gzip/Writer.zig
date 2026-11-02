@@ -68,6 +68,15 @@ pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
     return Hooks.init(output, buffer, options);
 }
 
+/// Start a member in `w`, as `init` does, writing the fields in place.
+/// `w.* = .init(...)` builds the writer elsewhere and copies all of it in,
+/// about 392 KiB per member: the larger part of a short member's cost. Use this
+/// to start a member in memory that held an earlier writer, or any `undefined`
+/// `Writer`.
+pub fn initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void {
+    Hooks.initInPlace(w, output, buffer, options);
+}
+
 /// End the member: write the header if nothing has been written yet, write
 /// the buffered data and the final deflate block, write the trailer (CRC-32
 /// and ISIZE, `§2.3.1`), and flush `output`. Call it once; without it the

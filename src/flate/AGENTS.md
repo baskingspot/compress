@@ -113,7 +113,12 @@ explained in `src/internal/AGENTS.md`. Attribution is in `THIRD_PARTY.md`.
   level-1 `Writer` reserves the level-6 tables (392 KiB total against the old
   128 KiB). The alternative — two optional fields — is 512 KiB, and an
   allocator-taking `init` would break the committed signature. Documented in
-  the README's Stack paragraph.
+  the README's Stack paragraph. The union stays undefined until the first
+  block that runs the finder (`finder_ready`): an optional set to null stores
+  its undefined payload, and LLVM merged that with the emitter's zeroing into
+  a 392-KiB memset per `init`. `initInPlace` exists because `w.* = .init(...)`
+  builds the writer in a temporary and copies all of it; for a 1-KiB stream
+  the two were most of the cost (docs/slop/results/flate-lazy-png-20261101.md).
 - `emitLazy` is out of line and takes the `BitWriter` by value: passing
   `&bw` from `emitBlock` made it escape, and level 1's inlined block loop then
   kept the bit writer in memory instead of registers, 6% slower.

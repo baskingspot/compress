@@ -34,10 +34,11 @@
 //! - `InnerReader`, `InnerWriter`: the inner codec's streaming types. The
 //!   driver uses `inner.reader` (the embedded `Io.Reader`), `inner.writer`,
 //!   `inner.err`, and `inner.checksum`.
-//! - `initWriter(output, buffer, options)`: the inner codec's streaming
-//!   writer constructor. It owns the block region's placement inside `buffer`
-//!   (a preset dictionary starts it after the dictionary), and the driver
-//!   takes the interface's serving region from `inner.writer.buffer`.
+//! - `initWriter(inner, output, buffer, options)`: the inner codec's
+//!   streaming writer constructor, which initializes `inner` in place. It
+//!   owns the block region's placement inside `buffer` (a preset dictionary
+//!   starts it after the dictionary), and the driver takes the interface's
+//!   serving region from `inner.writer.buffer`.
 //! - `initReader(input, buffer, dict)`, `readHeader(header, input, dict)`:
 //!   the inner codec's streaming constructor and the header parse. `dict` is
 //!   the container's preset dictionary or null; a framing without a
@@ -267,14 +268,24 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
         /// `buffer` as the compression window and `options` fixed for the
         /// writer's lifetime.
         pub fn init(output: *Io.Writer, buffer: *F.WriterBuffer, options: F.Options) Host {
-            var host: Host = .{
-                .writer = .failing,
-                .output = output,
-                .inner = F.initWriter(output, buffer, options),
-                .options = options,
-                .checksum = .init,
-                .header = .pending,
-            };
+            var host: Host = undefined;
+            initInPlace(&host, output, buffer, options);
+            return host;
+        }
+
+        /// As `init`, writing `host`'s fields in place instead of returning
+        /// a `Host` to copy: the inner writer's state is hundreds of KiB.
+        pub fn initInPlace(
+            host: *Host,
+            output: *Io.Writer,
+            buffer: *F.WriterBuffer,
+            options: F.Options,
+        ) void {
+            host.output = output;
+            F.initWriter(&host.inner, output, buffer, options);
+            host.options = options;
+            host.checksum = .init;
+            host.header = .pending;
             // The interface's serving region is the inner codec's block
             // region: the same bytes, which the generated entries hand out and
             // the encoder fills. A framing with a preset dictionary starts
@@ -285,7 +296,6 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
                 .end = 0,
                 .vtable = &vtable,
             };
-            return host;
         }
 
         /// Completes the container: writes the header if it is still pending,

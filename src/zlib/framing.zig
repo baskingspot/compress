@@ -131,10 +131,16 @@ fn dictionary(options: Options) ?[]const u8 {
     return if (bytes.len > 0) bytes else null;
 }
 
-/// Wrap `output` with `buffer` as the inner flate writer's window and
-/// `options`' level and dictionary fixed for the stream's lifetime.
-pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return InnerWriter.init(output, buffer, .{
+/// Start `inner`, in place, wrapping `output` with `buffer` as the inner
+/// flate writer's window and `options`' level and dictionary fixed for the
+/// stream's lifetime.
+pub fn initWriter(
+    inner: *InnerWriter,
+    output: *Io.Writer,
+    buffer: *WriterBuffer,
+    options: Options,
+) void {
+    inner.initInPlace(output, buffer, .{
         .level = options.level,
         .dict = dictionary(options),
         .strategy = options.strategy,

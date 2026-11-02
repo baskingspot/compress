@@ -120,10 +120,16 @@ pub fn initReader(
     return InnerReader.init(input, buffer, dict);
 }
 
-/// Wrap `output` with `buffer` as the inner flate writer's window and
-/// `options`' level fixed for the member's lifetime.
-pub fn initWriter(output: *Io.Writer, buffer: *WriterBuffer, options: Options) InnerWriter {
-    return InnerWriter.init(output, buffer, .{
+/// Start `inner`, in place, wrapping `output` with `buffer` as the inner
+/// flate writer's window and `options`' level fixed for the member's
+/// lifetime.
+pub fn initWriter(
+    inner: *InnerWriter,
+    output: *Io.Writer,
+    buffer: *WriterBuffer,
+    options: Options,
+) void {
+    inner.initInPlace(output, buffer, .{
         .level = options.level,
         .strategy = options.strategy,
     });

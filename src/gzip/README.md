@@ -70,6 +70,8 @@ decode.DecompressError = flate.decode.DecompressError || error{
 
 Writer.Buffer = [98303]u8
 Writer.init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
+Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void
+    // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
 w.writer              // the Io.Writer to write to
 w.finish() Io.Writer.Error!void
 Writer.streamAll(in: *Io.Reader, out: *Io.Writer, options: encode.Options)

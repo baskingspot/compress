@@ -13,9 +13,15 @@ All notable changes to compress are recorded here. The format follows
 - `flate.encode.Options.strategy`, and the same field on `zlib.encode.Options`
   and `gzip.encode.Options`: `.filtered` tunes levels 7 and 9 for predictor
   residuals such as PNG's filtered rows.
+- `flate.Writer.initInPlace`, `zlib.Writer.initInPlace`, and
+  `gzip.Writer.initInPlace` start a stream in existing memory without the copy
+  that assigning a new writer makes.
 
 ### Changed
 
+- Short streams compress 2 to 4 times faster: a writer no longer zeroes its
+  match-finder tables when it is created, and level 6 no longer clears its
+  256-KiB token array for every block.
 - `flate.Reader`, and so `zlib.Reader`, `gzip.Reader`, and the zlib and gzip
   one-shot decoders, inflate Huffman blocks 2 to 2.6 times faster: symbols
   decode from a 64-bit bit buffer over the input's buffered bytes, and the

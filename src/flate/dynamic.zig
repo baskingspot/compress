@@ -95,6 +95,16 @@ pub const TokenList = struct {
         .tokens = undefined,
     };
 
+    /// Make `self`, whatever it holds, an empty list: the token count and
+    /// the three histograms. Use it on `undefined` memory in place of
+    /// copying `empty`: the copy writes the whole 256-KiB token array.
+    pub fn clear(self: *TokenList) void {
+        self.n = 0;
+        fastmem.set(u16, &self.lit_hist, 0);
+        fastmem.set(u16, &self.extra_hist, 0);
+        fastmem.set(u16, &self.off_hist, 0);
+    }
+
     /// Empty the list for the next block: the token count and the three
     /// histograms (the token array is overwritten as it is filled).
     pub fn reset(self: *TokenList) void {

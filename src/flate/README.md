@@ -99,6 +99,8 @@ decode.DecompressError = error{
 
 Writer.Buffer = [98303]u8  // max_block_size + history_len
 Writer.init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
+Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void
+    // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
 Writer.writer: Io.Writer   // write through &w.writer
 Writer.finish(w: *Writer) Io.Writer.Error!void
 Writer.streamAll(in: *Io.Reader, out: *Io.Writer, options: encode.Options)
