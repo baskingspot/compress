@@ -53,6 +53,11 @@ All notable changes to compress are recorded here. The format follows
   refill.
 - `flate.Reader` inflates 4 to 13% faster again on PNG image data: the fast
   loop's bit count and match reach check are cheaper.
+- `flate.Reader` and `zlib.Reader` inflate short streams such as TIFF's
+  8-KiB Deflate strips 1.05 to 1.39 times faster, and PNG image data 2 to
+  33% faster: a block's Huffman tables build without counting and sorting
+  symbol by symbol, its header decodes from a bit buffer, and Adler-32 folds
+  without multiplies.
 
 ## [0.2.0] - 2026-10-31
 

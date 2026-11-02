@@ -25,6 +25,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const native_endian = @import("builtin").cpu.arch.endian();
 const testing = std.testing;
 
 const fastmem = @import("fastmem");
@@ -251,6 +252,7 @@ pub fn HuffmanDecoder(
     // above a 5-bit symbol.
     const symbol_mask: u16 = if (kind == .distance) 0x1F else 0xFFF;
     const invalid: Entry = 0xFFFF | fast.exceptional(kind);
+    const words = (alphabet_size + 63) / 64;
 
     return struct {
         const Self = @This();
@@ -284,42 +286,40 @@ pub fn HuffmanDecoder(
         pub fn build(self: *Self, lens: []const u4) TreeError!void {
             assert(lens.len <= alphabet_size);
             assert(kind != .literal_length or lens.len > 256);
-            try checkLengths(kind, lens);
 
-            var count: [max_bits + 1]u16 = @splat(0);
-            for (lens) |len| count[len] += 1;
-
-            // The symbols in canonical order, by code length and then by
-            // symbol (`§3.2.2`): `sorted[first[len]..]` has the codes of
-            // length `len`, whose numerals count up from `next_code[len]`.
-            var first: [max_bits + 2]u16 = undefined;
-            first[1] = 0;
-            for (1..max_bits + 1) |len| first[len + 1] = first[len] + count[len];
-            var sorted: [alphabet_size]u16 = undefined;
-            var at = first;
-            for (lens, 0..) |len, symbol| {
-                if (len == 0) continue;
-                sorted[at[len]] = @intCast(symbol);
-                at[len] += 1;
+            // Each length's symbols as bit masks, 64 symbols to a word, one
+            // vector compare per length and word. The masks give the counts,
+            // and walking a length's bits visits its symbols in canonical
+            // order (`§3.2.2`), so no sort is needed. Counting and sorting
+            // symbol by symbol chained every step through a counter in
+            // memory, which cost more than filling the table.
+            var padded: [words * 64]u8 = @splat(0);
+            for (padded[0..lens.len], lens) |*p, len| p.* = len;
+            var masks: [max_bits + 1][words]u64 = undefined;
+            var count: [16]u16 = @splat(0);
+            for (1..max_bits + 1) |len| {
+                for (&masks[len], 0..) |*mask_word, w| {
+                    const v: @Vector(64, u8) = padded[w * 64 ..][0..64].*;
+                    const m: u64 = @bitCast(v == @as(@Vector(64, u8), @splat(@intCast(len))));
+                    // A bool vector's element 0 is the integer's most
+                    // significant bit on a big-endian target.
+                    mask_word.* = if (native_endian == .big) @bitReverse(m) else m;
+                    count[len] += @popCount(m);
+                }
             }
-
-            // RFC 1951 §3.2.2, step 2: bl_count -> next_code.
-            var next_code: [max_bits + 1]u16 = @splat(0);
-            var code: u16 = 0;
-            count[0] = 0;
-            for (1..max_bits + 1) |bits| {
-                code = (code + count[bits - 1]) << 1;
-                next_code[bits] = code;
-            }
+            try checkCounts(kind, &count, lens);
 
             // The primary table a length at a time: the first 2^len slots
             // hold every code up to `len` bits, so doubling them repeats the
             // shorter codes across the next length's slots, and each code of
             // that length then takes one slot. Slots no short code fills
             // stay `invalid`: those of long codes, and the rest of an
-            // incomplete code.
+            // incomplete code. `code` is the next canonical numeral (RFC
+            // 1951 §3.2.2, step 2): one past the last code, doubled per
+            // length.
             self.lookup[0] = invalid;
             self.lookup[1] = invalid;
+            var code: u16 = 0;
             for (1..lookup_bits + 1) |len| {
                 const half = @as(usize, 1) << @intCast(len - 1);
                 if (len > 1) {
@@ -329,21 +329,34 @@ pub fn HuffmanDecoder(
                         fastmem.copy(Entry, self.lookup[half..][0..half], self.lookup[0..half]);
                     }
                 }
-                for (sorted[first[len]..first[len + 1]], 0..) |symbol, k| {
-                    const wire = wireBits(next_code[len] + @as(u16, @intCast(k)), @intCast(len));
-                    self.lookup[wire] = fast.entry(kind, symbol, @intCast(len));
+                code <<= 1;
+                const l: u4 = @intCast(len);
+                for (masks[len], 0..) |mask_word, w| {
+                    var m = mask_word;
+                    while (m != 0) : (m &= m - 1) {
+                        const symbol: u16 = @intCast(w * 64 + @ctz(m));
+                        self.lookup[wireBits(code, l)] = fast.entry(kind, symbol, l);
+                        code += 1;
+                    }
                 }
             }
 
             // Long codes, chained from their primary slot.
             for (lookup_bits + 1..max_bits + 1) |len| {
-                for (sorted[first[len]..first[len + 1]], 0..) |symbol, k| {
-                    const wire = wireBits(next_code[len] + @as(u16, @intCast(k)), @intCast(len));
-                    const index = wire & lookup_mask;
-                    const head: u16 = @truncate(self.lookup[index]);
-                    const next = if (head == 0xFFFF) chain_end else (head >> 4) & symbol_mask;
-                    self.chain[symbol] = .{ .wire = wire, .len = @intCast(len), .next = next };
-                    self.lookup[index] = symbol << 4 | fast.exceptional(kind);
+                code <<= 1;
+                const l: u4 = @intCast(len);
+                for (masks[len], 0..) |mask_word, w| {
+                    var m = mask_word;
+                    while (m != 0) : (m &= m - 1) {
+                        const symbol: u16 = @intCast(w * 64 + @ctz(m));
+                        const wire = wireBits(code, l);
+                        code += 1;
+                        const index = wire & lookup_mask;
+                        const head: u16 = @truncate(self.lookup[index]);
+                        const next = if (head == 0xFFFF) chain_end else (head >> 4) & symbol_mask;
+                        self.chain[symbol] = .{ .wire = wire, .len = l, .next = next };
+                        self.lookup[index] = symbol << 4 | fast.exceptional(kind);
+                    }
                 }
             }
         }
@@ -462,7 +475,8 @@ fn wireBits(code: u16, len: u5) u16 {
     return @bitReverse(code) >> @intCast(16 - @as(u6, len));
 }
 
-/// Reject the code-length sets a decoder must not accept:
+/// Reject the code-length sets a decoder must not accept, given `count`, the
+/// number of codes of each length, and `lens`:
 ///
 ///   - oversubscribed sets (Kraft sum > 1, implied by `§3.2.2`);
 ///   - incomplete sets, unless the only code is a single 1-bit code (`§3.2.7`;
@@ -471,27 +485,22 @@ fn wireBits(code: u16, len: u5) u16 {
 ///   - a literal/length set with no code for 256, and an empty precode set.
 ///
 /// An empty distance set is legal: "the data is all literals" (`§3.2.7`).
-fn checkLengths(comptime kind: TreeKind, lens: []const u4) TreeError!void {
-    var count: [16]u16 = @splat(0);
+fn checkCounts(comptime kind: TreeKind, count: *const [16]u16, lens: []const u4) TreeError!void {
+    // "left" is the number of code slots left after each length; one possible
+    // code of zero length starts it.
+    var left: u32 = 1;
     var max: u4 = 0;
-    for (lens) |len| {
-        count[len] += 1;
-        if (len > max) max = len;
+    for (1..16) |len| {
+        left <<= 1;
+        if (count[len] > left) return error.OversubscribedHuffmanTree;
+        left -= count[len];
+        if (count[len] != 0) max = @intCast(len);
     }
     if (max == 0) return switch (kind) {
         .distance => {}, // §3.2.7: zero distance codes, "the data is all literals"
         .literal_length => error.MissingEndOfBlockCode,
         .precode => error.InvalidDynamicBlockHeader,
     };
-
-    // "left" is the number of code slots left after each length; one possible
-    // code of zero length starts it.
-    var left: u32 = 1;
-    for (1..16) |len| {
-        left <<= 1;
-        if (count[len] > left) return error.OversubscribedHuffmanTree;
-        left -= count[len];
-    }
     if (left > 0 and !(max == 1 and count[1] == 1)) return error.IncompleteHuffmanTree;
     if (kind == .literal_length and lens[256] == 0) return error.MissingEndOfBlockCode;
 }
@@ -1015,36 +1024,33 @@ test "dictHistory: the dictionary's last 32 KiB" {
     try testing.expectEqualSlices(u8, big[big.len - history_len ..], tail);
 }
 
-test "checkLengths: oversubscribed and incomplete sets" {
+test "build: oversubscribed and incomplete sets" {
     // Spec: rfc1951-deflate.txt §3.2.2, §3.2.7 — oversubscribed sets are always
     // rejected; incomplete sets are rejected unless the longest code is 1 bit.
+    var d: DistDecoder = .{};
     // Kraft sum 1/2 + 1/4 + 1/8 + 1/8 = 1 is complete.
-    const complete = [_]u4{ 1, 2, 3, 3 };
-    try checkLengths(.distance, &complete);
+    try d.build(&.{ 1, 2, 3, 3 });
     // 1/2 + 1/4 + 1/4 + 1/4 = 5/4 > 1.
-    const oversubscribed = [_]u4{ 1, 2, 2, 2 };
-    try testing.expectError(
-        error.OversubscribedHuffmanTree,
-        checkLengths(.distance, &oversubscribed),
-    );
+    try testing.expectError(error.OversubscribedHuffmanTree, d.build(&.{ 1, 2, 2, 2 }));
     // 1/2 + 1/4 + 1/8 = 7/8 < 1, longest code 3 bits.
-    const incomplete = [_]u4{ 1, 2, 3, 0 };
-    try testing.expectError(error.IncompleteHuffmanTree, checkLengths(.distance, &incomplete));
+    try testing.expectError(error.IncompleteHuffmanTree, d.build(&.{ 1, 2, 3, 0 }));
     // A single 1-bit code is the one legal incomplete shape (§3.2.7).
-    const single = [_]u4{ 1, 0, 0, 0 };
-    try checkLengths(.distance, &single);
+    try d.build(&.{ 1, 0, 0, 0 });
 }
 
-test "checkLengths: literal/length trees need a code for 256" {
+test "build: literal/length trees need a code for 256" {
     // Spec: rfc1951-deflate.txt §3.2.7 — a literal/length tree with no code for
     // 256 is rejected up front, at table build, because no block could end; an
     // empty precode tree is the same situation one level up.
     var lens: [288]u4 = @splat(0);
     lens[0] = 1;
     lens[1] = 1; // complete, but no code for 256
-    try testing.expectError(error.MissingEndOfBlockCode, checkLengths(.literal_length, &lens));
+    var lit: LitDecoder = .{};
+    try testing.expectError(error.MissingEndOfBlockCode, lit.build(&lens));
 
     const empty: [19]u4 = @splat(0);
-    try testing.expectError(error.InvalidDynamicBlockHeader, checkLengths(.precode, &empty));
-    try checkLengths(.distance, &empty); // zero distance codes are legal
+    var pre: PrecodeDecoder = .{};
+    try testing.expectError(error.InvalidDynamicBlockHeader, pre.build(&empty));
+    var d: DistDecoder = .{};
+    try d.build(empty[0..4]); // zero distance codes are legal
 }

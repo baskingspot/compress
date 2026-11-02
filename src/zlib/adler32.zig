@@ -62,37 +62,34 @@ pub fn adler32(adler: u32, bytes: []const u8) u32 {
         //   s1 += Σ b_i
         //   s2 += len·s1_old + Σ (len-i)·b_i
         //
-        // so the block folds as two vector accumulators, the byte sums and
-        // the weight-times-byte sums, each reduced once at the end of the
-        // block. Full chunks go through the vector accumulators; a sub-chunk
-        // tail (only possible in the input's last block) finishes with the
-        // per-byte recurrence.
+        // The chunk-aligned prefix of `vec_len` = 16·K bytes folds through
+        // two vector accumulators. Byte j of chunk k has weight
+        // 16·(K-k) - j, so with `sum_lanes` the per-lane byte sums and
+        // `prefix_lanes` the per-lane sums of `sum_lanes` after each chunk
+        // (which count chunk k's bytes K-k times), the weighted sum is
+        // 16·Σ prefix_lanes - Σ j·sum_lanes[j]: two adds per chunk and no
+        // multiply until the end of the block. A sub-chunk tail (only
+        // possible in the input's last block) finishes with the per-byte
+        // recurrence from the exact state the prefix lands.
         const len = @min(rest.len, nmax);
         const block = rest[0..len];
         defer rest = rest[len..];
 
-        // The vector part folds the chunk-aligned prefix of `vec_len`
-        // bytes; its weights are relative to that prefix (the weight of
-        // 0-based byte p in an n-byte prefix is n-p), so the prefix fold
-        // lands the exact running state and the sub-chunk tail's per-byte
-        // recurrence continues from it without double-counting.
         const vec_len = block.len - block.len % chunk_len;
         var sum_lanes: Lane = @splat(0);
-        var weighted_lanes: Lane = @splat(0);
+        var prefix_lanes: Lane = @splat(0);
         var at: usize = 0;
         while (at < vec_len) : (at += chunk_len) {
             const chunk: Chunk = block[at..][0..chunk_len].*;
-            const wide: Lane = chunk;
-            // Per chunk, the weights are (vec_len - at) - lane_index.
-            const weights: Lane =
-                @as(Lane, @splat(@intCast(vec_len - at))) - lane_index;
-            sum_lanes +%= wide;
-            weighted_lanes +%= wide *% weights;
+            sum_lanes +%= chunk;
+            prefix_lanes +%= sum_lanes;
         }
         // The NMAX bound: every accumulator element and every sum below
-        // stays under 2^32 (see nmax), so the wrapping ops never wrap.
+        // stays under 2^32 (see nmax), so the wrapping ops never wrap;
+        // the weighted sum is under 2^32, so the difference is exact.
         const block_s1 = @reduce(.Add, sum_lanes);
-        const block_s2 = @reduce(.Add, weighted_lanes);
+        const block_s2 = @reduce(.Add, prefix_lanes) *% chunk_len -%
+            @reduce(.Add, sum_lanes *% lane_index);
         s2 +%= block_s2 +% @as(u32, @intCast(vec_len)) *% s1;
         s1 +%= block_s1;
         // The sub-chunk tail (only possible in the input's last block,

@@ -209,34 +209,65 @@ const BufferedBits = struct {
     pub const ErrorSet = ReaderError;
 
     bytes: []const u8,
-    /// Bits consumed from `bytes`.
-    pos: usize,
+    /// Unconsumed bits, the next on the wire in bit 0. Bits above `count`
+    /// are 0 or the next bits of `bytes`, so a refill's OR keeps them.
+    bits: u64,
+    /// Valid bits in `bits`.
+    count: u32,
+    /// The first byte of `bytes` not yet counted in `bits`.
+    next: usize,
 
     fn init(b: *const Bits) BufferedBits {
-        return .{ .bytes = b.input.buffer[b.input.seek..b.input.end], .pos = b.consumed };
+        var self: BufferedBits = .{
+            .bytes = b.input.buffer[b.input.seek..b.input.end],
+            .bits = 0,
+            .count = 0,
+            .next = 0,
+        };
+        self.refill();
+        const skip = @min(b.consumed, self.count);
+        self.bits >>= @intCast(skip);
+        self.count -= skip;
+        return self;
+    }
+
+    /// Top `bits` up from `bytes`: eight bytes in one load while that many
+    /// remain, byte by byte at the end. The header's symbols then decode
+    /// from a register, not from a fresh load at a bit offset.
+    fn refill(self: *BufferedBits) void {
+        if (self.bytes.len - self.next >= 8) {
+            self.bits |= readInt(u64, self.bytes[self.next..][0..8]) << @intCast(self.count);
+            self.next += (63 - self.count) >> 3;
+            self.count |= 56;
+            return;
+        }
+        while (self.count <= 56 and self.next < self.bytes.len) {
+            self.bits |= @as(u64, self.bytes[self.next]) << @intCast(self.count);
+            self.next += 1;
+            self.count += 8;
+        }
     }
 
     pub fn peek(self: *BufferedBits, n: u6) ErrorSet!u64 {
-        if (self.bytes.len * 8 - self.pos < n) return error.Truncated;
-        const at = self.pos / 8;
-        const rest = self.bytes[at..];
-        const window = if (rest.len >= 8)
-            readInt(u64, rest[0..8])
-        else
-            readVarInt(u64, rest[0..@min(rest.len, 8)]);
-        return (window >> @intCast(self.pos % 8)) & ((@as(u64, 1) << n) - 1);
+        if (self.count < n) {
+            self.refill();
+            if (self.count < n) return error.Truncated;
+        }
+        return self.bits & ((@as(u64, 1) << n) - 1);
     }
 
     pub fn take(self: *BufferedBits, n: u6) ErrorSet!u64 {
         const value = try self.peek(n);
-        self.pos += n;
+        self.bits >>= n;
+        self.count -= n;
         return value;
     }
 
     /// Consume from `b` what this source consumed.
     fn commit(self: *const BufferedBits, b: *Bits) void {
-        b.input.toss(self.pos / 8);
-        b.consumed = @intCast(self.pos % 8);
+        const used = self.next * 8 - self.count;
+        b.input.toss(used / 8);
+        b.consumed = @intCast(used % 8);
     }
 };
 
