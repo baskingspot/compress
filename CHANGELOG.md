@@ -59,6 +59,13 @@ All notable changes to compress are recorded here. The format follows
   symbol by symbol, its header decodes from a bit buffer, and Adler-32 folds
   without multiplies.
 
+### Fixed
+
+- `zstd.encode` and `zstd.Writer` on big-endian targets took a match's
+  length from the wrong end of a vector compare, so frames could decode to
+  the wrong bytes (`WrongChecksum`) or differ from the reference encoder's;
+  they now write the same frames as on little-endian targets.
+
 ## [0.2.0] - 2026-10-31
 
 ### Changed

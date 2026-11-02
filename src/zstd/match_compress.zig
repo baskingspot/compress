@@ -1652,7 +1652,11 @@ fn countTwo(
         const va: CountVec = a[current..][0..count_vec_len].*;
         const vb: CountVec = b[match..][0..count_vec_len].*;
         const mask: @Int(.unsigned, count_vec_len) = @bitCast(va != vb);
-        if (mask != 0) return current - a_start + @ctz(mask);
+        // A bool vector's element 0 is the integer's least significant bit
+        // on a little-endian target and its most significant on a
+        // big-endian one.
+        const first = if (builtin.cpu.arch.endian() == .little) @ctz(mask) else @clz(mask);
+        if (mask != 0) return current - a_start + first;
         current += count_vec_len;
         match += count_vec_len;
     }
