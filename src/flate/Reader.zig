@@ -865,13 +865,15 @@ fn makeSource(gpa: mem.Allocator, len: usize) ![]u8 {
 }
 
 test "Reader: the buffer types are the documented sizes" {
-    // The Reader's window is 2 * history_len = 64 KiB and the Writer's buffer
-    // is max_block_size + history_len = 98303 bytes. Callers size stacks from
-    // these, so a change must be deliberate.
+    // The Reader's window is 2 * history_len = 64 KiB, and the Writer's buffer
+    // is its window, max_block_size + history_len = 98303 bytes, and a block's
+    // scratch, 426,636 bytes in all. Callers size stacks from these, so a
+    // change must be deliberate.
     try testing.expectEqual(@as(usize, 65536), @sizeOf(Buffer));
     try testing.expectEqual(@as(usize, 2 * history_len), @sizeOf(Buffer));
-    try testing.expectEqual(@as(usize, 98303), @sizeOf(Writer.Buffer));
-    try testing.expectEqual(@as(usize, max_block_size + history_len), @sizeOf(Writer.Buffer));
+    try testing.expectEqual(@as(usize, 426636), @sizeOf(Writer.Buffer));
+    const Window = @FieldType(Writer.Buffer, "window");
+    try testing.expectEqual(@as(usize, max_block_size + history_len), @sizeOf(Window));
     try testing.expectEqual(@as(usize, 32768), history_len);
     try testing.expectEqual(@as(usize, 65535), max_block_size);
 }

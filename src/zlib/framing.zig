@@ -94,7 +94,7 @@ pub const reader_header_init: Header = .pending;
 pub const ReaderBuffer = InnerReader.Buffer;
 
 /// The caller-provided compression buffer: flate's, re-exported; the container
-/// adds no buffer of its own. `[max_block_size + history_len]u8`, 98303 bytes.
+/// adds no buffer of its own: the window and a block's scratch, 426,636 bytes.
 pub const WriterBuffer = InnerWriter.Buffer;
 
 /// The inner codec's streaming types, as the driver reads them.

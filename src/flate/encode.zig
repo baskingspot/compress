@@ -1333,6 +1333,7 @@ pub fn compressBlockStreamLazy(
     block_end: usize,
     w: *BitWriter,
     finder: *lazy.Finder,
+    tokens: *dynamic.TokenList,
     emitter: *dynamic.BlockWriter,
     base: u32,
     params: lazy.Params,
@@ -1341,7 +1342,6 @@ pub fn compressBlockStreamLazy(
 ) error{BufferTooSmall}!void {
     const window: Window(false) = .{ .dict = &.{}, .source = source };
     if (prime_dict) lazy.prime(false, window, finder, 0, block_start, base);
-    var tokens: dynamic.TokenList = undefined;
     tokens.clear();
     try lazy.compressBlock(
         false,
@@ -1350,7 +1350,7 @@ pub fn compressBlockStreamLazy(
         block_start,
         block_end,
         w,
-        &tokens,
+        tokens,
         finder,
         emitter,
         base,
@@ -1373,16 +1373,16 @@ pub fn compressBlockStream6(
     block_end: usize,
     w: *BitWriter,
     finder: *Finder6,
+    tokens: *dynamic.TokenList,
     emitter: *dynamic.BlockWriter,
     base: u32,
     prime_dict: bool,
     sync: bool,
 ) error{BufferTooSmall}!void {
     const window: Window(false) = .{ .dict = &.{}, .source = source };
-    var tokens: dynamic.TokenList = undefined;
     tokens.clear();
     if (prime_dict) {
-        encodeTokens6(false, window, 0, block_start, &tokens, finder, base);
+        encodeTokens6(false, window, 0, block_start, tokens, finder, base);
         tokens.reset();
     }
     try compressBlock6(
@@ -1391,7 +1391,7 @@ pub fn compressBlockStream6(
         block_start,
         block_end,
         w,
-        &tokens,
+        tokens,
         finder,
         emitter,
         base,

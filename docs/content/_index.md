@@ -135,7 +135,7 @@ The codec holds no allocator, and every call that allocates says so in its name.
 | `Writer.streamAllAlloc` and the `Reader` `*Alloc` pumps | One `DefaultBuffer` from the caller's allocator. It is freed before the call returns. |
 | `Io.Writer.Allocating` and `allocRemaining` in examples | Caller-side scaffolding. These belong to the example, not to the codec.               |
 
-A `Buffer` is storage that the codec writes into, not state that it owns. The type's size decides where it lives. `gzip.Writer.Buffer` is `[98303]u8`, so a stack local is fine. The zstd types are too large for that: `zstd.Reader.DefaultBuffer` is 8 MiB + 256 KiB and `zstd.Writer.DefaultBuffer` is 2.2 MiB, so keep those in static or heap storage. The `*Alloc` pumps take an allocator for exactly that buffer.
+A `Buffer` is storage that the codec writes into, not state that it owns. The type's size decides where it lives. `gzip.Writer.Buffer` is 426,636 bytes, so a stack local is fine on a main thread's stack. The zstd types are too large for that: `zstd.Reader.DefaultBuffer` is 8 MiB + 256 KiB and `zstd.Writer.DefaultBuffer` is 2.2 MiB, so keep those in static or heap storage. The `*Alloc` pumps take an allocator for exactly that buffer.
 
 A failed allocation from a `*Alloc` pump is `error.OutOfMemory`.
 

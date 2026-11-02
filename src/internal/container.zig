@@ -414,7 +414,8 @@ pub fn WriterHooks(comptime F: type, comptime Host: type) type {
             options: F.Options,
         ) Io.Reader.StreamRemainingError!usize {
             var buffer: F.WriterBuffer = undefined;
-            var ww: Host = init(out, &buffer, options);
+            var ww: Host = undefined;
+            initInPlace(&ww, out, &buffer, options);
             const n = try in.streamRemaining(&ww.writer);
             try finish(&ww);
             return n;

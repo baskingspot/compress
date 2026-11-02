@@ -187,7 +187,7 @@ test "Reader: the buffer type is flate's, re-exported" {
     // `Reader.Buffer` is `flate.Reader.Buffer`: 2 * history_len, 64 KiB.
     try testing.expectEqual(@as(usize, 65536), @sizeOf(Buffer));
     try testing.expect(Buffer == flate.Reader.Buffer);
-    try testing.expectEqual(@as(usize, 98303), @sizeOf(Writer.Buffer));
+    try testing.expectEqual(@as(usize, 426636), @sizeOf(Writer.Buffer));
 }
 
 test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {

@@ -19,6 +19,12 @@ All notable changes to compress are recorded here. The format follows
 
 ### Changed
 
+- `flate.Writer.Buffer`, and so `zlib.Writer.Buffer` and
+  `gzip.Writer.Buffer`, is a struct holding the window (`window`, the
+  former 98,303-byte array) and a block emission's token list and
+  compressed-output scratch, 426,636 bytes in all: emitting a block no
+  longer takes about 320 KiB of stack, and the writer itself is unchanged.
+  Code that indexed the buffer indexes `buffer.window`.
 - Short streams compress 2 to 4 times faster: a writer no longer zeroes its
   match-finder tables when it is created, and level 6 no longer clears its
   256-KiB token array for every block.

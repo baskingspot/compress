@@ -26,8 +26,8 @@ const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
 /// The caller-provided compression buffer: flate's `Writer.Buffer`,
-/// re-exported. 98303 bytes (`[max_block_size + history_len]u8`): one
-/// 65535-byte block plus 32 KiB of match history.
+/// re-exported. 426,636 bytes: the window, one 65535-byte block plus 32 KiB of
+/// match history, and the scratch for emitting a block.
 pub const Buffer = flate.Writer.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
@@ -102,8 +102,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// Compress everything in `in` into one zlib stream written to `out`, and
 /// return the number of input bytes consumed. `in` is read to its end, then
 /// the stream is finished. Returns `error.ReadFailed` if `in` fails and
-/// `error.WriteFailed` if `out` fails. Uses about 288 KiB of stack (the 96 KiB buffer plus flate's
-/// writer state and block scratch) and allocates nothing.
+/// `error.WriteFailed` if `out` fails. Uses about 800 KiB of stack (flate's writer
+/// and its buffer, block scratch included) and allocates nothing.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
@@ -150,9 +150,9 @@ fn roundTrip(source: []const u8) !void {
 }
 
 test "Writer: the buffer type is flate's, re-exported" {
-    // `Writer.Buffer` is `flate.Writer.Buffer`: max_block_size +
-    // history_len, 98303 bytes.
-    try testing.expectEqual(@as(usize, 98303), @sizeOf(Buffer));
+    // `Writer.Buffer` is `flate.Writer.Buffer`: the window and a block's
+    // scratch, 426,636 bytes.
+    try testing.expectEqual(@as(usize, 426636), @sizeOf(Buffer));
     try testing.expect(Buffer == flate.Writer.Buffer);
 }
 
@@ -496,11 +496,11 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     try testing.expect(out.written().len < plain_out.written().len);
     try testing.expectError(
         error.DictionaryRequired,
-        decode.decompress(out.written(), buf[0..source.len], null),
+        decode.decompress(out.written(), buf.window[0..source.len], null),
     );
     try testing.expectError(
         error.DictionaryMismatch,
-        decode.decompress(out.written(), buf[0..source.len], "another dictionary"),
+        decode.decompress(out.written(), buf.window[0..source.len], "another dictionary"),
     );
 
     // An empty dictionary is no dictionary: FDICT stays clear.

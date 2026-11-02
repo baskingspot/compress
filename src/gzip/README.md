@@ -68,7 +68,7 @@ decode.DecompressError = flate.decode.DecompressError || error{
     WrongSize,           // the trailer's size does not match the data
 }
 
-Writer.Buffer = [98303]u8
+Writer.Buffer = struct { window: [98303]u8, tokens, scratch } // 426,636 bytes
 Writer.init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void
     // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
@@ -125,8 +125,8 @@ and `InvalidBlockType` through `InvalidMatch` for a malformed deflate body.
   Once used, a `Reader` or `Writer` points into itself: initialize it in place and
   do not copy or move it.
 - **Stack.** `compress` uses about 128 KiB; `decompress`, `Reader.streamMember`,
-  and `Reader.streamAll` about 68 KiB. A `Writer` is about 128 KiB plus its 96 KiB
-  `Buffer`, and `Writer.streamAll` peaks near 288 KiB. On small stacks, allocate
+  and `Reader.streamAll` about 68 KiB. A `Writer` is about 392 KiB plus its 417 KiB
+  `Buffer`, and `Writer.streamAll` peaks near 810 KiB. On small stacks, allocate
   the writer and its buffer on the heap.
 
 ## Limitations

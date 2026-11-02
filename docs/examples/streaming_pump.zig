@@ -50,7 +50,7 @@ test "the caller owns the streaming buffer" {
     var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer out.deinit();
 
-    var wbuf: gzip.Writer.Buffer = undefined; // [98303]u8: a stack local is fine
+    var wbuf: gzip.Writer.Buffer = undefined; // 426,636 bytes: a stack local is fine
     var in: std.Io.Reader = .fixed("caller-owned, stack-sized");
     var w: gzip.Writer = .init(&out.writer, &wbuf, .{});
     try w.writer.writeAll("caller-owned, stack-sized");

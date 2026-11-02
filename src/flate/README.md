@@ -97,7 +97,7 @@ decode.DecompressError = error{
                                // dictionary's first byte, then the output's (§3.2.3)
 }
 
-Writer.Buffer = [98303]u8  // max_block_size + history_len
+Writer.Buffer = struct { window: [98303]u8, tokens, scratch } // 426,636 bytes
 Writer.init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer
 Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: encode.Options) void
     // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
@@ -150,8 +150,9 @@ declarations in `encode` and `decode` are shared internals.
   level 1; at level 6 it keeps 384 KiB of finder tables, a 257 KiB token list,
   and the tree scratch, about 650 KiB in all; at levels 7 and 9 it keeps
   256 KiB of hash chains in place of the level-6 tables. A `Writer` is about 392 KiB (it
-  reserves the level-6 tables at every level), `Writer.Buffer` adds 96 KiB,
-  and a level-6 block emission uses about 320 KiB more, so `Writer.streamAll`
+  reserves the level-6 tables at every level), and `Writer.Buffer` adds
+  417 KiB (the window, and a block emission's token list and output
+  scratch, so emitting takes no large stack frame), so `Writer.streamAll`
   peaks near 810 KiB. A `Reader` is about 4 KiB plus its 64 KiB buffer;
   `decompress` needs a few KiB. On a small stack, heap-allocate the structs and
   buffers.

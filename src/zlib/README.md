@@ -92,7 +92,7 @@ zlib.decode.DecompressError = flate.decode.DecompressError || error{
 };
 
 // Streaming: write through `w.writer`, read through `r.reader`
-zlib.Writer.Buffer = [98303]u8
+zlib.Writer.Buffer = flate.Writer.Buffer // 426,636 bytes
 zlib.Writer.init(output: *Io.Writer, buffer: *Buffer, options: Options) Writer
 zlib.Writer.initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: Options) void
     // as init, writing `w` in place: `w.* = .init(...)` copies the whole writer
@@ -165,8 +165,8 @@ The framing pieces are public too: `encode.cmf`, `flgFor`, `writeHeader`,
   of up to 32 KiB are always served; a larger contiguous request can fail with
   `error.ReadFailed` and `r.err == error.StreamTooLong`.
 - **Stack.** `encode.compress` uses about 128 KiB (flate's match-finder table).
-  `decode.decompress` and `Reader.streamAll` use about 68 KiB. `Writer.streamAll`
-  peaks near 288 KiB. A stack-allocated `Writer.Buffer` adds 96 KiB and a
+  `decode.decompress` and `Reader.streamAll` use about 68 KiB. A `Writer` is about
+  392 KiB, and `Writer.streamAll` peaks near 810 KiB. A stack-allocated `Writer.Buffer` adds 417 KiB and a
   `Reader.Buffer` 64 KiB; heap-allocate them on a small stack.
 - **Output.** The encoder is deterministic: CMF is always `0x78` (deflate,
   32 KiB window), FLEVEL follows the level (`encode.flgFor`), and FDICT is set

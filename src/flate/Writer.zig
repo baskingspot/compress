@@ -40,11 +40,21 @@ const history_len = encode.history_len;
 const flate_reader = @import("Reader.zig");
 const golden = @import("golden.zig");
 
-/// The caller-provided buffer, 98303 bytes: the uncompressed accumulation
-/// block (`max_block_size`) plus the retained match history (`history_len`).
-/// The history sits at the front and the block after it, so the encoder's
-/// window (history followed by block) is one contiguous slice.
-pub const Buffer = [max_block_size + history_len]u8;
+/// The caller-provided memory, about 417 KiB: the window and one block
+/// emission's scratch.
+pub const Buffer = struct {
+    /// The uncompressed accumulation block (`max_block_size`) plus the
+    /// retained match history (`history_len`), 98303 bytes. The history sits
+    /// at the front and the block after it, so the encoder's window (history
+    /// followed by block) is one contiguous slice.
+    window: [max_block_size + history_len]u8,
+    /// Level 6's and the lazy levels' token list for the block being
+    /// emitted. Undefined between emissions.
+    tokens: dynamic.TokenList,
+    /// The compressed block before it goes to `output`. Undefined between
+    /// emissions.
+    scratch: [scratch_len]u8,
+};
 
 /// The compressed-output scratch for one block: the exact worst case
 /// (`maxCompressedLength(max_block_size)`), so the encoder cannot run out of
@@ -131,10 +141,10 @@ const Hooks = internal.writer.VTable(Writer, emitBlock, writeEnding);
 /// deflate names no dictionary, so the caller vouches for the bytes; zlib's
 /// FDICT/DICTID is the checked form (RFC 1950 §2.2).
 ///
-/// Stack: a `Writer` holds the level-6 match-finder tables (384 KiB) and the
-/// emitter state, and `Buffer` is 98303 bytes, so place both with that in
-/// mind. Each block emission also uses about 320 KiB of stack for its
-/// token list and compressed-output scratch.
+/// Memory: a `Writer` holds the level-6 match-finder tables (384 KiB) and the
+/// emitter state, and `Buffer` holds the window and a block emission's
+/// token list and compressed-output scratch (about 417 KiB in all), so place
+/// both with that in mind; a block emission adds no large stack frame.
 pub fn init(output: *Io.Writer, buffer: *Buffer, options: encode.Options) Writer {
     // A preset dictionary is the window's oldest bytes: its tail fills the
     // history region in front of the block region, exactly where earlier
@@ -154,9 +164,9 @@ pub fn initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: enc
     // history region in front of the block region, exactly where earlier
     // blocks' bytes sit once the stream has written them (`§3.2.3`).
     const history = decode.dictHistory(options.dict);
-    fastmem.copy(u8, buffer[0..history.len], history);
+    fastmem.copy(u8, buffer.window[0..history.len], history);
     w.writer = .{
-        .buffer = buffer[history.len..][0..max_block_size],
+        .buffer = buffer.window[history.len..][0..max_block_size],
         .end = 0,
         .vtable = &Hooks.vtable,
     };
@@ -187,11 +197,12 @@ noinline fn emitLazy(w: *Writer, start: encode.BitWriter, block_end: usize) enco
         prime_dict = w.block_start > 0;
     }
     encode.compressBlockStreamLazy(
-        w.buffer[0..block_end],
+        w.buffer.window[0..block_end],
         w.block_start,
         block_end,
         &bw,
         &w.finder.lazy,
+        &w.buffer.tokens,
         &w.emitter,
         w.window_base +% encode.finder_origin,
         encode.lazyParams(w.options.level, w.options.strategy).?,
@@ -250,10 +261,9 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     // container's state sees the block's uncompressed bytes here, in stream
     // order, exactly once, before the encoder runs and before any slide moves
     // them. Null when unset: one check per emitted block, nothing per byte.
-    if (w.checksum) |checksum| checksum.update(w.buffer[w.block_start..block_end]);
-    var scratch: [scratch_len]u8 = undefined;
+    if (w.checksum) |checksum| checksum.update(w.buffer.window[w.block_start..block_end]);
     var bw: encode.BitWriter = .{
-        .target = &scratch,
+        .target = &w.buffer.scratch,
         .pos = 0,
         .bits = w.bits,
         .bit_count = w.bit_count,
@@ -274,11 +284,12 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
         }
         const base = w.window_base +% encode.finder_origin;
         encode.compressBlockStream6(
-            w.buffer[0..block_end],
+            w.buffer.window[0..block_end],
             w.block_start,
             block_end,
             &bw,
             &w.finder.l6,
+            &w.buffer.tokens,
             &w.emitter,
             base,
             prime_dict,
@@ -293,7 +304,7 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
             fastmem.set(u32, &w.finder.l1, 0);
         }
         encode.compressBlockStream(
-            w.buffer[0..block_end],
+            w.buffer.window[0..block_end],
             w.block_start,
             block_end,
             &bw,
@@ -303,12 +314,12 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
     }
     w.bits = bw.bits;
     w.bit_count = bw.bit_count;
-    try w.output.writeAll(scratch[0..bw.pos]);
+    try w.output.writeAll(w.buffer.scratch[0..bw.pos]);
 
     w.writer.end -= emit_len;
     w.block_start += emit_len;
-    if (w.block_start + max_block_size > w.buffer.len) w.compact();
-    w.writer.buffer = w.buffer[w.block_start..][0..max_block_size];
+    if (w.block_start + max_block_size > w.buffer.window.len) w.compact();
+    w.writer.buffer = w.buffer.window[w.block_start..][0..max_block_size];
 }
 
 /// Slide the history and the buffered block to the front of the window,
@@ -317,8 +328,9 @@ fn emitBlock(w: *Writer, emit_len: usize) Io.Writer.Error!void {
 fn compact(w: *Writer) void {
     const block_len = w.writer.end;
     const keep = @min(w.block_start, history_len);
-    fastmem.move(u8, w.buffer[0..keep], w.buffer[w.block_start - keep ..][0..keep]);
-    fastmem.move(u8, w.buffer[keep..][0..block_len], w.buffer[w.block_start..][0..block_len]);
+    const window = &w.buffer.window;
+    fastmem.move(u8, window[0..keep], window[w.block_start - keep ..][0..keep]);
+    fastmem.move(u8, window[keep..][0..block_len], window[w.block_start..][0..block_len]);
     // The dropped front bytes advance the window's absolute base, keeping
     // the persistent table's stream positions honest.
     w.window_base +%= @as(u32, @truncate(w.block_start - keep));
@@ -951,15 +963,16 @@ fn pumpChunked(w: *Writer, source: []const u8) !void {
 ///
 /// Returns `error.ReadFailed` if `in` fails, and `error.WriteFailed` if `out`
 /// fails.
-/// Allocates nothing: the `Writer`, its `Buffer`, and the block scratch are
-/// locals on the caller's stack, about 700 KiB at the peak at level 6.
+/// Allocates nothing: the `Writer` and its `Buffer`, block scratch included,
+/// are locals on the caller's stack, about 800 KiB.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
     options: encode.Options,
 ) Io.Reader.StreamRemainingError!usize {
     var buf: Buffer = undefined;
-    var ww: Writer = .init(out, &buf, options);
+    var ww: Writer = undefined;
+    ww.initInPlace(out, &buf, options);
     const n = try in.streamRemaining(&ww.writer);
     // The stream is not complete until `finish`, which emits the final partial
     // block and the closing empty block.
@@ -981,7 +994,7 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf, .{ .level = .@"1", .dict = dict });
     try testing.expectEqual(@as(usize, max_block_size), w.writer.buffer.len);
-    try testing.expectEqual(@intFromPtr(&buf[dict.len]), @intFromPtr(w.writer.buffer.ptr));
+    try testing.expectEqual(@intFromPtr(&buf.window[dict.len]), @intFromPtr(w.writer.buffer.ptr));
     try testing.expectEqual(@as(usize, dict.len), w.block_start);
 
     try w.writer.writeAll(source);
@@ -1014,7 +1027,7 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     var buf2: Buffer = undefined;
     var w2: Writer = .init(&plain.writer, &buf2, .{ .level = .@"1", .dict = "" });
     try testing.expectEqual(@as(usize, 0), w2.block_start);
-    try testing.expectEqual(@intFromPtr(&buf2[0]), @intFromPtr(w2.writer.buffer.ptr));
+    try testing.expectEqual(@intFromPtr(&buf2.window[0]), @intFromPtr(w2.writer.buffer.ptr));
     try w2.writer.writeAll(source);
     try w2.finish();
 

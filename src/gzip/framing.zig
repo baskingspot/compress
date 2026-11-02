@@ -91,8 +91,8 @@ pub const reader_header_init: Header = .init;
 /// (`[2 * history_len]u8`). gzip adds no buffer of its own.
 pub const ReaderBuffer = InnerReader.Buffer;
 
-/// The caller-provided encode buffer: flate's `Writer.Buffer`, 98303 bytes
-/// (`[max_block_size + history_len]u8`). gzip adds no buffer of its own.
+/// The caller-provided encode buffer: flate's `Writer.Buffer`, 426,636 bytes
+/// (the window and a block's scratch). gzip adds no buffer of its own.
 pub const WriterBuffer = InnerWriter.Buffer;
 
 /// The inner codec's streaming types, as the driver reads them.

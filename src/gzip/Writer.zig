@@ -23,8 +23,8 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-/// The caller-provided buffer: flate's `Writer.Buffer`, re-exported, 98303
-/// bytes (`[max_block_size + history_len]u8`). gzip adds no buffer of its own.
+/// The caller-provided buffer: flate's `Writer.Buffer`, re-exported, 426,636
+/// bytes (the window and a block's scratch). gzip adds no buffer of its own.
 pub const Buffer = flate.Writer.Buffer;
 const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
@@ -92,8 +92,8 @@ pub fn finish(w: *Writer) Io.Writer.Error!void {
 /// finished. Returns `error.ReadFailed` for a failure of `in` and
 /// `error.WriteFailed` for a failure of `out`.
 ///
-/// Allocates nothing. The writer and its buffer take about 224 KiB of stack,
-/// and emitting a block needs another 64 KiB.
+/// Allocates nothing. The writer, its block scratch included, and its buffer
+/// take about 800 KiB of stack.
 pub fn streamAll(
     in: *Io.Reader,
     out: *Io.Writer,
