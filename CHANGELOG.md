@@ -58,6 +58,10 @@ All notable changes to compress are recorded here. The format follows
   33% faster: a block's Huffman tables build without counting and sorting
   symbol by symbol, its header decodes from a bit buffer, and Adler-32 folds
   without multiplies.
+- Deflate encodes short streams faster, through `flate`, `zlib`, and `gzip`,
+  one-shot and `Writer`: up to 1.28 times at level 1 and 1.08 at levels 6
+  and 7 on 8 KiB TIFF strips, from clearing a stream's emitter and each
+  Huffman tree's scratch without compiler_rt's byte-wise `memset`.
 - `flate.Reader` inflates 2 to 6% faster on photographs' TIFF strips and PNG
   image data, and up to 17% on images with long runs: the fast loop reads its
   input through a cursor.

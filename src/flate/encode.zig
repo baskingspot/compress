@@ -1221,7 +1221,8 @@ fn compressBlocks6(
     var w: BitWriter = .init(target);
     var finder: Finder6 = undefined;
     finder.clear();
-    var emitter: dynamic.BlockWriter = .empty;
+    var emitter: dynamic.BlockWriter = undefined;
+    emitter.reset();
     var tokens: dynamic.TokenList = undefined;
     tokens.clear();
     if (preset) {
@@ -1295,7 +1296,8 @@ fn compressBlocksLazy(
     var w: BitWriter = .init(target);
     var finder: lazy.Finder = undefined;
     finder.clear();
-    var emitter: dynamic.BlockWriter = .empty;
+    var emitter: dynamic.BlockWriter = undefined;
+    emitter.reset();
     var tokens: dynamic.TokenList = undefined;
     tokens.clear();
     if (preset) lazy.prime(preset, window, &finder, 0, window.dict.len, base);

@@ -1,0 +1,19 @@
+                                               │ docs/slop/results/flate-encode-clears-20261103/base-l7.txt │ docs/slop/results/flate-encode-clears-20261103/new-l7.txt │
+                                               │                           sec/op                           │               sec/op                vs base               │
+Deflate/icon_16-actions_address_book_new-16x16                                                  29.45µ ± 2%                          27.37µ ± 7%  -7.04% (p=0.002 n=10)
+Deflate/icon_64-actions_address_book_new-64x64                                                  176.0µ ± 8%                          168.9µ ± 6%  -4.05% (p=0.029 n=10)
+Deflate/textures_pk-_pkf_water1-128x128                                                         989.2µ ± 3%                          988.6µ ± 4%       ~ (p=0.912 n=10)
+Deflate/test-testcard-256x256                                                                   1.498m ± 3%                          1.431m ± 2%  -4.45% (p=0.000 n=10)
+Deflate/photo_kodak-kodim01-768x512                                                             26.55m ± 3%                          26.55m ± 3%       ~ (p=0.853 n=10)
+Deflate/test-dice-800x600                                                                       14.11m ± 2%                          13.74m ± 2%  -2.59% (p=0.000 n=10)
+geomean                                                                                         1.193m                               1.156m       -3.07%
+
+                                               │ docs/slop/results/flate-encode-clears-20261103/base-l7.txt │ docs/slop/results/flate-encode-clears-20261103/new-l7.txt │
+                                               │                            B/s                             │                B/s                  vs base               │
+Deflate/icon_16-actions_address_book_new-16x16                                                 24.84Mi ± 2%                         26.75Mi ± 6%  +7.68% (p=0.002 n=10)
+Deflate/icon_64-actions_address_book_new-64x64                                                 66.57Mi ± 7%                         69.38Mi ± 6%  +4.23% (p=0.024 n=10)
+Deflate/textures_pk-_pkf_water1-128x128                                                        47.35Mi ± 3%                         47.45Mi ± 4%       ~ (p=0.985 n=10)
+Deflate/test-testcard-256x256                                                                  125.2Mi ± 3%                         131.0Mi ± 2%  +4.65% (p=0.000 n=10)
+Deflate/photo_kodak-kodim01-768x512                                                            42.34Mi ± 2%                         42.39Mi ± 3%       ~ (p=0.755 n=10)
+Deflate/test-dice-800x600                                                                      97.32Mi ± 2%                         99.90Mi ± 2%  +2.65% (p=0.000 n=10)
+geomean                                                                                        58.58Mi                              60.46Mi       +3.22%

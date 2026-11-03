@@ -362,7 +362,10 @@ pub fn HuffmanEncoder(comptime alphabet_len: usize) type {
                 .next_pair_freq = 0,
                 .needed = 0,
             });
-            var leaf_counts: [max_bits_limit][max_bits_limit]i32 = @splat(@splat(0));
+            // A fill rather than `@splat(0)`: LLVM clears a kilobyte with a
+            // call to `memset`, and Zig links compiler_rt's, a byte a store.
+            var leaf_counts: [max_bits_limit][max_bits_limit]i32 = undefined;
+            fastmem.set(i32, @as(*[max_bits_limit * max_bits_limit]i32, @ptrCast(&leaf_counts)), 0);
             const l2f: i32 = nodes[2].freq;
             const l1f: i32 = nodes[1].freq;
             const l0f: i32 = @as(i32, nodes[0].freq) + @as(i32, nodes[1].freq);
@@ -551,6 +554,14 @@ pub const BlockWriter = struct {
         .codegen_freq = @splat(0),
         .codegen = @splat(0),
     };
+
+    /// Make `self` `empty` in place. `self.* = .empty` clears its 8 KiB
+    /// through a call to `memset`, and Zig links compiler_rt's, a byte a
+    /// store; every field of `empty` is zero bytes, and the scratch it
+    /// leaves undefined may be zero too.
+    pub fn reset(self: *BlockWriter) void {
+        fastmem.set(u8, std.mem.asBytes(self), 0);
+    }
 
     /// Write the owed end-of-block code from the current literal table, if
     /// one is open (`last_header > 0`).
@@ -1228,4 +1239,20 @@ test "dynamic: the block dispatch picks the smallest form" {
     try w.writeBlockFast(&bw, &tokens, &big, false);
     try testing.expectEqual(@as(u8, 0b100), out[0] & 0b111); // BFINAL=0, BTYPE=10
     try testing.expect(w.last_header > 0);
+}
+
+test "dynamic: BlockWriter.reset leaves what empty holds" {
+    // `reset` zeroes the bytes, so every field `empty` sets must be zero.
+    var w: BlockWriter = undefined;
+    fastmem.set(u8, std.mem.asBytes(&w), 0xa5);
+    w.reset();
+    const e: BlockWriter = .empty;
+    inline for (std.meta.fields(BlockWriter)) |f| {
+        const got = @field(w, f.name);
+        const want = @field(e, f.name);
+        if (@typeInfo(f.type) == .@"struct") {
+            try testing.expectEqualDeep(want.codes, got.codes);
+            try testing.expectEqualDeep(want.bit_count, got.bit_count);
+        } else try testing.expectEqualDeep(want, got);
+    }
 }

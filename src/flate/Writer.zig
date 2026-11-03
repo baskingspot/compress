@@ -175,7 +175,7 @@ pub fn initInPlace(w: *Writer, output: *Io.Writer, buffer: *Buffer, options: enc
     w.checksum = null;
     w.buffer = buffer;
     w.finder_ready = false;
-    w.emitter = .empty;
+    w.emitter.reset();
     w.finishing = false;
     w.window_base = 0;
     w.block_start = history.len;
