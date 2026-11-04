@@ -655,11 +655,26 @@ fn fill(buf: []u8, phrase: []const u8) void {
 /// The block-layer test rig: a frame state, the scratch, and the tables.
 const Rig = struct {
     state: State,
-    literals: [max_block_size]u8 = undefined,
-    sequence_buffer: [max_sequences]sequences_compress.Sequence = undefined,
-    long_table: [dfast_compress.long_table_entries_max]u32 = @splat(0),
-    small_table: [dfast_compress.small_table_entries_max]u32 = @splat(0),
+    literals: [max_block_size]u8,
+    sequence_buffer: [max_sequences]sequences_compress.Sequence,
+    long_table: [dfast_compress.long_table_entries_max]u32,
+    small_table: [dfast_compress.small_table_entries_max]u32,
     params: match_compress.Params,
+
+    /// A rig on the heap: at 1.3 MB it is no stack local. The fields are
+    /// set one by one, leaving the scratch undefined without writing it.
+    fn create(params: match_compress.Params) !*Rig {
+        const rig = try testing.allocator.create(Rig);
+        rig.state = .init;
+        rig.params = params;
+        @memset(&rig.long_table, 0);
+        @memset(&rig.small_table, 0);
+        return rig;
+    }
+
+    fn destroy(rig: *Rig) void {
+        testing.allocator.destroy(rig);
+    }
 
     fn scratch(rig: *Rig) Scratch {
         return .{ .literals = &rig.literals, .sequences = &rig.sequence_buffer };
@@ -726,7 +741,8 @@ test "the reps do not advance across a raw or rle block" {
     // zstd_compress.c:4155-4160); a capture after the find restores the
     // advanced values and the revert is a no-op. Found by the encode-side
     // fuzz wave: the next block's repcodes decoded to the wrong distances.
-    var rig: Rig = .{ .state = .init, .params = .init(10, 11, 6) };
+    const rig = try Rig.create(.init(10, 11, 6));
+    defer rig.destroy();
     var scratch = rig.scratch();
     var dict: Dict = .empty;
     var target: [max_block_size + 64]u8 = undefined;
@@ -789,10 +805,11 @@ test "the ladder stores tiny and incompressible blocks raw" {
     // RFC 8878 §3.1.1.2.2 — a Raw_Block holds the bytes verbatim. The C
     // refuses to attempt compression below 7 bytes (`zstd_compress.c:3267`)
     // and keeps the compressed form only past the minGain margin.
-    var rig: Rig = .{ .state = .init, .params = .init(10, 11, 6) };
+    const rig = try Rig.create(.init(10, 11, 6));
+    defer rig.destroy();
     var tiny: [6]u8 = undefined;
     for (&tiny, 0..) |*byte, index| byte.* = @intCast(index);
-    try expectBlockRoundTrip(&rig, &tiny, tiny.len);
+    try expectBlockRoundTrip(rig, &tiny, tiny.len);
     // The block header's type is Raw.
     var target: [64]u8 = undefined;
     var scratch = rig.scratch();
@@ -819,7 +836,8 @@ test "the ladder picks RLE after the first block and Raw for noise" {
     // (the compatibility rule above); a later all-one-value block is, and an
     // incompressible one is
     // Raw.
-    var rig: Rig = .{ .state = .init, .params = .init(13, 13, 6) };
+    const rig = try Rig.create(.init(13, 13, 6));
+    defer rig.destroy();
     var source: [6 * 1024]u8 = undefined;
     // Block 0: text, so the first block is Compressed and its table entries
     // cannot match the run that follows.
@@ -887,7 +905,8 @@ test "the ladder picks RLE after the first block and Raw for noise" {
 test "a compressible block is Compressed and decodes back" {
     // RFC 8878 §3.1.1.3 — the Compressed_Block path: literals then
     // sequences, the block header's size the compressed length.
-    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
+    const rig = try Rig.create(.init(15, 13, 6));
+    defer rig.destroy();
     var source: [16 * 1024]u8 = undefined;
     const phrase = "the quick brown fox jumps over the lazy dog. ";
     var index: usize = 0;
@@ -896,14 +915,12 @@ test "a compressible block is Compressed and decodes back" {
         fastmem.copy(u8, source[index..][0..chunk], phrase[0..chunk]);
         index += chunk;
     }
-    try expectBlockRoundTrip(&rig, &source, source.len);
+    try expectBlockRoundTrip(rig, &source, source.len);
     // The same block again with a fresh table: the finder's table is
     // per-frame state, and a second scan of the same region is not a shape
     // the one-shot produces.
-    var fresh: Rig = .{
-        .state = .init,
-        .params = rig.params,
-    };
+    const fresh = try Rig.create(rig.params);
+    defer fresh.destroy();
     var target: [max_block_size + 64]u8 = undefined;
     var scratch = fresh.scratch();
     var dict: Dict = .empty;
@@ -929,14 +946,15 @@ test "an all-literals block carries the nbSeq == 0 section" {
     // stops here" (the one-byte section), for a block the finder cannot
     // match: a skew the finder's 4-byte hash misses but the literals'
     // Huffman coding wins on.
-    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
+    const rig = try Rig.create(.init(15, 13, 6));
+    defer rig.destroy();
     var source: [4096]u8 = undefined;
     var rng: std.Random.DefaultPrng = .init(0x5CEBE1);
     for (&source) |*byte| {
         const x: u16 = rng.random().int(u8);
         byte.* = @truncate(x * x >> 10);
     }
-    try expectBlockRoundTrip(&rig, &source, source.len);
+    try expectBlockRoundTrip(rig, &source, source.len);
 }
 
 test "the checksum funnel folds every block exactly once" {
@@ -944,7 +962,8 @@ test "the checksum funnel folds every block exactly once" {
     // bytes, in order. The block layer's fold must agree with the one-shot
     // fold of the whole source, whatever mix of Raw, RLE, and Compressed
     // blocks it emits.
-    var rig: Rig = .{ .state = .init, .params = .init(15, 13, 6) };
+    const rig = try Rig.create(.init(15, 13, 6));
+    defer rig.destroy();
     var source: [24 * 1024]u8 = undefined;
     for (source[0..8192], 0..) |*byte, index| byte.* = @truncate((index * 7) % 41);
     fastmem.set(u8, source[8192..16384], 0x5a);

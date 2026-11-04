@@ -1907,8 +1907,9 @@ fn fuzzReaderMachinery(_: void, smith: *Smith) anyerror!void {
         break :blk &limited.interface;
     } else &fixed_in;
 
-    var rbuf: Reader.Buffer(fixture_window_len) = undefined;
-    var r: Reader = .init(fixture_window_len, input_reader, &rbuf, null);
+    const rbuf = try testing.allocator.create(Reader.Buffer(fixture_window_len));
+    defer testing.allocator.destroy(rbuf);
+    var r: Reader = .init(fixture_window_len, input_reader, rbuf, null);
 
     var pos: usize = 0;
     var ops: usize = 0;
@@ -2282,9 +2283,10 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
 
     var got: [out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&got);
-    var rbuf: Reader.Buffer(fixture_window_len) = undefined;
+    const rbuf = try testing.allocator.create(Reader.Buffer(fixture_window_len));
+    defer testing.allocator.destroy(rbuf);
     var fixed_in: Io.Reader = .fixed(bad);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
+    var r: Reader = .init(fixture_window_len, &fixed_in, rbuf, null);
     const pumped = try pumpCapped(&r.reader, &fw, pumpLimit(expected.len));
     try testing.expectEqual(Stop.read_failed, pumped.stop);
     try testing.expectEqual(Reader.Error.WrongChecksum, r.err.?);
@@ -2969,7 +2971,8 @@ fn oneShotByteClass(source: []const u8, out: []u8) !usize {
     const written = try encode.compress(source, out[0..bound], .{});
     try testing.expect(written <= bound);
     {
-        var again: [class_bound]u8 = undefined;
+        const again = try testing.allocator.create([class_bound]u8);
+        defer testing.allocator.destroy(again);
         const m = try encode.compress(source, again[0..bound], .{});
         try testing.expectEqual(written, m);
         try testing.expectEqualSlices(u8, out[0..written], again[0..m]);
@@ -3024,15 +3027,17 @@ fn oneShotByteClass(source: []const u8, out: []u8) !usize {
 
     // The one-shot decodes the frame to the source, markers after it are not
     // part of it, and the trailer is the XXH64 of the source.
-    var framed: [class_bound + marker_len]u8 = undefined;
+    const framed = try testing.allocator.create([class_bound + marker_len]u8);
+    defer testing.allocator.destroy(framed);
     fastmem.copy(u8, framed[0..written], frame_bytes);
     fastmem.set(u8, framed[written..][0..marker_len], marker_byte);
-    var plain: [class_max + guard_len]u8 = undefined;
-    sentinel.fill(&plain);
+    const plain = try testing.allocator.create([class_max + guard_len]u8);
+    defer testing.allocator.destroy(plain);
+    sentinel.fill(plain);
     const n = try decode.decompress(framed[0 .. written + marker_len], plain[0..source.len], null);
     try testing.expectEqual(source.len, n);
     try testing.expectEqualSlices(u8, source, plain[0..n]);
-    try sentinel.expect(&plain, n);
+    try sentinel.expect(plain, n);
     try expectTrailerConsistent(frame_bytes, written, source, true);
     return written;
 }
@@ -3486,8 +3491,9 @@ fn fuzzWriterMachinery(_: void, smith: *Smith) anyerror!void {
 fn machineryCase(comptime window_log: usize, smith: *Smith) !void {
     var out: [machinery_out_max]u8 = undefined;
     var fw: Io.Writer = .fixed(&out);
-    var buffer: Writer.Buffer(window_log) = undefined;
-    var w: Writer = .init(window_log, &fw, &buffer, .{});
+    const buffer = try testing.allocator.create(Writer.Buffer(window_log));
+    defer testing.allocator.destroy(buffer);
+    var w: Writer = .init(window_log, &fw, buffer, .{});
 
     var model: [machinery_max]u8 = undefined;
     var model_len: usize = 0;
@@ -3597,9 +3603,10 @@ fn expectFrameBoundary(frame_bytes: []const u8, expected: []const u8) !void {
     fastmem.set(u8, framed[frame_bytes.len..][0..marker_len], marker_byte);
     var got: [machinery_max + guard_len]u8 = undefined;
     var fw: Io.Writer = .fixed(&got);
-    var rbuf: Reader.Buffer(fixture_window_len) = undefined;
+    const rbuf = try testing.allocator.create(Reader.Buffer(fixture_window_len));
+    defer testing.allocator.destroy(rbuf);
     var fixed_in: Io.Reader = .fixed(framed[0 .. frame_bytes.len + marker_len]);
-    var r: Reader = .init(fixture_window_len, &fixed_in, &rbuf, null);
+    var r: Reader = .init(fixture_window_len, &fixed_in, rbuf, null);
     try pump(&r.reader, &fw, pumpLimit(expected.len));
     try testing.expectEqual(expected.len, fw.end);
     try testing.expectEqualSlices(u8, expected, got[0..fw.end]);

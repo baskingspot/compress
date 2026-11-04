@@ -1268,14 +1268,15 @@ test "Reader: the frame boundary is exact at the frame's last byte" {
         .{ .desc = "unchecksummed", .source = &golden.frame_raw, .expected = "zstd raw" },
     };
     const markers = 8;
-    var rbuf: Buffer(fixture_buffer_len) = undefined;
+    const rbuf = try testing.allocator.create(Buffer(fixture_buffer_len));
+    defer testing.allocator.destroy(rbuf);
     var framed: [64 + markers]u8 = undefined;
     var target: [64]u8 = undefined;
     for (cases) |tc| {
         fastmem.copy(u8, framed[0..tc.source.len], tc.source);
         fastmem.set(u8, framed[tc.source.len..], 0xaa);
         var fixed_in: Io.Reader = .fixed(framed[0 .. tc.source.len + markers]);
-        var r: Reader = .init(fixture_buffer_len, &fixed_in, &rbuf, null);
+        var r: Reader = .init(fixture_buffer_len, &fixed_in, rbuf, null);
         const n = try decodeInto(&r, &target);
         try testing.expectEqualStrings(tc.expected, target[0..n]);
         try sentinel.expect(&target, n);

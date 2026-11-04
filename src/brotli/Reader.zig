@@ -913,9 +913,10 @@ test "Reader: the boundary is exact, and a second stream stays unread" {
     const stream = golden.hand_stream.bytes;
     fastmem.copy(u8, framed[0..stream.len], stream);
     fastmem.set(u8, framed[stream.len..], 0xFF);
-    var small: Buffer(16) = undefined;
+    const small = try testing.allocator.create(Buffer(16));
+    defer testing.allocator.destroy(small);
     var in: Io.Reader = .fixed(framed[0 .. stream.len + 8]);
-    var r: Reader = .init(16, &in, &small);
+    var r: Reader = .init(16, &in, small);
     var plain: Io.Writer.Allocating = .init(testing.allocator);
     defer plain.deinit();
     _ = try r.reader.streamRemaining(&plain.writer);
