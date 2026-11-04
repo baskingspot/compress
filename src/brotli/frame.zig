@@ -214,7 +214,7 @@ pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Err
     // §9.2, §7.3 — NTREESL, then the literal context map if NTREESL >= 2;
     // "otherwise, the context map has only zero values".
     const num_literal_trees = try readCount(Bits, br);
-    header.num_trees[@intFromEnum(Category.literal)] = @intCast(num_literal_trees);
+    header.num_trees[@backingInt(Category.literal)] = @intCast(num_literal_trees);
     const literal_map = header.context.literal_map[0 .. 64 * header.block_types[0]];
     if (num_literal_trees >= 2) {
         try context.readMap(
@@ -230,7 +230,7 @@ pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Err
 
     // NTREESD, then the distance context map.
     const num_distance_trees = try readCount(Bits, br);
-    header.num_trees[@intFromEnum(Category.distance)] = @intCast(num_distance_trees);
+    header.num_trees[@backingInt(Category.distance)] = @intCast(num_distance_trees);
     const distance_map = header.context.distance_map[0 .. 4 * header.block_types[2]];
     if (num_distance_trees >= 2) {
         try context.readMap(
@@ -248,8 +248,8 @@ pub fn readCompressedHeader(comptime Bits: type, br: *Bits, header: *Header) Err
     // NBLTYPESI prefix codes for insert-and-copy lengths; NTREESD prefix
     // codes for distances". The distance alphabet is dynamic: "16 + NDIRECT
     // + (48 << NPOSTFIX)" (§3.3, §4).
-    const num_command_trees = header.block_types[@intFromEnum(Category.command)];
-    header.num_trees[@intFromEnum(Category.command)] = num_command_trees;
+    const num_command_trees = header.block_types[@backingInt(Category.command)];
+    header.num_trees[@backingInt(Category.command)] = num_command_trees;
     const postfix_slots: u32 = @as(u32, 48) << @intCast(header.npostfix);
     const distance_alphabet_size: u16 = @intCast(16 + header.ndirect + postfix_slots);
     for (0..num_literal_trees) |i| {

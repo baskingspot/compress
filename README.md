@@ -54,7 +54,7 @@ const gzip = @import("compress").gzip;
 
 `std` has a `std.compress` of its own. In a file that uses both, bind this module as `compressx`.
 
-`compress` builds with Zig 0.16 only.
+`compress` builds with Zig 0.17 only.
 
 ## Documentation
 
@@ -66,7 +66,7 @@ const gzip = @import("compress").gzip;
 ## Work on it
 
 ```sh
-nix develop   # Zig 0.16, zls, ziglint, zigdoc, and the rest
+nix develop   # Zig 0.17, zls, ziglint, zigdoc, and the rest
 just ci       # unit tests, lint, and the cross-target compile gate
 just fuzz     # fuzz every codec's targets, 10M iterations each by default
 just bench    # local benchmarks

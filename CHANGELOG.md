@@ -25,6 +25,7 @@ All notable changes to compress are recorded here. The format follows
 
 ### Changed
 
+- compress builds with Zig 0.17 only (`minimum_zig_version` is `0.17.0`).
 - `brotli` decodes meta-blocks with up to 256 trees in each category, the
   format's ceiling, where it refused more than 64 with `TooManyTrees`;
   brotli 1.2.0 writes up to 256 literal trees at q4 to q9 on inputs of a

@@ -12,6 +12,8 @@
 //! Format: docs/specs/rfc1951-deflate.txt
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const assert = std.debug.assert;
 const math = std.math;
 const sort = std.mem.sort;
@@ -1205,7 +1207,7 @@ test "dynamic: the block dispatch picks the smallest form" {
     var w: BlockWriter = .empty;
     var tokens: TokenList = .empty;
     var out: [1024]u8 = undefined;
-    const input = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const input = internal.repeat("the quick brown fox jumps over the lazy dog. ", 4);
 
     // Zero tokens: stored.
     var bw: BitWriter = .init(&out);
@@ -1247,10 +1249,11 @@ test "dynamic: BlockWriter.reset leaves what empty holds" {
     fastmem.set(u8, std.mem.asBytes(&w), 0xa5);
     w.reset();
     const e: BlockWriter = .empty;
-    inline for (std.meta.fields(BlockWriter)) |f| {
-        const got = @field(w, f.name);
-        const want = @field(e, f.name);
-        if (@typeInfo(f.type) == .@"struct") {
+    const info = @typeInfo(BlockWriter).@"struct";
+    inline for (info.field_names, info.field_types) |name, T| {
+        const got = @field(w, name);
+        const want = @field(e, name);
+        if (@typeInfo(T) == .@"struct") {
             try testing.expectEqualDeep(want.codes, got.codes);
             try testing.expectEqualDeep(want.bit_count, got.bit_count);
         } else try testing.expectEqualDeep(want, got);

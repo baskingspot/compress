@@ -380,7 +380,7 @@ test "golden decode: literal + copy2 + literal (golang TestDecodeLengthOffset)" 
                 p += writeUvarint(input_buf[p..], total_len) catch unreachable;
                 input_buf[p] = @as(u8, @intCast(prefix.len - 1)) << 2; // tagLiteral
                 p += 1;
-                fastmem.copy(u8, input_buf[p..][0..prefix.len], prefix);
+                @memcpy(input_buf[p..][0..prefix.len], prefix);
                 p += prefix.len;
                 input_buf[p] = @as(u8, @intCast(length - 1)) << 2 | 0b10; // tagCopy2
                 input_buf[p + 1] = @truncate(@as(u32, @intCast(offset)));
@@ -406,7 +406,7 @@ test "golden decode: literal + copy2 + literal (golang TestDecodeLengthOffset)" 
                 // Build the expected output: prefix + (length bytes copied
                 // from offset back) + suffix.
                 var w: usize = 0;
-                fastmem.copy(u8, want_buf[w..][0..prefix.len], prefix);
+                @memcpy(want_buf[w..][0..prefix.len], prefix);
                 w += prefix.len;
                 for (0..length) |i| {
                     want_buf[w + i] = want_buf[w + i - offset];

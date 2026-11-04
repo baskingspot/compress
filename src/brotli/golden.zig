@@ -19,6 +19,8 @@
 //! reference compressor both the frame and the decode tests drive.
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const assert = std.debug.assert;
 
 const fastmem = @import("fastmem");
@@ -624,7 +626,7 @@ pub const window_bound: Stream = .{
     .bytes = &.{
         0xA1, 0x98, 0x3E, 0x00, 0x00, 0x11, 0x14, 0xE2, 0x05, 0xE8, 0xF8, 0x77,
     },
-    .plain = "A" ** 2000 ++ "lose",
+    .plain = @as([2000]u8, @splat('A')) ++ "lose",
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):
@@ -638,7 +640,7 @@ pub const cli_text_q1: Stream = .{
         0xEB, 0x00, 0x6D, 0xDD, 0xB1, 0xD0, 0x89, 0xFF, 0x07, 0x45, 0x96, 0x01,
         0x77, 0xFF,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 3),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 2 -c`):
@@ -651,7 +653,7 @@ pub const cli_text_q2: Stream = .{
         0x32, 0x42, 0x74, 0x3A, 0x05, 0x86, 0x2E, 0xC2, 0xCA, 0x75, 0x80, 0xB6,
         0xEE, 0xD0, 0x64, 0x47, 0x99, 0xF8, 0x7F, 0x50, 0x64, 0x99, 0xF6,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 3),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 5 -c`):
@@ -663,7 +665,7 @@ pub const cli_text_q5: Stream = .{
         0x12, 0x9C, 0x11, 0x4E, 0x79, 0x1A, 0x02, 0x2F, 0xF2, 0xAA, 0x7D, 0x80,
         0x5B, 0x14, 0xE4, 0xB2, 0xD8, 0xFF, 0xE0, 0x19, 0x8D, 0x07,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 3),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -c`):
@@ -675,7 +677,7 @@ pub const cli_text_q9: Stream = .{
         0x12, 0x9C, 0x11, 0x4E, 0x79, 0x1A, 0x02, 0x2F, 0xF2, 0xAA, 0x7D, 0x80,
         0x5B, 0x14, 0xE4, 0xB2, 0xD8, 0xFF, 0xE0, 0x19, 0x8D, 0x07,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 3),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 11 -c`):
@@ -687,7 +689,7 @@ pub const cli_text_q11: Stream = .{
         0x81, 0x43, 0x02, 0x79, 0x9B, 0xC8, 0x1D, 0x3A, 0xAD, 0x70, 0x36, 0x3B,
         0x1E, 0x27, 0x2A, 0x2C, 0x05, 0x1B, 0xE1, 0x65, 0xF5, 0x87, 0x49, 0x51,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 3,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 3),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -w 10 -c`):
@@ -704,7 +706,7 @@ pub const cli_small_window: Stream = .{
         0xDC, 0xA2, 0x20, 0xF7, 0x45, 0x00, 0x28, 0xF6, 0x3F, 0x78, 0x46, 0xE3,
         0x01,
     },
-    .plain = "the quick brown fox jumps over the lazy dog\n" ** 100,
+    .plain = internal.repeat("the quick brown fox jumps over the lazy dog\n", 100),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):
@@ -715,7 +717,7 @@ pub const cli_repeat_q1: Stream = .{
         0xF3, 0xB2, 0xC0, 0x01, 0x5C, 0xFC, 0x4A, 0x97, 0xE6, 0x1B, 0x1B, 0x8C,
         0x39, 0x76, 0x14, 0x50, 0x4E, 0xF7, 0x1E, 0x32,
     },
-    .plain = "abcdefgh" ** 20,
+    .plain = internal.repeat("abcdefgh", 20),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 2 -c`):
@@ -726,7 +728,7 @@ pub const cli_repeat_q2: Stream = .{
         0xF3, 0xB2, 0x0C, 0xC0, 0xC1, 0x58, 0x10, 0x89, 0x49, 0x62, 0x80, 0x3B,
         0x6D, 0x76, 0x91, 0x40, 0x39, 0xDD, 0x39,
     },
-    .plain = "abcdefgh" ** 20,
+    .plain = internal.repeat("abcdefgh", 20),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 5 -c`):
@@ -736,7 +738,7 @@ pub const cli_repeat_q5: Stream = .{
         0x1F, 0x9F, 0x00, 0x00, 0xC4, 0x01, 0xC7, 0x80, 0xB8, 0x3E, 0x74, 0x0B,
         0x87, 0x04, 0xCA, 0xE9, 0x0E,
     },
-    .plain = "abcdefgh" ** 20,
+    .plain = internal.repeat("abcdefgh", 20),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -c`):
@@ -746,7 +748,7 @@ pub const cli_repeat_q9: Stream = .{
         0x1F, 0x9F, 0x00, 0x00, 0xC4, 0x01, 0xC7, 0x80, 0xB8, 0x3E, 0x74, 0x0B,
         0x87, 0x04, 0xCA, 0xE9, 0x0E,
     },
-    .plain = "abcdefgh" ** 20,
+    .plain = internal.repeat("abcdefgh", 20),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 11 -c`):
@@ -756,7 +758,7 @@ pub const cli_repeat_q11: Stream = .{
         0x1F, 0x9F, 0x00, 0xF8, 0xC5, 0x01, 0xC7, 0x80, 0xB8, 0x3E, 0x74, 0x0B,
         0x07, 0x48, 0xA0, 0x9C, 0xEE,
     },
-    .plain = "abcdefgh" ** 20,
+    .plain = internal.repeat("abcdefgh", 20),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):
@@ -766,7 +768,7 @@ pub const cli_run_q1: Stream = .{
         0x8F, 0x95, 0x00, 0x00, 0x20, 0x82, 0xD8, 0x00, 0x0E, 0x5C, 0xC3, 0x09,
         0x7D, 0x36, 0x80, 0x0B, 0x70, 0x58, 0x1E, 0x1B,
     },
-    .plain = "A" ** 300,
+    .plain = &@as([300]u8, @splat('A')),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 2 -c`):
@@ -776,7 +778,7 @@ pub const cli_run_q2: Stream = .{
         0x1F, 0x2B, 0x01, 0x00, 0x20, 0x82, 0x06, 0xE0, 0x60, 0x2C, 0x88, 0xC4,
         0x24, 0x31, 0xC0, 0x9D, 0x36, 0xA3, 0xCB, 0x04,
     },
-    .plain = "A" ** 300,
+    .plain = &@as([300]u8, @splat('A')),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 5 -c`):
@@ -785,7 +787,7 @@ pub const cli_run_q5: Stream = .{
     .bytes = &.{
         0x1F, 0x2B, 0x01, 0x00, 0x24, 0x82, 0x62, 0xB1, 0x40, 0xCA,
     },
-    .plain = "A" ** 300,
+    .plain = &@as([300]u8, @splat('A')),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -c`):
@@ -794,7 +796,7 @@ pub const cli_run_q9: Stream = .{
     .bytes = &.{
         0x1F, 0x2B, 0x01, 0x00, 0x24, 0x82, 0x62, 0xB1, 0x40, 0xCA,
     },
-    .plain = "A" ** 300,
+    .plain = &@as([300]u8, @splat('A')),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 11 -c`):
@@ -803,7 +805,7 @@ pub const cli_run_q11: Stream = .{
     .bytes = &.{
         0x1F, 0x2B, 0x01, 0xF8, 0x25, 0x82, 0x62, 0xB1, 0x40, 0xA0, 0x0C,
     },
-    .plain = "A" ** 300,
+    .plain = &@as([300]u8, @splat('A')),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 1 -c`):
@@ -814,7 +816,7 @@ pub const cli_digits_q1: Stream = .{
         0x55, 0x16, 0x38, 0x80, 0x8B, 0x5F, 0x29, 0x32, 0xC5, 0x07, 0x76, 0x00,
         0x6B, 0x7C, 0x02, 0x94, 0xD3, 0xD9, 0xFB, 0xDA, 0xC7,
     },
-    .plain = "0123456789" ** 40,
+    .plain = internal.repeat("0123456789", 40),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 2 -c`):
@@ -825,7 +827,7 @@ pub const cli_digits_q2: Stream = .{
         0x55, 0x96, 0x01, 0x38, 0x18, 0x0B, 0x22, 0x31, 0x49, 0x0C, 0x70, 0xA7,
         0xCD, 0x45, 0x00, 0x02, 0xE5, 0x74, 0xF6, 0x9E, 0x02,
     },
-    .plain = "0123456789" ** 40,
+    .plain = internal.repeat("0123456789", 40),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 5 -c`):
@@ -835,7 +837,7 @@ pub const cli_digits_q5: Stream = .{
         0x1F, 0x8F, 0x01, 0x00, 0xC4, 0x0D, 0xC6, 0xE6, 0x25, 0x8D, 0x20, 0x30,
         0x14, 0x80, 0x40, 0x39, 0x9D, 0xBD, 0x07,
     },
-    .plain = "0123456789" ** 40,
+    .plain = internal.repeat("0123456789", 40),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -c`):
@@ -845,7 +847,7 @@ pub const cli_digits_q9: Stream = .{
         0x1F, 0x8F, 0x01, 0x00, 0xC4, 0x0D, 0xC6, 0xE6, 0x25, 0x8D, 0x20, 0x30,
         0x14, 0x80, 0x40, 0x39, 0x9D, 0xBD, 0x07,
     },
-    .plain = "0123456789" ** 40,
+    .plain = internal.repeat("0123456789", 40),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 11 -c`):
@@ -855,7 +857,7 @@ pub const cli_digits_q11: Stream = .{
         0x1F, 0x8F, 0x01, 0xF8, 0xC5, 0x0D, 0xC6, 0xE6, 0x25, 0x8D, 0x20, 0x30,
         0x14, 0x00, 0x08, 0x94, 0xD3, 0xD9, 0x7B,
     },
-    .plain = "0123456789" ** 40,
+    .plain = internal.repeat("0123456789", 40),
 };
 
 /// The pinned CLI's own output (brotli 1.2.0, `brotli -q 9 -w 16 -c`): the

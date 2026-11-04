@@ -127,23 +127,23 @@ comptime {
     // layer up).
     @setEvalBranchQuota(100_000);
     const own = [_][]const u8{ "WindowTooLarge", "StreamTooLong", "ReadFailed", "EndOfStream" };
-    const frame_set = @typeInfo(frame.Error).error_set.?;
-    const mine = @typeInfo(Error).error_set.?;
+    const frame_set = @typeInfo(frame.Error).error_set.error_names.?;
+    const mine = @typeInfo(Error).error_set.error_names.?;
     assert(mine.len == frame_set.len - 1 + own.len);
     for (frame_set) |want| {
         var found = false;
         for (mine) |entry| {
-            if (mem.eql(u8, entry.name, want.name)) found = true;
+            if (mem.eql(u8, entry, want)) found = true;
         }
         // `BufferTooSmall` is the one name the reader does not carry: its
         // window is the caller's buffer, and every output path is bounded by
         // the room the block phase guarantees.
-        assert(found == !mem.eql(u8, want.name, "BufferTooSmall"));
+        assert(found == !mem.eql(u8, want, "BufferTooSmall"));
     }
     for (own) |name| {
         var found = false;
         for (mine) |entry| {
-            if (mem.eql(u8, entry.name, name)) found = true;
+            if (mem.eql(u8, entry, name)) found = true;
         }
         assert(found);
     }
@@ -896,18 +896,18 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     // window is the caller's buffer, not a target cap), plus the interface's
     // `ReadFailed`/`EndOfStream` and this layer's `WindowTooLarge` and
     // `StreamTooLong`.
-    const mine = @typeInfo(Error).error_set.?;
-    for (@typeInfo(frame.Error).error_set.?) |want| {
-        if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
+    const mine = @typeInfo(Error).error_set.error_names.?;
+    for (@typeInfo(frame.Error).error_set.error_names.?) |want| {
+        if (mem.eql(u8, want, "BufferTooSmall")) continue;
         var found = false;
         for (mine) |entry| {
-            if (mem.eql(u8, entry.name, want.name)) found = true;
+            if (mem.eql(u8, entry, want)) found = true;
         }
         try testing.expect(found);
     }
     var has_buffer_too_small = false;
     for (mine) |entry| {
-        if (mem.eql(u8, entry.name, "BufferTooSmall")) has_buffer_too_small = true;
+        if (mem.eql(u8, entry, "BufferTooSmall")) has_buffer_too_small = true;
     }
     try testing.expect(!has_buffer_too_small);
 }
@@ -1036,7 +1036,7 @@ test "Reader: the golden fixtures decode through the streaming layer" {
 
     // The CLI's own multi-block, checksummed, single-segment frame: 135000
     // bytes over two Compressed_Blocks with the XXH64 trailer (`§3.1.1`).
-    const expected = golden.frame_checksum_multi_text ** 3000;
+    const expected = internal.repeat(golden.frame_checksum_multi_text, 3000);
     var big_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
     var big: Reader = .init(fixture_buffer_len, &big_in, &rbuf, null);
     const n = try decodeInto(&big, &target);
@@ -1326,17 +1326,9 @@ test "Reader: streamAll walks every frame to the input's end" {
     // A checksummed frame between two others: each frame's trailer verified
     // at its own boundary, the walk's total the concatenation.
     var framed: [golden.frame_raw.len * 2 + golden.frame_checksum.len]u8 = undefined;
-    fastmem.copy(u8, framed[0..golden.frame_raw.len], &golden.frame_raw);
-    fastmem.copy(
-        u8,
-        framed[golden.frame_raw.len..][0..golden.frame_checksum.len],
-        &golden.frame_checksum,
-    );
-    fastmem.copy(
-        u8,
-        framed[golden.frame_raw.len + golden.frame_checksum.len ..],
-        &golden.frame_raw,
-    );
+    @memcpy(framed[0..golden.frame_raw.len], &golden.frame_raw);
+    @memcpy(framed[golden.frame_raw.len..][0..golden.frame_checksum.len], &golden.frame_checksum);
+    @memcpy(framed[golden.frame_raw.len + golden.frame_checksum.len ..], &golden.frame_raw);
     var walk_in: Io.Reader = .fixed(&framed);
     var walk_out: Io.Writer.Allocating = .init(gpa);
     defer walk_out.deinit();
@@ -1875,7 +1867,7 @@ test "Reader: an over-the-end request still checks the trailer" {
     // specific error, on every trailer byte.
     for (0..frame.checksum_len) |at| {
         var bad: [golden.frame_checksum_multi.len]u8 = undefined;
-        fastmem.copy(u8, &bad, &golden.frame_checksum_multi);
+        @memcpy(&bad, &golden.frame_checksum_multi);
         bad[bad.len - frame.checksum_len + at] ^= 0x01;
         var rbuf: Buffer(take_len) = undefined;
         var fixed_in: Io.Reader = .fixed(&bad);
@@ -1898,7 +1890,7 @@ test "Reader: a chunked input refills across the header and a block" {
     const markers = 8;
     const framed = try gpa.alloc(u8, golden.frame_checksum_multi.len + markers);
     defer gpa.free(framed);
-    fastmem.copy(u8, framed[0..golden.frame_checksum_multi.len], &golden.frame_checksum_multi);
+    @memcpy(framed[0..golden.frame_checksum_multi.len], &golden.frame_checksum_multi);
     fastmem.set(u8, framed[golden.frame_checksum_multi.len..], 0xaa);
 
     var small: [4]u8 = undefined;
@@ -1909,7 +1901,7 @@ test "Reader: a chunked input refills across the header and a block" {
     const out = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(out);
     try testing.expectEqual(135000, out.len);
-    try testing.expectEqualStrings(golden.frame_checksum_multi_text ** 3000, out);
+    try testing.expectEqualStrings(internal.repeat(golden.frame_checksum_multi_text, 3000), out);
     try testing.expectEqual(@as(?Error, null), r.err);
     // The logical input position — the inner's position less the chunked
     // reader's still-buffered bytes — is the frame's last byte.
@@ -1931,7 +1923,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     try testing.expectEqual(@as(?Error, null), r.err);
     const got = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(got);
-    try testing.expectEqualStrings(golden.frame_checksum_multi_text ** 3000, got);
+    try testing.expectEqualStrings(internal.repeat(golden.frame_checksum_multi_text, 3000), got);
 }
 
 test "Reader: random consumer machinery sequences stay correct" {
@@ -1942,7 +1934,7 @@ test "Reader: random consumer machinery sequences stay correct" {
     // driver's positions exercise the slide.
     var rng: DefaultPrng = .init(4242);
     const rand = rng.random();
-    const input = golden.frame_checksum_multi_text ** 3000;
+    const input = internal.repeat(golden.frame_checksum_multi_text, 3000);
     var rbuf: Buffer(135000) = undefined;
 
     var iter: usize = 0;

@@ -89,7 +89,7 @@ pub const Alphabet = enum(u2) {
 };
 
 /// The alphabets' number.
-pub const alphabet_count = @typeInfo(Alphabet).@"enum".fields.len;
+pub const alphabet_count = @typeInfo(Alphabet).@"enum".field_names.len;
 
 /// `§3.1.1.3.2.1`, Table 15 — the four Compression_Modes of each symbol type.
 pub const Mode = enum(u2) {
@@ -254,7 +254,7 @@ const alphabet_specs = [alphabet_count]AlphabetSpec{
 
 /// The alphabets' contexts.
 fn specOf(alphabet: Alphabet) AlphabetSpec {
-    return alphabet_specs[@intFromEnum(alphabet)];
+    return alphabet_specs[@backingInt(alphabet)];
 }
 
 /// `§3.1.1.3.2.2`'s three distributions through `§4.1.1`'s construction: the
@@ -398,9 +398,9 @@ pub fn parseHeader(source: []const u8) Error!Header {
     // "The last field, Reserved, must be all zeroes."
     if (modes_byte & 0b11 != 0) return error.ReservedModeBits;
     header.modes = .{
-        .literals_lengths = @enumFromInt(modes_byte >> 6),
-        .offsets = @enumFromInt((modes_byte >> 4) & 0b11),
-        .match_lengths = @enumFromInt((modes_byte >> 2) & 0b11),
+        .literals_lengths = @fromBackingInt(@intCast(modes_byte >> 6)),
+        .offsets = @fromBackingInt(@intCast((modes_byte >> 4) & 0b11)),
+        .match_lengths = @fromBackingInt(@intCast((modes_byte >> 2) & 0b11)),
     };
     return header;
 }
@@ -604,7 +604,7 @@ fn resolveTables(
         // A description never reads past the bytes it was handed, so the
         // next table's slice and the bitstream's start are in the section.
         assert(cursor <= source.len);
-        tables[@intFromEnum(alphabet)] = state.tables[@intFromEnum(alphabet)].?;
+        tables[@backingInt(alphabet)] = state.tables[@backingInt(alphabet)].?;
     }
     return cursor;
 }
@@ -622,7 +622,7 @@ fn resolveTable(
     mode: Mode,
     state: *State,
 ) Error!usize {
-    const index = @intFromEnum(alphabet);
+    const index = @backingInt(alphabet);
     const spec = specOf(alphabet);
     switch (mode) {
         .predefined => {
@@ -697,8 +697,8 @@ fn executeSequences(
     for (description_order) |alphabet| {
         // "To obtain the initial state value, consume Accuracy_Log bits from
         // the stream as a little-endian value" (`§4.1`).
-        states[@intFromEnum(alphabet)] =
-            reader.readBits(tables[@intFromEnum(alphabet)].log);
+        states[@backingInt(alphabet)] =
+            reader.readBits(tables[@backingInt(alphabet)].log);
     }
 
     var produced: usize = 0;
@@ -709,12 +709,12 @@ fn executeSequences(
         // reading the Number_of_Bits required to decode offset. It does the
         // same for Match_Length and then for Literals_Length." The fused
         // cell is one load per alphabet and serves the state update too.
-        const offset_cell = tables[@intFromEnum(Alphabet.offsets)]
-            .entry(states[@intFromEnum(Alphabet.offsets)]);
-        const match_cell = tables[@intFromEnum(Alphabet.match_lengths)]
-            .entry(states[@intFromEnum(Alphabet.match_lengths)]);
-        const literal_cell = tables[@intFromEnum(Alphabet.literals_lengths)]
-            .entry(states[@intFromEnum(Alphabet.literals_lengths)]);
+        const offset_cell = tables[@backingInt(Alphabet.offsets)]
+            .entry(states[@backingInt(Alphabet.offsets)]);
+        const match_cell = tables[@backingInt(Alphabet.match_lengths)]
+            .entry(states[@backingInt(Alphabet.match_lengths)]);
+        const literal_cell = tables[@backingInt(Alphabet.literals_lengths)]
+            .entry(states[@backingInt(Alphabet.literals_lengths)]);
         const offset_value = offset_cell.baseline + readExtra(&reader, offset_cell.extra_bits);
         const match_length = match_cell.baseline + readExtra(&reader, match_cell.extra_bits);
         const literals_length = literal_cell.baseline + readExtra(&reader, literal_cell.extra_bits);
@@ -742,11 +742,11 @@ fn executeSequences(
         // §4.1: "the decoder should consume Num_Bits bits from the stream as
         // a little-endian value and add it to Baseline."
         if (sequence_index + 1 < sequence_count) {
-            states[@intFromEnum(Alphabet.literals_lengths)] =
+            states[@backingInt(Alphabet.literals_lengths)] =
                 literal_cell.transition + reader.readBits(literal_cell.num_bits);
-            states[@intFromEnum(Alphabet.match_lengths)] =
+            states[@backingInt(Alphabet.match_lengths)] =
                 match_cell.transition + reader.readBits(match_cell.num_bits);
-            states[@intFromEnum(Alphabet.offsets)] =
+            states[@backingInt(Alphabet.offsets)] =
                 offset_cell.transition + reader.readBits(offset_cell.num_bits);
         }
     }
@@ -1221,9 +1221,9 @@ test "the predefined tables use §3.1.1.3.2.2's accuracy logs" {
     // distributions "use an accuracy log of 6 bits (64 states)", the offset
     // codes' 5 bits (32 states). Appendix A's rows pin the tables themselves
     // (fse.zig's cross-check builds them from these distributions).
-    const ll_table = predefined_tables[@intFromEnum(Alphabet.literals_lengths)];
-    const ml_table = predefined_tables[@intFromEnum(Alphabet.match_lengths)];
-    const offset_table = predefined_tables[@intFromEnum(Alphabet.offsets)];
+    const ll_table = predefined_tables[@backingInt(Alphabet.literals_lengths)];
+    const ml_table = predefined_tables[@backingInt(Alphabet.match_lengths)];
+    const offset_table = predefined_tables[@backingInt(Alphabet.offsets)];
     try testing.expectEqual(@as(u5, 6), ll_table.log);
     try testing.expectEqual(@as(u5, 5), offset_table.log);
     try testing.expectEqual(@as(u5, 6), ml_table.log);
@@ -1246,11 +1246,11 @@ test "resolveTable stores every mode's table for Repeat_Mode" {
     try testing.expectEqual(@as(usize, 0), try resolveTable(.offsets, &.{}, .predefined, &state));
     try testing.expectEqual(@as(usize, 0), try resolveTable(.offsets, &.{}, .repeat, &state));
     try testing.expectEqual(
-        predefined_tables[@intFromEnum(Alphabet.offsets)].log,
-        state.tables[@intFromEnum(Alphabet.offsets)].?.log,
+        predefined_tables[@backingInt(Alphabet.offsets)].log,
+        state.tables[@backingInt(Alphabet.offsets)].?.log,
     );
     try testing.expectEqual(@as(usize, 1), try resolveTable(.offsets, &.{7}, .rle, &state));
-    const rle = state.tables[@intFromEnum(Alphabet.offsets)].?;
+    const rle = state.tables[@backingInt(Alphabet.offsets)].?;
     try testing.expectEqual(offset_codes[7].baseline, rle.entry(0).baseline);
     try testing.expectEqual(offset_codes[7].extra_bits, rle.entry(0).extra_bits);
     try testing.expectEqual(@as(u5, 0), rle.entry(0).num_bits);

@@ -194,7 +194,7 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
     }) |alphabet| {
         const parsed = try sequences.readDictionaryTable(alphabet, source[cursor..]);
         cursor += parsed.bytes_consumed;
-        const index = @intFromEnum(alphabet);
+        const index = @backingInt(alphabet);
         dictionary.sequence_tables[index] = parsed.table;
         dictionary.sequence_tables_compress[index] = fse_compress.buildTable(
             encodeNorm(alphabet, &parsed.description),
@@ -220,7 +220,7 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
         .match_lengths,
         .literals_lengths,
     }) |alphabet| {
-        const index = @intFromEnum(alphabet);
+        const index = @backingInt(alphabet);
         if (repeatPromoted(alphabet, &descriptions[index], content.len)) {
             dictionary.sequence_repeat_valid.insert(alphabet);
         }

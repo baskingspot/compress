@@ -135,7 +135,7 @@ pub fn compressBuffered(
     buffer: *Buffer,
     options: Options,
 ) Error!usize {
-    const level: u8 = @intFromEnum(options.level);
+    const level: u8 = @backingInt(options.level);
     // The dictionary's shape: which scan the frame runs and how its
     // parameters are sized (the C's `ZSTD_shouldAttachDict` switch,
     // `zstd_compress.c:2309-2323`). An empty content attaches nothing and

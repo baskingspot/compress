@@ -18,6 +18,8 @@
 //! algorithm).
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const testing = std.testing;
 const Adler32 = std.hash.Adler32;
 
@@ -202,7 +204,7 @@ test "adler32: the wrapper is a continuation of the kernel" {
     // standing for "no bytes yet" (libdeflate's signature). The identity
     // `adler32(1, b) == Adler32.hash(b)` is what the one-shot encoder relies
     // on.
-    const bytes = "the quick brown fox jumps over the lazy dog. " ** 20;
+    const bytes = internal.repeat("the quick brown fox jumps over the lazy dog. ", 20);
     try testing.expectEqual(Adler32.hash(bytes), adler32(1, bytes));
     try testing.expectEqual(
         adler32(1, bytes),
@@ -214,7 +216,7 @@ test "adler32: incremental runs equal one pass" {
     // The streaming layers fold runs as bytes cross the codec boundary: the
     // digest must be independent of where the runs are cut, including across
     // the 5552-byte deferred-modulo boundary (§8.2).
-    const bytes = "the quick brown fox jumps over the lazy dog. " ** 300;
+    const bytes = internal.repeat("the quick brown fox jumps over the lazy dog. ", 300);
     try testing.expect(bytes.len > nmax);
     const whole = Adler32.hash(bytes);
     try testing.expectEqual(whole, adler32(1, bytes));
@@ -242,7 +244,7 @@ test "adler32: the streaming accounting through a container trailer" {
     const encode = @import("encode.zig");
     var checksum: Checksum = .init;
     const hook = checksum.hook();
-    const bytes = "checksums ride the codec boundary " ** 8;
+    const bytes = internal.repeat("checksums ride the codec boundary ", 8);
     hook.update(bytes[0..100]);
     hook.update(bytes[100..]);
     var trailer: [encode.trailer_len]u8 = undefined;

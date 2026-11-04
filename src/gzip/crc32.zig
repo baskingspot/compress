@@ -4,7 +4,7 @@
 //! The CRC-32 is the one RFC 1952 §2.3.1 specifies: ISO 3309, reflected
 //! polynomial 0xEDB88320, with pre- and post-conditioning (§8 is the RFC's
 //! sample code). `crc32(crc, bytes)` is the whole interface: the conditioning
-//! is inside, so `crc32(0, bytes)` equals `std.hash.crc.Crc32.hash(bytes)` and
+//! is inside, so `crc32(0, bytes)` equals `std.hash.Crc32.hash(bytes)` and
 //! an empty input returns `crc` unchanged. `Checksum` holds the raw running
 //! CRC and the byte count mod 2^32 (the trailer's ISIZE). The container folds
 //! it through flate's checksum hook as bytes cross the codec boundary, so
@@ -15,9 +15,11 @@
 //! std's `Crc32` stays in the tests as the reference.
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const testing = std.testing;
 const assert = std.debug.assert;
-const Crc32 = std.hash.crc.Crc32;
+const Crc32 = std.hash.Crc32;
 
 const flate = @import("../flate/root.zig");
 const common = @import("common.zig");
@@ -191,7 +193,7 @@ test "crc32: incremental runs equal one pass" {
     // The streaming layers fold runs as bytes cross the codec boundary: the
     // digest must be independent of where the runs are cut, including cuts
     // inside a sixteen-byte slice.
-    const bytes = "the quick brown fox jumps over the lazy dog. " ** 20;
+    const bytes = internal.repeat("the quick brown fox jumps over the lazy dog. ", 20);
     const whole = Crc32.hash(bytes);
     try testing.expectEqual(whole, crc32(0, bytes));
     var split: Checksum = .init;
@@ -218,7 +220,7 @@ test "crc32: slice-by-16 agrees with std over a length sweep" {
 
 test "crc32: a long fold agrees with std" {
     // Well past one slice: the length the one-shot paths fold in a call.
-    const bytes = "the quick brown fox jumps over the lazy dog. " ** 1024;
+    const bytes = internal.repeat("the quick brown fox jumps over the lazy dog. ", 1024);
     try testing.expectEqual(Crc32.hash(bytes), crc32(0, bytes));
     try testing.expectEqual(
         Crc32.hash(bytes),

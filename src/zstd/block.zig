@@ -87,7 +87,7 @@ pub fn parseHeader(source: []const u8) error{Truncated}!Header {
     const bits = readInt(u24, source[0..block_header_len]);
     return .{
         .last_block = (bits & 1) != 0,
-        .block_type = @enumFromInt(@as(u2, @truncate((bits >> 1) & 0b11))),
+        .block_type = @fromBackingInt(@intCast(@as(u2, @truncate((bits >> 1) & 0b11)))),
         // "The upper 21 bits of Block_Header represent the Block_Size."
         .block_size = (bits >> 3) & 0x1fffff,
     };
@@ -700,7 +700,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     internal.sentinel.fill(&target);
     var literals_state: literals.State = .empty;
     var sequences_state: sequences.State = .empty;
-    const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ [_]u8{0} ** 8;
+    const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ @as([8]u8, @splat(0));
     try testing.expectError(
         error.BlockOversize,
         decode(&oversize, &target, 0, 1024, 0, &.{}, &literals_state, &sequences_state, null),
@@ -712,7 +712,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     internal.sentinel.fill(&big);
     const written = try decodeFrame(&golden.frame_rle_max, &big);
     try testing.expectEqual(max_block_size, written);
-    const run = [_]u8{0x5a} ** max_block_size;
+    const run = @as([max_block_size]u8, @splat(0x5a));
     try testing.expectEqualSlices(u8, &run, big[0..written]);
     try internal.sentinel.expect(&big, written);
 }
@@ -890,8 +890,8 @@ test "the history a match may read is the addressable span at the match" {
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_1k, &target);
     try testing.expectEqual(@as(usize, 2048 + 3), written);
-    const first = [_]u8{0x41} ** 1024;
-    const second = [_]u8{0x42} ** 1024;
+    const first = @as([1024]u8, @splat(0x41));
+    const second = @as([1024]u8, @splat(0x42));
     try testing.expectEqualSlices(u8, &first, target[0..1024]);
     try testing.expectEqualSlices(u8, &second, target[1024..2048]);
     // Offset 1024 from position 2048 is the B block's first byte.
@@ -945,8 +945,8 @@ test "the window accounting crosses Block_Maximum_Size" {
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_128k, &target);
     try testing.expectEqual(@as(usize, 2 * 131072 + 3), written);
-    const first = [_]u8{0x41} ** 131072;
-    const second = [_]u8{0x42} ** 131072;
+    const first = @as([131072]u8, @splat(0x41));
+    const second = @as([131072]u8, @splat(0x42));
     try testing.expectEqualSlices(u8, &first, target[0..131072]);
     try testing.expectEqualSlices(u8, &second, target[131072..262144]);
     try testing.expectEqualSlices(u8, "BBB", target[262144..262147]);

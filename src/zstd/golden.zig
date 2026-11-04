@@ -386,7 +386,7 @@ pub const literals_4stream_sf2_expected = hex(
 pub const literals_fse_tree_section = hex(
     "a6800713b0a599030e89989065de6a21499319061f03600100010001000f0f0f03",
 );
-pub const literals_fse_tree_expected = [_]u8{0x62} ** 10;
+pub const literals_fse_tree_expected = @as([10]u8, @splat(0x62));
 
 pub const weights_expected = [_]u8{
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
@@ -565,7 +565,7 @@ pub fn buildFrame(
     for (blocks, 0..) |b, index| {
         const last: u24 = if (index + 1 == blocks.len) 1 else 0;
         const header = last |
-            (@as(u24, @intFromEnum(b.block_type)) << 1) |
+            (@as(u24, @backingInt(b.block_type)) << 1) |
             (@as(u24, b.content.len) << 3);
         out[cursor] = @truncate(header);
         out[cursor + 1] = @truncate(header >> 8);
@@ -1445,7 +1445,7 @@ pub const dict_boundary = hex("37a430ec2a00000084432010731000e0a0a1d2d1b6d9480d"
     "141f012010b4d0bf00141f012010b4d0bf0001000000020000000300000058595a");
 /// The boundary fixture's expected output: the RLE block's 1024 'A's and the
 /// three dictionary bytes the match reads.
-pub const dict_boundary_expected = [_]u8{'A'} ** 1024 ++ "XYZ";
+pub const dict_boundary_expected = @as([1024]u8, @splat('A')) ++ "XYZ";
 /// `dict_frame_boundary` (21 bytes): the match at position 1024, exactly
 /// Window_Size.
 pub const dict_frame_boundary = hex("28b52ffd01002a022000413d000000010006001908");
@@ -1465,10 +1465,10 @@ pub const dict_frame_boundary_after = hex("28b52ffd01002a022000410a0000413d00000
 /// 1024 'A' + "ZAA".
 pub const dict_frame_boundary_straddle = hex("28b52ffd01002a022000413d000000010004001908");
 /// The straddle fixture's expected output.
-pub const dict_boundary_straddle_expected = [_]u8{'A'} ** 1024 ++ "ZAA";
+pub const dict_boundary_straddle_expected = @as([1024]u8, @splat('A')) ++ "ZAA";
 /// The pinned CLI's verdict on `dict_frame_boundary_after`: it decodes,
 /// reading "YZA" (the dictionary's last two bytes, then the output's first).
-pub const dict_boundary_after_cli = [_]u8{'A'} ** 1025 ++ "YZA";
+pub const dict_boundary_after_cli = @as([1025]u8, @splat('A')) ++ "YZA";
 
 // The `encode_*` fixtures are the CLI's own level-1 frames (`zstd -1 -q -k -f`,
 // the pinned v1.5.7) for the corpus shapes at sizes that fit a fixture: the

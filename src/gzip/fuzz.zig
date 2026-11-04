@@ -25,7 +25,7 @@ const testing = std.testing;
 const Smith = testing.Smith;
 const math = std.math;
 const mem = std.mem;
-const Crc32 = std.hash.crc.Crc32;
+const Crc32 = std.hash.Crc32;
 
 const fastmem = @import("fastmem");
 
@@ -188,7 +188,7 @@ fn shapeSeed(
 ) [24 + content.len]u8 {
     var seed: [24 + content.len]u8 = undefined;
     mem.writeInt(u64, seed[0..8], level, .little);
-    mem.writeInt(u64, seed[8..16], @intFromEnum(shape), .little);
+    mem.writeInt(u64, seed[8..16], @backingInt(shape), .little);
     mem.writeInt(u64, seed[16..24], len, .little);
     for (content, 0..) |b, i| seed[24 + i] = b;
     return seed;
@@ -771,7 +771,7 @@ test "gzip fuzz: header and trailer corruption" {
 /// Seeds for target 3: a repeated phrase the encoder turns into matches, and
 /// an empty payload (the header-before-nothing path).
 const stream_corpus: []const []const u8 = &.{
-    &sliceSeed(0, "the quick brown fox " ** 8),
+    &sliceSeed(0, internal.repeat("the quick brown fox ", 8)),
     &sliceSeed(0, ""),
 };
 
@@ -1388,7 +1388,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
 /// phrase with matches.
 const checksum_corpus: []const []const u8 = &.{
     &sliceSeed(0, ""),
-    &sliceSeed(0, "checksums ride the codec boundary " ** 4),
+    &sliceSeed(0, internal.repeat("checksums ride the codec boundary ", 4)),
 };
 
 test "gzip fuzz: checksum accounting" {
@@ -1420,7 +1420,7 @@ const Fold = struct {
 
 /// Seeds for target 7: a phrase with matches, and an empty payload.
 const hook_corpus: []const []const u8 = &.{
-    &sliceSeed(0, "the checksum rides the codec boundary " ** 4),
+    &sliceSeed(0, internal.repeat("the checksum rides the codec boundary ", 4)),
     &sliceSeed(0, ""),
 };
 
@@ -1615,7 +1615,7 @@ test "gzip fuzz: hostile-header pins" {
     // the presence of a new field".
     for ([_]u8{ 0x20, 0x40, 0x80 }) |bit| {
         var buf: [empty_member.len]u8 = undefined;
-        fastmem.copy(u8, &buf, empty_member);
+        @memcpy(&buf, empty_member);
         buf[3] = bit;
         try testing.expectError(error.BadHeader, gzip.decode.decompress(&buf, &.{}));
     }
@@ -1623,7 +1623,7 @@ test "gzip fuzz: hostile-header pins" {
     // ID1, ID2, and CM are checked (§2.3.1.2): BadHeader.
     for (0..3) |at| {
         var buf: [empty_member.len]u8 = undefined;
-        fastmem.copy(u8, &buf, empty_member);
+        @memcpy(&buf, empty_member);
         buf[at] ^= 0xff;
         try testing.expectError(error.BadHeader, gzip.decode.decompress(&buf, &.{}));
     }
@@ -1645,7 +1645,7 @@ test "gzip fuzz: hostile-header pins" {
     // to the same empty payload.
     for (4..header_len) |at| {
         var buf: [empty_member.len]u8 = undefined;
-        fastmem.copy(u8, &buf, empty_member);
+        @memcpy(&buf, empty_member);
         buf[at] ^= 0xff;
         try testing.expectEqual(@as(usize, 0), try gzip.decode.decompress(&buf, &.{}));
     }

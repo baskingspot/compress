@@ -107,12 +107,12 @@ comptime {
         "BadDictionary",
     };
     @setEvalBranchQuota(100_000);
-    const set = @typeInfo(DecompressError).error_set.?;
+    const set = @typeInfo(DecompressError).error_set.error_names.?;
     assert(set.len == vocabulary.len);
     for (vocabulary) |name| {
         var found = false;
         for (set) |entry| {
-            if (std.mem.eql(u8, name, entry.name)) found = true;
+            if (std.mem.eql(u8, name, entry)) found = true;
         }
         assert(found);
     }

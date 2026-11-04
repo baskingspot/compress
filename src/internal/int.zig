@@ -12,7 +12,7 @@ const mem = std.mem;
 
 /// `readInt` and `writeInt` for one byte order. Use the ready-made `little`
 /// and `big` bindings below.
-pub fn Int(comptime endian: std.builtin.Endian) type {
+pub fn Int(comptime endian: std.lang.Endian) type {
     return struct {
         /// Reads an integer from memory with bit count specified by T.
         /// The bit count of T must be evenly divisible by 8.

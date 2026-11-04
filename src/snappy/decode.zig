@@ -106,7 +106,7 @@ inline fn shuffleBytes(v: Vec16, mask: Vec16) Vec16 {
             // `v` is read and written, then return it.
             // Gate on SSSE3: pshufb requires SSSE3, not just x86_64. Baseline
             // x86_64 (no SSSE3) falls through to the portable byte permute.
-            if (comptime Target.x86.featureSetHas(builtin.cpu.features, .ssse3)) {
+            if (comptime Target.x86.featureSetHas(builtin.target.cpu.features, .ssse3)) {
                 var out = v;
                 asm volatile ("pshufb %[mask], %[out]"
                     : [out] "+x" (out),

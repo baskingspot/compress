@@ -55,7 +55,7 @@ test "example: the round trip holds through both pumps" {
     // `cli.expectRoundTrip` hands the pumps the testing allocator; brotli's
     // pumps put their MiB-scale buffers in the arena they are given, so this
     // test drives them with a real arena instead.
-    const text = "the quick brown fox jumps over the lazy dog. " ** 100;
+    const text = repeat("the quick brown fox jumps over the lazy dog. ", 100);
     var arena: std.heap.ArenaAllocator = .init(testing.allocator);
     defer arena.deinit();
 
@@ -123,7 +123,18 @@ test "example: the CLI's own stream decodes" {
     var in: Io.Reader = .fixed(&stream);
     try decode(arena.allocator(), &in, &plain.writer);
     try testing.expectEqualStrings(
-        "the quick brown fox jumps over the lazy dog\n" ** 100,
+        repeat("the quick brown fox jumps over the lazy dog\n", 100),
         plain.written(),
     );
+}
+
+/// `s` repeated `n` times, as `s ** n` spelled it before Zig 0.17.
+fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const out = comptime blk: {
+        @setEvalBranchQuota(1000 + n);
+        var buf: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+        break :blk buf;
+    };
+    return &out;
 }

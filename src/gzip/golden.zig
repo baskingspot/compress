@@ -366,7 +366,7 @@ pub fn expectTrailer(member: []const u8, source: []const u8) !void {
     try testing.expect(member.len >= decode.trailer_len);
     const trailer = member[member.len - decode.trailer_len ..];
     try testing.expectEqual(
-        std.hash.crc.Crc32.hash(source),
+        std.hash.Crc32.hash(source),
         readInt(u32, trailer[0..4]),
     );
     try testing.expectEqual(

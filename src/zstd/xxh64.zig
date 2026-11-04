@@ -82,10 +82,10 @@ const Accumulator = if (use_vector_lanes) VectorAccumulator else ScalarAccumulat
 /// (scalar wins, measured), baseline x86_64 synthesizes the multiply from
 /// `vpmuludq`, and aarch64's SVE2 splits it into two serial 2-wide chains
 /// (measured; the note above names the numbers).
-const use_vector_lanes = builtin.cpu.arch == .x86_64 and
-    x86.featureSetHas(builtin.cpu.features, .avx512dq) and
-    x86.featureSetHas(builtin.cpu.features, .avx512vl) and
-    mem.eql(u8, builtin.cpu.model.name, "znver4");
+const use_vector_lanes = builtin.target.cpu.arch == .x86_64 and
+    x86.featureSetHas(builtin.target.cpu.features, .avx512dq) and
+    x86.featureSetHas(builtin.target.cpu.features, .avx512vl) and
+    mem.eql(u8, builtin.target.cpu.model.name, "znver4");
 
 /// The scalar form: four `u64` accumulators, one stripe (32 bytes) at a time.
 const ScalarAccumulator = struct {
@@ -130,7 +130,7 @@ const ScalarAccumulator = struct {
         // (disassembly-checked on graniterapids). One stripe per iteration
         // keeps the multiply chains scalar; the loop overhead measured under
         // the barrier win (the four-lane micro grid, this wave's results).
-        if (builtin.cpu.arch == .x86_64) {
+        if (builtin.target.cpu.arch == .x86_64) {
             while (i + 32 <= input.len) : (i += 32) foldStripe(&acc, input[i..][0..32]);
             self.acc = acc;
             return i;
@@ -144,7 +144,7 @@ const ScalarAccumulator = struct {
     }
 
     inline fn foldStripe(acc: *Lane, stripe: *const [32]u8) void {
-        if (builtin.cpu.arch == .x86_64) {
+        if (builtin.target.cpu.arch == .x86_64) {
             // x86_64: interleave load and round per lane, with a barrier on
             // each finished lane. LLVM's SLP packs the four isomorphic
             // chains into one `vpmullq` round whenever it can see them
@@ -240,11 +240,10 @@ const VectorAccumulator = struct {
     }
 };
 
-/// The four 64-bit words of one 32-byte stripe. They are little-endian on the
-/// wire, so a big-endian host swaps the bytes of each word.
+/// The four 64-bit words of one 32-byte stripe, little-endian on the wire as
+/// a bit cast reads them on any host.
 inline fn loadStripe(stripe: *const [32]u8) LaneVec {
-    const raw: LaneVec = @bitCast(stripe.*);
-    return if (builtin.cpu.arch.endian() == .little) raw else @byteSwap(raw);
+    return @bitCast(stripe.*);
 }
 
 /// The vector round: `rotl(acc + word * P2, 31) * P1` on all four accumulators.
@@ -426,7 +425,7 @@ test "xxh64: the differential sweep against std's kernel" {
 test "xxh64: the incremental state equals the one-shot" {
     // The frame paths fold per block: the digest must be independent of
     // where the runs are cut, across the stripe boundaries.
-    const bytes = "checksums ride the codec boundary " ** 40;
+    const bytes = internal.repeat("checksums ride the codec boundary ", 40);
     var state: State = .init;
     var at: usize = 0;
     while (at < bytes.len) : (at += 7) {

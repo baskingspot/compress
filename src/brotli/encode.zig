@@ -13,6 +13,8 @@
 //! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const Io = std.Io;
 const assert = std.debug.assert;
 
@@ -1117,8 +1119,8 @@ test "round trip: shapes through the one-shot" {
         "",
         "A",
         "hello world",
-        "the quick brown fox jumps over the lazy dog. " ** 200,
-        "\x5a" ** 3000,
+        internal.repeat("the quick brown fox jumps over the lazy dog. ", 200),
+        &@as([3000]u8, @splat(0x5a)),
         "abcabcabcabcabcabc",
     };
     for (shapes) |shape| try roundTrip(shape);

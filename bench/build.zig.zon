@@ -2,7 +2,7 @@
     .name = .compress_bench,
     .version = "0.0.0",
     .fingerprint = 0x66e80da980e2944, // Changing this has security and trust implications.
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         // The C-arm competitor sources (bench/README.md, "Arms"): release
         // tarballs pinned by url+hash, fetched only by this build root's

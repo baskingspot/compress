@@ -19,6 +19,8 @@
 //! Reference encoder: https://github.com/klauspost/compress (s2/encode_all.go)
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const assert = std.debug.assert;
 const testing = std.testing;
 const DefaultPrng = std.Random.DefaultPrng;
@@ -419,7 +421,7 @@ test "encode: short input (< min_non_literal_block_size) is a single literal" {
 test "encode: repetitive input compresses (back-references)" {
     // A repeating string should produce copy tags, so the compressed size is
     // well under the input length.
-    const input = "the quick brown fox" ** 200; // 3800 bytes
+    const input = internal.repeat("the quick brown fox", 200); // 3800 bytes
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);
@@ -460,7 +462,7 @@ test "encode: 64K boundary round-trips" {
 }
 
 test "encode: RLE input (single-byte run)" {
-    const input = [_]u8{0x41} ** 4096;
+    const input = @as([4096]u8, @splat(0x41));
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);

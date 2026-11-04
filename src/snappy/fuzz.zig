@@ -144,7 +144,7 @@ const seed_literal = decodeSeed("\x03\x08\xff\xff\xff");
 const seed_copy1 = decodeSeed("\x0d\x0cabcd\x15\x04");
 const seed_copy2 = decodeSeed("\x06\x0cabcd\x06\x03\x00");
 const seed_copy4 = decodeSeed("\x06\x0cabcd\x07\x03\x00\x00\x00");
-const seed_literal40 = decodeSeed("\x28\x9c" ++ "." ** 40);
+const seed_literal40 = decodeSeed("\x28\x9c" ++ @as([40]u8, @splat('.')));
 const seed_zero_offset = decodeSeed("\x08\x0cabcd\x01\x00");
 const block_decode_corpus: []const []const u8 = &.{
     &seed_empty,

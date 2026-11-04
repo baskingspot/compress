@@ -57,7 +57,7 @@ pub const Arena = struct {
 /// §9.2 — the context modes: two bits per literal block type, in block-type
 /// order.
 pub fn readModes(comptime Bits: type, br: *Bits, modes: []Mode) Bits.ErrorSet!void {
-    for (modes) |*mode| mode.* = @enumFromInt(@as(u2, @intCast(try br.take(2))));
+    for (modes) |*mode| mode.* = @fromBackingInt(@intCast(@as(u2, @intCast(try br.take(2)))));
 }
 
 /// §7.3 — read one context map into `values`. `num_trees` is the map's

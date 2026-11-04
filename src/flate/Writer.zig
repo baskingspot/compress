@@ -383,12 +383,12 @@ test "Writer: no data block carries BFINAL" {
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf, .{});
-    try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 40);
+    try w.writer.writeAll(internal.repeat("the quick brown fox jumps over the lazy dog. ", 40));
     try w.finish();
     try testing.expect(out.written().len > 2);
     try testing.expectEqual(@as(u8, 0), out.written()[0] & 0b1);
     try golden.expectFinalEmptyBlock(out.written());
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 40);
+    try roundTrip(internal.repeat("the quick brown fox jumps over the lazy dog. ", 40));
 }
 
 test "Writer: round trips across block boundaries" {
@@ -512,14 +512,14 @@ test "Writer: writableSliceGreedy on a full block emits, never drops" {
     var w: Writer = .init(&out.writer, &buf, .{});
 
     // Fill the region exactly, without forcing a drain.
-    try w.writer.writeAll("a" ** max_block_size);
+    try w.writer.writeAll(&@as([max_block_size]u8, @splat('a')));
     // The direct-slice read: fills the (freshly emitted) whole region.
     const dest = try w.writer.writableSliceGreedy(1);
     try testing.expectEqual(max_block_size, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
     // More writes past the second block, then finish.
-    try w.writer.writeAll("c" ** 1000);
+    try w.writer.writeAll(&@as([1000]u8, @splat('c')));
     try w.finish();
 
     const target = try gpa.alloc(u8, 2 * max_block_size + 1000 + sentinel.len);
@@ -662,7 +662,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
     var w: Writer = .init(&fixed_out, &buf, .{});
-    try w.writer.writeAll("a" ** 4096);
+    try w.writer.writeAll(&@as([4096]u8, @splat('a')));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 
@@ -924,14 +924,14 @@ test "Writer: the checksum hook folds a rebased direct-slice write in order" {
     var digest: golden.TestChecksum = .init;
     w.checksum = digest.hook();
 
-    try w.writer.writeAll("a" ** max_block_size);
+    try w.writer.writeAll(&@as([max_block_size]u8, @splat('a')));
     // The direct-slice read: rebase emits the full block region, then hands
     // the whole of it back.
     const dest = try w.writer.writableSliceGreedy(1);
     try testing.expectEqual(max_block_size, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
-    try w.writer.writeAll("c" ** 1000);
+    try w.writer.writeAll(&@as([1000]u8, @splat('c')));
     try w.finish();
 
     var expect: [2 * max_block_size + 1000]u8 = undefined;
@@ -986,8 +986,8 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     // the dictionary exactly as it matches into an earlier block. The
     // interface's serving region is the block region, after the dictionary.
     const gpa = testing.allocator;
-    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const dict = internal.repeat("the quick brown fox jumps over the lazy dog. ", 3);
+    const source = internal.repeat("the quick brown fox jumps over the lazy dog. ", 8);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -1050,7 +1050,7 @@ test "Writer: random call sequences round-trip at both levels" {
     // klauspost's "too small" marker as a real token list.
     const gpa = testing.allocator;
     for (std.enums.values(encode.Level)) |level| {
-        var rng: DefaultPrng = .init(0xF00D + @as(u64, @intFromEnum(level)));
+        var rng: DefaultPrng = .init(0xF00D + @as(u64, @backingInt(level)));
         const rand = rng.random();
         var iter: usize = 0;
         while (iter < 200) : (iter += 1) {

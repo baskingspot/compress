@@ -35,7 +35,7 @@ const compress = b.dependency("compress", .{ .target = target, .optimize = optim
 exe.root_module.addImport("compress", compress.module("compress"));
 ```
 
-`compress` builds with Zig 0.16 only.
+`compress` builds with Zig 0.17 only.
 
 ## Import it
 

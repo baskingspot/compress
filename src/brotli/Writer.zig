@@ -15,6 +15,8 @@
 //! Format: docs/specs/rfc7932-brotli.txt. API: README.md.
 
 const std = @import("std");
+
+const internal = @import("../internal/root.zig");
 const Io = std.Io;
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -299,8 +301,8 @@ test "round trip: the README's shapes through a Writer" {
     try roundTrip(22, "");
     try roundTrip(22, "A");
     try roundTrip(22, "hello world");
-    try roundTrip(22, "the quick brown fox jumps over the lazy dog. " ** 200);
-    try roundTrip(10, "\x5a" ** 3000);
+    try roundTrip(22, internal.repeat("the quick brown fox jumps over the lazy dog. ", 200));
+    try roundTrip(10, &@as([3000]u8, @splat(0x5a)));
     try roundTrip(24, "abcabcabcabcabcabc");
 }
 
@@ -375,6 +377,6 @@ test "the buffer's size is the documented figure" {
 
 test "every window the format allows round-trips" {
     inline for (10..25) |w| {
-        try roundTrip(w, "the quick brown fox jumps over the lazy dog. " ** 40);
+        try roundTrip(w, internal.repeat("the quick brown fox jumps over the lazy dog. ", 40));
     }
 }

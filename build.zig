@@ -88,8 +88,7 @@ fn addFixtures(b: *Build) *Build.Module {
         const len = decoder.decode(bytes, text) catch
             std.debug.panic("fixture {s} does not decode", .{fx.path});
         _ = wf.add(name, bytes[0..len]);
-        root_src = std.fmt.allocPrint(
-            b.allocator,
+        root_src = b.allocator.print(
             "{s}pub const {s} = @embedFile(\"{s}\");\n",
             .{ root_src, id, name },
         ) catch @panic("OOM");
@@ -180,7 +179,7 @@ pub fn build(b: *Build) void {
         });
         const run = b.addRunArtifact(exe);
         run.has_side_effects = true;
-        if (b.args) |args| run.addArgs(args);
+        run.addPassthruArgs();
         const step = b.step(
             comptimePrint("example-{s}", .{name}),
             comptimePrint("Run the {s} example CLI (encode|decode [FILE|-])", .{name}),
@@ -297,7 +296,7 @@ pub fn build(b: *Build) void {
     });
     const run_corpus = b.addRunArtifact(corpus_tool);
     run_corpus.has_side_effects = true;
-    if (b.args) |args| run_corpus.addArgs(args);
+    run_corpus.addPassthruArgs();
     const corpus_step = b.step(
         "corpus",
         "Generate + verify the fleet corpus (bench/corpus-gen/)",
@@ -425,7 +424,7 @@ pub fn build(b: *Build) void {
                     .{ .name = "fastmem", .module = fastmem_mod },
                 },
             });
-            if (b.args) |args| run_bench.addArgs(args);
+            run_bench.addPassthruArgs();
             bench_step.dependOn(&run_bench.step);
         }
     }

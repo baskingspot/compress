@@ -28,7 +28,7 @@ pub fn at(i: usize) u8 {
 pub fn fill(target: []u8) void {
     var i: usize = 0;
     while (i + len <= target.len) : (i += len) {
-        fastmem.copy(u8, target[i..][0..len], &pattern);
+        @memcpy(target[i..][0..len], &pattern);
     }
     fastmem.copy(u8, target[i..], pattern[0 .. target.len - i]);
 }

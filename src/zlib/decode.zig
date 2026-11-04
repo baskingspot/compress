@@ -318,7 +318,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // body is flate's rules unchanged, and its failures are the module's own
     // (`Truncated`, `InvalidBlockType`, ...).
     var stream: [256]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = internal.repeat("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &stream, .{});
     // BTYPE=11 (reserved, `rfc1951-deflate.txt §3.2.3`) in the first body
     // byte: the body's first three bits are BFINAL, BTYPE.
@@ -338,7 +338,7 @@ test "decode: a bomb stream is capped, never an overrun" {
     // A stream that does not fit is `BufferTooSmall`; the bytes past the cap
     // are untouched.
     var stream: [512]u8 = undefined;
-    const source = "A" ** 4096;
+    const source = &@as([4096]u8, @splat('A'));
     const len = try encode.compress(source, &stream, .{});
     try testing.expect(len < stream.len);
 

@@ -4,15 +4,14 @@
 //! bytes of every data chunk (`framing_format.txt` §3). The polynomial is
 //! Castagnoli's, reflected, 0x82F63B78; the conditioning is the standard
 //! CRC-32 one (init 0xFFFFFFFF, final complement), so `crc32c(0, b)` equals
-//! `std.hash.crc.Crc32Iscsi.hash(b)`. `mask` is the format's stored value.
+//! `std.hash.crc.@"CRC-32/ISCSI".hash(b)`. `mask` is the format's stored value.
 //!
-//! std's bytewise `Crc32Iscsi` stays in the tests as the reference.
+//! std's `CRC-32/ISCSI` stays in the tests as the reference.
 
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 const assert = std.debug.assert;
-const Crc32Iscsi = std.hash.crc.Crc32Iscsi;
 
 const common = @import("common.zig");
 
@@ -46,8 +45,9 @@ const tables: [slice_count][256]u32 = blk: {
 comptime {
     // The standard check value (RFC 3720 §B.4).
     assert(crc32c(0, "123456789") == 0xE306_9283);
-    // A 17-byte pin crosses one full slice plus a one-byte tail.
-    assert(crc32c(0, "123456789ABCDEFGH") == Crc32Iscsi.hash("123456789ABCDEFGH"));
+    // A 17-byte pin crosses one full slice plus a one-byte tail. The value
+    // is std's `CRC-32/ISCSI`, whose x86 form cannot run at comptime.
+    assert(crc32c(0, "123456789ABCDEFGH") == 0xF8A3_7720);
 }
 
 /// The raw running state's step: no conditioning, the kernel's inner form.
@@ -101,7 +101,8 @@ test "crc32c: a length sweep agrees with std's bytewise kernel" {
     var prng: std.Random.DefaultPrng = .init(0xC2C);
     prng.random().bytes(&bytes);
     for (0..bytes.len + 1) |len| {
-        try testing.expectEqual(Crc32Iscsi.hash(bytes[0..len]), crc32c(0, bytes[0..len]));
+        const want = std.hash.crc.@"CRC-32/ISCSI".hash(bytes[0..len]);
+        try testing.expectEqual(want, crc32c(0, bytes[0..len]));
     }
 }
 

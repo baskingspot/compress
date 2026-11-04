@@ -82,7 +82,7 @@ pub const Header = struct {
 pub fn parseHeader(source: []const u8) error{MalformedLiteralsHeader}!Header {
     if (source.len < 1) return error.MalformedLiteralsHeader;
     const byte0 = source[0];
-    const block_type: BlockType = @enumFromInt(byte0 & 0b11);
+    const block_type: BlockType = @fromBackingInt(@intCast(byte0 & 0b11));
     const size_format: u2 = @intCast((byte0 >> 2) & 0b11);
     return switch (block_type) {
         .raw, .rle => parseRawSizes(block_type, size_format, source),
@@ -624,7 +624,7 @@ test "decodeRle repeats the single content byte Regenerated_Size times" {
     var state: State = .empty;
     // Size_Format 01: rs = 9, one content byte, then the next section's byte.
     const section = try decode(&.{ 0x95, 0x00, 0x41, 0xff }, &target, &state);
-    const expected = [_]u8{0x41} ** 9;
+    const expected = @as([9]u8, @splat(0x41));
     try testing.expectEqualSlices(u8, &expected, section.bytes);
     try testing.expectEqual(@as(usize, 3), section.bytes_consumed);
     try internal.sentinel.expect(&target, section.bytes.len);
@@ -879,7 +879,7 @@ test "the treeless table survives intervening Raw and RLE blocks" {
 
     internal.sentinel.fill(&target);
     const rle = try decode(&.{ 0x95, 0x00, 0x41 }, &target, &state);
-    const expected_rle = [_]u8{0x41} ** 9;
+    const expected_rle = @as([9]u8, @splat(0x41));
     try testing.expectEqualSlices(u8, &expected_rle, rle.bytes);
     try internal.sentinel.expect(&target, rle.bytes.len);
 

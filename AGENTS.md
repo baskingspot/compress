@@ -113,9 +113,11 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
 
 ## Toolchain
 
-- Zig 0.16.0 from the flake. Read the zig skill before you write Zig here.
+- Zig 0.17.0 from the flake. Read the zig skill before you write Zig here.
   0.15-era patterns are wrong in 0.16 in silent ways (`std.Io`, `main(init)`,
-  run-time vector indexing). Run `zigdoc` to verify any std API before you
+  run-time vector indexing), and 0.16 ones in 0.17: a bit cast between
+  arrays or vectors and wider types is little-endian on every host, so a
+  bool vector's element 0 is the low bit even on big-endian. Run `zigdoc` to verify any std API before you
   use it.
 - The flake is the environment. A missing tool goes in `flake.nix`; do not
   install it globally.
@@ -190,7 +192,10 @@ encode README.md`).
   codec hot paths, not in tests, not in bench corpus builders. Use
   `fastmem.copy`, `fastmem.move`, `fastmem.set` (all `(comptime T, dest,
 ...)`). `copy` and `set` are non-overlapping only; `move` handles overlap.
-  A stray `@memcpy` in a diff is a review blocker.
+  A stray `@memcpy` in a diff is a review blocker. The one exception is a
+  test copying a whole comptime-known constant, where Zig 0.17 evaluates
+  fastmem's inline vector loads at comptime and rejects them ("comptime
+  dereference requires a well-defined layout"); those copies use `@memcpy`.
 - testingx (lazy): the test runner and bench harness for the test and bench
   steps only, never imported by codecs. In `build.zig`, lazy deps must go
   through `b.lazyImport` / `b.lazyDependency`, never `b.dependency`.

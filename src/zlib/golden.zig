@@ -289,7 +289,7 @@ pub const fcheck31_dict = "she sells seashells by the seashore\n";
 /// `fcheck31_dict_stream`'s payload: the 225 bytes the C reference compressed
 /// against `fcheck31_dict` (a stored block, so the dictionary's only role is
 /// the header's DICTID and the window it pre-seeds).
-pub const fcheck31_plain = "The quick brown fox jumps over the lazy dog. " ** 5;
+pub const fcheck31_plain = internal.repeat("The quick brown fox jumps over the lazy dog. ", 5);
 
 /// Decode `source` with the one-shot decoder, checking `expect` and the
 /// sentinel overrun rule: `target` is `window[0..cap]`, and the bytes at and
@@ -448,7 +448,7 @@ test "golden decode: the oracle-verified emissions" {
     // The C-reference emissions, checked through python3's zlib: the level
     // bands' FLEVEL values, the dict + FLEVEL-0 corner's `78 3f`, and the
     // DICTID and trailer byte order (both big-endian, §2.1).
-    const data = "The quick brown fox jumps over the lazy dog. " ** 5;
+    const data = internal.repeat("The quick brown fox jumps over the lazy dog. ", 5);
     // The implemented levels' FLEVEL bands: level 1 -> 0 (`78 01`), level 6
     // -> 2 (`78 9c`).
     try testing.expectEqual(@as(u8, 0x01), encode.flgFor(.@"1", false));

@@ -454,7 +454,7 @@ fn checkAll(bench: *Bench) !void {
     try bench.out.print(
         "{{\"type\":\"check\",\"schema\":1,\"arm\":\"zc\",\"status\":\"{s}\",\"cases\":{d}," ++
             "\"cpu\":\"{s}\",\"optimize\":\"{s}\",\"detail\":\"{s}\"}}\n",
-        .{ status, bench.cases, builtin.cpu.model.name, @tagName(builtin.mode), detail },
+        .{ status, bench.cases, builtin.target.cpu.model.name, @tagName(builtin.mode), detail },
     );
     try bench.out.flush();
     if (detail.len != 0) std.process.exit(1);
@@ -561,7 +561,7 @@ fn writeMeta(bench: *Bench) !void {
             "\"optimize\":\"{s}\",\"suite\":\"{s}\",\"seed\":{d},\"samples\":{d}," ++
             "\"sample_ms\":{d},\"impls\":[",
         .{
-            build_options.rev,      builtin.zig_version_string, tripleName(), builtin.cpu.model.name,
+            build_options.rev,      builtin.zig_version_string, tripleName(), builtin.target.cpu.model.name,
             @tagName(builtin.mode), @tagName(options.suite),    options.seed, options.samples,
             options.sample_ms,
         },

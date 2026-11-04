@@ -27,3 +27,16 @@ pub const array_buffer = @import("array_buffer.zig");
 /// `WriterHooks`, `EncodeHooks`, `DecodeHooks`, `readExact`). Each container
 /// supplies its own framing type.
 pub const container = @import("container.zig");
+
+/// `s` repeated `n` times at comptime: the string repetition `s ** n` spelled
+/// before Zig 0.17 removed array multiplication. One-byte repeats use
+/// `@splat` instead.
+pub fn repeat(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
+    const out = comptime blk: {
+        @setEvalBranchQuota(1000 + n);
+        var buf: [s.len * n]u8 = undefined;
+        for (0..n) |i| @memcpy(buf[i * s.len ..][0..s.len], s);
+        break :blk buf;
+    };
+    return &out;
+}
