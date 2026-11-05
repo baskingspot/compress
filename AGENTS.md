@@ -232,9 +232,10 @@ patterns into every codec:
   heap-allocates it (the arena pattern, the zstd example after its
   8.4 MiB DefaultBuffer segfaulted under a real 8 MiB `ulimit -s 8192` —
   it had only worked because the dev box's stack was bigger). Tests too:
-  in Debug, Zig 0.17 sets an `undefined` local over 512 KiB by copying an
-  undefined constant, and in a function that inlines fastmem (which
-  disables intrinsics) that copy must be expanded inline, which ran
+  in Debug, in a function with intrinsics disabled (any that inlines
+  fastmem), Zig 0.17 sets an `undefined` local over 512 KiB with an inline
+  copy of an undefined constant (0.17.0 and 0.17.1 both; 0.16 wrote an
+  inline 0xAA fill), and expanding that copy ran
   `just check-target arm-linux` out of memory.
 - Batching: whole blocks through the data plane; framing is the control
   plane.
