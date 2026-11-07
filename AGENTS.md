@@ -7,6 +7,15 @@ it before you change a kernel or make a performance claim.
 
 ## Layout
 
+- `src/compat.zig`: the Zig 0.16/0.17 shims, private to the module. Zig 0.17
+  removed the `**` array-repeat operator and moved the CRC catalogue, the
+  container type info, and the error-set shape; its `zig fmt` rewrites
+  `@intFromEnum`/`@enumFromInt` into builtins 0.16 cannot parse. Every one of
+  those goes through a helper here, not a version check at the call site.
+  `repeatString`/`repeatArray` replace `**`, `enumToInt`/`enumFromInt` the
+  two builtins, `Crc32`/`Crc32Iscsi` the CRC names, and `enumCount`,
+  `structFieldCount`/`structFieldName`/`StructFieldType`, and `errorNames`
+  the type-info shapes.
 - `src/root.zig`: the barrel of the ONE `compress` build module. One pub
   decl per codec, each a namespace under it (`compress.snappy`,
   `compress.flate`).
@@ -92,8 +101,10 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   sentinel test machinery, the reader lifecycle + generated reader vtable
   entries, the shared writer machinery (the generated `Io.Writer` entries
   and the poisoned `finish`), the endian-bound integer helpers the codec
-  `common.zig` files bind, and the container driver over a codec's framing
-  type. Imports only `std` and `fastmem`; reached by relative import
+  `common.zig` files bind, the container driver over a codec's framing
+  type, and `constant.copyInto` (a copy whose source is a comptime constant;
+  `constant.zig` explains why fastmem refuses one on 0.17). Imports only
+  `std` and `fastmem`; reached by relative import
   (`@import("../internal/root.zig")`), never a build module, and never
   re-exported by the barrel; a codec that uses it lifts with it in tow,
   under a module root above both directories (relative imports cannot
@@ -113,12 +124,19 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
 
 ## Toolchain
 
-- Zig 0.16.0 from the flake. Read the zig skill before you write Zig here.
-  0.15-era patterns are wrong in 0.16 in silent ways (`std.Io`, `main(init)`,
-  run-time vector indexing). Run `zigdoc` to verify any std API before you
-  use it.
+- Two Zig versions, both supported: 0.17.0 is the default shell, 0.16.0 is
+  `nix develop .#zig-old`. The tree builds, tests, and formats under both,
+  and `minimum_zig_version` stays `"0.16.0"` until 0.16 is dropped. Read the
+  zig skill before you write Zig here; run `zigdoc` to verify any std API
+  before you use it.
+- A 0.17-only or 0.16-only API goes through `src/compat.zig`, with a shape
+  probe (`@hasDecl`, `@hasField`, `@typeInfo(...) == .optional`), never a
+  version number, and never a `zig fmt: off` region outside compat. The
+  0.17 formatter rewrites `@intFromEnum` and `@enumFromInt` in place, so a
+  call site that spells them directly cannot format under both compilers.
 - The flake is the environment. A missing tool goes in `flake.nix`; do not
-  install it globally.
+  install it globally. `ziglint-0-16` points the deprecation rule at the
+  oldest supported std from either shell, so `just lint` is a 0.16 lint.
 
 ## Disk discipline
 
@@ -143,6 +161,11 @@ onto a nearly-full disk):
 
 - `just test`: unit tests for every codec, under the testingx plain-text runner.
   Must pass before a commit.
+- `just test-release-safe` / `just test-release-fast`: the same suite in the
+  release modes. Lazy analysis hides code that only instantiates there.
+- `just check`: the per-version gate, `test` plus both release modes. CI runs
+  it on the default shell and on `zig-old`; run it under both compilers
+  before you call a port done.
 - `just test-be`: the unit tests on s390x under qemu-user, the only
   big-endian target, in ReleaseSafe (Debug's 4-GiB zstd frame tests outrun
   the runner's timeout under emulation). A vector compare bitcast to an
@@ -150,13 +173,14 @@ onto a nearly-full disk):
   gate that sees it.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
-- `just ci`: everything CI runs: `just test`, `just test-be`, `just lint`,
-  and `just check-baseline`.
-- `just lint`: ziglint over `.ziglint.zon` paths, `zig fmt --check` over
-  `src/` and `build.zig`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
+- `just ci`: everything CI runs: `just check`, `just test-be`, `just lint`,
+  `just check-baseline`, the bench harness check, and the docs build.
+- `just lint`: `ziglint-0-16` over `.ziglint.zon` paths, `zig fmt --check`
+  over `src/`, `build.zig`, `demo/`, `examples/`, `bench/`, and
+  `docs/examples/`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
   `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
   before you call Zig work done.
-- `just fmt`: apply `zig fmt` to `src/` and `build.zig`.
+- `just fmt`: apply `zig fmt` to the same Zig paths.
 - `just check-baseline`: cross-target `zig build check` covering every
   portable target (freestanding targets excluded — the testingx runner needs
   an OS).
