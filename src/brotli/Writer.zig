@@ -24,6 +24,7 @@ const fastmem = @import("fastmem");
 const encode = @import("encode.zig");
 const match = encode.match;
 const decode = @import("decode.zig");
+const compat = @import("../compat.zig");
 
 /// The input staging size: the reference's `lgblock` is 14 below the
 /// block-split qualities, so the matcher sees 16-KiB input blocks.
@@ -299,8 +300,8 @@ test "round trip: the README's shapes through a Writer" {
     try roundTrip(22, "");
     try roundTrip(22, "A");
     try roundTrip(22, "hello world");
-    try roundTrip(22, "the quick brown fox jumps over the lazy dog. " ** 200);
-    try roundTrip(10, "\x5a" ** 3000);
+    try roundTrip(22, compat.repeatString("the quick brown fox jumps over the lazy dog. ", 200));
+    try roundTrip(10, compat.repeatString("\x5a", 3000));
     try roundTrip(24, "abcabcabcabcabcabc");
 }
 
@@ -375,6 +376,6 @@ test "the buffer's size is the documented figure" {
 
 test "every window the format allows round-trips" {
     inline for (10..25) |w| {
-        try roundTrip(w, "the quick brown fox jumps over the lazy dog. " ** 40);
+        try roundTrip(w, compat.repeatString("the quick brown fox jumps over the lazy dog. ", 40));
     }
 }

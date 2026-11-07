@@ -36,6 +36,7 @@ const internal = @import("../internal/root.zig");
 const block = @import("block.zig");
 const dfast_compress = @import("dfast_compress.zig");
 const Dictionary = @import("Dictionary.zig");
+const compat = @import("../compat.zig");
 /// `§3.1.1.2.4` — Block_Maximum_Size's 128 KiB ceiling: the encoder's block
 /// size, and the bound its scratch sizes from.
 pub const max_block_size = block.max_block_size;
@@ -168,7 +169,7 @@ pub fn seedFromDict(state: *State, dict: *const Dictionary) void {
         .match_lengths,
         .literals_lengths,
     }) |alphabet| {
-        const index = @intFromEnum(alphabet);
+        const index = compat.enumToInt(alphabet);
         state.sequences.tables.set(alphabet, .{ .fse = &dict.sequence_tables_compress[index] });
         if (dict.sequence_repeat_valid.contains(alphabet)) {
             state.sequences.repeat_valid.insert(alphabet);
@@ -614,7 +615,7 @@ pub fn writeBlockHeader(
     assert(target.len == block.block_header_len);
     assert(block_size <= 0x1fffff);
     const header: u24 = @intFromBool(last_block) +
-        (@as(u24, @intFromEnum(block_type)) << 1) +
+        (@as(u24, compat.enumToInt(block_type)) << 1) +
         (@as(u24, @intCast(block_size)) << 3);
     common.writeInt(u24, target[0..block.block_header_len], header);
 }

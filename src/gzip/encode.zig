@@ -23,6 +23,7 @@ const writeInt = common.writeInt;
 const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
+const compat = @import("../compat.zig");
 /// Encoder configuration. `.{}` is the default: level 1.
 pub const Options = framing.Options;
 /// The compression levels this encoder takes (flate's, re-exported).
@@ -107,7 +108,7 @@ test "encode: the emitted member is the deterministic one" {
     // RFC 1952 §2.3.1 — ID1/ID2/CM fixed, FLG=0 (no optional fields,
     // reserved bits clear), MTIME=0, OS=255; XFL is informational.
     var target: [256]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try compress(source, &target, .{});
     const member = target[0..len];
 
@@ -129,8 +130,8 @@ test "encode: the emitted member is the deterministic one" {
         @as(u32, @truncate(source.len)),
         readInt(u32, member[len - 4 ..][0..4]),
     );
-    // The reference kernel agrees (std.hash.crc.Crc32 is the same algorithm).
-    try testing.expectEqual(std.hash.crc.Crc32.hash(source), crc32.crc32(0, source));
+    // The reference kernel agrees (compat.Crc32 is the same algorithm).
+    try testing.expectEqual(compat.Crc32.hash(source), crc32.crc32(0, source));
 }
 
 test "encode: the empty member is the golden bytes" {
@@ -205,8 +206,8 @@ test "encode: the bound holds for every shape" {
         "",
         "a",
         "hello world\n",
-        "the quick brown fox jumps over the lazy dog. " ** 100,
-        "\x00\x01\x02\x03\x04\x05\x06\x07" ** 64,
+        compat.repeatString("the quick brown fox jumps over the lazy dog. ", 100),
+        compat.repeatString("\x00\x01\x02\x03\x04\x05\x06\x07", 64),
     };
     for (cases) |source| {
         const target = try testing.allocator.alloc(u8, maxCompressedLength(source.len));

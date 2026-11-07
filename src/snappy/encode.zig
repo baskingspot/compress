@@ -31,6 +31,7 @@ const writeUvarint = common.writeUvarint;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
+const compat = @import("../compat.zig");
 
 /// Upper bound on the size of `compressBlock`'s output for `input_len` bytes of
 /// input: the length varint, the input itself, and one tag byte per 60 input
@@ -419,7 +420,7 @@ test "encode: short input (< min_non_literal_block_size) is a single literal" {
 test "encode: repetitive input compresses (back-references)" {
     // A repeating string should produce copy tags, so the compressed size is
     // well under the input length.
-    const input = "the quick brown fox" ** 200; // 3800 bytes
+    const input = compat.repeatString("the quick brown fox", 200); // 3800 bytes
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);
@@ -460,16 +461,16 @@ test "encode: 64K boundary round-trips" {
 }
 
 test "encode: RLE input (single-byte run)" {
-    const input = [_]u8{0x41} ** 4096;
+    const input = compat.repeatString(&[_]u8{0x41}, 4096);
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);
-    const clen = try compressBlock(&input, comp);
+    const clen = try compressBlock(input, comp);
     // Snappy copies max at 64 bytes, so a 4096-byte run is ~one literal + many
     // 60-byte copy-2 chunks (3 bytes each): roughly 4096/60*3 ~= 205 bytes.
     // Well under the input, but not tiny.
     try testing.expect(clen < input.len / 10);
-    try roundTrip(&input);
+    try roundTrip(input);
 }
 
 test "maxCompressedLength >= actual for literal-only small input" {

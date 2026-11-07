@@ -35,6 +35,7 @@ const bits = @import("bits.zig");
 const fse = @import("fse.zig");
 const golden = @import("golden.zig");
 const huff0 = @import("huff0.zig");
+const compat = @import("../compat.zig");
 
 /// Everything the FSE encoder reports.
 pub const Error = error{
@@ -150,7 +151,7 @@ pub fn normalize(
         .symbol_count = max_symbol + 1,
         .accuracy_log = accuracy_log,
     };
-    const low_prob_count: i16 = @intFromEnum(low_probability);
+    const low_prob_count: i16 = compat.enumToInt(low_probability);
     const table_size: i32 = @as(i32, 1) << accuracy_log;
     // The C's rtbTable (`fse_compress.c:466`): the rounding beats that turn a
     // scaled probability into the nearest whole cell.
@@ -291,7 +292,7 @@ fn placeLowSymbols(
             continue;
         }
         if (count <= low_threshold) {
-            norm.counts[symbol] = @intFromEnum(low_probability);
+            norm.counts[symbol] = compat.enumToInt(low_probability);
             remainder.distributed += 1;
             continue;
         }
@@ -807,7 +808,7 @@ test "normalize refuses the single-symbol distribution" {
     // RFC 8878 §3.1.1.3.2.1 Table 15 — FSE_Compressed "must not be used when
     // only one symbol is present": the caller uses RLE_Mode instead, so the
     // normalizer's rle special case is an error here.
-    var histogram = [_]u32{0} ** 4;
+    var histogram = compat.repeatArray(u32, &[_]u32{0}, 4).*;
     histogram[2] = 100;
     var norm: Norm = undefined;
     try testing.expectError(

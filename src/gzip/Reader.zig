@@ -26,6 +26,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
+const compat = @import("../compat.zig");
 /// The caller-provided decode window: flate's `Reader.Buffer`, re-exported,
 /// 64 KiB (`[2 * history_len]u8`). gzip adds no buffer of its own.
 pub const Buffer = flate.Reader.Buffer;
@@ -194,12 +195,12 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     // `Reader.err`'s type is the `DecompressError` set minus `BufferTooSmall`
     // (output goes through a fixed window), plus the interface's
     // `ReadFailed`/`EndOfStream` and the contiguity cap's `StreamTooLong`.
-    const mine = @typeInfo(Error).error_set.?;
-    for (@typeInfo(decode.DecompressError).error_set.?) |want| {
-        if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
+    const mine = compat.errorNames(Error);
+    for (compat.errorNames(decode.DecompressError)) |want| {
+        if (mem.eql(u8, want, "BufferTooSmall")) continue;
         var found = false;
         for (mine) |entry| {
-            if (mem.eql(u8, entry.name, want.name)) found = true;
+            if (mem.eql(u8, entry, want)) found = true;
         }
         try testing.expect(found);
     }
@@ -209,11 +210,11 @@ test "Reader: round-trips through Writer" {
     try roundTrip("");
     try roundTrip("a");
     try roundTrip("hello, gzip");
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 1000);
-    try roundTrip("a" ** (flate.encode.max_block_size - 1));
-    try roundTrip("b" ** flate.encode.max_block_size);
-    try roundTrip("c" ** (flate.encode.max_block_size + 1));
-    try roundTrip("d" ** (3 * flate.encode.max_block_size + 17));
+    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(compat.repeatString("a", (flate.encode.max_block_size - 1)));
+    try roundTrip(compat.repeatString("b", flate.encode.max_block_size));
+    try roundTrip(compat.repeatString("c", (flate.encode.max_block_size + 1)));
+    try roundTrip(compat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
 }
 
 test "Reader: multi-block inputs round-trip" {
@@ -335,7 +336,7 @@ test "Reader: a multi-member file is a caller loop at the boundary" {
     // The repeated empty member: 64 members, each boundary exact.
     var repeated: [64 * 20]u8 = undefined;
     for (0..64) |i| {
-        fastmem.copy(u8, repeated[i * 20 ..][0..20], &golden.cve_2022_30631_member);
+        internal.constant.copyInto(&golden.cve_2022_30631_member, repeated[i * 20 ..][0..20]);
     }
     var walk_in: Io.Reader = .fixed(&repeated);
     var sink: Io.Writer.Discarding = .init(&.{});
@@ -369,7 +370,7 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
     // with the detail in `err` (`§2.3.1`).
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &member, .{});
 
     for (0..decode.trailer_len) |at| {
@@ -399,7 +400,7 @@ test "Reader: an over-the-end request still checks the trailer" {
 
     // A member whose decoded size lands the window deep enough that a
     // 30-KiB request overflows the room at the consumer's position.
-    const source = "the quick brown fox jumps over the lazy dog. " ** 950;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 950);
     var member: [encode.maxCompressedLength(source.len)]u8 = undefined;
     const len = try encode.compress(source, &member, .{});
 
@@ -522,7 +523,7 @@ test "Reader: a chunked input refills across the header and the body" {
     // reach the decoder.
     const gpa = testing.allocator;
     var member: [128]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &member, .{});
 
     var framed: [144]u8 = undefined;
@@ -585,7 +586,7 @@ test "Reader: streamAll fails where a member should start" {
     const gpa = testing.allocator;
     const x2 = golden.gunzip_cases[3].source;
     var framed: [x2.len + 1]u8 = undefined;
-    fastmem.copy(u8, framed[0..x2.len], x2);
+    internal.constant.copyInto(x2, framed[0..x2.len]);
     framed[x2.len] = 0x00; // garbage: not ID1, so the header parse rejects.
     var fixed_in: Io.Reader = .fixed(&framed);
     var out: Io.Writer.Allocating = .init(gpa);

@@ -16,6 +16,7 @@ const fastmem = @import("fastmem");
 const bits = @import("bits.zig");
 const golden = @import("golden.zig");
 const huffman = @import("huffman.zig");
+const compat = @import("../compat.zig");
 
 /// §9.2 — the 1..11-bit count code's ceiling: a meta-block can declare up to
 /// 256 block types, and the modes array and context maps are sized for it.
@@ -57,7 +58,7 @@ pub const Arena = struct {
 /// §9.2 — the context modes: two bits per literal block type, in block-type
 /// order.
 pub fn readModes(comptime Bits: type, br: *Bits, modes: []Mode) Bits.ErrorSet!void {
-    for (modes) |*mode| mode.* = @enumFromInt(@as(u2, @intCast(try br.take(2))));
+    for (modes) |*mode| mode.* = compat.enumFromInt(Mode, try br.take(2));
 }
 
 /// §7.3 — read one context map into `values`. `num_trees` is the map's

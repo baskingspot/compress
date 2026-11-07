@@ -26,6 +26,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const internal = @import("../internal/root.zig");
+const compat = @import("../compat.zig");
 const sentinel = internal.sentinel;
 /// The checksum hook's type: a container's state plus its byte-fold function
 /// (`Checksum.zig`). It is re-exported here so a container can name it
@@ -383,12 +384,12 @@ test "Writer: no data block carries BFINAL" {
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf, .{});
-    try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 40);
+    try w.writer.writeAll(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 40));
     try w.finish();
     try testing.expect(out.written().len > 2);
     try testing.expectEqual(@as(u8, 0), out.written()[0] & 0b1);
     try golden.expectFinalEmptyBlock(out.written());
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 40);
+    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 40));
 }
 
 test "Writer: round trips across block boundaries" {
@@ -512,14 +513,14 @@ test "Writer: writableSliceGreedy on a full block emits, never drops" {
     var w: Writer = .init(&out.writer, &buf, .{});
 
     // Fill the region exactly, without forcing a drain.
-    try w.writer.writeAll("a" ** max_block_size);
+    try w.writer.writeAll(compat.repeatString("a", max_block_size));
     // The direct-slice read: fills the (freshly emitted) whole region.
     const dest = try w.writer.writableSliceGreedy(1);
     try testing.expectEqual(max_block_size, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
     // More writes past the second block, then finish.
-    try w.writer.writeAll("c" ** 1000);
+    try w.writer.writeAll(compat.repeatString("c", 1000));
     try w.finish();
 
     const target = try gpa.alloc(u8, 2 * max_block_size + 1000 + sentinel.len);
@@ -662,7 +663,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
     var w: Writer = .init(&fixed_out, &buf, .{});
-    try w.writer.writeAll("a" ** 4096);
+    try w.writer.writeAll(compat.repeatString("a", 4096));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 
@@ -924,14 +925,14 @@ test "Writer: the checksum hook folds a rebased direct-slice write in order" {
     var digest: golden.TestChecksum = .init;
     w.checksum = digest.hook();
 
-    try w.writer.writeAll("a" ** max_block_size);
+    try w.writer.writeAll(compat.repeatString("a", max_block_size));
     // The direct-slice read: rebase emits the full block region, then hands
     // the whole of it back.
     const dest = try w.writer.writableSliceGreedy(1);
     try testing.expectEqual(max_block_size, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
-    try w.writer.writeAll("c" ** 1000);
+    try w.writer.writeAll(compat.repeatString("c", 1000));
     try w.finish();
 
     var expect: [2 * max_block_size + 1000]u8 = undefined;
@@ -986,8 +987,8 @@ test "Writer: a preset dictionary is the window's oldest bytes" {
     // the dictionary exactly as it matches into an earlier block. The
     // interface's serving region is the block region, after the dictionary.
     const gpa = testing.allocator;
-    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const dict = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -1050,7 +1051,7 @@ test "Writer: random call sequences round-trip at both levels" {
     // klauspost's "too small" marker as a real token list.
     const gpa = testing.allocator;
     for (std.enums.values(encode.Level)) |level| {
-        var rng: DefaultPrng = .init(0xF00D + @as(u64, @intFromEnum(level)));
+        var rng: DefaultPrng = .init(0xF00D + @as(u64, compat.enumToInt(level)));
         const rand = rng.random();
         var iter: usize = 0;
         while (iter < 200) : (iter += 1) {

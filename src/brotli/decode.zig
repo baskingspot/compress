@@ -33,6 +33,7 @@ pub const context = @import("context.zig");
 /// The static dictionary (`§8`): the 122,784-byte word table and its 121
 /// transforms.
 pub const dictionary = @import("dictionary.zig");
+const compat = @import("../compat.zig");
 /// The distance layer (`§4`): the four-distance ring and the special codes.
 pub const distance = @import("distance.zig");
 /// The stream header and the meta-block ladder (`§9.1`, `§9.2`), with the
@@ -107,12 +108,12 @@ comptime {
         "BadDictionary",
     };
     @setEvalBranchQuota(100_000);
-    const set = @typeInfo(DecompressError).error_set.?;
+    const set = compat.errorNames(DecompressError);
     assert(set.len == vocabulary.len);
     for (vocabulary) |name| {
         var found = false;
         for (set) |entry| {
-            if (std.mem.eql(u8, name, entry.name)) found = true;
+            if (std.mem.eql(u8, name, entry)) found = true;
         }
         assert(found);
     }

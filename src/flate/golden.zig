@@ -29,6 +29,7 @@ const fixtures = @import("fixtures");
 const sentinel = internal.sentinel;
 const Checksum = @import("Checksum.zig");
 const decode = @import("decode.zig");
+const compat = @import("../compat.zig");
 const decompress = decode.decompress;
 const DecompressError = decode.DecompressError;
 
@@ -461,19 +462,19 @@ pub const micro_cases: [9]MicroCase = .{
     .{
         .desc = "flate-notes §3.2 stream 1: literal 'A' + <length 20, distance 1>",
         .source = &hex("73c40600"),
-        .want = "A" ** 21,
+        .want = compat.repeatString("A", 21),
     },
     .{
         .desc = "flate-notes §3.2 stream 1, length extra bits the other way: 22 bytes of 'A'",
         .source = &hex("73c40a00"),
-        .want = "A" ** 22,
+        .want = compat.repeatString("A", 22),
     },
     .{
         .desc = "flate-notes §3.2 stream 2: 70 literals 'A' + <length 3, distance 67>",
         .source = &hex("737474747474747474747474747474747474747474747474747474747474" ++
             "747474747474747474747474747474747474747474747474747474747474" ++
             "74747474747474747474041a0100"),
-        .want = "A" ** 73,
+        .want = compat.repeatString("A", 73),
     },
     .{
         .desc = "RFC 1951 §3.2.3: <length = 5, distance = 2> adds X,Y,X,Y,X",
@@ -532,7 +533,7 @@ pub const dict_stream_plain = "she sells seashells she sells seashells by the se
 /// (`§3.2.3`), so the byte after its last is the output's first.
 pub const dict_straddle_stream = hex("4bc4410300");
 pub const dict_straddle_dict = "abcdefgh";
-pub const dict_straddle_plain = "abcdefgh" ** 3;
+pub const dict_straddle_plain = compat.repeatString("abcdefgh", 3);
 
 pub const huffman_fixtures: [9]HuffmanFixture = .{
     .{

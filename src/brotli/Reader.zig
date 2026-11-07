@@ -29,6 +29,7 @@ const command = @import("command.zig");
 const decode = @import("decode.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
+const compat = @import("../compat.zig");
 
 /// The caller-owned decode buffer: the history ring plus the meta-block
 /// header arena. `window_wbits` is 10..24 (`§9.1`), and `init` reads the
@@ -131,23 +132,23 @@ comptime {
         "ReadFailed",
         "EndOfStream",
     };
-    const one_shot = @typeInfo(decode.DecompressError).error_set.?;
-    const mine = @typeInfo(Error).error_set.?;
+    const one_shot = compat.errorNames(decode.DecompressError);
+    const mine = compat.errorNames(Error);
     assert(mine.len == one_shot.len - 1 + own.len);
     for (one_shot) |want| {
         var found = false;
         for (mine) |entry| {
-            if (std.mem.eql(u8, entry.name, want.name)) found = true;
+            if (std.mem.eql(u8, entry, want)) found = true;
         }
         // `BufferTooSmall` is the one name the reader does not carry: the
         // window is the caller's ring, and every output path is bounded by
         // its room.
-        assert(found == !std.mem.eql(u8, want.name, "BufferTooSmall"));
+        assert(found == !std.mem.eql(u8, want, "BufferTooSmall"));
     }
     for (own) |name| {
         var found = false;
         for (mine) |entry| {
-            if (std.mem.eql(u8, entry.name, name)) found = true;
+            if (std.mem.eql(u8, entry, name)) found = true;
         }
         assert(found);
     }
@@ -645,7 +646,7 @@ const Trickle = struct {
     fn stream(r: *Io.Reader, w: *Io.Writer, limit: Io.Limit) Io.Reader.StreamError!usize {
         const host: *Trickle = @alignCast(@fieldParentPtr("reader", r));
         if (host.pos == host.source.len) return error.EndOfStream;
-        const n = @min(@as(usize, 1), @intFromEnum(limit));
+        const n = @min(@as(usize, 1), compat.enumToInt(limit));
         const written = try w.write(host.source[host.pos..][0..n]);
         host.pos += written;
         return written;
@@ -710,7 +711,7 @@ test "Reader: the error vocabulary is the README's list" {
     // The comptime block above checks the names one for one; this pins the
     // count, so a name that vanished along with its README line cannot pass.
     // 16 one-shot names, minus `BufferTooSmall`, plus this layer's five.
-    try testing.expectEqual(@as(usize, 20), @typeInfo(Error).error_set.?.len);
+    try testing.expectEqual(@as(usize, 20), compat.errorNames(Error).len);
 }
 
 test "Reader: the README's streaming snippet decodes a stream" {
@@ -831,7 +832,7 @@ test "Reader: an uncompressed payload crosses the ring's end" {
     // next byte boundary, and a ring writes them in segments. §11.1's trivial
     // compressor declares WBITS 16 (a 65,536-byte ring), so a 70,020-byte
     // payload fills the ring once and crosses its end with a second segment.
-    const plain = "the quick brown fox jumps over the lazy dog\n" ** 1556;
+    const plain = compat.repeatString("the quick brown fox jumps over the lazy dog\n", 1556);
     var compressed: [golden.trivialBound(plain.len)]u8 = undefined;
     const len = golden.trivialCompress(plain, &compressed);
     var medium: Buffer(16) = undefined;

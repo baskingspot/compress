@@ -18,9 +18,8 @@ const std = @import("std");
 const assert = std.debug.assert;
 const testing = std.testing;
 
-const fastmem = @import("fastmem");
-
 const internal = @import("../internal/root.zig");
+const compat = @import("../compat.zig");
 /// The block layer (`§3.1.1.2`): the Block_Header, the four Block_Types, and
 /// the per-block decode.
 pub const block = @import("block.zig");
@@ -81,12 +80,12 @@ comptime {
         "Truncated",
     };
     @setEvalBranchQuota(100_000);
-    const set = @typeInfo(DecompressError).error_set.?;
+    const set = compat.errorNames(DecompressError);
     assert(set.len == vocabulary.len);
     for (vocabulary) |name| {
         var found = false;
         for (set) |entry| {
-            if (std.mem.eql(u8, name, entry.name)) found = true;
+            if (std.mem.eql(u8, name, entry)) found = true;
         }
         assert(found);
     }
@@ -284,7 +283,7 @@ test "decompress decodes the golden whole-frame fixtures" {
     try expectDecode(&golden.frame_literals_1stream, &golden.literals_1stream_expected);
     try expectDecode(&golden.frame_literals_4stream_sf1, &golden.literals_4stream_sf1_expected);
     try expectDecode(&golden.frame_literals_4stream_sf2, &golden.literals_4stream_sf2_expected);
-    try expectDecode(&golden.frame_literals_fse_tree, &golden.literals_fse_tree_expected);
+    try expectDecode(&golden.frame_literals_fse_tree, golden.literals_fse_tree_expected);
 }
 
 test "decompress decodes the CLI's multi-block checksummed frame" {
@@ -293,12 +292,12 @@ test "decompress decodes the CLI's multi-block checksummed frame" {
     // Frame_Content_Size = 135000), with the XXH64 trailer the C library
     // wrote. The decoded bytes are the input the CLI compressed, and the
     // trailer check is what makes this the end-to-end differential pin.
-    const expected = golden.frame_checksum_multi_text ** 3000;
+    const expected = compat.repeatString(golden.frame_checksum_multi_text, 3000);
     try expectDecode(&golden.frame_checksum_multi, expected);
     // The same frame with its trailer byte flipped: the decode succeeds byte
     // for byte and then returns `WrongChecksum`.
     var corrupt: [golden.frame_checksum_multi.len]u8 = undefined;
-    fastmem.copy(u8, &corrupt, &golden.frame_checksum_multi);
+    internal.constant.copyInto(&golden.frame_checksum_multi, &corrupt);
     corrupt[corrupt.len - 1] ^= 0xff;
     var target: [300 * 1024]u8 = undefined;
     internal.sentinel.fill(&target);
@@ -314,10 +313,10 @@ test "decompress reads the descriptor corners" {
     // RFC 8878 §3.1.1.1.1.1, Table 4 — every FCS_Field_Size; §3.1.1.1.1.2 —
     // Single_Segment_Flag's Window_Size = Frame_Content_Size; §3.1.1.1.1.3 —
     // the unused bit is never interpreted. The CLI decodes each of these.
-    const run = [_]u8{'A'} ** 300;
+    const run = compat.repeatString(&[_]u8{'A'}, 300);
     try expectDecode(&golden.frame_fcs1, "01234567");
-    try expectDecode(&golden.frame_fcs2, &run);
-    try expectDecode(&golden.frame_fcs2_single_segment, &run);
+    try expectDecode(&golden.frame_fcs2, run);
+    try expectDecode(&golden.frame_fcs2_single_segment, run);
     try expectDecode(&golden.frame_fcs4, "01234567");
     try expectDecode(&golden.frame_fcs8, "01234567");
     try expectDecode(&golden.frame_unused_bit, "abcd");

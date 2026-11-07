@@ -46,6 +46,7 @@ const Reader = @import("Reader.zig");
 const sequences_compress = @import("sequences_compress.zig");
 const split_compress = @import("split_compress.zig");
 const common = @import("common.zig");
+const compat = @import("../compat.zig");
 const writeInt = common.writeInt;
 
 /// The frame's retained history: `1 << window_log` bytes, the frame's
@@ -244,7 +245,7 @@ pub fn init(
         // row's widths and minMatch, and the caller's window_log replaces
         // the row's windowLog.
         .params = match_compress.forStreaming(
-            @intFromEnum(options.level),
+            compat.enumToInt(options.level),
             @intCast(window_log),
         ),
         .block_start = 0,
@@ -265,7 +266,7 @@ pub fn init(
     if (options.dict) |d| {
         block_compress.seedFromDict(&w.state, d);
         if (d.content.len > 0) {
-            const dict_params = d.matchParams(@intFromEnum(options.level));
+            const dict_params = d.matchParams(compat.enumToInt(options.level));
             w.dict = .{
                 .content = d.content,
                 .table = if (options.level == .@"1") &d.match else null,
@@ -656,7 +657,7 @@ test "Writer: the zero-data flush writes the header alone" {
     // The header is written once, whatever mix of writes and flushes
     // follows.
     const phrase = "the quick brown fox jumps over the lazy dog. ";
-    try w.writer.writeAll(phrase ** 8);
+    try w.writer.writeAll(compat.repeatString(phrase, 8));
     try w.writer.flush();
     try testing.expect(out.written().len > 6);
     try w.finish();
@@ -665,7 +666,7 @@ test "Writer: the zero-data flush writes the header alone" {
     sentinel.fill(plain);
     const written = try decode.decompress(out.written(), plain[0 .. phrase.len * 8], null);
     try testing.expectEqual(@as(usize, phrase.len * 8), written);
-    try testing.expectEqualSlices(u8, phrase ** 8, plain[0..written]);
+    try testing.expectEqualSlices(u8, compat.repeatString(phrase, 8), plain[0..written]);
     try sentinel.expect(plain, written);
 }
 
@@ -1049,7 +1050,7 @@ test "Writer: a finished or failed writer never reports a false success" {
     const buffer = try makeBuffer(default_window_log);
     defer gpa.destroy(buffer);
     var w: Writer = .init(default_window_log, &fixed_out, buffer, .{});
-    try w.writer.writeAll("a" ** 4096);
+    try w.writer.writeAll(compat.repeatString("a", 4096));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 

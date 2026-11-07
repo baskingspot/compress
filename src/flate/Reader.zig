@@ -34,6 +34,7 @@ const sentinel = internal.sentinel;
 const State = internal.reader.State;
 const VTable = internal.reader.VTable;
 const common = @import("common.zig");
+const compat = @import("../compat.zig");
 const readVarInt = common.readVarInt;
 const readInt = common.readInt;
 /// The checksum hook's type: a container's state plus its byte-fold function
@@ -425,8 +426,9 @@ fn step(r: *Reader) Error!usize {
         .block_header => {
             // §3.2.3 — BFINAL, then BTYPE, two bits LSB-of-value first.
             r.final = (try r.bits.take(1)) != 0;
-            const block_type: decode.BlockType = @enumFromInt(
-                @as(u2, @intCast(try r.bits.take(2))),
+            const block_type: decode.BlockType = compat.enumFromInt(
+                decode.BlockType,
+                try r.bits.take(2),
             );
             switch (block_type) {
                 .stored => try r.readStoredHeader(),
@@ -917,12 +919,12 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     // `Reader.Error` is the `DecompressError` set minus `BufferTooSmall` (the
     // Reader owns its window), plus the interface's `ReadFailed`/`EndOfStream`
     // and the contiguity cap's `StreamTooLong`.
-    const mine = @typeInfo(Error).error_set.?;
-    for (@typeInfo(decode.DecompressError).error_set.?) |want| {
-        if (mem.eql(u8, want.name, "BufferTooSmall")) continue;
+    const mine = compat.errorNames(Error);
+    for (compat.errorNames(decode.DecompressError)) |want| {
+        if (mem.eql(u8, want, "BufferTooSmall")) continue;
         var found = false;
         for (mine) |entry| {
-            if (mem.eql(u8, entry.name, want.name)) found = true;
+            if (mem.eql(u8, entry, want)) found = true;
         }
         try testing.expect(found);
     }
@@ -932,11 +934,11 @@ test "Reader: round-trips through Writer" {
     try roundTrip("");
     try roundTrip("a");
     try roundTrip("hello, flate");
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 1000);
-    try roundTrip("a" ** (max_block_size - 1));
-    try roundTrip("b" ** max_block_size);
-    try roundTrip("c" ** (max_block_size + 1));
-    try roundTrip("d" ** (3 * max_block_size + 17));
+    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(compat.repeatString("a", (max_block_size - 1)));
+    try roundTrip(compat.repeatString("b", max_block_size));
+    try roundTrip(compat.repeatString("c", (max_block_size + 1)));
+    try roundTrip(compat.repeatString("d", (3 * max_block_size + 17)));
 }
 
 test "Reader: multi-block inputs round-trip" {
@@ -1094,7 +1096,8 @@ test "Reader: consumes input exactly through the stream's last byte" {
     // and after the decode the input's position is exactly the stream's
     // length.
     const gpa = testing.allocator;
-    inline for (.{ "", "a", "the quick brown fox jumps over the lazy dog. " ** 40 }) |source| {
+    const long = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 40);
+    inline for (.{ "", "a", long }) |source| {
         var compressed: Io.Writer.Allocating = .init(gpa);
         defer compressed.deinit();
         var wbuf: Writer.Buffer = undefined;
@@ -1235,7 +1238,8 @@ test "Reader: a consumer scanning for a delimiter past the window fails" {
     var r: Reader = .init(&fixed_in, &rbuf, null);
     // `takeDelimiterExclusive` leaves the delimiter buffered; the consumer
     // steps over it.
-    try testing.expectEqualStrings("a" ** 99, try r.reader.takeDelimiterExclusive('\n'));
+    const line = try r.reader.takeDelimiterExclusive('\n');
+    try testing.expectEqualStrings(compat.repeatString("a", 99), line);
     r.reader.toss(1);
     try testing.expectError(error.ReadFailed, r.reader.takeDelimiterExclusive('\n'));
     try testing.expectEqual(Error.StreamTooLong, r.err.?);
@@ -1246,7 +1250,7 @@ test "Reader: a zero-length stream poll does not fail the stream" {
     // poll must answer 0 without filling (a fill could fail StreamTooLong
     // on a valid stream with buffered output).
     const gpa = testing.allocator;
-    const src = "the quick brown fox jumps over the lazy dog. " ** 6000;
+    const src = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 6000);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
@@ -1270,7 +1274,7 @@ test "Reader: a stream ends cleanly and stickily" {
     // The reader ends cleanly with `error.EndOfStream`, stickily, once the
     // final block's output has been consumed.
     const gpa = testing.allocator;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 100;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 100);
     var compressed: Io.Writer.Allocating = .init(gpa);
     defer compressed.deinit();
     var wbuf: Writer.Buffer = undefined;
@@ -1537,8 +1541,8 @@ test "Reader: a preset dictionary pre-seeds the window" {
     // dictionary's bytes are not decoded output: the checksum hook never sees
     // them.
     const gpa = testing.allocator;
-    const dict = "the quick brown fox jumps over the lazy dog. " ** 3;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 8;
+    const dict = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();

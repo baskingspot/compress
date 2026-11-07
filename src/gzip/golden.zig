@@ -25,6 +25,7 @@ const common = @import("common.zig");
 const readInt = common.readInt;
 const crc32 = @import("crc32.zig");
 const decode = @import("decode.zig");
+const compat = @import("../compat.zig");
 
 /// Comptime hex decoding, so the ported vectors keep golang/go's own
 /// hexstring spelling instead of a byte-list transcription.
@@ -366,7 +367,7 @@ pub fn expectTrailer(member: []const u8, source: []const u8) !void {
     try testing.expect(member.len >= decode.trailer_len);
     const trailer = member[member.len - decode.trailer_len ..];
     try testing.expectEqual(
-        std.hash.crc.Crc32.hash(source),
+        compat.Crc32.hash(source),
         readInt(u32, trailer[0..4]),
     );
     try testing.expectEqual(

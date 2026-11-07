@@ -34,6 +34,7 @@ const encode = @import("encode.zig");
 const golden = @import("golden.zig");
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
+const compat = @import("../compat.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -360,7 +361,7 @@ fn shapeSeed(
 ) [24 + content.len]u8 {
     var seed: [24 + content.len]u8 = undefined;
     mem.writeInt(u64, seed[0..8], level, .little);
-    mem.writeInt(u64, seed[8..16], @intFromEnum(shape), .little);
+    mem.writeInt(u64, seed[8..16], compat.enumToInt(shape), .little);
     mem.writeInt(u64, seed[16..24], len, .little);
     for (content, 0..) |b, i| seed[24 + i] = b;
     return seed;
@@ -543,10 +544,10 @@ fn fuzzStreamRoundTrip(_: void, smith: *Smith) anyerror!void {
 /// bytes `smith.slice` consumes. The first is a repeated phrase, which the
 /// encoder turns into matches across blocks.
 const stream_corpus: []const []const u8 = &.{
-    &sliceSeed(0, "the quick brown fox " ** 8),
+    &sliceSeed(0, compat.repeatString("the quick brown fox ", 8)),
     // implementedLevel's pick 1 is level 6 (pick 0 is level 1), with real
     // content so blocks emit.
-    &sliceSeed(1, "z" ** 1024),
+    &sliceSeed(1, compat.repeatString("z", 1024)),
 };
 
 test "flate fuzz: stream round trip" {
@@ -859,7 +860,7 @@ fn referenceWalk(source: []const u8, target: []u8) Walk {
             .err = err,
             .produced = out_pos,
         });
-        switch (@as(decode.BlockType, @enumFromInt(btype))) {
+        switch (@as(decode.BlockType, compat.enumFromInt(decode.BlockType, btype))) {
             .stored => walkStored(&br, target, &out_pos) catch |err| return .{
                 .err = err,
                 .produced = out_pos,

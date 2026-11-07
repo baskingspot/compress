@@ -20,6 +20,9 @@ pub const writer = @import("writer.zig");
 /// Integer access with a fixed byte order (`Int`, `little`, `big`): the
 /// `readInt` and `writeInt` that each codec's `common.zig` binds.
 pub const int = @import("int.zig");
+/// Copies from a comptime constant into a runtime buffer: the 0.17-only
+/// fastmem restriction, explained in `constant.zig`.
+pub const constant = @import("constant.zig");
 /// Fixed-capacity buffer backed by an array (`ArrayBuffer`): the
 /// `buffer + len` pair with assert-checked appends and resizes.
 pub const array_buffer = @import("array_buffer.zig");

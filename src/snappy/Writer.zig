@@ -38,6 +38,7 @@ const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const golden = @import("golden.zig");
 const Reader = @import("Reader.zig");
+const compat = @import("../compat.zig");
 
 /// The stream identifier chunk every framed stream starts with (`§4.1`).
 pub const identifier = "\xff\x06\x00\x00sNaPpY";
@@ -188,10 +189,10 @@ test "Writer: writes past one chunk split into full chunks" {
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
-    try w.writer.writeAll("a" ** (3 * max_chunk_len + 1));
+    try w.writer.writeAll(compat.repeatString("a", (3 * max_chunk_len + 1)));
     try w.finish();
     try testing.expectEqual(4, countChunks(out.written()));
-    try roundTrip("a" ** (3 * max_chunk_len + 1));
+    try roundTrip(compat.repeatString("a", (3 * max_chunk_len + 1)));
 }
 
 test "Writer: writableSliceGreedy on a full buffer emits, never drops" {
@@ -206,12 +207,12 @@ test "Writer: writableSliceGreedy on a full buffer emits, never drops" {
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf);
 
-    try w.writer.writeAll("a" ** max_chunk_len);
+    try w.writer.writeAll(compat.repeatString("a", max_chunk_len));
     const dest = try w.writer.writableSliceGreedy(1);
     try testing.expectEqual(max_chunk_len, dest.len);
     fastmem.set(u8, dest, 0x62);
     w.writer.advance(dest.len);
-    try w.writer.writeAll("c" ** 1000);
+    try w.writer.writeAll(compat.repeatString("c", 1000));
     try w.finish();
 
     try testing.expectEqual(3, countChunks(out.written()));
@@ -283,7 +284,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
     var w: Writer = .init(&fixed_out, &buf);
-    try w.writer.writeAll("a" ** 4096);
+    try w.writer.writeAll(compat.repeatString("a", 4096));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 

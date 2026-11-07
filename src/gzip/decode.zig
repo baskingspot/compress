@@ -26,6 +26,7 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const crc32 = @import("crc32.zig");
 const encode = @import("encode.zig");
+const compat = @import("../compat.zig");
 /// The fixed header's length, 10 bytes (RFC 1952 §2.3.1). Defined in
 /// `encode.zig` and re-exported so decoder-side code need not reach across
 /// namespaces.
@@ -374,7 +375,7 @@ test "decode: the extra field is skipped with the XLEN bound" {
     // are skipped, not interpreted (§2.3.1.2 examines them only "so it can
     // skip over the optional fields"). A 65,535-byte XLEN costs bounded
     // work: the bytes are consumed as they stream past, never stored.
-    const extra = "z" ** 0xffff;
+    const extra = compat.repeatString("z", 0xffff);
     const header = try testing.allocator.alloc(u8, header_len + 2 + extra.len);
     defer testing.allocator.free(header);
     fastmem.copy(u8, header[0..header_len], &empty_header);
@@ -405,7 +406,7 @@ test "decode: FNAME and FCOMMENT are NUL-scanned with the 512-byte cap" {
     // RFC, it matches Go's reader (`gunzip.go:145`). The terminator counts as
     // a header byte for FHCRC, and 511 bytes of name plus the terminator is
     // inside the cap while 512 without one is `HeaderTooLong`.
-    const name = "n" ** 511;
+    const name = compat.repeatString("n", 511);
     const header = try testing.allocator.alloc(u8, header_len + name.len + 1);
     defer testing.allocator.free(header);
     fastmem.copy(u8, header[0..header_len], &empty_header);
@@ -545,7 +546,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // is flate's rules unchanged, and its failures are the module's own
     // (`Truncated`, `InvalidBlockType`, ...).
     var member: [256]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &member, .{});
     // BTYPE=11 (reserved, §3.2.3 of RFC 1951) in the first body byte: the
     // body's first three bits are BFINAL, BTYPE.
@@ -565,7 +566,7 @@ test "decode: a bomb member is capped, never an overrun" {
     // A member that does not fit is `BufferTooSmall`, reported before the
     // overflowing write; the bytes past the cap are untouched.
     var member: [512]u8 = undefined;
-    const source = "A" ** 4096;
+    const source = compat.repeatString("A", 4096);
     const len = try encode.compress(source, &member, .{});
     try testing.expect(len < member.len);
 

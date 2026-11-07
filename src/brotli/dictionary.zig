@@ -24,6 +24,7 @@ const fastmem = @import("fastmem");
 const fixtures = @import("fixtures");
 
 const data = @import("dictionary_data.zig");
+const compat = @import("../compat.zig");
 
 /// §8, Appendix A — DICT: "an array of bytes", 122,784 of them, the words a
 /// static dictionary reference names.
@@ -217,7 +218,7 @@ test "dictionary: RFC 7932 Appendix A's DICT by its CRC-32" {
     // RFC 7932 Appendix A — "the length is 122,784 bytes and the CRC-32 of
     // the byte sequence is 0x5136cb04".
     try testing.expectEqual(@as(usize, 122784), words.len);
-    try testing.expectEqual(@as(u32, 0x5136cb04), std.hash.crc.Crc32.hash(words));
+    try testing.expectEqual(@as(u32, 0x5136cb04), compat.Crc32.hash(words));
     // The hex's opening words: "time", "down", "life", "left".
     try testing.expectEqualStrings("timedownlifeleft", words[0..16]);
 }
@@ -249,7 +250,7 @@ test "dictionary: RFC 7932 Appendix B's flat transform sequence by its CRC-32" {
         at += 1;
     }
     try testing.expectEqual(flat.len, at);
-    try testing.expectEqual(@as(u32, 0x3d965f81), std.hash.crc.Crc32.hash(&flat));
+    try testing.expectEqual(@as(u32, 0x3d965f81), compat.Crc32.hash(&flat));
 }
 
 /// RFC 7932 Appendix B's elementary numbering, which the flat sequence (and

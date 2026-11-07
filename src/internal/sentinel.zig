@@ -12,6 +12,8 @@ const testing = std.testing;
 
 const fastmem = @import("fastmem");
 
+const constant = @import("constant.zig");
+
 /// The first sentinel byte; the cycle is `[base, base + len)`.
 pub const base: u8 = 0xa0;
 /// The cycle length, in bytes.
@@ -28,7 +30,7 @@ pub fn at(i: usize) u8 {
 pub fn fill(target: []u8) void {
     var i: usize = 0;
     while (i + len <= target.len) : (i += len) {
-        fastmem.copy(u8, target[i..][0..len], &pattern);
+        constant.copyInto(&pattern, target[i..][0..len]);
     }
     fastmem.copy(u8, target[i..], pattern[0 .. target.len - i]);
 }

@@ -34,6 +34,7 @@ const huff0 = @import("huff0.zig");
 const huff0_compress = @import("huff0_compress.zig");
 const literals = @import("literals.zig");
 const golden = @import("golden.zig");
+const compat = @import("../compat.zig");
 
 /// Everything the literals encoder reports. Every Huffman bail-out
 /// (`huff0_compress.Error`) is handled inside `write` by falling back to the
@@ -294,7 +295,7 @@ fn rawHeaderLength(source_len: usize) usize {
 /// Regenerated_Size. Size_Format 00 and 10 share the 1-byte form, 01 is the
 /// 12-bit form, 11 the 20-bit one.
 fn writeRawHeader(target: []u8, block_type: literals.BlockType, source_len: usize) void {
-    const type_bits: u32 = @intFromEnum(block_type);
+    const type_bits: u32 = compat.enumToInt(block_type);
     switch (target.len) {
         1 => target[0] = @intCast(type_bits + (source_len << 3)),
         2 => {
@@ -339,7 +340,7 @@ fn writeCompressedHeader(
         2 => 18,
         3 => 22,
     };
-    var header: u64 = @intFromEnum(block_type) + (@as(u64, size_format) << 2);
+    var header: u64 = compat.enumToInt(block_type) + (@as(u64, size_format) << 2);
     header |= @as(u64, @intCast(source_len)) << 4;
     header |= @as(u64, @intCast(body_len)) << shift;
     for (target, 0..) |*byte, index| {
@@ -435,8 +436,8 @@ test "write's ladder picks Raw, RLE, and Compressed at the C's thresholds" {
     for (&literals_64, 0..) |*byte, index| byte.* = if (index % 8 == 0) 7 else 0;
     try expectRoundTrip(&literals_64, .compressed);
     // One distinct byte, 100 literals: RLE.
-    const repeated = [_]u8{0x41} ** 100;
-    try expectRoundTrip(&repeated, .rle);
+    const repeated = compat.repeatString(&[_]u8{0x41}, 100);
+    try expectRoundTrip(repeated, .rle);
     // A two-byte input of one symbol: Raw, because the one content byte does
     // not beat minGain (the C's `cLitSize == 1` path).
     try testing.expectEqual(@as(usize, 3), try write(&.{ 0x41, 0x41 }, &target, &state, false));

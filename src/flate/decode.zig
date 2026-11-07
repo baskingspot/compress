@@ -25,12 +25,13 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
-const native_endian = @import("builtin").cpu.arch.endian();
+
 const testing = std.testing;
 
 const fastmem = @import("fastmem");
 
 const common = @import("common.zig");
+const compat = @import("../compat.zig");
 const readInt = common.readInt;
 
 /// Why a stream failed to decode. `decompress` returns these directly. The
@@ -301,9 +302,7 @@ pub fn HuffmanDecoder(
                 for (&masks[len], 0..) |*mask_word, w| {
                     const v: @Vector(64, u8) = padded[w * 64 ..][0..64].*;
                     const m: u64 = @bitCast(v == @as(@Vector(64, u8), @splat(@intCast(len))));
-                    // A bool vector's element 0 is the integer's most
-                    // significant bit on a big-endian target.
-                    mask_word.* = if (native_endian == .big) @bitReverse(m) else m;
+                    mask_word.* = if (compat.bool_vector_element0_is_msb) @bitReverse(m) else m;
                     count[len] += @popCount(m);
                 }
             }
@@ -590,7 +589,7 @@ pub fn decompress(source: []const u8, target: []u8, dict: ?[]const u8) Decompres
     while (true) {
         const final = (try br.take(1)) != 0;
         // §3.2.3: BFINAL then BTYPE, two bits LSB-of-value first.
-        const block_type: BlockType = @enumFromInt(@as(u2, @intCast(try br.take(2))));
+        const block_type: BlockType = compat.enumFromInt(BlockType, try br.take(2));
         switch (block_type) {
             .stored => try decodeStoredBlock(&br, target, &out_pos),
             .fixed => try decodeCompressedBlock(

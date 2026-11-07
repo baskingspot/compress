@@ -31,6 +31,7 @@ const huff0 = @import("huff0.zig");
 const huff0_compress = @import("huff0_compress.zig");
 const match_compress = @import("match_compress.zig");
 const sequences = @import("sequences.zig");
+const compat = @import("../compat.zig");
 
 const Dictionary = @This();
 
@@ -194,7 +195,7 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
     }) |alphabet| {
         const parsed = try sequences.readDictionaryTable(alphabet, source[cursor..]);
         cursor += parsed.bytes_consumed;
-        const index = @intFromEnum(alphabet);
+        const index = compat.enumToInt(alphabet);
         dictionary.sequence_tables[index] = parsed.table;
         dictionary.sequence_tables_compress[index] = fse_compress.buildTable(
             encodeNorm(alphabet, &parsed.description),
@@ -220,7 +221,7 @@ pub fn parse(source: []const u8) ParseError!Dictionary {
         .match_lengths,
         .literals_lengths,
     }) |alphabet| {
-        const index = @intFromEnum(alphabet);
+        const index = compat.enumToInt(alphabet);
         if (repeatPromoted(alphabet, &descriptions[index], content.len)) {
             dictionary.sequence_repeat_valid.insert(alphabet);
         }

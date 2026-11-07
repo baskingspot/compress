@@ -29,6 +29,7 @@ const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
 const framing = @import("framing.zig");
+const compat = @import("../compat.zig");
 /// Encoder configuration. `.{}` is the default: level 1. The level also
 /// selects the header's FLEVEL bits (`flgFor`).
 pub const Options = framing.Options;
@@ -147,7 +148,7 @@ test "encode: the emitted stream is the deterministic one" {
     // FLG: FLEVEL by band, the minimal FCHECK, FDICT clear. The pair is a
     // multiple of 31 as one MSB-order u16 (§2.2).
     var target: [256]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 4;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try compress(source, &target, .{});
     const stream = target[0..len];
 
@@ -245,8 +246,8 @@ test "encode: the bound holds for every shape" {
         "",
         "a",
         "hello world\n",
-        "the quick brown fox jumps over the lazy dog. " ** 100,
-        "\x00\x01\x02\x03\x04\x05\x06\x07" ** 64,
+        compat.repeatString("the quick brown fox jumps over the lazy dog. ", 100),
+        compat.repeatString("\x00\x01\x02\x03\x04\x05\x06\x07", 64),
     };
     for (cases) |source| {
         const target = try testing.allocator.alloc(u8, maxCompressedLength(source.len));
@@ -338,7 +339,7 @@ test "encode: a dictionary round-trips and carries the stream" {
     // into the dictionary's bytes: the same stream without them is a raw
     // flate `InvalidMatch`, and the DICTID check catches a different
     // dictionary before any body byte.
-    const source = "she sells seashells by the seashore\n" ** 8;
+    const source = compat.repeatString("she sells seashells by the seashore\n", 8);
     const dict = "she sells seashells by the seashore\n";
     var stream: [maxCompressedLength(source.len)]u8 = undefined;
     var plain: [source.len + @as(usize, sentinel.len)]u8 = undefined;
@@ -383,7 +384,7 @@ test "encode: an empty dictionary is no dictionary" {
     // spelling is `null`.
     var with_empty: [128]u8 = undefined;
     var with_null: [128]u8 = undefined;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 2;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 2);
     const a = try compress(source, &with_empty, .{ .level = .@"1", .dict = "" });
     const b = try compress(source, &with_null, .{});
     try testing.expectEqual(b, a);

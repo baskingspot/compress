@@ -31,6 +31,7 @@ const frame = @import("frame.zig");
 const golden = @import("golden.zig");
 const huffman = @import("huffman.zig");
 const internal = @import("../internal/root.zig");
+const compat = @import("../compat.zig");
 
 /// The command layer's refusals.
 pub const Error = error{
@@ -258,7 +259,7 @@ pub const Blocks = struct {
 
     /// The current block type of `cat`.
     fn current(self: *const Blocks, cat: frame.Category) u16 {
-        return self.types[@intFromEnum(cat)][1];
+        return self.types[compat.enumToInt(cat)][1];
     }
 };
 
@@ -271,7 +272,7 @@ fn consumeSymbol(
     blocks: *Blocks,
     cat: frame.Category,
 ) Errors(Bits)!void {
-    const index = @intFromEnum(cat);
+    const index = compat.enumToInt(cat);
     if (blocks.counts[index] == 0) try switchBlock(Bits, br, header, blocks, cat);
     blocks.counts[index] -= 1;
 }
@@ -305,7 +306,7 @@ fn switchBlock(
     blocks: *Blocks,
     cat: frame.Category,
 ) Errors(Bits)!void {
-    const index = @intFromEnum(cat);
+    const index = compat.enumToInt(cat);
     const max_types = header.block_types[index];
     if (max_types == 1) {
         // §9.3 — a single-type category's switch "appears only if
@@ -548,7 +549,7 @@ pub fn decodeMetaBlock(
     // sequence with the caps that bind only mid-ring removed.
     while (w.left > 0) {
         // §9.3 — the insert-and-copy block switch, before the length code.
-        const cmd_index = @intFromEnum(frame.Category.command);
+        const cmd_index = compat.enumToInt(frame.Category.command);
         if (blocks.counts[cmd_index] == 0) {
             br.* = local;
             try switchBlock(Bits, br, header, &blocks, .command);
@@ -594,7 +595,7 @@ pub fn decodeMetaBlock(
         } else {
             // §9.3 — the distance block switch, before the distance code,
             // and only when a distance is read (erratum 6977, T2).
-            const dist_index = @intFromEnum(frame.Category.distance);
+            const dist_index = compat.enumToInt(frame.Category.distance);
             if (blocks.counts[dist_index] == 0) {
                 br.* = local;
                 try switchBlock(Bits, br, header, &blocks, .distance);
@@ -905,7 +906,7 @@ inline fn insertLiteralsRun(
     var before = p2;
     var rest = target;
     while (rest.len > 0) {
-        const index = @intFromEnum(frame.Category.literal);
+        const index = compat.enumToInt(frame.Category.literal);
         if (blocks.counts[index] == 0)
             try @call(.always_inline, switchBlock, .{ Bits, r, header, blocks, .literal });
         const block_type = blocks.types[index][1];
@@ -913,7 +914,7 @@ inline fn insertLiteralsRun(
         blocks.counts[index] -= seg_len;
         const segment = rest[0..seg_len];
         rest = rest[seg_len..];
-        if (header.num_trees[@intFromEnum(frame.Category.literal)] == 1) {
+        if (header.num_trees[compat.enumToInt(frame.Category.literal)] == 1) {
             // One literal tree: the map's values are all 0 (`§7.3`'s
             // alphabet is NTREES + RLEMAX with values below NTREES), so the
             // context ID selects nothing and the per-literal work is the
@@ -1174,7 +1175,7 @@ test "context IDs: RFC 7932 §7.1's Lut tables by their Appendix C CRCs" {
     // RFC 7932 §7.1 — "The lengths and the CRC-32 check values (see
     // Appendix C) of each of these tables": 0x8e91efb7, 0xd01a32f4,
     // 0x0dd7a0d6.
-    const crc = std.hash.crc.Crc32.hash;
+    const crc = compat.Crc32.hash;
     try testing.expectEqual(@as(u32, 0x8e91efb7), crc(&lut0));
     try testing.expectEqual(@as(u32, 0xd01a32f4), crc(&lut1));
     try testing.expectEqual(@as(u32, 0x0dd7a0d6), crc(&lut2));
@@ -1391,7 +1392,7 @@ test "command stream: a spent single-type block count re-arms without a switch" 
     try switchBlock(bits.BitReader, &br, &single_type_header, &blocks, .command);
     try testing.expectEqual(
         @as(u32, 1 << 24),
-        blocks.counts[@intFromEnum(frame.Category.command)],
+        blocks.counts[compat.enumToInt(frame.Category.command)],
     );
     try testing.expectEqual(@as(u64, 0), br.bit_pos);
 }

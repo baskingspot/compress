@@ -36,6 +36,7 @@ const decode = @import("decode.zig");
 const encode = @import("encode.zig");
 const golden = @import("golden.zig");
 const Writer = @import("Writer.zig");
+const compat = @import("../compat.zig");
 
 /// The caller-provided buffer: the decoded serving region plus the
 /// chunk-payload staging region.
@@ -253,10 +254,10 @@ fn rebase(r: *Reader, capacity: usize) Io.Reader.RebaseError!void {
 test "Reader: round-trips through Writer" {
     try roundTrip("");
     try roundTrip("hello, snappy");
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 1000);
-    try roundTrip("a" ** (encode.max_block_size - 1));
-    try roundTrip("b" ** encode.max_block_size);
-    try roundTrip("c" ** (encode.max_block_size + 1));
+    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(compat.repeatString("a", (encode.max_block_size - 1)));
+    try roundTrip(compat.repeatString("b", encode.max_block_size));
+    try roundTrip(compat.repeatString("c", (encode.max_block_size + 1)));
 }
 
 test "Reader: random multi-block input round-trips" {
@@ -282,7 +283,7 @@ test "Reader: a zero-length stream poll does not fail the stream" {
     // on a valid stream with buffered output — the serving region cannot
     // always hold a fresh block beside unconsumed bytes).
     const gpa = testing.allocator;
-    const src = "the quick brown fox jumps over the lazy dog. " ** 3000;
+    const src = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3000);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
@@ -385,7 +386,7 @@ test "Reader: a peek past the serving region fails" {
     // the vtable's rebase as the capacity, so a request larger than the
     // serving region reaches rebase itself.
     const gpa = testing.allocator;
-    const src = "the quick brown fox jumps over the lazy dog. " ** 4000;
+    const src = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4000);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;
@@ -579,7 +580,8 @@ test "Reader: peek across blocks stays contiguous" {
     // The documented cap is two blocks of contiguous decoded reads: after
     // an unaligned take, a peek spanning the cap must stay contiguous (the
     // append + slide path of fillNextBlock).
-    const src = "the quick brown fox jumps over the lazy dog. " ** 4000; // ~172 KiB
+    const text = "the quick brown fox jumps over the lazy dog. ";
+    const src = compat.repeatString(text, 4000); // ~172 KiB
     var out: Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     var wbuf: Writer.Buffer = undefined;

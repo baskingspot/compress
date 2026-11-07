@@ -23,6 +23,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
+const compat = @import("../compat.zig");
 /// The caller-provided buffer: flate's `Writer.Buffer`, re-exported, 426,636
 /// bytes (the window and a block's scratch). gzip adds no buffer of its own.
 pub const Buffer = flate.Writer.Buffer;
@@ -143,17 +144,20 @@ test "Writer: the emitted member is the deterministic one" {
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
-    try w.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
+    try w.writer.writeAll(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
     try w.finish();
     try golden.expectHeader(out.written(), encode.xflFor(.@"6"));
-    try golden.expectTrailer(out.written(), "the quick brown fox jumps over the lazy dog. " ** 4);
+    try golden.expectTrailer(
+        out.written(),
+        compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4),
+    );
 
     // The same input and level produce the same member.
     var second: Io.Writer.Allocating = .init(gpa);
     defer second.deinit();
     var buf2: Buffer = undefined;
     var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6" });
-    try w2.writer.writeAll("the quick brown fox jumps over the lazy dog. " ** 4);
+    try w2.writer.writeAll(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
     try w2.finish();
     try testing.expectEqualSlices(u8, out.written(), second.written());
 }
@@ -192,11 +196,11 @@ test "Writer: round-trips" {
     try roundTrip("");
     try roundTrip("a");
     try roundTrip("hello, gzip");
-    try roundTrip("the quick brown fox jumps over the lazy dog. " ** 1000);
-    try roundTrip("a" ** (flate.encode.max_block_size - 1));
-    try roundTrip("b" ** flate.encode.max_block_size);
-    try roundTrip("c" ** (flate.encode.max_block_size + 1));
-    try roundTrip("d" ** (3 * flate.encode.max_block_size + 17));
+    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(compat.repeatString("a", (flate.encode.max_block_size - 1)));
+    try roundTrip(compat.repeatString("b", flate.encode.max_block_size));
+    try roundTrip(compat.repeatString("c", (flate.encode.max_block_size + 1)));
+    try roundTrip(compat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
 }
 
 test "Writer: incompressible input round-trips" {
@@ -290,7 +294,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
     var w: Writer = .init(&fixed_out, &buf, .{});
-    try w.writer.writeAll("a" ** 4096);
+    try w.writer.writeAll(compat.repeatString("a", 4096));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 
@@ -407,7 +411,7 @@ test "Writer: streamAll consumes its input exactly and writes one member" {
     // The one-call pump: stack-buffered end to end, zero allocation, the
     // input consumed through its end, one member on the output.
     const gpa = testing.allocator;
-    const source = "the quick brown fox jumps over the lazy dog. " ** 100;
+    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 100);
     var in: Io.Reader = .fixed(source);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();

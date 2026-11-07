@@ -33,6 +33,7 @@ const fse_compress = @import("fse_compress.zig");
 const golden = @import("golden.zig");
 const huff0 = @import("huff0.zig");
 const literals = @import("literals.zig");
+const compat = @import("../compat.zig");
 
 /// Everything the Huffman encoder reports.
 pub const Error = error{
@@ -809,7 +810,7 @@ fn writeHeader(
     regenerated_size: u32,
     compressed_size: usize,
 ) void {
-    var header_bits: u64 = @intFromEnum(block_type) + (@as(u64, size_format) << 2);
+    var header_bits: u64 = compat.enumToInt(block_type) + (@as(u64, size_format) << 2);
     header_bits |= @as(u64, regenerated_size) << 4;
     const shift: u6 = switch (size_format) {
         0, 1 => 14,

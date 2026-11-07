@@ -30,6 +30,7 @@ const internal = @import("../internal/root.zig");
 const literals = @import("literals.zig");
 const sequences = @import("sequences.zig");
 const xxh64 = @import("xxh64.zig");
+const compat = @import("../compat.zig");
 
 /// Everything the frame layer reports: the block layer's composed set plus
 /// this layer's own names. `zstd.decode.DecompressError` is this set, name
@@ -947,13 +948,13 @@ test "the frame walk decodes the fast-path fixtures" {
     try expectFrame(&golden.frame_multi, "abcdefghIIIIII");
     // §3.1.1.2.4 — an RLE block at exactly Block_Maximum_Size: 128 KB from
     // one content byte.
-    const run = [_]u8{0x5a} ** block.max_block_size;
+    const run = compat.repeatString(&[_]u8{0x5a}, block.max_block_size);
     var target: [block.max_block_size + 8]u8 = undefined;
     internal.sentinel.fill(&target);
     var progress: usize = 0;
     const written = try decodeFrame(&golden.frame_rle_max, &target, &progress);
     try testing.expectEqual(block.max_block_size, written);
-    try testing.expectEqualSlices(u8, &run, target[0..written]);
+    try testing.expectEqualSlices(u8, run, target[0..written]);
     try internal.sentinel.expect(&target, written);
 }
 
@@ -981,7 +982,7 @@ test "the frame walk decodes the golden fixture frames" {
     try expectFrame(&golden.frame_literals_1stream, &golden.literals_1stream_expected);
     try expectFrame(&golden.frame_literals_4stream_sf1, &golden.literals_4stream_sf1_expected);
     try expectFrame(&golden.frame_literals_4stream_sf2, &golden.literals_4stream_sf2_expected);
-    try expectFrame(&golden.frame_literals_fse_tree, &golden.literals_fse_tree_expected);
+    try expectFrame(&golden.frame_literals_fse_tree, golden.literals_fse_tree_expected);
 }
 
 test "the frame walk carries the window accounting across blocks" {
@@ -1036,7 +1037,7 @@ test "the checksum folds each block's output exactly once, in order" {
     internal.sentinel.fill(&target);
     var progress: usize = 0;
     const written = try decodeFrame(&golden.frame_checksum_multi, &target, &progress);
-    const expected = golden.frame_checksum_multi_text ** 3000;
+    const expected = compat.repeatString(golden.frame_checksum_multi_text, 3000);
     try testing.expectEqual(expected.len, written);
     try testing.expectEqualSlices(u8, expected, target[0..written]);
     try internal.sentinel.expect(&target, written);
@@ -1166,10 +1167,10 @@ test "the descriptor corners decode as the CLI does" {
     // RFC 8878 §3.1.1.1.1.1 — every FCS form, and §3.1.1.1.1.2's
     // single-segment Window_Size = Frame_Content_Size. The CLI decodes each
     // of these byte-exact.
-    const run = [_]u8{'A'} ** 300;
+    const run = compat.repeatString(&[_]u8{'A'}, 300);
     try expectFrame(&golden.frame_fcs1, "01234567");
-    try expectFrame(&golden.frame_fcs2, &run);
-    try expectFrame(&golden.frame_fcs2_single_segment, &run);
+    try expectFrame(&golden.frame_fcs2, run);
+    try expectFrame(&golden.frame_fcs2_single_segment, run);
     try expectFrame(&golden.frame_fcs4, "01234567");
     try expectFrame(&golden.frame_fcs8, "01234567");
     // §3.1.1.1.1.3 — the unused bit is accepted (the CLI exits 0 on it).

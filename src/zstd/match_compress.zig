@@ -39,6 +39,9 @@ const builtin = @import("builtin");
 
 const fastmem = @import("fastmem");
 
+const compat = @import("../compat.zig");
+const internal = @import("../internal/root.zig");
+
 const common = @import("common.zig");
 const readInt = common.readInt;
 const sequences = @import("sequences.zig");
@@ -1652,10 +1655,7 @@ fn countTwo(
         const va: CountVec = a[current..][0..count_vec_len].*;
         const vb: CountVec = b[match..][0..count_vec_len].*;
         const mask: @Int(.unsigned, count_vec_len) = @bitCast(va != vb);
-        // A bool vector's element 0 is the integer's least significant bit
-        // on a little-endian target and its most significant on a
-        // big-endian one.
-        const first = if (builtin.cpu.arch.endian() == .little) @ctz(mask) else @clz(mask);
+        const first = if (compat.bool_vector_element0_is_msb) @clz(mask) else @ctz(mask);
         if (mask != 0) return current - a_start + first;
         current += count_vec_len;
         match += count_vec_len;
@@ -1833,7 +1833,7 @@ test "the rep pre-check wins two bytes ahead and keeps its literals" {
     // "xyzw" then the same four bytes again: after the first match at offset
     // 4, the next position matches rep1 at +2.
     const pattern = "xyzwxyzwxyzwxyzw";
-    fastmem.copy(u8, source[0..pattern.len], pattern);
+    internal.constant.copyInto(pattern, source[0..pattern.len]);
     var index: usize = pattern.len;
     while (index < source.len) : (index += 1) source[index] = @truncate(index);
     const params: Params = .init(10, 11, 6);
@@ -1862,7 +1862,7 @@ test "the offset-2 chain emits zero-literal repcodes that decode" {
     var source: [512]u8 = undefined;
     fastmem.set(u8, source[0..64], 0x5a);
     const pattern = "abcdabcdabcdabcd";
-    fastmem.copy(u8, source[64..][0..pattern.len], pattern);
+    internal.constant.copyInto(pattern, source[64..][0..pattern.len]);
     fastmem.set(u8, source[64 + pattern.len .. 64 + pattern.len + 200], 'd');
     const tail = "xyz!";
     fastmem.copy(u8, source[264..][0..tail.len], tail);

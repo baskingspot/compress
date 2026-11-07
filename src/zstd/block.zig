@@ -28,6 +28,7 @@ const literals = @import("literals.zig");
 const readInt = @import("common.zig").readInt;
 const sequences = @import("sequences.zig");
 const xxh64 = @import("xxh64.zig");
+const compat = @import("../compat.zig");
 
 /// `§3.1.1.2.4` — "128 KB": Block_Maximum_Size's ceiling. A frame's own
 /// bound is `min(Window_Size, this)`, so this is also the largest block any
@@ -87,7 +88,7 @@ pub fn parseHeader(source: []const u8) error{Truncated}!Header {
     const bits = readInt(u24, source[0..block_header_len]);
     return .{
         .last_block = (bits & 1) != 0,
-        .block_type = @enumFromInt(@as(u2, @truncate((bits >> 1) & 0b11))),
+        .block_type = compat.enumFromInt(BlockType, (bits >> 1) & 0b11),
         // "The upper 21 bits of Block_Header represent the Block_Size."
         .block_size = (bits >> 3) & 0x1fffff,
     };
@@ -700,7 +701,7 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     internal.sentinel.fill(&target);
     var literals_state: literals.State = .empty;
     var sequences_state: sequences.State = .empty;
-    const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ [_]u8{0} ** 8;
+    const oversize = [_]u8{ 0x0d, 0x20, 0x00 } ++ compat.repeatString(&[_]u8{0}, 8).*;
     try testing.expectError(
         error.BlockOversize,
         decode(&oversize, &target, 0, 1024, 0, &.{}, &literals_state, &sequences_state, null),
@@ -712,8 +713,8 @@ test "decode refuses Block_Size past Block_Maximum_Size" {
     internal.sentinel.fill(&big);
     const written = try decodeFrame(&golden.frame_rle_max, &big);
     try testing.expectEqual(max_block_size, written);
-    const run = [_]u8{0x5a} ** max_block_size;
-    try testing.expectEqualSlices(u8, &run, big[0..written]);
+    const run = compat.repeatString(&[_]u8{0x5a}, max_block_size);
+    try testing.expectEqualSlices(u8, run, big[0..written]);
     try internal.sentinel.expect(&big, written);
 }
 
@@ -831,7 +832,7 @@ test "decode composes the golden literals fixtures as whole frames" {
     try expectFrame(&golden.frame_literals_1stream, &golden.literals_1stream_expected);
     try expectFrame(&golden.frame_literals_4stream_sf1, &golden.literals_4stream_sf1_expected);
     try expectFrame(&golden.frame_literals_4stream_sf2, &golden.literals_4stream_sf2_expected);
-    try expectFrame(&golden.frame_literals_fse_tree, &golden.literals_fse_tree_expected);
+    try expectFrame(&golden.frame_literals_fse_tree, golden.literals_fse_tree_expected);
     // The hand-built pair: the Table 25 assignment and the errata 8195
     // stream, as whole frames the CLI and std both decode.
     try expectFrame(&golden.frame_pair, &golden.pair_literals);
@@ -890,10 +891,10 @@ test "the history a match may read is the addressable span at the match" {
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_1k, &target);
     try testing.expectEqual(@as(usize, 2048 + 3), written);
-    const first = [_]u8{0x41} ** 1024;
-    const second = [_]u8{0x42} ** 1024;
-    try testing.expectEqualSlices(u8, &first, target[0..1024]);
-    try testing.expectEqualSlices(u8, &second, target[1024..2048]);
+    const first = compat.repeatString(&[_]u8{0x41}, 1024);
+    const second = compat.repeatString(&[_]u8{0x42}, 1024);
+    try testing.expectEqualSlices(u8, first, target[0..1024]);
+    try testing.expectEqualSlices(u8, second, target[1024..2048]);
     // Offset 1024 from position 2048 is the B block's first byte.
     try testing.expectEqualSlices(u8, "BBB", target[2048..2051]);
     try internal.sentinel.expect(&target, written);
@@ -903,8 +904,8 @@ test "the history a match may read is the addressable span at the match" {
     internal.sentinel.fill(&target);
     const span = try decodeFrame(&golden.frame_window_1k_span, &target);
     try testing.expectEqual(@as(usize, 2048 + 10 + 3), span);
-    try testing.expectEqualSlices(u8, &first, target[0..1024]);
-    try testing.expectEqualSlices(u8, &second, target[1024..2048]);
+    try testing.expectEqualSlices(u8, first, target[0..1024]);
+    try testing.expectEqualSlices(u8, second, target[1024..2048]);
     try testing.expectEqualSlices(u8, "0123456789BBB", target[2048..2061]);
     try internal.sentinel.expect(&target, span);
     try expectFrameError(error.OffsetTooFar, &golden.frame_window_1k_over);
@@ -945,10 +946,10 @@ test "the window accounting crosses Block_Maximum_Size" {
     internal.sentinel.fill(&target);
     const written = try decodeFrame(&golden.frame_window_128k, &target);
     try testing.expectEqual(@as(usize, 2 * 131072 + 3), written);
-    const first = [_]u8{0x41} ** 131072;
-    const second = [_]u8{0x42} ** 131072;
-    try testing.expectEqualSlices(u8, &first, target[0..131072]);
-    try testing.expectEqualSlices(u8, &second, target[131072..262144]);
+    const first = compat.repeatString(&[_]u8{0x41}, 131072);
+    const second = compat.repeatString(&[_]u8{0x42}, 131072);
+    try testing.expectEqualSlices(u8, first, target[0..131072]);
+    try testing.expectEqualSlices(u8, second, target[131072..262144]);
     try testing.expectEqualSlices(u8, "BBB", target[262144..262147]);
     try internal.sentinel.expect(&target, written);
     try expectFrameError(error.OffsetTooFar, &golden.frame_window_128k_over);

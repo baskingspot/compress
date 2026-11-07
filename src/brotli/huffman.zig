@@ -20,6 +20,7 @@ const testing = std.testing;
 
 const bits = @import("bits.zig");
 const golden = @import("golden.zig");
+const compat = @import("../compat.zig");
 
 /// §3.3 — the alphabet sizes. Distance alphabets are dynamic: 16 special
 /// codes, NDIRECT direct codes, and 48 code slots per NPOSTFIX bit (max 520
@@ -593,12 +594,18 @@ test "prefix codes: a set that is not a complete code is BadHuffmanCode" {
     // ReleaseSafe, undefined behavior in ReleaseFast) before the table was
     // even built.
     var tree: LiteralTree = undefined;
-    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{1} ** 200)));
+    try testing.expectError(
+        error.BadHuffmanCode,
+        tree.build(compat.repeatArray(u4, &[_]u4{1}, 200)),
+    );
     // Under-subscribed: three two-bit codes leave 24,576 of the 32,768
     // unassigned, so there is no table to build. The all-zero set is the
     // degenerate case.
-    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{2} ** 3)));
-    try testing.expectError(error.BadHuffmanCode, tree.build(&([_]u4{0} ** 256)));
+    try testing.expectError(error.BadHuffmanCode, tree.build(compat.repeatArray(u4, &[_]u4{2}, 3)));
+    try testing.expectError(
+        error.BadHuffmanCode,
+        tree.build(compat.repeatArray(u4, &[_]u4{0}, 256)),
+    );
 }
 
 test "prefix codes: the two-level table never overflows a short read" {
