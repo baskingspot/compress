@@ -3,6 +3,10 @@
 # not fail CI: a break on a 32-bit target gets fixed after the fact.
 jobs:
   - recipe: test
+  # The compatibility lane: the previous Zig must compile and pass the whole
+  # suite too. `check` is the per-version gate (Debug, ReleaseSafe, ReleaseFast).
+  - recipe: check
+    shell: zig-old
   # The unit tests on s390x under qemu-user: the only big-endian coverage,
   # since every other target is little-endian.
   - recipe: test-be

@@ -13,6 +13,16 @@ default:
 test:
     TESTINGX_FORMAT=verbose zig build test
 
+[doc("Unit tests (ReleaseSafe): the option matrix, because lazy analysis hides code that only instantiates in release modes")]
+[group("test")]
+test-release-safe:
+    zig build test -Doptimize=ReleaseSafe --summary all
+
+[doc("Unit tests (ReleaseFast)")]
+[group("test")]
+test-release-fast:
+    zig build test -Doptimize=ReleaseFast --summary all
+
 [doc("Unit tests on a big-endian target, s390x under qemu-user. ReleaseSafe, because in Debug the two 4-GiB zstd frame tests outrun the runner's 10-minute timeout under emulation")]
 [group("test")]
 test-be:
@@ -26,9 +36,9 @@ fuzz LIMIT="10M":
 [doc("Lint Zig, Python, Nix, Markdown, the workflows, and this justfile: ziglint, the ast-grep rules, zig fmt, ruff, ty, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
-    ziglint
+    ziglint-0-16
     baskingspot-lint src
-    zig fmt --check src build.zig demo
+    zig fmt --check src build.zig demo examples bench docs/examples
     uv run scripts/check_binary_files.py
     uvx ruff check --line-length 100 scripts
     uvx ruff format --check --line-length 100 scripts
@@ -42,7 +52,7 @@ lint:
 [doc("Format everything lint checks")]
 [group("lint")]
 fmt:
-    zig fmt src build.zig demo
+    zig fmt src build.zig demo examples bench docs/examples
     uvx ruff format --line-length 100 scripts
     nix fmt
     oxfmt README.md AGENTS.md docs/content
@@ -70,9 +80,13 @@ check-32:
     wasmtime zig-out/bin/zstd-probe32.wasm
     wasmtime zig-out/bin/brotli-probe32.wasm
 
-[doc("Everything CI runs: the unit tests, natively and big-endian, lint, the cross-target compile gate, and the docs build")]
+[doc("The per-version gate, run on both supported Zig versions: the Debug, ReleaseSafe, and ReleaseFast test suites")]
 [group("ci")]
-ci: test test-be lint check-baseline bench-check doc
+check: test test-release-safe test-release-fast
+
+[doc("Everything CI runs: the gate, the big-endian tests, lint, the cross-target compile gate, and the docs build")]
+[group("ci")]
+ci: check test-be lint check-baseline bench-check doc
 
 [private]
 api:
