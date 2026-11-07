@@ -4,29 +4,38 @@
 # launch templates (see bench.toml), so its recipes run under that AWS profile.
 export AWS_PROFILE := env("AWS_PROFILE", "baskingspot-bench")
 
+# The one test that allocates about 4 GiB: zstd's over-4-GiB scale check. The
+# local gate skips it; `test-giant` runs it, and CI runs that.
+skip_giant := "4 GiB"
+
 [private]
 default:
     @just --list
 
-[doc("Unit tests for every codec, under the testingx plain-text runner")]
+[doc("Unit tests for every codec, under the testingx plain-text runner. Skips `test-giant`")]
 [group("test")]
 test:
-    TESTINGX_FORMAT=verbose zig build test
+    TESTINGX_SKIP="{{ skip_giant }}" TESTINGX_FORMAT=verbose zig build test
 
 [doc("Unit tests (ReleaseSafe): the option matrix, because lazy analysis hides code that only instantiates in release modes")]
 [group("test")]
 test-release-safe:
-    zig build test -Doptimize=ReleaseSafe --summary all
+    TESTINGX_SKIP="{{ skip_giant }}" zig build test -Doptimize=ReleaseSafe --summary all
 
 [doc("Unit tests (ReleaseFast)")]
 [group("test")]
 test-release-fast:
-    zig build test -Doptimize=ReleaseFast --summary all
+    TESTINGX_SKIP="{{ skip_giant }}" zig build test -Doptimize=ReleaseFast --summary all
 
-[doc("Unit tests on a big-endian target, s390x under qemu-user. ReleaseSafe, because in Debug the two 4-GiB zstd frame tests outrun the runner's 10-minute timeout under emulation")]
+[doc("The scale tests the rest skip: zstd's over-4-GiB source. It allocates about 4 GiB, so a local run needs the memory to spare and CI runs it")]
+[group("test")]
+test-giant:
+    zig build test -Doptimize=ReleaseSafe --summary all
+
+[doc("Unit tests on a big-endian target, s390x under qemu-user. ReleaseSafe, because Debug under emulation outruns the runner's timeout")]
 [group("test")]
 test-be:
-    zig build test -Dtarget=s390x-linux-musl -fqemu -Doptimize=ReleaseSafe --summary all
+    TESTINGX_SKIP="{{ skip_giant }}" zig build test -Dtarget=s390x-linux-musl -fqemu -Doptimize=ReleaseSafe --summary all
 
 [doc("Fuzz every codec's targets for an iteration budget with a K, M, or G suffix, for example `just fuzz 1M`. The budget is per fuzz target. ReleaseSafe only, because a Debug fuzz run hits ziglang/zig#30655")]
 [group("test")]

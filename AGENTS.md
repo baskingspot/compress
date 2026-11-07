@@ -160,17 +160,22 @@ onto a nearly-full disk):
 ## Commands
 
 - `just test`: unit tests for every codec, under the testingx plain-text runner.
-  Must pass before a commit.
+  Must pass before a commit. It skips `test-giant`.
 - `just test-release-safe` / `just test-release-fast`: the same suite in the
   release modes. Lazy analysis hides code that only instantiates there.
 - `just check`: the per-version gate, `test` plus both release modes. CI runs
   it on the default shell and on `zig-old`; run it under both compilers
   before you call a port done.
+- `just test-giant`: the over-4-GiB zstd scale test, which allocates about
+  4 GiB. Every other test recipe skips it; CI runs this one job, and a local
+  run needs the memory to spare (wrap it in `systemd-run --user --scope -p
+  MemoryMax=6G` on a busy box).
 - `just test-be`: the unit tests on s390x under qemu-user, the only
-  big-endian target, in ReleaseSafe (Debug's 4-GiB zstd frame tests outrun
-  the runner's timeout under emulation). A vector compare bitcast to an
-  integer puts element 0 in the most significant bit there; this is the
-  gate that sees it.
+  big-endian target, in ReleaseSafe (Debug under emulation outruns the
+  runner's timeout). A bool vector's element 0 lands on the integer's most
+  significant bit on 0.16 and its least significant on 0.17, and an
+  array-to-vector bitcast follows the target's byte order on 0.16 only;
+  `compat.zig` probes both, and this is the gate that sees a regression.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
 - `just ci`: everything CI runs: `just check`, `just test-be`, `just lint`,

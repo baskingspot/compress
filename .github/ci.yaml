@@ -7,6 +7,9 @@ jobs:
   # suite too. `check` is the per-version gate (Debug, ReleaseSafe, ReleaseFast).
   - recipe: check
     shell: zig-old
+  # The over-4-GiB zstd scale test allocates about 4 GiB, so the gate recipes
+  # skip it and this job runs it alone.
+  - recipe: test-giant
   # The unit tests on s390x under qemu-user: the only big-endian coverage,
   # since every other target is little-endian.
   - recipe: test-be
