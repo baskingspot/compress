@@ -120,10 +120,12 @@ comptime {
 /// does not match.
 ///
 /// `target` limits the output: a frame that would write past it fails with
-/// `BufferTooSmall` before the write. On any error `target` can hold partial
-/// output, which must not be used. A Compressed block keeps a 128 KiB literals
-/// scratch on the stack and the frame state is about 16 KiB. Nothing is
-/// allocated.
+/// `BufferTooSmall` before the write. A caller enforcing a decoded-size limit
+/// sizes `target` from that limit, so the error means the limit was exceeded
+/// and a retry with the same buffer cannot succeed. On any error `target` can
+/// hold partial output, which must not be used. A Compressed block keeps a
+/// 128 KiB literals scratch on the stack and the frame state is about 16 KiB.
+/// Nothing is allocated.
 pub fn decompress(
     source: []const u8,
     target: []u8,

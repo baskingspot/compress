@@ -568,7 +568,9 @@ pub fn dictHistory(dict: ?[]const u8) []const u8 {
 /// the decoded length. `target` is a cap, not a size hint: the stream does not
 /// record its decoded length, so size `target` from what you know about the
 /// data, or stream with `Reader`. If the output does not fit, returns
-/// `error.BufferTooSmall` before writing past `target`.
+/// `error.BufferTooSmall` before writing past `target`. A caller enforcing a
+/// decoded-size limit sizes `target` from that limit, so the error means the
+/// limit was exceeded and a retry with the same buffer cannot succeed.
 ///
 /// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): the history
 /// in front of the output, which a distance can reach into. Raw deflate names

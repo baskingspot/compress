@@ -145,9 +145,11 @@ pub const Buffer = struct {
 ///
 /// The format records no decoded length, so `target` is a cap: the decoded
 /// bytes are also the match history (`§8`), and a stream that would write
-/// past the cap fails `error.BufferTooSmall` before that write. Bytes after
-/// the stream's last byte are ignored; `decompressCounted` reports where the
-/// stream ended.
+/// past the cap fails `error.BufferTooSmall` before that write. A caller
+/// enforcing a decoded-size limit sizes `target` from that limit, so the error
+/// means the limit was exceeded and a retry with the same buffer cannot
+/// succeed. Bytes after the stream's last byte are ignored; `decompressCounted`
+/// reports where the stream ended.
 ///
 /// Zero bytes of input is `Truncated` (no stream began; the empty stream is
 /// the single byte `06`), and a stream of only empty meta-blocks decodes to

@@ -298,7 +298,9 @@ const Hooks = container.DecodeHooks(framing, Reader);
 /// Decode one gzip member from `source` into `target` and return the decoded
 /// length. `target` is a cap, not a size hint: a member that decodes to more
 /// than `target.len` bytes returns `error.BufferTooSmall` before the
-/// overflowing write.
+/// overflowing write. A caller enforcing a decoded-size limit sizes `target`
+/// from that limit, so the error means the limit was exceeded and a retry with
+/// the same buffer cannot succeed.
 ///
 /// The header, the deflate body, and the trailer are all checked (see
 /// `DecompressError`). After an error the contents of `target` are

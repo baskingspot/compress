@@ -125,7 +125,10 @@ const Hooks = container.DecodeHooks(framing, Reader);
 /// decoded length. `target` is a cap, not a size hint: the format stores no
 /// decoded length, so the caller sizes it from outside knowledge. A stream
 /// that decodes to more than `target.len` bytes returns
-/// `error.BufferTooSmall`, and nothing is written past `target`.
+/// `error.BufferTooSmall`, and nothing is written past `target`. A caller
+/// enforcing a decoded-size limit sizes `target` from that limit, so the error
+/// means the limit was exceeded and a retry with the same buffer cannot
+/// succeed.
 ///
 /// `dict` is the stream's preset dictionary or `null` (`§2.2`): the FDICT
 /// flag's bytes. With FDICT set the dictionary must be supplied — its
