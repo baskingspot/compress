@@ -1405,7 +1405,11 @@ test "copyMatch fills a long match at a period dividing the chunk" {
         }) |length| {
             var target: [4096]u8 = undefined;
             fastmem.set(u8, &target, 0);
-            const match_start = 64;
+            // The loop's largest offset is `overlap_chunk + 1`, so the prefix
+            // in front of the match must be at least that long: 64 is short
+            // on a target whose vector length is 64 (AVX-512), and
+            // `match_start - offset` underflows there.
+            const match_start = overlap_chunk + 1;
             for (0..match_start) |i| target[i] = random.int(u8);
             if (offset >= 2) target[match_start - offset] = 1;
             const source = target[match_start - offset ..][0..offset];
