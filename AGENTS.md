@@ -186,9 +186,11 @@ onto a nearly-full disk):
   `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
   before you call Zig work done.
 - `just fmt`: apply `zig fmt` to the same Zig paths.
-- `just check-baseline`: cross-target `zig build check` covering every
-  portable target (freestanding targets excluded — the testingx runner needs
-  an OS).
+- `just check-baseline`: cross-target `zig build check` over x86_64, aarch64,
+  x86 (32-bit `usize`), and wasm32 (32-bit again). arm-linux and riscv64 are
+  not supported, so they are not built: the lanes hung on hosted runners for
+  hours without producing a log, and nothing here targets them. Freestanding
+  targets stay out because the testingx runner needs an OS.
 - `just flate-oracle`: external-oracle conformance for flate — `python3
 zlib` raw, both directions (catches bit-packing bugs invisible to a
   self-round-trip; the layer is `scripts/flate_oracle.py`).

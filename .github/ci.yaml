@@ -19,10 +19,6 @@ jobs:
   - recipe: check-target aarch64-linux
   - recipe: check-target x86-linux
     blocking: false
-  - recipe: check-target arm-linux
-    blocking: false
-  - recipe: check-target riscv64-linux
-    blocking: false
   - recipe: check-target wasm32-wasi
     blocking: false
   # macOS on aarch64 works for some projects and not others.

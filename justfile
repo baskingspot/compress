@@ -67,14 +67,12 @@ fmt:
     oxfmt README.md AGENTS.md docs/content
     just --fmt
 
-[doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. The targets differ most from the dev box, and freestanding targets are excluded because the testingx runner needs an OS. It is not a supported-platform claim")]
+[doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. 32-bit x86 and wasm32 are the 32-bit targets; arm-linux and riscv64 are not supported and not built, and freestanding targets are excluded because the testingx runner needs an OS. It is not a supported-platform claim")]
 [group("test")]
 check-baseline:
     just check-target x86_64-linux
     just check-target aarch64-linux
     just check-target x86-linux
-    just check-target arm-linux
-    just check-target riscv64-linux
     just check-target wasm32-wasi
 
 [doc("Compile-only check for one target, such as `just check-target x86-linux`. CI runs one job per target")]
