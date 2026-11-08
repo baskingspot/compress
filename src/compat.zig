@@ -35,10 +35,21 @@ pub const Crc32 = if (@hasDecl(std.hash.crc, "Crc32"))
 else
     std.hash.crc.@"CRC-32/ISO-HDLC";
 
+/// The generic form, not 0.17's `@"CRC-32/ISCSI"`: that name resolves to
+/// std's SSE4.2 kernel on an x86_64 target with the CRC instruction, and the
+/// kernel is inline asm, which a comptime check cannot evaluate. The
+/// polynomial and flags are the catalogue entry's, in the bytewise Zig
+/// implementation. The tests are the only user.
 pub const Crc32Iscsi = if (@hasDecl(std.hash.crc, "Crc32Iscsi"))
     std.hash.crc.Crc32Iscsi
 else
-    std.hash.crc.@"CRC-32/ISCSI";
+    std.hash.crc.Generic(u32, .{
+        .polynomial = 0x1edc6f41,
+        .initial = 0xffffffff,
+        .reflect_input = true,
+        .reflect_output = true,
+        .xor_output = 0xffffffff,
+    });
 
 /// An enum's backing integer.
 ///
