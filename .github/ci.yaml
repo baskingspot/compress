@@ -25,7 +25,6 @@ jobs:
     blocking: false
   - recipe: check-target wasm32-wasi
     blocking: false
-  # macOS on aarch64 works for some projects and not others.
+  # aarch64-darwin is in the support tier, so its failure fails CI.
   - recipe: test
     runners: [macos-26]
-    blocking: false
