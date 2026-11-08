@@ -570,7 +570,10 @@ pub fn dictHistory(dict: ?[]const u8) []const u8 {
 /// data, or stream with `Reader`. If the output does not fit, returns
 /// `error.BufferTooSmall` before writing past `target`. A caller enforcing a
 /// decoded-size limit sizes `target` from that limit, so the error means the
-/// limit was exceeded and a retry with the same buffer cannot succeed.
+/// limit was exceeded and a retry with the same buffer cannot succeed. The
+/// format's expansion ceiling is 1032:1 (`§3.2.5`: 258 bytes per
+/// length/distance pair, two bits for the pair in a custom tree), so
+/// `source.len` is no guide to the decoded size.
 ///
 /// `dict` is the stream's preset dictionary or `null` (`§3.2.3`): the history
 /// in front of the output, which a distance can reach into. Raw deflate names

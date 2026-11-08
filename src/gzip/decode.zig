@@ -300,7 +300,9 @@ const Hooks = container.DecodeHooks(framing, Reader);
 /// than `target.len` bytes returns `error.BufferTooSmall` before the
 /// overflowing write. A caller enforcing a decoded-size limit sizes `target`
 /// from that limit, so the error means the limit was exceeded and a retry with
-/// the same buffer cannot succeed.
+/// the same buffer cannot succeed. The format's expansion ceiling is 1032:1
+/// (`§3.2.5`: 258 bytes per length/distance pair, two bits for the pair in a
+/// custom tree), so `source.len` is no guide to the decoded size.
 ///
 /// The header, the deflate body, and the trailer are all checked (see
 /// `DecompressError`). After an error the contents of `target` are
