@@ -124,6 +124,10 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
 
 ## Toolchain
 
+- Supported targets: x86_64-linux, aarch64-linux, and aarch64-macos. Every
+  other target (32-bit x86, wasm32, arm-linux, riscv64, s390x) is best effort
+  in CI only; no local recipe may require one, and a best-effort lane that
+  hangs costs nothing.
 - Two Zig versions, both supported: 0.17.0 is the default shell, 0.16.0 is
   `nix develop .#zig-old`. The tree builds, tests, and formats under both,
   and `minimum_zig_version` stays `"0.16.0"` until 0.16 is dropped. Read the
@@ -172,25 +176,23 @@ onto a nearly-full disk):
   with a memory cap.
 - `just test-be`: the unit tests on s390x under qemu-user, the only
   big-endian target, in ReleaseSafe (Debug under emulation outruns the
-  runner's timeout). A bool vector's element 0 lands on the integer's most
+  runner's timeout). CI runs it; it is not part of a local `just ci`. A bool vector's element 0 lands on the integer's most
   significant bit on 0.16 and its least significant on 0.17, and an
   array-to-vector bitcast follows the target's byte order on 0.16 only;
   `compat.zig` probes both, and this is the gate that sees a regression.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
-- `just ci`: everything CI runs: `just check`, `just test-be`, `just lint`,
-  `just check-baseline`, the bench harness check, and the docs build.
+- `just ci`: what a local run needs: `just check`, `just lint`,
+  `just check-baseline`, the bench harness check, and the docs build. It never
+  runs a target outside the support tier; CI adds the best-effort lanes.
 - `just lint`: `ziglint-0-16` over `.ziglint.zon` paths, `zig fmt --check`
   over `src/`, `build.zig`, `demo/`, `examples/`, `bench/`, and
   `docs/examples/`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
   `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
   before you call Zig work done.
 - `just fmt`: apply `zig fmt` to the same Zig paths.
-- `just check-baseline`: cross-target `zig build check` over x86_64, aarch64,
-  x86 (32-bit `usize`), and wasm32 (32-bit again). arm-linux and riscv64 are
-  not supported, so they are not built: the lanes hung on hosted runners for
-  hours without producing a log, and nothing here targets them. Freestanding
-  targets stay out because the testingx runner needs an OS.
+- `just check-baseline`: cross-target `zig build check` on the support tier
+  only, `x86_64-linux`, `aarch64-linux`, and `aarch64-macos`.
 - `just flate-oracle`: external-oracle conformance for flate — `python3
 zlib` raw, both directions (catches bit-packing bugs invisible to a
   self-round-trip; the layer is `scripts/flate_oracle.py`).

@@ -67,13 +67,12 @@ fmt:
     oxfmt README.md AGENTS.md docs/content
     just --fmt
 
-[doc("Compile-only cross-target gate: it catches 32-bit usize, shift, and overflow bugs and non-portable codegen. 32-bit x86 and wasm32 are the 32-bit targets; arm-linux and riscv64 are not supported and not built, and freestanding targets are excluded because the testingx runner needs an OS. It is not a supported-platform claim")]
+[doc("Compile-only gate on the support tier: x86_64-linux, aarch64-linux, and aarch64-macos. Every other target is best effort in CI only")]
 [group("test")]
 check-baseline:
     just check-target x86_64-linux
     just check-target aarch64-linux
-    just check-target x86-linux
-    just check-target wasm32-wasi
+    just check-target aarch64-macos
 
 [doc("Compile-only check for one target, such as `just check-target x86-linux`. CI runs one job per target")]
 [group("test")]
@@ -91,9 +90,9 @@ check-32:
 [group("ci")]
 check: test test-release-safe test-release-fast
 
-[doc("Everything CI runs: the gate, the big-endian tests, lint, the cross-target compile gate, and the docs build")]
+[doc("Everything a local run needs: the gate, lint, the support-tier compile gate, the bench harness, and the docs build. CI adds the best-effort lanes")]
 [group("ci")]
-ci: check test-be lint check-baseline bench-check doc
+ci: check lint check-baseline bench-check doc
 
 [private]
 api:

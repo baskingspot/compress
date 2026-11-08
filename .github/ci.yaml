@@ -1,6 +1,6 @@
-# First class: Linux on x86_64 and aarch64. A failure there fails CI.
-# Everything else is a stretch goal. Its jobs run and show, and a failure does
-# not fail CI: a break on a 32-bit target gets fixed after the fact.
+# The support tier is x86_64-linux, aarch64-linux, and aarch64-macos; a
+# failure there fails CI. Every other target is best effort: its job runs and
+# shows, and a break or a hung runner never blocks anything.
 jobs:
   - recipe: test
   # The compatibility lane: the previous Zig must compile and pass the whole
@@ -18,6 +18,10 @@ jobs:
   - recipe: check-target x86_64-linux
   - recipe: check-target aarch64-linux
   - recipe: check-target x86-linux
+    blocking: false
+  - recipe: check-target arm-linux
+    blocking: false
+  - recipe: check-target riscv64-linux
     blocking: false
   - recipe: check-target wasm32-wasi
     blocking: false
