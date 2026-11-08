@@ -167,9 +167,9 @@ onto a nearly-full disk):
   it on the default shell and on `zig-old`; run it under both compilers
   before you call a port done.
 - `just test-giant`: the over-4-GiB zstd scale test, which allocates about
-  4 GiB. Every other test recipe skips it; CI runs this one job, and a local
-  run needs the memory to spare (wrap it in `systemd-run --user --scope -p
-  MemoryMax=6G` on a busy box).
+  4 GiB. Every other test recipe skips it and CI runs it as its own job. A
+  local run needs the memory to spare: put it under a `systemd-run` scope
+  with a memory cap.
 - `just test-be`: the unit tests on s390x under qemu-user, the only
   big-endian target, in ReleaseSafe (Debug under emulation outruns the
   runner's timeout). A bool vector's element 0 lands on the integer's most
