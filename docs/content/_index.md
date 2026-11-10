@@ -25,7 +25,7 @@ This guide is the recipes. The [API reference](api/) has the contract for every 
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/compress/v0.2.0.tar.gz
+zig fetch --save https://baskingspot.dev/compress/v0.3.0.tar.gz
 ```
 
 Add the module to your build in `build.zig`:
@@ -35,7 +35,8 @@ const compress = b.dependency("compress", .{ .target = target, .optimize = optim
 exe.root_module.addImport("compress", compress.module("compress"));
 ```
 
-`compress` builds with Zig 0.16 only.
+`compress` builds with Zig 0.16 and 0.17, and `minimum_zig_version` is
+`0.16.0`, so either compiler resolves the same tree.
 
 ## Import it
 

@@ -5,6 +5,8 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
 ### Added
 
 - `brotli.decode.decompressBuffered` and `brotli.decode.Buffer`: the
@@ -29,6 +31,9 @@ All notable changes to compress are recorded here. The format follows
   `minimum_zig_version` stays `"0.16.0"`, so a consumer on either version
   resolves the same tree: the version-dependent builtins and type info go
   through a private shim module, and the public API is the same on both.
+- aarch64-macos is now in the support tier with x86_64-linux and
+  aarch64-linux: a failure on any of the three fails CI. Every other target
+  remains best effort.
 - `brotli` decodes meta-blocks with up to 256 trees in each category, the
   format's ceiling, where it refused more than 64 with `TooManyTrees`;
   brotli 1.2.0 writes up to 256 literal trees at q4 to q9 on inputs of a
@@ -72,6 +77,7 @@ All notable changes to compress are recorded here. The format follows
 
 ### Fixed
 
+- Zig packages retain `LICENSE` and `THIRD_PARTY.md` after extraction.
 - `zstd.encode` and `zstd.Writer` on big-endian targets took a match's
   length from the wrong end of a vector compare, so frames could decode to
   the wrong bytes (`WrongChecksum`) or differ from the reference encoder's;

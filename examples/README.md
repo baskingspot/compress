@@ -22,7 +22,7 @@ gzip, and zlib the pumps buffer on the stack and the tools allocate nothing.
 zstd's two directions call the `*Alloc` pumps instead — a 512-KiB-window
 Writer buffer and an 8 MiB-window Reader buffer are too large for a stack —
 which take them from the run's arena (`examples/zstd.zig`), and brotli's
-`Writer` and `Reader` buffers (8.7 MiB and 16.7 MiB) come from the arena the
+`Writer` and `Reader.DefaultBuffer` also come from the arena the
 same way (`examples/brotli.zig`).
 
 The stream format is the codec package's, not the example's. The snappy tool,

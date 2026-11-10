@@ -36,7 +36,7 @@ Not implemented:
 ## Install
 
 ```sh
-zig fetch --save https://baskingspot.dev/compress/v0.2.0.tar.gz
+zig fetch --save https://baskingspot.dev/compress/v0.3.0.tar.gz
 ```
 
 Add the module to your build:
@@ -54,7 +54,8 @@ const gzip = @import("compress").gzip;
 
 `std` has a `std.compress` of its own. In a file that uses both, bind this module as `compressx`.
 
-`compress` builds with Zig 0.16 only.
+`compress` builds with Zig 0.16 and 0.17, and `minimum_zig_version` is
+`0.16.0`, so either compiler resolves the same tree.
 
 ## Documentation
 
@@ -66,7 +67,8 @@ const gzip = @import("compress").gzip;
 ## Work on it
 
 ```sh
-nix develop   # Zig 0.16, zls, ziglint, zigdoc, and the rest
+nix develop           # Zig 0.17 (default), zls, ziglint, zigdoc, and the rest
+nix develop .#zig-old # Zig 0.16, the compatibility lane
 just ci       # unit tests, lint, and the cross-target compile gate
 just fuzz     # fuzz every codec's targets, 10M iterations each by default
 just bench    # local benchmarks
