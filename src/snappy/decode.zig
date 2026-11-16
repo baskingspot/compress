@@ -179,7 +179,7 @@ fn copyMatch(target: []u8, pos: usize, offset: usize, length: usize) void {
         }
         // Tail: the remaining (< 16) bytes are the leading bytes of the current
         // pattern window — `pattern[i]` is exactly the byte for this position.
-        // A vector cannot be indexed at run time (Zig 0.16), so coerce to an
+        // A vector cannot be indexed at run time, so coerce to an
         // array first.
         const pattern_bytes: [16]u8 = pattern;
         const tail = end - p;

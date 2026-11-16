@@ -5,6 +5,11 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- The package requires Zig 0.17.0: `minimum_zig_version` is `"0.17.0"`, and
+  the 0.16 support and its `nix develop .#zig-old` shell are gone.
+
 ## [0.3.0] - 2026-11-10
 
 ### Added

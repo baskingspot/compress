@@ -20,7 +20,7 @@ const fastmem = @import("fastmem");
 
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 const BitWriter = encode.BitWriter;
 const Code = encode.Code;
@@ -1206,7 +1206,7 @@ test "dynamic: the block dispatch picks the smallest form" {
     var w: BlockWriter = .empty;
     var tokens: TokenList = .empty;
     var out: [1024]u8 = undefined;
-    const input = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
+    const input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
 
     // Zero tokens: stored.
     var bw: BitWriter = .init(&out);
@@ -1248,13 +1248,13 @@ test "dynamic: BlockWriter.reset leaves what empty holds" {
     fastmem.set(u8, std.mem.asBytes(&w), 0xa5);
     w.reset();
     const e: BlockWriter = .empty;
-    const field_count = comptime compat.structFieldCount(BlockWriter);
+    const field_count = comptime @typeInfo(BlockWriter).@"struct".field_names.len;
     inline for (0..field_count) |i| {
-        const name = comptime compat.structFieldName(BlockWriter, i);
-        const FieldType = compat.StructFieldType(BlockWriter, i);
+        const name = comptime @typeInfo(BlockWriter).@"struct".field_names[i];
+        const field_type = @typeInfo(BlockWriter).@"struct".field_types[i];
         const got = @field(w, name);
         const want = @field(e, name);
-        if (@typeInfo(FieldType) == .@"struct") {
+        if (@typeInfo(field_type) == .@"struct") {
             try testing.expectEqualDeep(want.codes, got.codes);
             try testing.expectEqualDeep(want.bit_count, got.bit_count);
         } else try testing.expectEqualDeep(want, got);

@@ -19,8 +19,8 @@ const cli = @import("cli");
 const brotli = @import("compress").brotli;
 
 /// `s` repeated `n` times, for the expected payloads here. `examples/` is its
-/// own module root, so it cannot reach the library's private `compat.zig`;
-/// this is the same shape (`src/compat.zig` explains why it recurses).
+/// own module root, so it cannot reach the library's private `repeat.zig`;
+/// this is the same shape (`src/repeat.zig` explains why it recurses).
 fn repeated(comptime s: []const u8, comptime n: usize) *const [s.len * n]u8 {
     const bytes = comptime repeatedValue(s, n);
     return &bytes;

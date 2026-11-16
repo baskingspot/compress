@@ -25,7 +25,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 /// The caller-provided compression buffer: flate's `Writer.Buffer`,
 /// re-exported. 426,636 bytes: the window, one 65535-byte block plus 32 KiB of
 /// match history, and the scratch for emitting a block.
@@ -166,12 +166,12 @@ test "Writer: the emitted stream is the deterministic one" {
     defer out.deinit();
     var buf: Buffer = undefined;
     var w: Writer = .init(&out.writer, &buf, .{ .level = .@"6" });
-    try w.writer.writeAll(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
+    try w.writer.writeAll(repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
     try w.finish();
     try golden.expectHeader(out.written(), .@"6");
     try golden.expectTrailer(
         out.written(),
-        compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4),
+        repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4),
     );
 
     // The same input and level produce the same stream.
@@ -179,7 +179,7 @@ test "Writer: the emitted stream is the deterministic one" {
     defer second.deinit();
     var buf2: Buffer = undefined;
     var w2: Writer = .init(&second.writer, &buf2, .{ .level = .@"6" });
-    try w2.writer.writeAll(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
+    try w2.writer.writeAll(repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4));
     try w2.finish();
     try testing.expectEqualSlices(u8, out.written(), second.written());
 }
@@ -218,7 +218,7 @@ test "Writer: initInPlace starts a stream in a used writer's memory" {
     // Adler-32: a writer restarted in place over a finished one writes each
     // stream as a fresh `init` would, so as the one-shot encoder does.
     const gpa = testing.allocator;
-    const input = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3000);
+    const input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 3000);
     const cases = [_]encode.Options{
         .{ .level = .@"7", .dict = "the lazy dog", .strategy = .filtered },
         .{ .level = .@"6", .dict = null },
@@ -246,11 +246,11 @@ test "Writer: round-trips" {
     try roundTrip("");
     try roundTrip("a");
     try roundTrip("hello, zlib");
-    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
-    try roundTrip(compat.repeatString("a", (flate.encode.max_block_size - 1)));
-    try roundTrip(compat.repeatString("b", flate.encode.max_block_size));
-    try roundTrip(compat.repeatString("c", (flate.encode.max_block_size + 1)));
-    try roundTrip(compat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
+    try roundTrip(repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(repeat.repeatString("a", (flate.encode.max_block_size - 1)));
+    try roundTrip(repeat.repeatString("b", flate.encode.max_block_size));
+    try roundTrip(repeat.repeatString("c", (flate.encode.max_block_size + 1)));
+    try roundTrip(repeat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
 }
 
 test "Writer: incompressible input round-trips" {
@@ -344,7 +344,7 @@ test "Writer: a failed or finished writer never reports a false success" {
     var fixed_out: Io.Writer = .fixed(&small);
     var buf: Buffer = undefined;
     var w: Writer = .init(&fixed_out, &buf, .{});
-    try w.writer.writeAll(compat.repeatString("a", 4096));
+    try w.writer.writeAll(repeat.repeatString("a", 4096));
     try testing.expectError(error.WriteFailed, w.finish());
     try testing.expectError(error.WriteFailed, w.finish());
 
@@ -451,7 +451,7 @@ test "Writer: streamAll consumes its input exactly and writes one stream" {
     // The one-call pump: stack-buffered end to end, zero allocation, the
     // input consumed through its end, one stream on the output.
     const gpa = testing.allocator;
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 100);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 100);
     var in: Io.Reader = .fixed(source);
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -469,7 +469,7 @@ test "Writer: a dictionary stream's header is FDICT plus the DICTID" {
     // writes all six bytes before any compressed byte.
     const gpa = testing.allocator;
     const dict = "she sells seashells by the seashore\n";
-    const source = compat.repeatString("she sells seashells ", 4);
+    const source = repeat.repeatString("she sells seashells ", 4);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
@@ -523,8 +523,8 @@ test "Writer: a dictionary round-trips through the streaming layer" {
     // stream's distances reach into it, and the decoder reproduces the source
     // with the same bytes supplied.
     const gpa = testing.allocator;
-    const dict = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
+    const dict = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
 
     var out: Io.Writer.Allocating = .init(gpa);
     defer out.deinit();

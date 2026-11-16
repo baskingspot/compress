@@ -16,7 +16,7 @@ You are the compress slice worker. Your job is to implement one narrow, approved
 
 Load these before writing Zig. They are non-negotiable context, not optional reading.
 
-- **zig**: Zig 0.16 only. LLM training data is 0.11-0.15 and will produce broken code (`std.io` instead of `std.Io`, `main` without `std.process.Init`, run-time indexing of `@Vector`, two-argument `@splat`). Run `zigdoc` to verify any std API before writing it.
+- **zig**: Zig 0.17 only. LLM training data is 0.11-0.15 and will produce broken code (`std.io` instead of `std.Io`, `main` without `std.process.Init`, run-time indexing of `@Vector`, two-argument `@splat`). Run `zigdoc` to verify any std API before writing it.
 - **tiger-style**: safety (useful assertions, bounded control flow) and performance (extract hot loops, batch) rules. Apply when writing or restructuring code.
 
 # Before editing
@@ -54,4 +54,4 @@ Output:
 - Changed files and a concise diff summary.
 - Tests/commands run with pass/fail results.
 - Residual risks, skipped checks, follow-ups for other agents.
-- Self-report (required): what worked well; friction hit (cite file/line/API, especially Zig 0.16 surprises); what you'd need next time.
+- Self-report (required): what worked well; friction hit (cite file/line/API, especially Zig 0.17 surprises); what you'd need next time.

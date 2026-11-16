@@ -19,7 +19,7 @@ const assert = std.debug.assert;
 const fastmem = @import("fastmem");
 
 const huffman = @import("encode_huffman.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 /// The matcher: the q3 hasher, the greedy scan, and the command record.
 pub const match = @import("encode_match.zig");
 
@@ -1118,8 +1118,8 @@ test "round trip: shapes through the one-shot" {
         "",
         "A",
         "hello world",
-        compat.repeatString("the quick brown fox jumps over the lazy dog. ", 200),
-        compat.repeatString("\x5a", 3000),
+        repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 200),
+        repeat.repeatString("\x5a", 3000),
         "abcabcabcabcabcabc",
     };
     for (shapes) |shape| try roundTrip(shape);

@@ -20,7 +20,7 @@ const testing = std.testing;
 
 const bits = @import("bits.zig");
 const golden = @import("golden.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 /// §3.3 — the alphabet sizes. Distance alphabets are dynamic: 16 special
 /// codes, NDIRECT direct codes, and 48 code slots per NPOSTFIX bit (max 520
@@ -486,7 +486,7 @@ fn readComplexTree(
     var lens: [T.alphabet_size]u4 = @splat(0);
     var symbol: usize = 0;
     var code_space: i32 = 32768;
-    var repeat: u32 = 0;
+    var repeat_count: u32 = 0;
     var prev_len: u4 = 8; // "the previous length is taken to be 8"
     var repeat_len: u4 = 8; // the length a 16/17 run targets (0 = zeros)
     while (symbol < alphabet_size and code_space > 0) {
@@ -497,7 +497,7 @@ fn readComplexTree(
             break :blk cl_symbols[peeked];
         };
         if (code_len < 16) {
-            repeat = 0;
+            repeat_count = 0;
             lens[symbol] = @intCast(code_len);
             symbol += 1;
             if (code_len != 0) {
@@ -510,14 +510,14 @@ fn readComplexTree(
         const extra_bits: u3 = if (code_len == 16) 2 else 3;
         const target: u4 = if (code_len == 16) prev_len else 0;
         if (repeat_len != target) {
-            repeat = 0;
+            repeat_count = 0;
             repeat_len = target;
         }
         const delta: u32 = try br.take(extra_bits);
-        var count = repeat;
+        var count = repeat_count;
         if (count > 0) count = (count - 2) << extra_bits;
         count += delta + 3;
-        const added = count - repeat;
+        const added = count - repeat_count;
         if (symbol + added > alphabet_size) return error.BadHuffmanCode;
         if (target != 0) {
             for (lens[symbol..][0..added]) |*len| len.* = target;
@@ -525,7 +525,7 @@ fn readComplexTree(
             if (code_space < 0) return error.BadHuffmanCode;
         }
         symbol += added;
-        repeat = count;
+        repeat_count = count;
     }
     if (code_space != 0) return error.BadHuffmanCode;
     try tree.build(lens[0..alphabet_size]);
@@ -596,15 +596,15 @@ test "prefix codes: a set that is not a complete code is BadHuffmanCode" {
     var tree: LiteralTree = undefined;
     try testing.expectError(
         error.BadHuffmanCode,
-        tree.build(compat.repeatArray(u4, &[_]u4{1}, 200)),
+        tree.build(repeat.repeatArray(u4, &[_]u4{1}, 200)),
     );
     // Under-subscribed: three two-bit codes leave 24,576 of the 32,768
     // unassigned, so there is no table to build. The all-zero set is the
     // degenerate case.
-    try testing.expectError(error.BadHuffmanCode, tree.build(compat.repeatArray(u4, &[_]u4{2}, 3)));
+    try testing.expectError(error.BadHuffmanCode, tree.build(repeat.repeatArray(u4, &[_]u4{2}, 3)));
     try testing.expectError(
         error.BadHuffmanCode,
-        tree.build(compat.repeatArray(u4, &[_]u4{0}, 256)),
+        tree.build(repeat.repeatArray(u4, &[_]u4{0}, 256)),
     );
 }
 

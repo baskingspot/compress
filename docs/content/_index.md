@@ -7,7 +7,7 @@ Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brot
 One module, a namespace per codec, the same buffer discipline everywhere: the caller owns every buffer, the default APIs do not allocate, and every failure has a name. Streaming goes through `std.Io`. The encoders target the speed class — the zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3 — and the zstd decoder verifies what the C library does not.
 
 - [Codecs](#codecs): one namespace per format, and which of them are containers over `flate`.
-- [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.16, and what this package adds. gzip, zlib, and Snappy are missing from std entirely; zstd in std is decode-only.
+- [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.17, and what this package adds. gzip, zlib, and Snappy are missing from std entirely; zstd in std is decode-only.
 - [One-shot encode and decode](#one-shot-encode-and-decode): the same shape in every codec. Encode returns the compressed length, decode returns the decoded length, and both take caller-owned buffers.
 - [Size the buffers](#size-the-buffers): every encoder exports its exact worst case, and decode never writes past the length it returns.
 - [Streaming](#streaming): `Writer` and `Reader` over `std.Io`, with one-call pumps.
@@ -35,8 +35,7 @@ const compress = b.dependency("compress", .{ .target = target, .optimize = optim
 exe.root_module.addImport("compress", compress.module("compress"));
 ```
 
-`compress` builds with Zig 0.16 and 0.17, and `minimum_zig_version` is
-`0.16.0`, so either compiler resolves the same tree.
+`compress` builds with Zig 0.17, and `minimum_zig_version` is `0.17.0`.
 
 ## Import it
 
@@ -84,9 +83,9 @@ just test
 
 # Choose std or compress
 
-`std.compress` in Zig 0.16 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, Snappy, or Brotli at all.
+`std.compress` in Zig 0.17 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, Snappy, or Brotli at all.
 
-| Format  | std.compress 0.16 | this package                                                  |
+| Format  | std.compress 0.17 | this package                                                  |
 | ------- | ----------------- | ------------------------------------------------------------- |
 | DEFLATE | both directions   | both, one-shot and streaming, preset history                  |
 | gzip    | not present       | both, one-shot and streaming                                  |

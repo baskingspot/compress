@@ -46,7 +46,7 @@ const sentinel = internal.sentinel;
 const common = @import("common.zig");
 const readInt = common.readInt;
 const decode = @import("decode.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 /// The format's maximum backward match reach: 32768 (`§3.2.5`, the canonical
 /// constant in decode.zig with the distance tables). The finder's window is
 /// this much history followed by the block, so the cap is structural.
@@ -970,7 +970,7 @@ fn encodeTokens6(
     var s = block_start;
     const s_limit = block_end - input_margin_6;
     var cv = window.load64At(s);
-    var repeat: usize = 1;
+    var repeat_offset: usize = 1;
 
     scan: while (true) {
         var next_s = s;
@@ -1029,7 +1029,7 @@ fn encodeTokens6(
                     const next_candidate = finder.b_table[next_hash_l_next];
                     storeAhead(finder, next_hash_s_next, next_hash_l_next, next_s, base);
                     // The previous match's distance, checked at s+1.
-                    const t2 = s - repeat + 1;
+                    const t2 = s - repeat_offset + 1;
                     if (@as(u32, @truncate(cv >> 8)) == window.load32At(t2)) {
                         const ml = matchLen6(preset, window, s + 5, t2 + 4, block_end) + 4;
                         if (ml > l) {
@@ -1125,7 +1125,7 @@ fn encodeTokens6(
         }
         if (next_emit < s) tokens.addLiterals(window.sourceSlice(next_emit, s));
         tokens.addMatchLong(l, s - t);
-        repeat = s - t;
+        repeat_offset = s - t;
         s += l;
         next_emit = s;
         if (next_s >= s) s = next_s + 1;
@@ -1403,7 +1403,7 @@ pub fn compressBlockStream6(
 }
 
 /// The compression levels this encoder implements, named by the zlib scale.
-/// The tag is the level number, so `@intFromEnum` spells the CLI's value.
+/// The tag is the level number, so `@backingInt` spells the CLI's value.
 pub const Level = enum(u8) {
     /// Fixed-Huffman blocks from the level-1 match finder, or a stored block
     /// when that is smaller.
@@ -1586,11 +1586,11 @@ test "compress: options — every level round-trips and carries its tag" {
     // The levels are the zlib scale, and the tag is the number.
     var comp: [4096]u8 = undefined;
     var decoded: [4096]u8 = undefined;
-    const input = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
+    const input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
 
     try testing.expectEqual(Level.@"1", @as(Options, .{}).level);
-    try testing.expectEqual(@as(u8, 1), compat.enumToInt(Level.@"1"));
-    try testing.expectEqual(@as(u8, 6), compat.enumToInt(Level.@"6"));
+    try testing.expectEqual(@as(u8, 1), @backingInt(Level.@"1"));
+    try testing.expectEqual(@as(u8, 6), @backingInt(Level.@"6"));
     try testing.expectEqual(Level.@"1", Level.fromInt(1).?);
     try testing.expectEqual(Level.@"6", Level.fromInt(6).?);
     try testing.expectEqual(@as(?Level, null), Level.fromInt(2));
@@ -1610,7 +1610,7 @@ test "compress: level 6 emits a dynamic-Huffman block for compressible text" {
     // is smaller than level 1's for the same input, and its first block's
     // BTYPE is dynamic.
     const gpa = testing.allocator;
-    const input = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 400);
+    const input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 400);
     const dynamic_comp = try gpa.alloc(u8, maxCompressedLength(input.len));
     defer gpa.free(dynamic_comp);
     const dynamic_len = try compress(input, dynamic_comp, .{ .level = .@"6" });
@@ -1656,7 +1656,7 @@ test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
         },
         .{
             .name = "dynamic phrase",
-            .input = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4),
+            .input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4),
             .want = &[_]u8{
                 0x2a, 0xc9, 0x48, 0x55, 0x28, 0x2c, 0xcd, 0x4c, 0xce, 0x56,
                 0x48, 0x2a, 0xca, 0x2f, 0xcf, 0x53, 0x48, 0xcb, 0xaf, 0x50,
@@ -1667,7 +1667,7 @@ test "compress: level 6 emits klauspost's bytes (the pinned module version)" {
         },
         .{
             .name = "one distance code",
-            .input = compat.repeatString("\x5a", 300),
+            .input = repeat.repeatString("\x5a", 300),
             .want = &[_]u8{ 0x8a, 0x1a, 0x05, 0x44, 0x03, 0xc0, 0x00 },
         },
         .{
@@ -1703,9 +1703,9 @@ test "compress: level 6 with a preset dictionary emits klauspost's bytes" {
     // dictionary's tail before the first block, so the tables hold its
     // positions. These bytes come from their `NewWriterDict(w, 6, dict)`; the
     // oracle's dictionary parity rows re-derive them from the module.
-    const dict = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
-    const source = &((compat.repeatString("she sells seashells by the seashore\n", 6).*) ++
-        (compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3).*));
+    const dict = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
+    const source = &((repeat.repeatString("she sells seashells by the seashore\n", 6).*) ++
+        (repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 3).*));
     const want = &[_]u8{
         0x2a, 0xce, 0x48, 0x55, 0x28, 0x4e, 0xcd, 0xc9, 0x29, 0x56, 0x28, 0x4e,
         0x4d, 0x2c, 0xce, 0x00, 0xb3, 0x92, 0x2a, 0xc1, 0x66, 0x80, 0x05, 0xf2,
@@ -1836,7 +1836,7 @@ test "compress: the lazy levels match into a preset dictionary" {
     // The dictionary's positions are linked into the chains before the first
     // block, so a source that repeats the dictionary is one long match.
     const dict_text = "the quick brown fox jumps over the lazy dog, twice over. ";
-    const dict = compat.repeatString(dict_text, 4);
+    const dict = repeat.repeatString(dict_text, 4);
     const source = dict[0..200];
     var with: [512]u8 = undefined;
     var without: [512]u8 = undefined;
@@ -2212,7 +2212,7 @@ test "emit: flate-notes §3.2 stream 1 packing, byte-exact modulo BFINAL" {
     // bits — is byte-exact otherwise. The finder produces exactly these
     // tokens: one literal 'A', then a 20-byte match at distance 1.
     const allocator = testing.allocator;
-    const input = compat.repeatString(&[_]u8{'A'}, 21);
+    const input = repeat.repeatString(&[_]u8{'A'}, 21);
     const comp = try allocator.alloc(u8, maxCompressedLength(input.len));
     defer allocator.free(comp);
     const clen = try compress(input, comp, .{});
@@ -2242,7 +2242,7 @@ test "emit: flate-notes §3.2 stream 2 tokens pack the distance extra bits LSB-f
     try w.writeBits(1, 2); // BTYPE = 01, fixed
     var payload: u64 = 0;
     const limit: u64 = math.maxInt(u64);
-    const run = compat.repeatString(&[_]u8{'A'}, 70);
+    const run = repeat.repeatString(&[_]u8{'A'}, 70);
     try testing.expect(try emitLiterals(run, &w, &payload, limit));
     try testing.expect(try emitMatch(&w, 67, 3, &payload, limit));
     try w.writeCode(fixed_literal_codes[256]);
@@ -2312,8 +2312,8 @@ test "compress: a preset dictionary is matchable history" {
     // past it, so the match straddles the dictionary's end and the output's
     // start.
     const allocator = testing.allocator;
-    const dict = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
+    const dict = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 3);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 8);
     const comp = try allocator.alloc(u8, maxCompressedLength(source.len));
     defer allocator.free(comp);
     const plain = try allocator.alloc(u8, source.len + sentinel.len);

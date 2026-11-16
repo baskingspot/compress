@@ -34,7 +34,7 @@ const huff0 = @import("huff0.zig");
 const huff0_compress = @import("huff0_compress.zig");
 const literals = @import("literals.zig");
 const golden = @import("golden.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 /// Everything the literals encoder reports. Every Huffman bail-out
 /// (`huff0_compress.Error`) is handled inside `write` by falling back to the
@@ -75,8 +75,8 @@ pub const Repeat = enum { none, check, valid };
 /// `ZSTD_minLiteralsToCompress` (`zstd_compress_literals.c:114-127`): the
 /// fast strategy's floor is `8 << min(9 - strategy, 3)` = 64, and 6 when the
 /// previous tree is `HUF_repeat_valid` — which only dictionary loading sets.
-fn minLiteralsToCompress(repeat: Repeat) usize {
-    return if (repeat == .valid) 6 else 64;
+fn minLiteralsToCompress(reuse: Repeat) usize {
+    return if (reuse == .valid) 6 else 64;
 }
 
 /// `ZSTD_minGain` (`zstd_compress_internal.h:677-683`) at the fast levels:
@@ -167,10 +167,10 @@ pub fn write(
     // "Check validity of previous table" (`huf_compress.c:1371-1376`): a
     // `check`-state tree the block outgrew is dropped for this block — the
     // drop is this block's alone, since every bail below restores the state.
-    var repeat = state.repeat;
-    if (repeat == .check and !covers(&state.table.?, &histogram)) repeat = .none;
+    var reuse = state.repeat;
+    if (reuse == .check and !covers(&state.table.?, &histogram)) reuse = .none;
     // "Heuristic : use existing table for small inputs" (`:1378-1381`).
-    if (prefer_repeat and repeat != .none) {
+    if (prefer_repeat and reuse != .none) {
         return writeTreeless(&state.table.?, source, target);
     }
 
@@ -194,7 +194,7 @@ pub fn write(
     // covers the whole alphabet by construction, so the estimate alone
     // decides; a `check` tree already had to validate.
     var reused: ?*const huff0_compress.Table = null;
-    if (repeat != .none) {
+    if (reuse != .none) {
         const previous = &state.table.?;
         const previous_size = estimateSize(previous, &histogram);
         const new_size = estimateSize(&table, &histogram);
@@ -295,7 +295,7 @@ fn rawHeaderLength(source_len: usize) usize {
 /// Regenerated_Size. Size_Format 00 and 10 share the 1-byte form, 01 is the
 /// 12-bit form, 11 the 20-bit one.
 fn writeRawHeader(target: []u8, block_type: literals.BlockType, source_len: usize) void {
-    const type_bits: u32 = compat.enumToInt(block_type);
+    const type_bits: u32 = @backingInt(block_type);
     switch (target.len) {
         1 => target[0] = @intCast(type_bits + (source_len << 3)),
         2 => {
@@ -340,7 +340,7 @@ fn writeCompressedHeader(
         2 => 18,
         3 => 22,
     };
-    var header: u64 = compat.enumToInt(block_type) + (@as(u64, size_format) << 2);
+    var header: u64 = @backingInt(block_type) + (@as(u64, size_format) << 2);
     header |= @as(u64, @intCast(source_len)) << 4;
     header |= @as(u64, @intCast(body_len)) << shift;
     for (target, 0..) |*byte, index| {
@@ -436,7 +436,7 @@ test "write's ladder picks Raw, RLE, and Compressed at the C's thresholds" {
     for (&literals_64, 0..) |*byte, index| byte.* = if (index % 8 == 0) 7 else 0;
     try expectRoundTrip(&literals_64, .compressed);
     // One distinct byte, 100 literals: RLE.
-    const repeated = compat.repeatString(&[_]u8{0x41}, 100);
+    const repeated = repeat.repeatString(&[_]u8{0x41}, 100);
     try expectRoundTrip(repeated, .rle);
     // A two-byte input of one symbol: Raw, because the one content byte does
     // not beat minGain (the C's `cLitSize == 1` path).

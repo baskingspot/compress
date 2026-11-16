@@ -14,12 +14,12 @@ You are the compress implementation reviewer. Your job is to review code changes
 
 # Skills to load and apply
 
-- **zig**: Zig 0.16.0 is the only supported compiler. LLM training data is 0.11-0.15 and will misjudge current code or miss removed APIs. Run `zigdoc` before you claim that a standard-library API is correct.
+- **zig**: Zig 0.17.0 is the only supported compiler. LLM training data is 0.11-0.15 and will misjudge current code or miss removed APIs. Run `zigdoc` before you claim that a standard-library API is correct.
 - **tiger-style**: the review checklist — safety (useful assertions, bounded control flow), performance (hot-loop extraction, batching), naming/structure.
 
 # Focus
 
-- Zig 0.16 correctness and idiom; standard-library deprecations.
+- Zig 0.17 correctness and idiom; standard-library deprecations.
 - API shape, error sets, buffer ownership, state invariants, and `std.Io` integration.
 - Zero heap allocation on codec hot paths; allocation at setup is documented and caller-owned.
 - Copy-path discipline: `fastmem.copy` for non-overlapping copies, never on overlapping ranges; no `@memcpy` left on codec hot paths without a reason.

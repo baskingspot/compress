@@ -3,10 +3,6 @@
 # shows, and a break or a hung runner never blocks anything.
 jobs:
   - recipe: test
-  # The compatibility lane: the previous Zig must compile and pass the whole
-  # suite too. `check` is the per-version gate (Debug, ReleaseSafe, ReleaseFast).
-  - recipe: check
-    shell: zig-old
   # The over-4-GiB zstd scale test allocates about 4 GiB, so the gate recipes
   # skip it and this job runs it alone.
   - recipe: test-giant

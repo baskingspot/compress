@@ -88,8 +88,7 @@ fn addFixtures(b: *Build) *Build.Module {
         const len = decoder.decode(bytes, text) catch
             std.debug.panic("fixture {s} does not decode", .{fx.path});
         _ = wf.add(name, bytes[0..len]);
-        root_src = std.fmt.allocPrint(
-            b.allocator,
+        root_src = b.allocator.print(
             "{s}pub const {s} = @embedFile(\"{s}\");\n",
             .{ root_src, id, name },
         ) catch @panic("OOM");
@@ -97,16 +96,6 @@ fn addFixtures(b: *Build) *Build.Module {
     return b.createModule(.{
         .root_source_file = wf.add("root.zig", root_src),
     });
-}
-
-/// `b.args` (removed in Zig 0.17) and `Run.addPassthruArgs` are the same
-/// feature on either side of the split. Probe the build API, not the version.
-fn passthruArgs(b: *Build, run: *Build.Step.Run) void {
-    if (comptime @hasDecl(Build.Step.Run, "addPassthruArgs")) {
-        run.addPassthruArgs();
-    } else if (b.args) |args| {
-        run.addArgs(args);
-    }
 }
 
 pub fn build(b: *Build) void {
@@ -190,7 +179,7 @@ pub fn build(b: *Build) void {
         });
         const run = b.addRunArtifact(exe);
         run.has_side_effects = true;
-        passthruArgs(b, run);
+        run.addPassthruArgs();
         const step = b.step(
             comptimePrint("example-{s}", .{name}),
             comptimePrint("Run the {s} example CLI (encode|decode [FILE|-])", .{name}),
@@ -307,7 +296,7 @@ pub fn build(b: *Build) void {
     });
     const run_corpus = b.addRunArtifact(corpus_tool);
     run_corpus.has_side_effects = true;
-    passthruArgs(b, run_corpus);
+    run_corpus.addPassthruArgs();
     const corpus_step = b.step(
         "corpus",
         "Generate + verify the fleet corpus (bench/corpus-gen/)",
@@ -435,7 +424,7 @@ pub fn build(b: *Build) void {
                     .{ .name = "fastmem", .module = fastmem_mod },
                 },
             });
-            passthruArgs(b, run_bench);
+            run_bench.addPassthruArgs();
             bench_step.dependOn(&run_bench.step);
         }
     }

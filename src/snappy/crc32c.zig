@@ -4,18 +4,29 @@
 //! bytes of every data chunk (`framing_format.txt` §3). The polynomial is
 //! Castagnoli's, reflected, 0x82F63B78; the conditioning is the standard
 //! CRC-32 one (init 0xFFFFFFFF, final complement), so `crc32c(0, b)` equals
-//! `compat.Crc32Iscsi.hash(b)`. `mask` is the format's stored value.
+//! `std.hash.crc.@"CRC-32/ISCSI"`'s. `mask` is the format's stored value.
 //!
-//! std's bytewise `Crc32Iscsi` stays in the tests as the reference.
+//! std's bytewise CRC-32C stays in the tests as the reference.
 
 const std = @import("std");
 const mem = std.mem;
 const testing = std.testing;
 const assert = std.debug.assert;
-const Crc32Iscsi = compat.Crc32Iscsi;
+
+/// The catalogue's CRC-32/ISCSI entry in its generic form: `@"CRC-32/ISCSI"`
+/// resolves to std's SSE4.2 kernel on an x86_64 target with the CRC
+/// instruction, and that kernel is inline asm, which a comptime check cannot
+/// evaluate. The polynomial and flags are the entry's, in the bytewise Zig
+/// implementation. The tests are the only user.
+const Crc32Iscsi = std.hash.crc.Generic(u32, .{
+    .polynomial = 0x1edc6f41,
+    .initial = 0xffffffff,
+    .reflect_input = true,
+    .reflect_output = true,
+    .xor_output = 0xffffffff,
+});
 
 const common = @import("common.zig");
-const compat = @import("../compat.zig");
 
 /// The reflected Castagnoli polynomial (RFC 3720 §12.1's CRC-32C).
 const poly: u32 = 0x82F6_3B78;

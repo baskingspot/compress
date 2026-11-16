@@ -27,7 +27,7 @@ const print = std.debug.print;
 const fastmem = @import("fastmem");
 
 const flate = @import("../flate/root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 /// The caller-provided decode window: flate's `Reader.Buffer`, re-exported.
 /// 64 KiB (`[2 * history_len]u8`); the last 32 KiB of it is match history.
 pub const Buffer = flate.Reader.Buffer;
@@ -190,8 +190,8 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     // `Reader.Error` is the `DecompressError` set minus `BufferTooSmall` (the
     // decode window is fixed), plus the interface's `ReadFailed` and
     // `EndOfStream` and the contiguity cap's `StreamTooLong`.
-    const mine = compat.errorNames(Error);
-    for (compat.errorNames(decode.DecompressError)) |want| {
+    const mine = @typeInfo(Error).error_set.error_names.?;
+    for (@typeInfo(decode.DecompressError).error_set.error_names.?) |want| {
         if (mem.eql(u8, want, "BufferTooSmall")) continue;
         var found = false;
         for (mine) |entry| {
@@ -205,11 +205,11 @@ test "Reader: round-trips through Writer" {
     try roundTrip("");
     try roundTrip("a");
     try roundTrip("hello, zlib");
-    try roundTrip(compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
-    try roundTrip(compat.repeatString("a", (flate.encode.max_block_size - 1)));
-    try roundTrip(compat.repeatString("b", flate.encode.max_block_size));
-    try roundTrip(compat.repeatString("c", (flate.encode.max_block_size + 1)));
-    try roundTrip(compat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
+    try roundTrip(repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 1000));
+    try roundTrip(repeat.repeatString("a", (flate.encode.max_block_size - 1)));
+    try roundTrip(repeat.repeatString("b", flate.encode.max_block_size));
+    try roundTrip(repeat.repeatString("c", (flate.encode.max_block_size + 1)));
+    try roundTrip(repeat.repeatString("d", (3 * flate.encode.max_block_size + 17)));
 }
 
 test "Reader: multi-block inputs round-trip" {
@@ -438,7 +438,7 @@ test "Reader: a corrupt trailer fails at the clean end, stickily" {
     // `error.ReadFailed` with the detail in `err` (`§2.3`).
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &stream, .{});
 
     for (0..decode.trailer_len) |at| {
@@ -468,7 +468,7 @@ test "Reader: an over-the-end request still checks the trailer" {
 
     // A stream whose decoded size lands the window deep enough that a
     // 30-KiB request overflows the room at the consumer's position.
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 950);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 950);
     var stream: [encode.maxCompressedLength(source.len)]u8 = undefined;
     const len = try encode.compress(source, &stream, .{});
 
@@ -590,7 +590,7 @@ test "Reader: a chunked input refills across the header and the body" {
     // reach the decoder.
     const gpa = testing.allocator;
     var stream: [128]u8 = undefined;
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &stream, .{});
 
     var framed: [144]u8 = undefined;

@@ -19,7 +19,7 @@ const assert = std.debug.assert;
 const testing = std.testing;
 
 const internal = @import("../internal/root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 /// The block layer (`§3.1.1.2`): the Block_Header, the four Block_Types, and
 /// the per-block decode.
 pub const block = @import("block.zig");
@@ -80,7 +80,7 @@ comptime {
         "Truncated",
     };
     @setEvalBranchQuota(100_000);
-    const set = compat.errorNames(DecompressError);
+    const set = @typeInfo(DecompressError).error_set.error_names.?;
     assert(set.len == vocabulary.len);
     for (vocabulary) |name| {
         var found = false;
@@ -294,7 +294,7 @@ test "decompress decodes the CLI's multi-block checksummed frame" {
     // Frame_Content_Size = 135000), with the XXH64 trailer the C library
     // wrote. The decoded bytes are the input the CLI compressed, and the
     // trailer check is what makes this the end-to-end differential pin.
-    const expected = compat.repeatString(golden.frame_checksum_multi_text, 3000);
+    const expected = repeat.repeatString(golden.frame_checksum_multi_text, 3000);
     try expectDecode(&golden.frame_checksum_multi, expected);
     // The same frame with its trailer byte flipped: the decode succeeds byte
     // for byte and then returns `WrongChecksum`.
@@ -315,7 +315,7 @@ test "decompress reads the descriptor corners" {
     // RFC 8878 §3.1.1.1.1.1, Table 4 — every FCS_Field_Size; §3.1.1.1.1.2 —
     // Single_Segment_Flag's Window_Size = Frame_Content_Size; §3.1.1.1.1.3 —
     // the unused bit is never interpreted. The CLI decodes each of these.
-    const run = compat.repeatString(&[_]u8{'A'}, 300);
+    const run = repeat.repeatString(&[_]u8{'A'}, 300);
     try expectDecode(&golden.frame_fcs1, "01234567");
     try expectDecode(&golden.frame_fcs2, run);
     try expectDecode(&golden.frame_fcs2_single_segment, run);

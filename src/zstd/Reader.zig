@@ -38,7 +38,7 @@ const Dictionary = @import("Dictionary.zig");
 const frame = @import("frame.zig");
 const golden = @import("golden.zig");
 const xxh64 = @import("xxh64.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 /// The block staging room `Buffer(window_len)` adds on top of the serving
 /// region: one block's whole content, staged because both backwards
@@ -128,8 +128,8 @@ comptime {
     // layer up).
     @setEvalBranchQuota(100_000);
     const own = [_][]const u8{ "WindowTooLarge", "StreamTooLong", "ReadFailed", "EndOfStream" };
-    const frame_set = compat.errorNames(frame.Error);
-    const mine = compat.errorNames(Error);
+    const frame_set = @typeInfo(frame.Error).error_set.error_names.?;
+    const mine = @typeInfo(Error).error_set.error_names.?;
     assert(mine.len == frame_set.len - 1 + own.len);
     for (frame_set) |want| {
         var found = false;
@@ -897,8 +897,8 @@ test "Reader: the error set mirrors DecompressError minus BufferTooSmall" {
     // window is the caller's buffer, not a target cap), plus the interface's
     // `ReadFailed`/`EndOfStream` and this layer's `WindowTooLarge` and
     // `StreamTooLong`.
-    const mine = compat.errorNames(Error);
-    for (compat.errorNames(frame.Error)) |want| {
+    const mine = @typeInfo(Error).error_set.error_names.?;
+    for (@typeInfo(frame.Error).error_set.error_names.?) |want| {
         if (mem.eql(u8, want, "BufferTooSmall")) continue;
         var found = false;
         for (mine) |entry| {
@@ -1037,7 +1037,7 @@ test "Reader: the golden fixtures decode through the streaming layer" {
 
     // The CLI's own multi-block, checksummed, single-segment frame: 135000
     // bytes over two Compressed_Blocks with the XXH64 trailer (`§3.1.1`).
-    const expected = compat.repeatString(golden.frame_checksum_multi_text, 3000);
+    const expected = repeat.repeatString(golden.frame_checksum_multi_text, 3000);
     var big_in: Io.Reader = .fixed(&golden.frame_checksum_multi);
     var big: Reader = .init(fixture_buffer_len, &big_in, &rbuf, null);
     const n = try decodeInto(&big, &target);
@@ -1912,7 +1912,7 @@ test "Reader: a chunked input refills across the header and a block" {
     defer gpa.free(out);
     try testing.expectEqual(135000, out.len);
     try testing.expectEqualStrings(
-        compat.repeatString(golden.frame_checksum_multi_text, 3000),
+        repeat.repeatString(golden.frame_checksum_multi_text, 3000),
         out,
     );
     try testing.expectEqual(@as(?Error, null), r.err);
@@ -1937,7 +1937,7 @@ test "Reader: a zero-length poll does not fail the stream" {
     const got = try r.reader.allocRemaining(gpa, .unlimited);
     defer gpa.free(got);
     try testing.expectEqualStrings(
-        compat.repeatString(golden.frame_checksum_multi_text, 3000),
+        repeat.repeatString(golden.frame_checksum_multi_text, 3000),
         got,
     );
 }
@@ -1950,7 +1950,7 @@ test "Reader: random consumer machinery sequences stay correct" {
     // driver's positions exercise the slide.
     var rng: DefaultPrng = .init(4242);
     const rand = rng.random();
-    const input = compat.repeatString(golden.frame_checksum_multi_text, 3000);
+    const input = repeat.repeatString(golden.frame_checksum_multi_text, 3000);
     var rbuf: Buffer(135000) = undefined;
 
     var iter: usize = 0;

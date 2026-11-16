@@ -4,24 +4,24 @@
 //! The CRC-32 is the one RFC 1952 §2.3.1 specifies: ISO 3309, reflected
 //! polynomial 0xEDB88320, with pre- and post-conditioning (§8 is the RFC's
 //! sample code). `crc32(crc, bytes)` is the whole interface: the conditioning
-//! is inside, so `crc32(0, bytes)` equals `compat.Crc32.hash(bytes)` and
-//! an empty input returns `crc` unchanged. `Checksum` holds the raw running
+//! is inside, so `crc32(0, bytes)` equals std's `@"CRC-32/ISO-HDLC"`, and an
+//! empty input returns `crc` unchanged. `Checksum` holds the raw running
 //! CRC and the byte count mod 2^32 (the trailer's ISIZE). The container folds
 //! it through flate's checksum hook as bytes cross the codec boundary, so
 //! each payload byte is hashed once, in stream order, with no copy and no
 //! second pass. Any faster kernel can replace the one here behind `crc32` and
 //! `Checksum`.
 //!
-//! std's `Crc32` stays in the tests as the reference.
+//! std's CRC-32 stays in the tests as the reference.
 
 const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
-const Crc32 = compat.Crc32;
+const std_crc32 = std.hash.crc.@"CRC-32/ISO-HDLC";
 
 const flate = @import("../flate/root.zig");
 const common = @import("common.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 const readInt = common.readInt;
 
 /// The reflected polynomial (§2.3.1's ISO 3309 CRC-32), bit-reversed for the
@@ -58,11 +58,11 @@ const tables: [slice_count][256]u32 = blk: {
 // The table construction and the fold are pinned at comptime against the
 // check value (RFC 1952 §8). The 17-byte pin crosses one full slice plus a
 // one-byte tail: `crc32("123456789")` is 9 bytes, so the comparison with
-// std's `Crc32` is what exercises the sliced path.
+// std's CRC-32 is what exercises the sliced path.
 comptime {
     assert(tables[0][0x01] == 0x7707_3096);
     assert(crc32(0, "123456789") == 0xCBF4_3926);
-    assert(crc32(0, "123456789ABCDEFGH") == Crc32.hash("123456789ABCDEFGH"));
+    assert(crc32(0, "123456789ABCDEFGH") == std_crc32.hash("123456789ABCDEFGH"));
 }
 
 // Why sixteen slices: a bytewise table lookup's address depends on the
@@ -74,7 +74,7 @@ comptime {
 
 /// Fold `bytes` into the raw running state (the complemented-running
 /// convention: the state starts at `0xffff_ffff` and `final()` complements
-/// it). Exactly the state transition of std's bytewise `Crc32.update`,
+/// it). Exactly the state transition of std's bytewise CRC-32 `update`,
 /// sixteen bytes per step; the tail under sixteen bytes steps bytewise.
 fn foldRaw(raw: u32, bytes: []const u8) u32 {
     var crc = raw;
@@ -150,8 +150,8 @@ pub const Checksum = struct {
 
 /// Continue a CRC-32: returns the digest of the bytes `crc` summarizes (a
 /// previous result, or 0 to start) followed by `bytes`. `crc32(0, b)` equals
-/// std's `Crc32.hash(b)`, and `crc32(crc, "")` is `crc`. The header parser uses
-/// it for FHCRC.
+/// std's `hash(b)`, and `crc32(crc, "")` is `crc`. The header parser uses it
+/// for FHCRC.
 pub fn crc32(crc: u32, bytes: []const u8) u32 {
     // The digest is the complemented raw state, so the raw state behind a
     // digest `d` is `d ^ 0xffff_ffff` — complement in, fold, complement out.
@@ -160,7 +160,7 @@ pub fn crc32(crc: u32, bytes: []const u8) u32 {
 
 // ---------------------------------------------------------------------------
 // Tests. Spec: docs/specs/rfc1952-gzip.txt §8 (the sample table and
-// update), §2.3.1 (the trailer value). std's `Crc32` is the reference for the
+// update), §2.3.1 (the trailer value). std's CRC-32 is the reference for the
 // slice-by-16 kernel.
 // ---------------------------------------------------------------------------
 
@@ -168,7 +168,7 @@ test "crc32: the standard check value" {
     // RFC 1952 §8 — the bytewise reflected table over the polynomial
     // 0xEDB88320. The check value every CRC-32 description pins:
     // crc32("123456789") = 0xCBF43926.
-    try testing.expectEqual(@as(u32, 0xCBF43926), Crc32.hash("123456789"));
+    try testing.expectEqual(@as(u32, 0xCBF43926), std_crc32.hash("123456789"));
     try testing.expectEqual(@as(u32, 0xCBF43926), crc32(0, "123456789"));
 }
 
@@ -176,7 +176,7 @@ test "crc32: the golang/go gzip golden trailer" {
     // RFC 1952 §2.3.1 — the CRC-32 of the uncompressed data. Go's gzip
     // golden "hello.txt" carries the little-endian bytes `2d 3b 08 af` for
     // "hello world\n" (`gunzip_test.go`); read back, the value is 0xAF083B2D.
-    try testing.expectEqual(@as(u32, 0xAF083B2D), Crc32.hash("hello world\n"));
+    try testing.expectEqual(@as(u32, 0xAF083B2D), std_crc32.hash("hello world\n"));
     try testing.expectEqual(@as(u32, 0xAF083B2D), crc32(0, "hello world\n"));
 }
 
@@ -192,8 +192,8 @@ test "crc32: incremental runs equal one pass" {
     // The streaming layers fold runs as bytes cross the codec boundary: the
     // digest must be independent of where the runs are cut, including cuts
     // inside a sixteen-byte slice.
-    const bytes = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 20);
-    const whole = Crc32.hash(bytes);
+    const bytes = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 20);
+    const whole = std_crc32.hash(bytes);
     try testing.expectEqual(whole, crc32(0, bytes));
     var split: Checksum = .init;
     const hook = split.hook();
@@ -213,16 +213,16 @@ test "crc32: slice-by-16 agrees with std over a length sweep" {
     var rng: std.Random.DefaultPrng = .init(0x5EED);
     rng.random().bytes(&bytes);
     for (0..bytes.len + 1) |len| {
-        try testing.expectEqual(Crc32.hash(bytes[0..len]), crc32(0, bytes[0..len]));
+        try testing.expectEqual(std_crc32.hash(bytes[0..len]), crc32(0, bytes[0..len]));
     }
 }
 
 test "crc32: a long fold agrees with std" {
     // Well past one slice: the length the one-shot paths fold in a call.
-    const bytes = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 1024);
-    try testing.expectEqual(Crc32.hash(bytes), crc32(0, bytes));
+    const bytes = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 1024);
+    try testing.expectEqual(std_crc32.hash(bytes), crc32(0, bytes));
     try testing.expectEqual(
-        Crc32.hash(bytes),
+        std_crc32.hash(bytes),
         crc32(crc32(0, bytes[0..1000]), bytes[1000..]),
     );
 }

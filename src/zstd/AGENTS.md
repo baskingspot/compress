@@ -897,9 +897,10 @@ the record of what the divergence was.
 - **CPython 3.14 `compression.zstd`** (libzstd): `ZstdDecompressor` over
   concatenated frames leaves the next frame in `unused_data`, the exact-boundary
   check.
-- **`std.compress.zstd`** (0.16.0) is a second opinion and a divergence pin, not a
-  fixture source: it ships no tests or testdata. `std.hash.XxHash64` is the
-  differential oracle for `xxh64.zig` (zstd-notes §3).
+- **`std.compress.zstd`**, as of 0.16.0 (the divergence pin's version), is a
+  second opinion, not a fixture source: it ships no tests or testdata.
+  `std.hash.XxHash64` is the differential oracle for `xxh64.zig`
+  (zstd-notes §3).
 - **klauspost/compress zstd v1.18.0-5** (`DecodeAll`, from a scratch Go module) is
   the third opinion. Divergence: T6.
 - **The encoder's oracle set.** The CLI is the encoder oracle too: `zstd -1 -q

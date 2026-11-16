@@ -30,7 +30,7 @@ The generated entries apply them, and a codec's own `pump`, `rebase`,
 `emitBlock`, and framing code must keep them. Each is pinned by regression
 tests in the codecs' `Reader.zig` and `Writer.zig`, and a new codec copies them.
 "Fixed in" names the commit. std cites are line numbers in `std/Io/Reader.zig`
-and `std/Io/Writer.zig` of Zig 0.16.0 (`zig env` prints `std_dir`); re-check
+and `std/Io/Writer.zig` of Zig 0.17.0 (`zig env` prints `std_dir`); re-check
 them on a toolchain bump.
 
 ### Fill and return 0, never the bytes-added count
@@ -53,7 +53,7 @@ std: `Reader.zig:168-177`. Fixed in flate (8057598) and snappy (5c5eb16).
 ### Sticky lifecycle: clean end, sticky failure, detail in `err`
 
 - The interface has two coarse errors, `ReadFailed` and `EndOfStream`. std
-  leaves the detail to the implementation (`Reader.zig:111-116`), so it goes in
+  leaves the detail to the implementation (`Reader.zig:112-116`), so it goes in
   the codec's `err`, set once and never cleared.
 - Every entry opens with `guard`: `failed` reports `ReadFailed`, `done` reports
   `EndOfStream`. `done` is set only when the input ends cleanly at a stream
@@ -71,7 +71,7 @@ with `err == .StreamTooLong`: the request is the consumer's, not a codec bug.
 std's own `rebase` asserts here, and the codecs deliberately do not. Left as an
 assert it panics in Debug and segfaulted in ReleaseFast (caeaae9), and a
 hand-written `rebase` assert hid the same class (a812b4f). std:
-`Reader.zig:89-92`, `:1132-1136`, `:1402-1409`.
+`Reader.zig:89-92`, `:1125-1126`, `:1423-1439`.
 
 ### A wrapper's rebase routes the inner end through the same ending as fill
 
@@ -106,7 +106,7 @@ preserved tail, then leaves the tail as the buffered block. Discarding drops
 input silently, and `writeAll`-based tests never reach this path (`File.Reader`
 simple-mode streaming does). `emitBlock(host, len)` owns the slide, and the
 generated `rebase` owns the keep computation, the emit length, and the
-postconditions. std: `Writer.zig:82-88`, `:397-418`. Fixed in ea2a581.
+postconditions. std: `Writer.zig:82-88`, `:411-439`. Fixed in ea2a581.
 
 ### Drain tops up before emitting: maximal blocks, not caller chunking
 
@@ -114,7 +114,7 @@ postconditions. std: `Writer.zig:82-88`, `:397-418`. Fixed in ea2a581.
 space from the front of `data` (the last slice repeated `splat` times), then
 emits the full block, and the caller re-slices and calls again. Emitting before
 topping up splits blocks at the caller's write boundaries instead of the
-codec's block size. std: `Writer.zig:21-25`, `:183-186`. Fixed in caeaae9.
+codec's block size. std: `Writer.zig:24-26`, `:183-186`. Fixed in caeaae9.
 
 ### Poison checks: finish after failure never reports false success
 
@@ -123,7 +123,7 @@ writing the stream ending, then poisons it (`Writer.failing`). A failed or
 finished writer returns `error.WriteFailed`, never a false success on a
 truncated stream. The check compares the address of the generated `vtable`, so
 `init` must store `&Hooks.vtable`, never a copy of its value. std:
-`Writer.zig:43-45`, `:124-125`, `:140-148`. Fixed in caeaae9.
+`Writer.zig:43-45`, `:124-125`, `:140-147`. Fixed in caeaae9.
 
 ## Testing
 

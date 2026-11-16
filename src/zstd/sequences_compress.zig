@@ -37,7 +37,6 @@ const fse = @import("fse.zig");
 const fse_compress = @import("fse_compress.zig");
 const golden = @import("golden.zig");
 const sequences = @import("sequences.zig");
-const compat = @import("../compat.zig");
 
 /// Everything the sequences encoder reports.
 pub const Error = error{
@@ -155,7 +154,7 @@ pub const Resolved = union(enum) {
 /// zero-bit cell.
 fn machineOf(resolved: Resolved, alphabet: Alphabet) ?*const fse_compress.Table {
     return switch (resolved) {
-        .predefined => &predefined_tables[compat.enumToInt(alphabet)],
+        .predefined => &predefined_tables[@backingInt(alphabet)],
         .rle => null,
         .fse => |table| table,
     };
@@ -246,7 +245,7 @@ const alphabet_specs = [alphabet_count]AlphabetSpec{
 };
 
 fn specOf(alphabet: Alphabet) AlphabetSpec {
-    return alphabet_specs[compat.enumToInt(alphabet)];
+    return alphabet_specs[@backingInt(alphabet)];
 }
 
 /// The C's `LL_deltaCode` (`zstd_compress_internal.h:1010`): the code a
@@ -364,9 +363,9 @@ fn countStats(source: []const Sequence) [alphabet_count]Stats {
     var stats: [alphabet_count]Stats = @splat(.{});
     for (source) |sequence| {
         const codes = codesOf(sequence);
-        stats[compat.enumToInt(Alphabet.literals_lengths)].add(codes.literals_lengths);
-        stats[compat.enumToInt(Alphabet.offsets)].add(codes.offsets);
-        stats[compat.enumToInt(Alphabet.match_lengths)].add(codes.match_lengths);
+        stats[@backingInt(Alphabet.literals_lengths)].add(codes.literals_lengths);
+        stats[@backingInt(Alphabet.offsets)].add(codes.offsets);
+        stats[@backingInt(Alphabet.match_lengths)].add(codes.match_lengths);
     }
     for (&stats) |*stats_one| stats_one.finish();
     return stats;
@@ -389,22 +388,22 @@ pub fn write(target: []u8, source: []const Sequence, state: *State) Error!usize 
     const stats = countStats(source);
     var modes: [alphabet_count]sequences.Mode = undefined;
     for (description_order) |alphabet| {
-        const index = compat.enumToInt(alphabet);
+        const index = @backingInt(alphabet);
         modes[index] = selectMode(alphabet, &stats[index], @intCast(source.len), state);
     }
     // The modes byte: "bits 7-6 Literal_Lengths_Mode, 5-4 Offsets_Mode, 3-2
     // Match_Lengths_Mode, 1-0 Reserved", and "The last field, Reserved, must
     // be all zeroes".
     if (cursor >= target.len) return error.BufferTooSmall;
-    const literals_mode: u8 = compat.enumToInt(modes[compat.enumToInt(Alphabet.literals_lengths)]);
-    const offsets_mode: u8 = compat.enumToInt(modes[compat.enumToInt(Alphabet.offsets)]);
-    const match_mode: u8 = compat.enumToInt(modes[compat.enumToInt(Alphabet.match_lengths)]);
+    const literals_mode: u8 = @backingInt(modes[@backingInt(Alphabet.literals_lengths)]);
+    const offsets_mode: u8 = @backingInt(modes[@backingInt(Alphabet.offsets)]);
+    const match_mode: u8 = @backingInt(modes[@backingInt(Alphabet.match_lengths)]);
     target[cursor] = (literals_mode << 6) | (offsets_mode << 4) | (match_mode << 2);
     cursor += 1;
 
     var resolved: std.EnumArray(Alphabet, Resolved) = .initUndefined();
     for (description_order) |alphabet| {
-        const index = compat.enumToInt(alphabet);
+        const index = @backingInt(alphabet);
         cursor += try writeTable(
             target[cursor..],
             alphabet,
@@ -591,7 +590,7 @@ fn writeBitstream(
         // no state at all.
         const last_codes = codesOf(source[last]);
         for (description_order) |alphabet| {
-            const index = compat.enumToInt(alphabet);
+            const index = @backingInt(alphabet);
             const table = machineOf(resolved.get(alphabet), alphabet) orelse continue;
             states[index] = table.initState(codeOf(alphabet, last_codes));
         }
@@ -617,7 +616,7 @@ fn writeBitstream(
         };
         try accumulator.flush(target, &written);
         inline for (transition_order) |alphabet| {
-            const state_index = compat.enumToInt(alphabet);
+            const state_index = @backingInt(alphabet);
             const code = codeOf(alphabet, codes);
             switch (resolved.get(alphabet)) {
                 .rle => |symbol| assert(code == symbol),
@@ -642,7 +641,7 @@ fn writeBitstream(
     }
     // `FSE_flushCState` in the C's order: ML, OF, LL.
     for (flush_order) |alphabet| {
-        const flush_index = compat.enumToInt(alphabet);
+        const flush_index = @backingInt(alphabet);
         if (machineOf(resolved.get(alphabet), alphabet)) |table| {
             try accumulator.add(target, &written, states[flush_index], table.norm.accuracy_log);
         }
@@ -1043,14 +1042,14 @@ fn decodePredefinedSequences(section: []const u8) !DecodedSequences {
     var reader = try bits.BackwardReader.init(section[header.count_len + 1 ..]);
     var states: [alphabet_count]u16 = undefined;
     for (description_order) |alphabet| {
-        const index = compat.enumToInt(alphabet);
+        const index = @backingInt(alphabet);
         states[index] = reader.readBits(tables[index].log);
     }
     while (result.count < header.sequence_count) : (result.count += 1) {
         // The decoder's read order: offset, match length, literals length.
-        const offset_index = compat.enumToInt(Alphabet.offsets);
-        const match_index = compat.enumToInt(Alphabet.match_lengths);
-        const literal_index = compat.enumToInt(Alphabet.literals_lengths);
+        const offset_index = @backingInt(Alphabet.offsets);
+        const match_index = @backingInt(Alphabet.match_lengths);
+        const literal_index = @backingInt(Alphabet.literals_lengths);
         const offset_cell = tables[offset_index].entry(states[offset_index]);
         const match_cell = tables[match_index].entry(states[match_index]);
         const literal_cell = tables[literal_index].entry(states[literal_index]);
@@ -1069,11 +1068,11 @@ fn decodePredefinedSequences(section: []const u8) !DecodedSequences {
             .offset_value = offset_value,
         };
         if (result.count + 1 < header.sequence_count) {
-            states[compat.enumToInt(Alphabet.literals_lengths)] =
+            states[@backingInt(Alphabet.literals_lengths)] =
                 literal_cell.baseline + reader.readBits(literal_cell.num_bits);
-            states[compat.enumToInt(Alphabet.match_lengths)] =
+            states[@backingInt(Alphabet.match_lengths)] =
                 match_cell.baseline + reader.readBits(match_cell.num_bits);
-            states[compat.enumToInt(Alphabet.offsets)] =
+            states[@backingInt(Alphabet.offsets)] =
                 offset_cell.baseline + reader.readBits(offset_cell.num_bits);
         }
     }

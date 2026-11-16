@@ -20,14 +20,12 @@ parallel codecs (pgzip-style), dictionary training, s2 extensions, xz/lzma
 
 ## Facts that the plan uses
 
-- Zig 0.16.0 is the only toolchain. The flake pins it. Zig 0.17.0 (released
-  2026-10-02) ships LLVM 22.1.8 with the loop vectorization pass disabled, a
-  workaround for an LLVM 22 miscompilation (LLVM issue 186922; the pass returns
-  in 0.18 with LLVM 23). `std.simd` in 0.17.0 is the 0.16.0 file modulo
-  cosmetic changes. 0.16 keeps the auto-vectorizer and the std.simd toolbox
-  (`interlace`, `deinterlace`, `extract`, `mergeShift`, `prefixScan`,
-  `suggestVectorLengthForCpu`).
-- std.compress 0.16 ships flate (Compress/Decompress), zstd, lzma, lzma2, and
+- Zig 0.17.0 is the only toolchain. The flake pins it. It ships LLVM 22.1.8
+  with the loop vectorization pass disabled, a workaround for an LLVM 22
+  miscompilation (LLVM issue 186922; the pass returns in 0.18 with LLVM 23).
+  `std.simd` keeps the toolbox (`interlace`, `deinterlace`, `extract`,
+  `mergeShift`, `prefixScan`, `suggestVectorLengthForCpu`).
+- std.compress 0.17 ships flate (Compress/Decompress), zstd, lzma, lzma2, and
   xz. It ships no snappy, lzw, gzip, or zlib container. Those are ours.
 - klauspost/compress covers zstd, s2, flate (with gzip/zlib/zip containers),
   snappy, lzw, huff0, fse, and xpress. License: BSD-3-Clause.
@@ -39,10 +37,10 @@ parallel codecs (pgzip-style), dictionary training, s2 extensions, xz/lzma
 - fastmem (same author, MIT) is the blessed copy primitive. Its inline layer
   has no loops, and large sizes call its own `no_builtin` kernels, so
   consumer-side inlining cannot idiom-match back into a `memcpy` call.
-- Zig 0.16 removed run-time indexing of `@Vector` values, and `@splat` is
+- Zig removed run-time indexing of `@Vector` values, and `@splat` is
   single-argument. `std.Io` is the reader/writer interface; `main` takes
   `std.process.Init`.
-- Zig 0.16 fuzz mode takes an iteration budget (`--fuzz=10M`). Debug fuzz hits
+- Fuzz mode takes an iteration budget (`--fuzz=10M`). Debug fuzz hits
   ziglang/zig#30655, so fuzz runs use ReleaseSafe.
 
 ## Scope and build order
@@ -430,8 +428,7 @@ gap (1.04-2.39x, worst on the Intel targets).
 
 ## Decisions made
 
-- Zig 0.16.0 only (2026-10-08). Revisit at 0.18: LLVM 23 restores loop
-  vectorization.
+- Zig 0.17.0 only. Revisit at 0.18: LLVM 23 restores loop vectorization.
 - Codec order as in Scope.
 - fastmem is a direct dependency and the blessed copy primitive on codec hot
   paths (2026-10-08).

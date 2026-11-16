@@ -19,7 +19,7 @@ const testing = std.testing;
 
 const print = std.debug.print;
 const internal = @import("../internal/root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 const sentinel = internal.sentinel;
 const container = internal.container;
 /// Read exactly `target.len` bytes from `input` and consume them, refilling
@@ -322,7 +322,7 @@ test "decode: a corrupt body fails with flate's detail" {
     // body is flate's rules unchanged, and its failures are the module's own
     // (`Truncated`, `InvalidBlockType`, ...).
     var stream: [256]u8 = undefined;
-    const source = compat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
+    const source = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 4);
     const len = try encode.compress(source, &stream, .{});
     // BTYPE=11 (reserved, `rfc1951-deflate.txt §3.2.3`) in the first body
     // byte: the body's first three bits are BFINAL, BTYPE.
@@ -342,7 +342,7 @@ test "decode: a bomb stream is capped, never an overrun" {
     // A stream that does not fit is `BufferTooSmall`; the bytes past the cap
     // are untouched.
     var stream: [512]u8 = undefined;
-    const source = compat.repeatString("A", 4096);
+    const source = repeat.repeatString("A", 4096);
     const len = try encode.compress(source, &stream, .{});
     try testing.expect(len < stream.len);
 

@@ -750,10 +750,10 @@ helpers. Its pure pieces are extracted. The encoder carries no Tracy zones
 ## Testing
 
 - **The day-one goldens are the RFC's own check values.** Appendix C defines
-  CRC-32, `std.hash.crc.Crc32` is that function (verified on the spec's own
-  values), and the vendored RFC text *is* the fixture: no binary vendoring, no
-  network. The port's first tests are the five CRCs above plus the
-  transformed-word bound.
+  CRC-32, `std.hash.crc.@"CRC-32/ISO-HDLC"` is that function (verified on the
+  spec's own values), and the vendored RFC text *is* the fixture: no binary
+  vendoring, no network. The port's first tests are the five CRCs above plus
+  the transformed-word bound.
 - **The hand-built streams** (`brotli-notes.md` §7.3) pin the wire: `hand.br`
   exercises every header field and both zero-length-code cases in nine bytes;
   the unordered-symbol and ALPHABET_BITS pairs pin §3.4's construction and

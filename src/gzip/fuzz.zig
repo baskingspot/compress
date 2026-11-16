@@ -25,7 +25,7 @@ const testing = std.testing;
 const Smith = testing.Smith;
 const math = std.math;
 const mem = std.mem;
-const Crc32 = compat.Crc32;
+const std_crc32 = std.hash.crc.@"CRC-32/ISO-HDLC";
 
 const fastmem = @import("fastmem");
 
@@ -36,7 +36,7 @@ const common = @import("common.zig");
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const gzip = @import("root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -189,7 +189,7 @@ fn shapeSeed(
 ) [24 + content.len]u8 {
     var seed: [24 + content.len]u8 = undefined;
     mem.writeInt(u64, seed[0..8], level, .little);
-    mem.writeInt(u64, seed[8..16], compat.enumToInt(shape), .little);
+    mem.writeInt(u64, seed[8..16], @backingInt(shape), .little);
     mem.writeInt(u64, seed[16..24], len, .little);
     for (content, 0..) |b, i| seed[24 + i] = b;
     return seed;
@@ -307,7 +307,7 @@ fn expectGzipTrailer(member: []const u8, source: []const u8) !void {
     try testing.expect(member.len >= trailer_len);
     const trailer = member[member.len - trailer_len ..];
     try testing.expectEqual(
-        Crc32.hash(source),
+        std_crc32.hash(source),
         readInt(u32, trailer[0..4]),
     );
     try testing.expectEqual(
@@ -680,7 +680,7 @@ fn checkReader(mutated: []const u8, source: []const u8, meta: Mutated) !void {
             try testing.expect(fixed_in.seek >= trailer_len);
             const trailer = mutated[fixed_in.seek - trailer_len .. fixed_in.seek];
             try testing.expectEqual(
-                Crc32.hash(got[0..served]),
+                std_crc32.hash(got[0..served]),
                 readInt(u32, trailer[0..4]),
             );
             try testing.expectEqual(
@@ -772,7 +772,7 @@ test "gzip fuzz: header and trailer corruption" {
 /// Seeds for target 3: a repeated phrase the encoder turns into matches, and
 /// an empty payload (the header-before-nothing path).
 const stream_corpus: []const []const u8 = &.{
-    &sliceSeed(0, compat.repeatString("the quick brown fox ", 8)),
+    &sliceSeed(0, repeat.repeatString("the quick brown fox ", 8)),
     &sliceSeed(0, ""),
 };
 
@@ -1389,7 +1389,7 @@ fn fuzzChecksumAccounting(_: void, smith: *Smith) anyerror!void {
 /// phrase with matches.
 const checksum_corpus: []const []const u8 = &.{
     &sliceSeed(0, ""),
-    &sliceSeed(0, compat.repeatString("checksums ride the codec boundary ", 4)),
+    &sliceSeed(0, repeat.repeatString("checksums ride the codec boundary ", 4)),
 };
 
 test "gzip fuzz: checksum accounting" {
@@ -1404,7 +1404,7 @@ test "gzip fuzz: checksum accounting" {
 /// a std CRC-32 state, and the reference is the one-shot hash over the same
 /// bytes.
 const Fold = struct {
-    crc: Crc32 = .init(),
+    crc: std_crc32 = .init(),
 
     fn update(context: *anyopaque, bytes: []const u8) void {
         const self: *Fold = @ptrCast(@alignCast(context));
@@ -1421,7 +1421,7 @@ const Fold = struct {
 
 /// Seeds for target 7: a phrase with matches, and an empty payload.
 const hook_corpus: []const []const u8 = &.{
-    &sliceSeed(0, compat.repeatString("the checksum rides the codec boundary ", 4)),
+    &sliceSeed(0, repeat.repeatString("the checksum rides the codec boundary ", 4)),
     &sliceSeed(0, ""),
 };
 
@@ -1454,7 +1454,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
         if (smith.boolWeighted(1, 2)) try w.writer.flush();
     }
     try w.finish();
-    try testing.expectEqual(Crc32.hash(input), encode_fold.crc.final());
+    try testing.expectEqual(std_crc32.hash(input), encode_fold.crc.final());
 
     // The reader side: the same fold over the same bytes, with the input
     // sometimes chunked so the window fills mid-symbol.
@@ -1473,7 +1473,7 @@ fn fuzzChecksumHook(_: void, smith: *Smith) anyerror!void {
     r.checksum = decode_fold.hook();
     try pump(&r.reader, &plain.writer, pumpLimit(input.len));
     try testing.expectEqualSlices(u8, input, plain.written());
-    try testing.expectEqual(Crc32.hash(input), decode_fold.crc.final());
+    try testing.expectEqual(std_crc32.hash(input), decode_fold.crc.final());
 }
 
 test "gzip fuzz: flate checksum hook" {
@@ -1634,7 +1634,7 @@ test "gzip fuzz: hostile-header pins" {
     var fhcrc: [header_len + 2 + 2 + trailer_len]u8 = undefined;
     fastmem.copy(u8, fhcrc[0..header_len], empty_member[0..header_len]);
     fhcrc[3] = 0x02; // FHCRC
-    const hcrc: u16 = @truncate(Crc32.hash(fhcrc[0..header_len]));
+    const hcrc: u16 = @truncate(std_crc32.hash(fhcrc[0..header_len]));
     writeInt(u16, fhcrc[header_len..][0..2], hcrc);
     fastmem.copy(u8, fhcrc[header_len + 2 ..][0..2], empty_member[10..12]);
     fastmem.set(u8, fhcrc[header_len + 4 ..], 0);

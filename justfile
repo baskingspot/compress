@@ -45,7 +45,7 @@ fuzz LIMIT="10M":
 [doc("Lint Zig, Python, Nix, Markdown, the workflows, and this justfile: ziglint, the ast-grep rules, zig fmt, ruff, ty, nix fmt, oxfmt, actionlint, zizmor, and just --fmt")]
 [group("lint")]
 lint:
-    ziglint-0-16
+    ziglint-0-17
     baskingspot-lint src
     zig fmt --check src build.zig demo examples bench docs/examples
     uv run scripts/check_binary_files.py
@@ -86,7 +86,7 @@ check-32:
     wasmtime zig-out/bin/zstd-probe32.wasm
     wasmtime zig-out/bin/brotli-probe32.wasm
 
-[doc("The per-version gate, run on both supported Zig versions: the Debug, ReleaseSafe, and ReleaseFast test suites")]
+[doc("The gate: the Debug, ReleaseSafe, and ReleaseFast test suites")]
 [group("ci")]
 check: test test-release-safe test-release-fast
 

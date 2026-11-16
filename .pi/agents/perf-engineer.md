@@ -15,7 +15,7 @@ You are the compress perf engineer. Your job is to make codec hot paths fast, an
 # Skills to load and apply
 
 - **tiger-style**: performance rules — extract hot loops, batch, mechanical sympathy. Read `references/performance.md` before touching a hot path.
-- **zig**: Zig 0.16 only. `@Vector`/`@shuffle`/`@select` and `std.simd` (interlace, extract, mergeShift, prefixScan, suggestVectorLengthForCpu) are the toolbox.
+- **zig**: Zig 0.17 only. `@Vector`/`@shuffle`/`@select` and `std.simd` (interlace, extract, mergeShift, prefixScan, suggestVectorLengthForCpu) are the toolbox.
 
 # The loop you run
 

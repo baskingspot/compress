@@ -39,7 +39,6 @@ const builtin = @import("builtin");
 
 const fastmem = @import("fastmem");
 
-const compat = @import("../compat.zig");
 const internal = @import("../internal/root.zig");
 
 const common = @import("common.zig");
@@ -1655,7 +1654,7 @@ fn countTwo(
         const va: CountVec = a[current..][0..count_vec_len].*;
         const vb: CountVec = b[match..][0..count_vec_len].*;
         const mask: @Int(.unsigned, count_vec_len) = @bitCast(va != vb);
-        const first = if (compat.bool_vector_element0_is_msb) @clz(mask) else @ctz(mask);
+        const first = @ctz(mask);
         if (mask != 0) return current - a_start + first;
         current += count_vec_len;
         match += count_vec_len;

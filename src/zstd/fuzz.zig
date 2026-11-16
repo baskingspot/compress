@@ -60,7 +60,7 @@ const golden = @import("golden.zig");
 const match_compress = @import("match_compress.zig");
 const Reader = @import("Reader.zig");
 const Writer = @import("Writer.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 // ---------------------------------------------------------------------------
 // Shared harness
@@ -1766,7 +1766,7 @@ fn mutationSeed(comptime row: []const u8, comptime mutation: Mutation, comptime 
     var seed: [32]u8 = undefined;
     mem.writeInt(u64, seed[0..8], 0, .little);
     mem.writeInt(u64, seed[8..16], mutableIndex(row), .little);
-    mem.writeInt(u64, seed[16..24], compat.enumToInt(mutation), .little);
+    mem.writeInt(u64, seed[16..24], @backingInt(mutation), .little);
     mem.writeInt(u64, seed[24..32], param, .little);
     return seed;
 }
@@ -2130,7 +2130,7 @@ fn opSeed(
     mem.writeInt(u64, seed[0..8], rowIndex(row), .little);
     mem.writeInt(u64, seed[8..16], @intFromBool(chunked), .little);
     for (records, 0..) |record, index| {
-        mem.writeInt(u64, seed[16 + 16 * index ..][0..8], compat.enumToInt(record.op), .little);
+        mem.writeInt(u64, seed[16 + 16 * index ..][0..8], @backingInt(record.op), .little);
         mem.writeInt(u64, seed[16 + 16 * index + 8 ..][0..8], record.param, .little);
     }
     return seed;
@@ -2715,7 +2715,7 @@ fn encodeSeed(
     comptime mode: u64,
 ) [32]u8 {
     var seed: [32]u8 = undefined;
-    mem.writeInt(u64, seed[0..8], compat.enumToInt(kind), .little);
+    mem.writeInt(u64, seed[0..8], @backingInt(kind), .little);
     mem.writeInt(u64, seed[8..16], sizeIndex(ladder, size), .little);
     mem.writeInt(u64, seed[16..24], content, .little);
     mem.writeInt(u64, seed[24..32], mode, .little);
@@ -3386,11 +3386,11 @@ fn corruptionSeed(
     comptime param: u64,
 ) [48]u8 {
     var seed: [48]u8 = undefined;
-    mem.writeInt(u64, seed[0..8], compat.enumToInt(kind), .little);
+    mem.writeInt(u64, seed[0..8], @backingInt(kind), .little);
     mem.writeInt(u64, seed[8..16], sizeIndex(&corrupt_sizes, size), .little);
     mem.writeInt(u64, seed[16..24], content, .little);
     mem.writeInt(u64, seed[24..32], @intFromBool(writer), .little);
-    mem.writeInt(u64, seed[32..40], compat.enumToInt(mutation), .little);
+    mem.writeInt(u64, seed[32..40], @backingInt(mutation), .little);
     mem.writeInt(u64, seed[40..48], param, .little);
     return seed;
 }
@@ -3624,7 +3624,7 @@ fn writerPoison(smith: *Smith) !void {
             var out: [8]u8 = undefined;
             var fw: Io.Writer = .fixed(&out);
             var w: Writer = .init(10, &fw, &buffer, .{});
-            try w.writer.writeAll(compat.repeatString("a", 512));
+            try w.writer.writeAll(repeat.repeatString("a", 512));
             try testing.expectError(error.WriteFailed, w.finish());
             try testing.expectError(error.WriteFailed, w.finish());
             try testing.expectError(error.WriteFailed, w.writer.writeAll("more"));
@@ -3693,58 +3693,58 @@ fn machinerySeed(
 const machinery_corpus: []const []const u8 = &.{
     // One write at the default window: the frame is one block at `finish`.
     &machinerySeed(3, &.{
-        .{ compat.enumToInt(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
     }, 2),
     // The small window: the block region fills four times over one write.
     &machinerySeed(0, &.{
-        .{ compat.enumToInt(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.writable_slice), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.byte_and_flush), 0, 0, 1, 0, 0x5a, 1 },
-        .{ compat.enumToInt(WriteOp.splat_bytes_all), 0, 0, 7, 512, 0, 0 },
-        .{ compat.enumToInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 4096, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.writable_slice), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.byte_and_flush), 0, 0, 1, 0, 0x5a, 1 },
+        .{ @backingInt(WriteOp.splat_bytes_all), 0, 0, 7, 512, 0, 0 },
+        .{ @backingInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
     }, 1),
     // The splat path across the slide: the window compacts repeatedly.
     &machinerySeed(1, &.{
-        .{ compat.enumToInt(WriteOp.write_splat_all), 1024, 8192, 7, 2048, 0, 0 },
+        .{ @backingInt(WriteOp.write_splat_all), 1024, 8192, 7, 2048, 0, 0 },
     }, 0),
     // Vector writes and byte writes at the 16-KiB class.
     &machinerySeed(2, &.{
-        .{ compat.enumToInt(WriteOp.write_vec_all), 1024, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.byte_and_flush), 0, 0, 1, 0, 0xa5, 1 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_vec_all), 1024, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.byte_and_flush), 0, 0, 1, 0, 0xa5, 1 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
     }, 3),
     // Many writes at the default window: a block emits when the region fills.
     &machinerySeed(3, &.{
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
-        .{ compat.enumToInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.write_all), 0, 8192, 1, 0, 0, 0 },
     }, 1),
     // The zero-data flush alone.
     &machinerySeed(3, &.{
-        .{ compat.enumToInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
+        .{ @backingInt(WriteOp.flush), 0, 0, 1, 0, 0, 0 },
     }, 0),
 };
 
@@ -4035,7 +4035,7 @@ test "zstd fuzz: the checksum reference pins the empty and multi-block frames" {
     );
     // The multi-block frame's trailer is over all 135000 bytes in order.
     const multi_info = analyze(&golden.frame_checksum_multi).?;
-    const multi_expected = compat.repeatString(golden.frame_checksum_multi_text, 3000);
+    const multi_expected = repeat.repeatString(golden.frame_checksum_multi_text, 3000);
     try testing.expectEqual(
         @as(u32, @truncate(XxHash64.hash(0, multi_expected))),
         readInt(

@@ -14,7 +14,7 @@ You are the compress fuzz engineer. Decode of untrusted input is the security su
 
 # Skills to load and apply
 
-- **zig**: Zig 0.16 only. `std.testing.Smith` drives structured fuzz inputs; `main(init)` and `std.Io` are current. Run `zigdoc` on any std API before you use it.
+- **zig**: Zig 0.17 only. `std.testing.Smith` drives structured fuzz inputs; `main(init)` and `std.Io` are current. Run `zigdoc` on any std API before you use it.
 
 # What you own
 

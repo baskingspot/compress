@@ -25,7 +25,7 @@ const DefaultPrng = std.Random.DefaultPrng;
 const builtin = @import("builtin");
 
 const internal = @import("../internal/root.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 const ArrayBuffer = internal.array_buffer.ArrayBuffer;
 const readInt = @import("common.zig").readInt;
 
@@ -242,11 +242,10 @@ const VectorAccumulator = struct {
 };
 
 /// The four 64-bit words of one 32-byte stripe. They are little-endian on the
-/// wire, so a host whose `@bitCast` reads a lane in its own byte order swaps
-/// each word's bytes.
+/// wire, and a `@bitCast` from bytes to a vector reads each lane little-endian
+/// on every target, so there is no byte order to fix here.
 inline fn loadStripe(stripe: *const [32]u8) LaneVec {
-    const raw: LaneVec = @bitCast(stripe.*);
-    return if (compat.vector_bitcast_is_little_endian) raw else @byteSwap(raw);
+    return @bitCast(stripe.*);
 }
 
 /// The vector round: `rotl(acc + word * P2, 31) * P1` on all four accumulators.
@@ -428,7 +427,7 @@ test "xxh64: the differential sweep against std's kernel" {
 test "xxh64: the incremental state equals the one-shot" {
     // The frame paths fold per block: the digest must be independent of
     // where the runs are cut, across the stripe boundaries.
-    const bytes = compat.repeatString("checksums ride the codec boundary ", 40);
+    const bytes = repeat.repeatString("checksums ride the codec boundary ", 40);
     var state: State = .init;
     var at: usize = 0;
     while (at < bytes.len) : (at += 7) {

@@ -31,7 +31,7 @@ const writeUvarint = common.writeUvarint;
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
-const compat = @import("../compat.zig");
+const repeat = @import("../repeat.zig");
 
 /// Upper bound on the size of `compressBlock`'s output for `input_len` bytes of
 /// input: the length varint, the input itself, and one tag byte per 60 input
@@ -150,8 +150,8 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
     var s: usize = 1;
     var cv = load64(source, s);
     // Last copy offset, used for the repeat-offset check. Initialized so the
-    // first check (against source[1-repeat]) reads source[0], which is harmless.
-    var repeat: usize = 1;
+    // first check (against source[1-repeat_offset]) reads source[0], which is harmless.
+    var repeat_offset: usize = 1;
 
     outer: while (true) {
         var candidate: usize = 0;
@@ -174,11 +174,11 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
             // (e.g. runs of the same record) without a fresh hash lookup.
             const check_rep: usize = 1;
             const repeated: u32 = @truncate(cv >> (check_rep * 8));
-            if (load32(source, s - repeat + check_rep) == repeated) {
+            if (load32(source, s - repeat_offset + check_rep) == repeated) {
                 var base = s + check_rep;
                 // Extend the match backwards over any already-emitted bytes.
-                while (base > next_emit and base - repeat > 0 and
-                    source[base - repeat - 1] == source[base - 1])
+                while (base > next_emit and base - repeat_offset > 0 and
+                    source[base - repeat_offset - 1] == source[base - 1])
                 {
                     base -= 1;
                 }
@@ -186,7 +186,7 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
                 d += try emitLiteral(target[d..], source[next_emit..base]);
 
                 // Extend forwards.
-                var cand = s - repeat + 4 + check_rep;
+                var cand = s - repeat_offset + 4 + check_rep;
                 s += 4 + check_rep;
                 while (s <= s_limit) {
                     const diff = load64(source, s) ^ load64(source, cand);
@@ -197,8 +197,10 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
                     s += 8;
                     cand += 8;
                 }
-                if (d + emitCopySize(repeat, s - base) > target.len) return error.BufferTooSmall;
-                d += emitCopy(target[d..], repeat, s - base);
+                if (d + emitCopySize(repeat_offset, s - base) > target.len) {
+                    return error.BufferTooSmall;
+                }
+                d += emitCopy(target[d..], repeat_offset, s - base);
                 next_emit = s;
                 if (s >= s_limit) break :outer;
                 cv = load64(source, s);
@@ -235,7 +237,7 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
         // ended (the "emitCopy then re-check immediately" inner loop).
         while (true) {
             const base = s;
-            repeat = base - candidate;
+            repeat_offset = base - candidate;
 
             // Extend the 4-byte match forward 8 bytes at a time.
             s += 4;
@@ -249,8 +251,8 @@ fn encodeBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
                 s += 8;
                 candidate += 8;
             }
-            if (d + emitCopySize(repeat, s - base) > target.len) return error.BufferTooSmall;
-            d += emitCopy(target[d..], repeat, s - base);
+            if (d + emitCopySize(repeat_offset, s - base) > target.len) return error.BufferTooSmall;
+            d += emitCopy(target[d..], repeat_offset, s - base);
 
             next_emit = s;
             if (s >= s_limit) break :outer;
@@ -420,7 +422,7 @@ test "encode: short input (< min_non_literal_block_size) is a single literal" {
 test "encode: repetitive input compresses (back-references)" {
     // A repeating string should produce copy tags, so the compressed size is
     // well under the input length.
-    const input = compat.repeatString("the quick brown fox", 200); // 3800 bytes
+    const input = repeat.repeatString("the quick brown fox", 200); // 3800 bytes
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);
@@ -461,7 +463,7 @@ test "encode: 64K boundary round-trips" {
 }
 
 test "encode: RLE input (single-byte run)" {
-    const input = compat.repeatString(&[_]u8{0x41}, 4096);
+    const input = repeat.repeatString(&[_]u8{0x41}, 4096);
     const bound = maxCompressedLength(input.len);
     const comp = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(comp);

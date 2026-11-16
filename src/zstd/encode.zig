@@ -35,10 +35,9 @@ const match_compress = @import("match_compress.zig");
 const sequences = @import("sequences.zig");
 const sequences_compress = @import("sequences_compress.zig");
 const split_compress = @import("split_compress.zig");
-const compat = @import("../compat.zig");
 
 /// The compression levels this encoder implements, named by the CLI scale.
-/// The tag is the level number, so `@intFromEnum` spells the CLI's value.
+/// The tag is the level number, so `@backingInt` spells the CLI's value.
 pub const Level = enum(u8) {
     /// `ZSTD_fast`, byte-identical to `zstd -1`.
     @"1" = 1,
@@ -136,7 +135,7 @@ pub fn compressBuffered(
     buffer: *Buffer,
     options: Options,
 ) Error!usize {
-    const level: u8 = compat.enumToInt(options.level);
+    const level: u8 = @backingInt(options.level);
     // The dictionary's shape: which scan the frame runs and how its
     // parameters are sized (the C's `ZSTD_shouldAttachDict` switch,
     // `zstd_compress.c:2309-2323`). An empty content attaches nothing and

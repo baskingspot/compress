@@ -11,14 +11,11 @@
   outputs =
     inputs@{ flake-parts, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      # imports and inputsFrom below mirror each other, including the
-      # toolchain versions. Both build; the default is the current stable,
-      # and `zig-old` is the previous one for the CI compatibility lane and
-      # for local checks.
+      # imports and inputsFrom below mirror each other on the one toolchain
+      # version the tree builds, tests, and formats under.
       imports = with inputs.baskingspot.flakeModules; [
         base
         docs
-        zig."0.16"
         zig."0.17"
       ];
 
@@ -30,11 +27,10 @@
           ...
         }:
         let
-          # Both shells carry the same tools, so a recipe runs the same way
-          # on either compiler. ziglint-0-16 points the deprecation rule at
-          # the oldest API surface the repo supports.
+          # ziglint-0-17 points the deprecation rule at the supported API
+          # surface, which is Zig 0.17's std.
           packages = [
-            config.packages."ziglint-0-16"
+            config.packages."ziglint-0-17"
           ]
           ++ (with pkgs; [
             uv
@@ -78,15 +74,6 @@
               config.devShells.base
               config.devShells.docs
               config.devShells."zig-0-17"
-            ];
-            inherit packages env;
-          };
-
-          devShells.zig-old = pkgs.mkShell {
-            inputsFrom = [
-              config.devShells.base
-              config.devShells.docs
-              config.devShells."zig-0-16"
             ];
             inherit packages env;
           };

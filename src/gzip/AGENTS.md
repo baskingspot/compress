@@ -118,11 +118,11 @@ is not obvious from either:
   footer and never compares it. `WrongChecksum` and `WrongSize` stay separate;
   Go reports both as `ErrChecksum`.
 - **std's CRC-32 names** (`containers-notes.md §3.1`, checked by running).
-  `std.hash.crc.Crc32` is the gzip CRC-32 (`Crc32("123456789")` is 0xCBF43926)
-  and the test reference for `crc32.zig`. `Crc32Iscsi` is CRC-32C, the wrong
-  CRC, next to the right one. `Crc32WithPoly` and `Crc32SmallWithPoly` are
-  dangling declarations in the 0.16.0 tree (the `impl` names they reference do
-  not exist): do not reach for them.
+  `std.hash.crc.@"CRC-32/ISO-HDLC"` is the gzip CRC-32 (`"123456789"` hashes
+  to 0xCBF43926) and the test reference for `crc32.zig`.
+  `std.hash.crc.@"CRC-32/ISCSI"` is CRC-32C, the wrong CRC, next to the right
+  one, and `Crc32WithPoly`/`Crc32SmallWithPoly` are gone from the catalogue:
+  do not reach for them.
 
 ## Testing and golden vectors
 

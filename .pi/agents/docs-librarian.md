@@ -150,7 +150,7 @@ Accumulated memory. Update it when you find a rule or a recurring drift class th
   belongs to the test and bench steps only.
 - The caller owns every buffer, and the codecs do not allocate. Check any claim that says otherwise.
 - The package was renamed from `zcompress` to `compress`. A remaining `zcompress` in a live document is a finding.
-- Zig 0.16 only. There is no "or newer".
+- Zig 0.17 only. There is no "or newer".
 - Commit messages are one line, `area: summary`. You do not commit unless asked.
 
 ## Intentional non-issues

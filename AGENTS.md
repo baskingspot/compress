@@ -7,15 +7,11 @@ it before you change a kernel or make a performance claim.
 
 ## Layout
 
-- `src/compat.zig`: the Zig 0.16/0.17 shims, private to the module. Zig 0.17
-  removed the `**` array-repeat operator and moved the CRC catalogue, the
-  container type info, and the error-set shape; its `zig fmt` rewrites
-  `@intFromEnum`/`@enumFromInt` into builtins 0.16 cannot parse. Every one of
-  those goes through a helper here, not a version check at the call site.
-  `repeatString`/`repeatArray` replace `**`, `enumToInt`/`enumFromInt` the
-  two builtins, `Crc32`/`Crc32Iscsi` the CRC names, and `enumCount`,
-  `structFieldCount`/`structFieldName`/`StructFieldType`, and `errorNames`
-  the type-info shapes.
+- `src/repeat.zig`: `repeatString`/`repeatArray`, the comptime repetition the
+  `**` operator did before Zig 0.17 removed it. Private to the module, reached
+  by relative import like the `internal` shares; the result is a pointer to a
+  comptime constant, because that is what coerces to the slice the call sites
+  want.
 - `src/root.zig`: the barrel of the ONE `compress` build module. One pub
   decl per codec, each a namespace under it (`compress.snappy`,
   `compress.flate`).
@@ -103,7 +99,7 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   and the poisoned `finish`), the endian-bound integer helpers the codec
   `common.zig` files bind, the container driver over a codec's framing
   type, and `constant.copyInto` (a copy whose source is a comptime constant;
-  `constant.zig` explains why fastmem refuses one on 0.17). Imports only
+  `constant.zig` explains why fastmem refuses one). Imports only
   `std` and `fastmem`; reached by relative import
   (`@import("../internal/root.zig")`), never a build module, and never
   re-exported by the barrel; a codec that uses it lifts with it in tow,
@@ -128,19 +124,18 @@ zlib-oracle`; `common.zig` is the big-endian integer helper. Fuzz targets
   other target (32-bit x86, wasm32, arm-linux, riscv64, s390x) is best effort
   in CI only; no local recipe may require one, and a best-effort lane that
   hangs costs nothing.
-- Two Zig versions, both supported: 0.17.0 is the default shell, 0.16.0 is
-  `nix develop .#zig-old`. The tree builds, tests, and formats under both,
-  and `minimum_zig_version` stays `"0.16.0"` until 0.16 is dropped. Read the
-  zig skill before you write Zig here; run `zigdoc` to verify any std API
-  before you use it.
-- A 0.17-only or 0.16-only API goes through `src/compat.zig`, with a shape
-  probe (`@hasDecl`, `@hasField`, `@typeInfo(...) == .optional`), never a
-  version number, and never a `zig fmt: off` region outside compat. The
-  0.17 formatter rewrites `@intFromEnum` and `@enumFromInt` in place, so a
-  call site that spells them directly cannot format under both compilers.
+- One Zig version: 0.17.0, the flake's default shell. The tree builds, tests,
+  and formats under it, and `minimum_zig_version` is `"0.17.0"`. Read the zig
+  skill before you write Zig here; run `zigdoc` to verify any std API before
+  you use it.
+- No version shims: one compiler means a call site spells the 0.17 API
+  directly (the CRC catalogue's names, `field_names`/`field_types`,
+  `error_set.error_names`), and `zig fmt` rewrites
+  `@intFromEnum`/`@enumFromInt` to `@backingInt`/`@fromBackingInt`, so spell
+  those. `**` is gone; `src/repeat.zig` stands in for it.
 - The flake is the environment. A missing tool goes in `flake.nix`; do not
-  install it globally. `ziglint-0-16` points the deprecation rule at the
-  oldest supported std from either shell, so `just lint` is a 0.16 lint.
+  install it globally. `ziglint-0-17` points the deprecation rule at the
+  supported std, so `just lint` is a 0.17 lint.
 
 ## Disk discipline
 
@@ -167,25 +162,24 @@ onto a nearly-full disk):
   Must pass before a commit. It skips `test-giant`.
 - `just test-release-safe` / `just test-release-fast`: the same suite in the
   release modes. Lazy analysis hides code that only instantiates there.
-- `just check`: the per-version gate, `test` plus both release modes. CI runs
-  it on the default shell and on `zig-old`; run it under both compilers
-  before you call a port done.
+- `just check`: the gate, `test` plus both release modes. CI runs it on the
+  default shell; run it before you call a port done.
 - `just test-giant`: the over-4-GiB zstd scale test, which allocates about
   4 GiB. Every other test recipe skips it and CI runs it as its own job. A
   local run needs the memory to spare: put it under a `systemd-run` scope
   with a memory cap.
 - `just test-be`: the unit tests on s390x under qemu-user, the only
   big-endian target, in ReleaseSafe (Debug under emulation outruns the
-  runner's timeout). CI runs it; it is not part of a local `just ci`. A bool vector's element 0 lands on the integer's most
-  significant bit on 0.16 and its least significant on 0.17, and an
-  array-to-vector bitcast follows the target's byte order on 0.16 only;
-  `compat.zig` probes both, and this is the gate that sees a regression.
+  runner's timeout). CI runs it; it is not part of a local `just ci`. A bool
+  vector's element 0 is the integer's least significant bit and an
+  array-to-vector bitcast reads little-endian, both on every target since
+  0.17; this is the gate that sees a regression in either.
 - `just fuzz [BUDGET]`: per-target fuzz over `--fuzz=<budget>` iterations
   (default 10M). ReleaseSafe only (Debug fuzz hits ziglang/zig#30655).
 - `just ci`: what a local run needs: `just check`, `just lint`,
   `just check-baseline`, the bench harness check, and the docs build. It never
   runs a target outside the support tier; CI adds the best-effort lanes.
-- `just lint`: `ziglint-0-16` over `.ziglint.zon` paths, `zig fmt --check`
+- `just lint`: `ziglint-0-17` over `.ziglint.zon` paths, `zig fmt --check`
   over `src/`, `build.zig`, `demo/`, `examples/`, `bench/`, and
   `docs/examples/`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
   `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
