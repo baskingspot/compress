@@ -138,11 +138,11 @@ pub fn build(b: *Build) void {
     // testingx: plain-text test runner and benchmark harness. Lazy — only
     // fetched when a development step is built, not when consumers use
     // compress as a library dependency.
-    const testingx_dep = b.lazyDependency("testingx", .{
+    const testingx_dep = b.dependencyLazy("testingx", .{
         // testingx declares no `optimize` option; the module is compiled at
         // the optimize mode of whatever artifact imports it.
         .target = target,
-    });
+    }) catch null;
     const test_runner: ?Build.Step.Compile.TestRunner =
         if (fuzz_mode or target.result.cpu.arch == .wasm32)
             // Fuzz runs need the built-in runner's server protocol. wasm32-wasi
@@ -310,7 +310,7 @@ pub fn build(b: *Build) void {
     // trees under bench/zig-out/bench-src/<name>/ for the harness's zig-cc and
     // cmake builds. This step only delegates to that build root. The
     // dependencies stay out of this build graph on purpose: a
-    // `b.lazyDependency` call here would mark them needed at configure time,
+    // `b.dependencyLazy` call here would mark them needed at configure time,
     // and the build runner fetches every marked dependency on any invocation,
     // `zig build test` included. The call site triggers the fetch, not the
     // requested step.
@@ -401,11 +401,11 @@ pub fn build(b: *Build) void {
     // again.
     if (b.lazyImport(@This(), "testingx")) |testingx| {
         // The dependency is lazy in the zon, so it must come through
-        // lazyDependency. lazyImport already confirmed it is fetched, so
+        // dependencyLazy. lazyImport already confirmed it is fetched, so
         // this call returns non-null.
-        const bench_dep = b.lazyDependency("testingx", .{
+        const bench_dep = (b.dependencyLazy("testingx", .{
             .target = target,
-        }).?;
+        }) catch null).?;
         const testingx_mod = bench_dep.module("testingx");
 
         const bench_step = b.step("bench", "Run codec benchmarks (ReleaseFast)");
