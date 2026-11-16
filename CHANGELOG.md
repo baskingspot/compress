@@ -5,6 +5,8 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-16
+
 ### Changed
 
 - The package requires Zig 0.17.0: `minimum_zig_version` is `"0.17.0"`, and

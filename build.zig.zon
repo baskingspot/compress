@@ -1,6 +1,6 @@
 .{
     .name = .compress,
-    .version = "0.3.0",
+    .version = "0.4.0",
     .fingerprint = 0x4934d3195a751457, // Changing this has security and trust implications.
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
