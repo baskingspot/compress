@@ -49,6 +49,7 @@ lint:
     baskingspot-lint src
     zig fmt --check src build.zig demo examples bench docs/examples
     uv run scripts/check_binary_files.py
+    uv run scripts/check_readme_fences_test.py
     uv run scripts/check_readme_fences.py
     uvx ruff check --line-length 100 scripts
     uvx ruff format --check --line-length 100 scripts

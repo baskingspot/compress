@@ -1,49 +1,66 @@
 """Type-check the Zig samples in every README.
 
 A sample that no longer compiles is a lie the reader finds out the hard
-way. This extracts every ```zig fence from the tracked READMEs, writes each
+way. This extracts every Zig fence from the tracked READMEs, writes each
 one into a generated module with a fixed import preamble and a probe that
 makes the compiler analyze every declaration the fence makes, and builds the
 lot through `zig build check-readme-fences`. `just lint` runs this, so a
 sample cannot rot unnoticed.
 
-A fence that cannot compile as a compilation unit is a listing, not a
-sample: mark it ```text and it stops being extracted. There is no skip list
-here; a fence that fails is either fixed or demoted by hand.
+The checker fails closed: a fence it cannot fully analyze is a lint failure
+that names the README and line, never a pass. A fence that cannot be a
+compilation unit is a listing, and a listing is tagged `text`; there is no
+skip list here.
 
 The generated module is written to README_FENCES_DIR, which `build.zig`
-compiles. A failing fence is reported by its README path and line.
+compiles.
 """
 
 import re
 import shutil
 import subprocess
 import sys
+import textwrap
 from pathlib import Path
 
 # Where the generated module lives. build.zig's `check-readme-fences` step
 # reads it from here, both being ignored by git and by `just clean`.
 README_FENCES_DIR = Path("zig-out/readme-fences")
 
-FENCE = "```zig"
-CLOSE = "```"
+# A markdown fence opener: three or more backticks or tildes, indented or
+# not, with an info string. Any fence style counts, because a tester will
+# reach for `~~~` and a four-backtick fence next.
+OPENER = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
 # The names a fence may use without importing them: `compress` is the module
 # under test, and the codec aliases match the barrel's namespaces.
 PREAMBLE = ("std", "compress", "snappy", "flate", "gzip", "zlib", "zstd", "brotli")
 
-# A top-level declaration: column 0, so a nested one is not counted.
-DECL = re.compile(r"^(?:pub )?(const|var|fn) (\w+)", re.MULTILINE)
+# A top-level declaration: a column-0 line, so a nested one is not counted.
+DECL = re.compile(r"^(?:pub )?(const|var|fn) (\w+)")
+
+# A declaration the compiler would take at file scope but this cannot probe:
+# one indented off column 0, and a container, whose private members Zig does
+# not list for `@typeInfo` (only `pub` ones).
+INDENTED_DECL = re.compile(r"^[ \t]+(?:pub )?(?:const|var|fn) \w+")
+CONTAINER = re.compile(r"^\s*(?:pub )?const \w+ = (?:struct|union|enum|opaque)\b")
 
 PROBE = """\
 const std = @import("std");
 
-/// Calls `f` with undefined arguments, which makes the compiler analyze its
-/// body and its callees. The generated tests guard the call: it never runs.
+/// References a declaration so the compiler resolves its initializer.
+pub fn touch(value: anytype) void {
+    _ = value;
+}
+
+/// Calls `f` with undefined arguments, so the compiler analyzes its body and
+/// its callees. The generated tests guard the call: it never runs.
 pub fn probe(comptime f: anytype) void {
     const info = @typeInfo(@TypeOf(f)).@"fn";
-    // A generic fn needs comptime arguments this cannot supply.
-    if (info.is_generic) return;
+    if (info.is_generic) {
+        @compileError("a README fence declares a generic function, which cannot be" ++
+            " type-checked; make the sample concrete");
+    }
     const args: std.meta.ArgsTuple(@TypeOf(f)) = undefined;
     switch (@typeInfo(info.return_type.?)) {
         .error_union => if (@call(.auto, f, args)) |_| {} else |_| {},
@@ -62,24 +79,111 @@ def readmes() -> list[Path]:
     return [Path(name) for name in tracked if name and name.endswith("README.md")]
 
 
+def is_zig(info: str) -> bool:
+    """Whether an info string names Zig, in any case."""
+    words = info.split()
+    return bool(words) and words[0].lower().startswith("zig")
+
+
+def strip_code(line: str) -> str:
+    """`line` with the contents of its strings, chars, and comment blanked.
+
+    The columns survive, so a pattern still matches where it did, and a brace
+    inside a string can no longer move the depth. A Zig multiline string line
+    (`\\\\`) is all content.
+    """
+    if line.lstrip().startswith("\\\\"):
+        return " " * len(line)
+    out = list(line)
+    quote = None
+    i = 0
+    while i < len(line):
+        char = line[i]
+        if quote:
+            out[i] = " "
+            if char == "\\" and i + 1 < len(line):
+                out[i + 1] = " "
+                i += 2
+                continue
+            if char == quote:
+                quote = None
+        elif char in "\"'":
+            quote = char
+            out[i] = " "
+        elif line.startswith("//", i):
+            out[i:] = " " * (len(line) - i)
+            break
+        i += 1
+    return "".join(out)
+
+
 def fences(path: Path) -> list[tuple[int, str]]:
-    """Every ```zig fence in `path`, as (first line number, text)."""
+    """Every Zig fence in `path`, as (first line number, dedented text).
+
+    A non-Zig fence is consumed too, so its body is never read as markup.
+    """
     lines = path.read_text(encoding="utf-8").splitlines()
     found = []
     i = 0
     while i < len(lines):
-        if lines[i].strip() != FENCE:
+        opener = OPENER.match(lines[i])
+        if opener is None:
             i += 1
             continue
+        fence, info = opener["fence"], opener["info"].strip()
+        if fence[0] == "`" and "`" in info:
+            i += 1  # a code span, not a fence
+            continue
+        closer = re.compile(rf"^[ \t]*{re.escape(fence[0])}{{{len(fence)},}}[ \t]*$")
         first = i + 1
         i = first
-        while i < len(lines) and lines[i].strip() != CLOSE:
+        while i < len(lines) and closer.match(lines[i]) is None:
             i += 1
         if i == len(lines):
-            raise SystemExit(f"{path}:{first}: a ```zig fence never closes")
-        found.append((first + 1, "\n".join(lines[first:i])))
+            raise SystemExit(f"{path}:{first}: an unclosed {fence} fence")
+        if is_zig(info):
+            found.append((first + 1, textwrap.dedent("\n".join(lines[first:i])).strip("\n")))
         i += 1
     return found
+
+
+def declarations(path: Path, line: int, fence: str) -> list[tuple[str, str]]:
+    """The fence's top-level (kind, name) declarations, or a lint failure."""
+    lines = [strip_code(text) for text in fence.splitlines()]
+    unparsed = []
+    depth = 0
+    for index, text in enumerate(lines):
+        if depth == 0 and INDENTED_DECL.match(text):
+            unparsed.append(index)
+        depth += sum(1 for char in text if char == "{") - sum(1 for char in text if char == "}")
+    if depth != 0:
+        raise SystemExit(f"{path}:{line}: the fence's braces do not balance")
+
+    for text in lines:
+        if CONTAINER.match(text):
+            raise SystemExit(
+                f"{path}:{line}: the fence declares a container, and Zig lists only its"
+                " `pub` declarations to `@typeInfo`, so a private member would go unchecked."
+                " Declare the members at the fence's top level, or tag the fence `text`"
+            )
+    if unparsed:
+        found = fence.splitlines()[unparsed[0]]
+        raise SystemExit(
+            f"{path}:{line}: cannot tell whether this is a top-level declaration: {found!r}."
+            " Declarations at file scope start in column 0"
+        )
+
+    decls = []
+    for text in lines:
+        match = DECL.match(text)
+        if match:
+            decls.append((match[1], match[2]))
+    if not decls:
+        raise SystemExit(
+            f"{path}:{line}: the fence declares nothing this can type-check."
+            " A sample declares a function or a constant; a listing is tagged `text`"
+        )
+    return decls
 
 
 def preamble_line(name: str) -> str:
@@ -91,9 +195,8 @@ def preamble_line(name: str) -> str:
     return f"const {name} = compress.{name};"
 
 
-def module(path: Path, line: int, fence: str) -> str:
+def module(path: Path, line: int, fence: str, decls: list[tuple[str, str]]) -> str:
     """The fence as a compilation unit that the compiler analyzes in full."""
-    decls = DECL.findall(fence)
     declared = {name for _, name in decls}
 
     # A name the fence imports itself is left alone: the preamble only fills
@@ -103,7 +206,11 @@ def module(path: Path, line: int, fence: str) -> str:
 
     # A const's reference resolves its initializer; a fn's probe analyzes its
     # body. Every top-level declaration of the fence is covered.
-    probes = [f"_ = {name};" for kind, name in decls if kind in ("const", "var")]
+    probes = [
+        f"_ = {name};" if kind == "var" else f"probe_mod.touch({name});"
+        for kind, name in decls
+        if kind in ("const", "var")
+    ]
     probes += [f"probe_mod.probe({name});" for kind, name in decls if kind == "fn"]
     body = "\n".join(f"        {probe}" for probe in probes)
 
@@ -129,7 +236,7 @@ test "{path}:{line}" {{
 def main() -> int:
     extracted = [(path, line, text) for path in readmes() for line, text in fences(path)]
     if not extracted:
-        print("readme fences: no ```zig fences found", file=sys.stderr)
+        print("readme fences: no Zig fences found", file=sys.stderr)
         return 1
 
     shutil.rmtree(README_FENCES_DIR, ignore_errors=True)
@@ -138,9 +245,10 @@ def main() -> int:
 
     generated = []
     for index, (path, line, fence) in enumerate(extracted):
+        decls = declarations(path, line, fence)
         stem = re.sub(r"[^0-9A-Za-z]+", "_", f"{path}_{line}")
         name = f"fence_{index:02}_{stem}.zig"
-        (README_FENCES_DIR / name).write_text(module(path, line, fence), encoding="utf-8")
+        (README_FENCES_DIR / name).write_text(module(path, line, fence, decls), encoding="utf-8")
         generated.append((name, path, line))
 
     root = [
