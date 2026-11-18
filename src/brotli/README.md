@@ -56,7 +56,7 @@ decodes every stream in `in` in one call; `just example brotli decode FILE.br
 
 ## API
 
-```zig
+```text
 const brotli = @import("compress").brotli; // two names: `decode`, `Reader`
 
 // One-shot decode: one stream, header through last byte. `target` is a cap;
@@ -126,7 +126,7 @@ two names. The implemented class is the reference's `q3` — the quickly hasher
 with trivial trees, one emission path, no block splitter and no context
 machinery.
 
-```zig
+```text
 const brotli = @import("compress").brotli; // the encoder's two names: `encode`, `Writer`
 
 // One-shot encode: one stream, header through last byte. `target` is a cap;
