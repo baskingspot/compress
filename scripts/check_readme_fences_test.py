@@ -1,7 +1,8 @@
 """Tests for the README fence checker, which `just lint` runs before it.
 
 The checker fails closed: every case here is a fence it must refuse to pass
-silently, plus the fence spellings it must read.
+silently, a statement spelling it must not skip, or a fence shape it must
+read.
 """
 
 import tempfile
@@ -17,6 +18,10 @@ def parse(readme: str) -> list[tuple[int, str]]:
         path = Path(directory) / "README.md"
         path.write_text(readme, encoding="utf-8")
         return fences(path)
+
+
+def names(fence: str) -> list[tuple[str, str]]:
+    return declarations(Path("README.md"), 1, fence)
 
 
 class FencesTest(unittest.TestCase):
@@ -61,6 +66,21 @@ const g = 7;
             [text.split(" = ")[0] for _, text in found],
         )
 
+    def test_a_fence_inside_a_blockquote_is_read(self) -> None:
+        readme = """\
+> A sample:
+>
+> ```zig
+> fn sample() void {}
+> ```
+"""
+        found = parse(readme)
+        self.assertEqual(1, len(found))
+        line, text = found[0]
+        self.assertEqual(4, line)
+        self.assertEqual("fn sample() void {}", text)
+        self.assertEqual([("fn", "sample")], declarations(Path("README.md"), line, text))
+
     def test_a_fence_inside_a_list_item_is_dedented(self) -> None:
         readme = """\
 - Usage:
@@ -80,22 +100,76 @@ const g = 7;
             ["sample"], [name for _, name in declarations(Path("README.md"), line, text)]
         )
 
-    def test_a_declaration_off_column_zero_fails(self) -> None:
-        fence = "fn a() void {}\n    const b = 1;"
-        with self.assertRaises(SystemExit) as raised:
-            declarations(Path("README.md"), 7, fence)
-        self.assertIn("cannot tell", str(raised.exception))
+    def test_every_declaration_spelling_is_probed(self) -> None:
+        fence = """\
+inline fn one() void {}
+pub inline fn two() void {}
+noinline fn three() void {}
+threadlocal var four: u8 = 1;
+pub const five = 5;
+"""
+        self.assertEqual(
+            [("fn", "one"), ("fn", "two"), ("fn", "three"), ("var", "four"), ("const", "five")],
+            names(fence),
+        )
+
+    def test_a_multi_line_declaration_is_one_statement(self) -> None:
+        fence = """\
+fn sample(out: *Writer, in: *Reader,
+    buffer: *Buffer) !void {
+    _ = out;
+    _ = in;
+    _ = buffer;
+}
+"""
+        self.assertEqual([("fn", "sample")], names(fence))
+
+    def test_a_statement_it_cannot_name_fails(self) -> None:
+        for fence in ("try writer.writeAll(bytes);", "usingnamespace foo;", "x y z;"):
+            with self.assertRaises(SystemExit) as raised:
+                names(fence)
+            self.assertIn("cannot type-check", str(raised.exception))
+
+    def test_test_and_comptime_statements_are_allowed(self) -> None:
+        fence = """\
+test "a sample" {
+    _ = 1;
+}
+comptime {
+    _ = 2;
+}
+"""
+        self.assertEqual([], names(fence))
 
     def test_a_container_fails(self) -> None:
-        fence = "const S = struct {\n    fn m() void {}\n};"
-        with self.assertRaises(SystemExit) as raised:
-            declarations(Path("README.md"), 7, fence)
-        self.assertIn("container", str(raised.exception))
+        for fence in (
+            "const S = struct {\n    fn m() void {}\n};",
+            "const S = packed struct {\n    fn m() void {}\n};",
+            "const S = extern struct {\n    fn m() void {}\n};",
+            "const S = blk: {\n    break :blk struct {\n        fn m() void {}\n    };\n};",
+            "const S = union {\n    fn m() void {}\n};",
+            "const S = enum {\n    a,\n    fn m() void {}\n};",
+            "const S = opaque {\n    fn m() void {}\n};",
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                names(fence)
+            self.assertIn("container", str(raised.exception))
 
-    def test_a_fence_that_declares_nothing_fails(self) -> None:
+    def test_a_container_inside_a_function_body_is_allowed(self) -> None:
+        fence = """\
+fn sample() void {
+    const S = struct {
+        fn m() void {}
+    };
+    _ = S;
+}
+"""
+        self.assertEqual([("fn", "sample")], names(fence))
+
+    def test_a_fence_with_no_statements_fails(self) -> None:
         with self.assertRaises(SystemExit) as raised:
-            declarations(Path("README.md"), 7, "try writer.writeAll(bytes);")
-        self.assertIn("declares nothing", str(raised.exception))
+            names("")
+        self.assertIn("no statements", str(raised.exception))
 
     def test_an_unclosed_fence_fails(self) -> None:
         with self.assertRaises(SystemExit) as raised:
@@ -110,8 +184,7 @@ fn sample(out: *std.Io.Writer) void {
     const inner = '}';
     _ = inner;
 }"""
-        decls = declarations(Path("README.md"), 7, fence)
-        self.assertEqual([("fn", "sample")], decls)
+        self.assertEqual([("fn", "sample")], names(fence))
 
     def test_the_module_probes_each_declaration(self) -> None:
         fence = "const answer = 42;\nfn sample() void {}"

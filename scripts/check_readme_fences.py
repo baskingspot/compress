@@ -32,18 +32,27 @@ README_FENCES_DIR = Path("zig-out/readme-fences")
 # reach for `~~~` and a four-backtick fence next.
 OPENER = re.compile(r"^[ \t]*(?P<fence>`{3,}|~{3,})(?P<info>.*)$")
 
+# A blockquote marker in front of a fence or its body (`> ```zig`).
+QUOTE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
+
 # The names a fence may use without importing them: `compress` is the module
 # under test, and the codec aliases match the barrel's namespaces.
 PREAMBLE = ("std", "compress", "snappy", "flate", "gzip", "zlib", "zstd", "brotli")
 
-# A top-level declaration: a column-0 line, so a nested one is not counted.
-DECL = re.compile(r"^(?:pub )?(const|var|fn) (\w+)")
+# The head of a top-level statement: any modifiers the language allows before
+# the kind, then a kind this checker can handle. A statement it cannot name is
+# an error, so a spelling it does not know cannot slip through.
+HEAD = re.compile(
+    r"(?:(?:pub|inline|noinline|export|extern|threadlocal)[ \t]+)*"
+    r"(?P<kind>const|var|fn|test|comptime)\b"
+)
 
-# A declaration the compiler would take at file scope but this cannot probe:
-# one indented off column 0, and a container, whose private members Zig does
-# not list for `@typeInfo` (only `pub` ones).
-INDENTED_DECL = re.compile(r"^[ \t]+(?:pub )?(?:const|var|fn) \w+")
-CONTAINER = re.compile(r"^\s*(?:pub )?const \w+ = (?:struct|union|enum|opaque)\b")
+# The name of a const, var, or fn: the identifier right after the keyword.
+NAME = re.compile(r"[ \t]+(?P<name>\w+)")
+
+# A container declaration anywhere but a function body: `@typeInfo` lists only
+# its `pub` declarations, so a private member would go unchecked.
+CONTAINER = re.compile(r"\b(?:struct|union|enum|opaque)\b")
 
 PROBE = """\
 const std = @import("std");
@@ -120,9 +129,11 @@ def strip_code(line: str) -> str:
 def fences(path: Path) -> list[tuple[int, str]]:
     """Every Zig fence in `path`, as (first line number, dedented text).
 
-    A non-Zig fence is consumed too, so its body is never read as markup.
+    A non-Zig fence is consumed too, so its body is never read as markup, and
+    a blockquote marker in front of a fence or its body is dropped, so a
+    sample quoted in prose is still read.
     """
-    lines = path.read_text(encoding="utf-8").splitlines()
+    lines = [QUOTE.sub("", line) for line in path.read_text(encoding="utf-8").splitlines()]
     found = []
     i = 0
     while i < len(lines):
@@ -147,40 +158,76 @@ def fences(path: Path) -> list[tuple[int, str]]:
     return found
 
 
-def declarations(path: Path, line: int, fence: str) -> list[tuple[str, str]]:
-    """The fence's top-level (kind, name) declarations, or a lint failure."""
-    lines = [strip_code(text) for text in fence.splitlines()]
-    unparsed = []
+def statement_end(path: Path, at: int, text: str, start: int, kind: str) -> int:
+    """The index just past the top-level statement that starts at `start`."""
+    if kind in ("fn", "test", "comptime"):
+        opened = text.find("{", start)
+        if opened < 0:
+            raise SystemExit(f"{path}:{at}: a {kind} statement has no body")
+        depth = 0
+        for index in range(opened, len(text)):
+            if text[index] == "{":
+                depth += 1
+            elif text[index] == "}":
+                depth -= 1
+                if depth == 0:
+                    return index + 1
+        raise SystemExit(f"{path}:{at}: a {kind} body never closes")
+
     depth = 0
-    for index, text in enumerate(lines):
-        if depth == 0 and INDENTED_DECL.match(text):
-            unparsed.append(index)
-        depth += sum(1 for char in text if char == "{") - sum(1 for char in text if char == "}")
-    if depth != 0:
-        raise SystemExit(f"{path}:{line}: the fence's braces do not balance")
+    for index in range(start, len(text)):
+        if text[index] == "{":
+            depth += 1
+        elif text[index] == "}":
+            depth -= 1
+        elif text[index] == ";" and depth == 0:
+            return index + 1
+    raise SystemExit(f"{path}:{at}: a {kind} statement has no `;`")
 
-    for text in lines:
-        if CONTAINER.match(text):
-            raise SystemExit(
-                f"{path}:{line}: the fence declares a container, and Zig lists only its"
-                " `pub` declarations to `@typeInfo`, so a private member would go unchecked."
-                " Declare the members at the fence's top level, or tag the fence `text`"
-            )
-    if unparsed:
-        found = fence.splitlines()[unparsed[0]]
-        raise SystemExit(
-            f"{path}:{line}: cannot tell whether this is a top-level declaration: {found!r}."
-            " Declarations at file scope start in column 0"
-        )
 
+def declarations(path: Path, line: int, fence: str) -> list[tuple[str, str]]:
+    """The fence's top-level (kind, name) declarations, or a lint failure.
+
+    The fence is split into the statements the language allows at file scope.
+    A statement this cannot name is a failure, not a skip: that is what keeps
+    an unknown spelling from passing unchecked.
+    """
+    text = "\n".join(strip_code(source) for source in fence.splitlines())
     decls = []
-    for text in lines:
-        match = DECL.match(text)
-        if match:
-            decls.append((match[1], match[2]))
-    if not decls:
+    statements = 0
+    i = 0
+    while True:
+        while i < len(text) and text[i] in " \t\n":
+            i += 1
+        if i >= len(text):
+            break
+        at = line + text.count("\n", 0, i)
+        head = HEAD.match(text, i)
+        if head is None:
+            end = text.find("\n", i)
+            found = text[i : len(text) if end < 0 else end].strip()
+            raise SystemExit(
+                f"{path}:{at}: cannot type-check this top-level statement: {found!r}."
+                " A fence's statements are const, var, fn, test, or comptime"
+            )
+        kind = head["kind"]
+        if kind in ("const", "var", "fn"):
+            name = NAME.match(text, head.end())
+            if name is None:
+                raise SystemExit(f"{path}:{at}: cannot read the name of this {kind}")
+            decls.append((kind, name["name"]))
+        end = statement_end(path, at, text, head.end(), kind)
+        if kind != "fn" and CONTAINER.search(text[head.start() : end]):
+            raise SystemExit(
+                f"{path}:{at}: the fence declares a container, and Zig lists only its"
+                " `pub` declarations to `@typeInfo`, so a private member would go unchecked."
+                " Declare the members in a function body, or tag the fence `text`"
+            )
+        statements += 1
+        i = end
+    if not statements:
         raise SystemExit(
-            f"{path}:{line}: the fence declares nothing this can type-check."
+            f"{path}:{line}: the fence has no statements this can type-check."
             " A sample declares a function or a constant; a listing is tagged `text`"
         )
     return decls
