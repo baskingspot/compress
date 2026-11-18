@@ -54,6 +54,10 @@ NAME = re.compile(r"[ \t]+(?P<name>\w+)")
 # its `pub` declarations, so a private member would go unchecked.
 CONTAINER = re.compile(r"\b(?:struct|union|enum|opaque)\b")
 
+# A member of a container: the three declaration kinds, where a statement
+# boundary puts one.
+MEMBER = re.compile(r"(?:fn|const|var)\b")
+
 PROBE = """\
 const std = @import("std");
 
@@ -158,21 +162,28 @@ def fences(path: Path) -> list[tuple[int, str]]:
     return found
 
 
-def statement_end(path: Path, at: int, text: str, start: int, kind: str) -> int:
-    """The index just past the top-level statement that starts at `start`."""
+def statement_end(path: Path, at: int, text: str, start: int, kind: str) -> tuple[int, bool]:
+    """The index just past the top-level statement at `start`, and whether a
+    fn statement has a body. An `extern` prototype ends at its `;`; a body
+    search would otherwise swallow the next statement.
+    """
     if kind in ("fn", "test", "comptime"):
-        opened = text.find("{", start)
-        if opened < 0:
-            raise SystemExit(f"{path}:{at}: a {kind} statement has no body")
         depth = 0
-        for index in range(opened, len(text)):
-            if text[index] == "{":
+        body = False
+        for index in range(start, len(text)):
+            character = text[index]
+            if character == "{":
                 depth += 1
-            elif text[index] == "}":
+                body = True
+            elif character == "}":
                 depth -= 1
-                if depth == 0:
-                    return index + 1
-        raise SystemExit(f"{path}:{at}: a {kind} body never closes")
+                if depth == 0 and body:
+                    return index + 1, True
+            elif character == ";" and depth == 0 and not body:
+                return index + 1, False
+        if body:
+            raise SystemExit(f"{path}:{at}: a {kind} body never closes")
+        raise SystemExit(f"{path}:{at}: a {kind} statement has no body")
 
     depth = 0
     for index in range(start, len(text)):
@@ -181,8 +192,47 @@ def statement_end(path: Path, at: int, text: str, start: int, kind: str) -> int:
         elif text[index] == "}":
             depth -= 1
         elif text[index] == ";" and depth == 0:
-            return index + 1
+            return index + 1, True
     raise SystemExit(f"{path}:{at}: a {kind} statement has no `;`")
+
+
+def declares(text: str, opened: int) -> bool:
+    """Whether the container whose body opens at `opened` declares a member.
+
+    A member is a `fn`, `const`, or `var` at the body's own depth. Fields are
+    not, so a plain data container stays legal: its type is checked where the
+    fence references it.
+    """
+    depth = 0
+    boundary = True
+    for index in range(opened, len(text)):
+        character = text[index]
+        if character == "{":
+            depth += 1
+            boundary = True
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return False
+            boundary = True
+        elif character in ";,":
+            boundary = True
+        elif character in " \t\n":
+            continue
+        else:
+            if depth == 1 and boundary and MEMBER.match(text, index):
+                return True
+            boundary = False
+    return False
+
+
+def container_with_members(text: str) -> int:
+    """The index of the first container in `text` that declares a member."""
+    for keyword in CONTAINER.finditer(text):
+        opened = text.find("{", keyword.end())
+        if opened < 0 or declares(text, opened):
+            return keyword.start()
+    return -1
 
 
 def declarations(path: Path, line: int, fence: str) -> list[tuple[str, str]]:
@@ -211,24 +261,32 @@ def declarations(path: Path, line: int, fence: str) -> list[tuple[str, str]]:
                 " A fence's statements are const, var, fn, test, or comptime"
             )
         kind = head["kind"]
+        end, body = statement_end(path, at, text, head.end(), kind)
         if kind in ("const", "var", "fn"):
             name = NAME.match(text, head.end())
             if name is None:
                 raise SystemExit(f"{path}:{at}: cannot read the name of this {kind}")
-            decls.append((kind, name["name"]))
-        end = statement_end(path, at, text, head.end(), kind)
-        if kind != "fn" and CONTAINER.search(text[head.start() : end]):
-            raise SystemExit(
-                f"{path}:{at}: the fence declares a container, and Zig lists only its"
-                " `pub` declarations to `@typeInfo`, so a private member would go unchecked."
-                " Declare the members in a function body, or tag the fence `text`"
-            )
+            if kind != "fn":
+                decls.append((kind, name["name"]))
+            elif body:
+                decls.append(("fn", name["name"]))
+            else:
+                decls.append(("fn_proto", name["name"]))
         statements += 1
         i = end
     if not statements:
         raise SystemExit(
             f"{path}:{line}: the fence has no statements this can type-check."
             " A sample declares a function or a constant; a listing is tagged `text`"
+        )
+
+    member = container_with_members(text)
+    if member >= 0:
+        at = line + text.count("\n", 0, member)
+        raise SystemExit(
+            f"{path}:{at}: the fence declares a container with a member, and Zig lists"
+            " only its `pub` declarations to `@typeInfo`, so a private one would go"
+            " unchecked. A container of fields is fine; tag a sample with methods `text`"
         )
     return decls
 
@@ -256,7 +314,7 @@ def module(path: Path, line: int, fence: str, decls: list[tuple[str, str]]) -> s
     probes = [
         f"_ = {name};" if kind == "var" else f"probe_mod.touch({name});"
         for kind, name in decls
-        if kind in ("const", "var")
+        if kind in ("const", "var", "fn_proto")
     ]
     probes += [f"probe_mod.probe({name});" for kind, name in decls if kind == "fn"]
     body = "\n".join(f"        {probe}" for probe in probes)

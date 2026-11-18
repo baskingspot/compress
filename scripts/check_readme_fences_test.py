@@ -155,7 +155,17 @@ comptime {
                 names(fence)
             self.assertIn("container", str(raised.exception))
 
-    def test_a_container_inside_a_function_body_is_allowed(self) -> None:
+    def test_a_container_of_fields_is_allowed(self) -> None:
+        fence = """\
+fn sample() void {
+    const S = struct { a: u8, b: *const fn () void };
+    _ = S;
+}
+const Options = struct { level: u8 = 1 };
+"""
+        self.assertEqual([("fn", "sample"), ("const", "Options")], names(fence))
+
+    def test_a_container_with_a_member_inside_a_function_body_fails(self) -> None:
         fence = """\
 fn sample() void {
     const S = struct {
@@ -164,7 +174,16 @@ fn sample() void {
     _ = S;
 }
 """
-        self.assertEqual([("fn", "sample")], names(fence))
+        with self.assertRaises(SystemExit) as raised:
+            names(fence)
+        self.assertIn("container with a member", str(raised.exception))
+
+    def test_an_extern_prototype_ends_at_its_semicolon(self) -> None:
+        fence = """\
+pub extern fn proto(x: u32) u32;
+fn sample() void {}
+"""
+        self.assertEqual([("fn_proto", "proto"), ("fn", "sample")], names(fence))
 
     def test_a_fence_with_no_statements_fails(self) -> None:
         with self.assertRaises(SystemExit) as raised:
@@ -187,10 +206,11 @@ fn sample(out: *std.Io.Writer) void {
         self.assertEqual([("fn", "sample")], names(fence))
 
     def test_the_module_probes_each_declaration(self) -> None:
-        fence = "const answer = 42;\nfn sample() void {}"
+        fence = "const answer = 42;\npub extern fn proto(x: u32) u32;\nfn sample() void {}"
         decls = declarations(Path("README.md"), 7, fence)
         text = module(Path("README.md"), 7, fence, decls)
         self.assertIn("probe_mod.touch(answer);", text)
+        self.assertIn("probe_mod.touch(proto);", text)
         self.assertIn("probe_mod.probe(sample);", text)
         self.assertIn('test "README.md:7"', text)
 

@@ -290,10 +290,10 @@ Deviations, on purpose:
   compilation unit is a listing, and a listing is tagged `text`. A fence
   may use `std`, `compress`, and the six codec names without importing
   them; the rest is its own. The checker fails closed: a fence it cannot
-  analyze in full — a container outside a function body, a generic
-  function, a statement it does not recognize — fails the lint with the
-  README and line, never passes. A new declaration spelling is a checker
-  change, not a regex to leave behind.
+  analyze in full — a container that declares a member, a generic function,
+  a statement it does not recognize — fails the lint with the README and
+  line, never passes. A new declaration spelling is a checker change, not a
+  regex to leave behind.
 - Docs split by reader. A `README.md` is for a human deciding whether and how
   to use the code: what it is, usage, the API, behavior a caller needs,
   limitations. No milestone labels (M3), research-row ids (OQ7, T10), process
