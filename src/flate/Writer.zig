@@ -364,10 +364,10 @@ fn roundTrip(source: []const u8) !void {
 }
 
 test "Writer: the buffer and writer are the sizes the doc comments state" {
-    // `Buffer`'s doc comment names 426,636 bytes and docgen copies that
-    // sentence into the API page. `Writer`'s names 392 KiB, which is this
-    // figure in round numbers. The writer holds pointers, so 401,696 is the
-    // 64-bit size; the lanes that run tests are all 64-bit.
+    // `Buffer`'s doc comment gives it as about 417 KiB, and a caller sizes
+    // memory from that sentence. A writer holds pointers, so 401,696 is its
+    // 64-bit size; the assertion is skipped where `usize` is 32 bits, which
+    // `check-target` compiles for without running.
     try testing.expectEqual(@as(usize, 426636), @sizeOf(Buffer));
     if (@sizeOf(usize) == 8) try testing.expectEqual(@as(usize, 401696), @sizeOf(Writer));
 }
