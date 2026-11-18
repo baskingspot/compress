@@ -363,6 +363,15 @@ fn roundTrip(source: []const u8) !void {
     try golden.checkDecode(target, out.written(), source);
 }
 
+test "Writer: the buffer and writer are the sizes the doc comments state" {
+    // `Buffer`'s doc comment names 426,636 bytes and docgen copies that
+    // sentence into the API page. `Writer`'s names 392 KiB, which is this
+    // figure in round numbers. The writer holds pointers, so 401,696 is the
+    // 64-bit size; the lanes that run tests are all 64-bit.
+    try testing.expectEqual(@as(usize, 426636), @sizeOf(Buffer));
+    if (@sizeOf(usize) == 8) try testing.expectEqual(@as(usize, 401696), @sizeOf(Writer));
+}
+
 test "Writer: empty input is the final empty block" {
     // Spec: rfc1951-deflate.txt §3.2.3 — "BFINAL is set if and only if this
     // is the last block of the data set". The stream ends with the empty

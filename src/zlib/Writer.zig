@@ -157,6 +157,13 @@ test "Writer: the buffer type is flate's, re-exported" {
     try testing.expect(Buffer == flate.Writer.Buffer);
 }
 
+test "Writer: the writer is the size its doc comment states" {
+    // flate's writer plus zlib's framing state: 401,768 bytes, the figure
+    // `initInPlace`'s doc comment gives as about 392 KiB per member. A
+    // pointer-bearing struct, so the assertion is the 64-bit size.
+    if (@sizeOf(usize) == 8) try testing.expectEqual(@as(usize, 401768), @sizeOf(Writer));
+}
+
 test "Writer: the emitted stream is the deterministic one" {
     // RFC 1950 §2.2 — the header (CM=8, CINFO=7, FLEVEL by band, the minimal
     // FCHECK, FDICT clear) and the trailer (the Adler-32, big-endian) are
