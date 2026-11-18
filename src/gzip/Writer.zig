@@ -135,6 +135,13 @@ fn roundTrip(source: []const u8) !void {
     try decodeMember(out.written(), source);
 }
 
+test "Writer: the writer is the size its doc comment states" {
+    // flate's writer plus gzip's framing state: 401,752 bytes, the figure
+    // `initInPlace`'s doc comment gives as about 392 KiB per member. A
+    // pointer-bearing struct, so the assertion is the 64-bit size.
+    if (@sizeOf(usize) == 8) try testing.expectEqual(@as(usize, 401752), @sizeOf(Writer));
+}
+
 test "Writer: the emitted member is the deterministic one" {
     // RFC 1952 §2.3.1 — the header (FLG=0, MTIME=0, XFL by level, OS=255)
     // and the trailer (CRC-32, ISIZE) are pinned, and nothing in them depends
