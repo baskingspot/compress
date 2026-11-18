@@ -17,36 +17,42 @@ each, and skippable chunks.
 One block, at most 64 KiB:
 
 ```zig
+const std = @import("std");
 const snappy = @import("compress").snappy;
 
-// `gpa` is a std.mem.Allocator; `source` is a []const u8.
-const block = try gpa.alloc(u8, snappy.encode.maxCompressedLength(source.len));
-defer gpa.free(block);
-const n = try snappy.encode.compressBlock(source, block);
-const out = try gpa.alloc(u8, try snappy.decode.decompressedBlockLength(block[0..n]));
-defer gpa.free(out);
-_ = try snappy.decode.decompressBlock(block[0..n], out);
+fn roundTripBlock(gpa: std.mem.Allocator, source: []const u8) !void {
+    const block = try gpa.alloc(u8, snappy.encode.maxCompressedLength(source.len));
+    defer gpa.free(block);
+    const n = try snappy.encode.compressBlock(source, block);
+
+    const out = try gpa.alloc(u8, try snappy.decode.decompressedBlockLength(block[0..n]));
+    defer gpa.free(out);
+    _ = try snappy.decode.decompressBlock(block[0..n], out);
+    std.debug.assert(std.mem.eql(u8, source, out));
+}
 ```
 
 A stream of any length (`Writer.streamAll` and `Reader.streamAll` do each half
 in one call):
 
 ```zig
-// Compress `bytes` into `sink`, an *Io.Writer.
-var wbuf: snappy.Writer.Buffer = undefined;
-var w: snappy.Writer = .init(sink, &wbuf);
-try w.writer.writeAll(bytes);
-try w.finish(); // writes the last block and flushes `sink`
+fn compressStream(output: *std.Io.Writer, bytes: []const u8) !void {
+    var buffer: snappy.Writer.Buffer = undefined;
+    var w: snappy.Writer = .init(output, &buffer);
+    try w.writer.writeAll(bytes);
+    try w.finish(); // writes the last block and flushes `output`
+}
 
-// Decompress `compressed`, an *Io.Reader, into `out`, an *Io.Writer.
-var rbuf: snappy.Reader.Buffer = undefined;
-var r: snappy.Reader = .init(compressed, &rbuf);
-_ = try r.reader.streamRemaining(out);
+fn decompressStream(input: *std.Io.Reader, output: *std.Io.Writer) !void {
+    var buffer: snappy.Reader.Buffer = undefined;
+    var r: snappy.Reader = .init(input, &buffer);
+    _ = try r.reader.streamRemaining(output); // on ReadFailed, r.err says why
+}
 ```
 
 ## API
 
-```zig
+```text
 // snappy.encode
 pub fn compressBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize
 pub fn maxCompressedLength(input_len: usize) usize

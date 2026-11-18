@@ -248,6 +248,25 @@ pub fn build(b: *Build) void {
     const check_step = b.step("check", "Compile the tests without running (cross-target gate)");
     check_step.dependOn(&compress_tests.step);
 
+    // The README samples: scripts/check_readme_fences.py writes every ```zig
+    // fence in the READMEs into zig-out/readme-fences/ as a compilation unit,
+    // and this compiles them. The script owns the extraction and runs this
+    // step; `just lint` runs the script, so a sample cannot rot. Compiled, not
+    // run: a fence's bodies are analyzed through a probe that calls them with
+    // undefined arguments.
+    const readme_fences_mod = b.createModule(.{
+        .root_source_file = b.path("zig-out/readme-fences/root.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "compress", .module = compress_mod }},
+    });
+    const readme_fences = b.addTest(.{ .root_module = readme_fences_mod });
+    const readme_fences_step = b.step(
+        "check-readme-fences",
+        "Type-check the README samples (scripts/check_readme_fences.py writes them)",
+    );
+    readme_fences_step.dependOn(&readme_fences.step);
+
     // The benchmark driver for the bench/ harness (bench/README.md): one
     // binary with the compress one-shot rows and the std.compress rows,
     // cross-built per EC2 target by the harness and uploaded to the boxes.

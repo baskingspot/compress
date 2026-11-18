@@ -41,7 +41,7 @@ zig fetch --save https://baskingspot.dev/compress/v0.4.0.tar.gz
 
 Add the module to your build:
 
-```zig
+```text
 const compress = b.dependency("compress", .{ .target = target, .optimize = optimize });
 exe.root_module.addImport("compress", compress.module("compress"));
 ```

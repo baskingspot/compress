@@ -4,7 +4,7 @@ Code shared by more than one compress codec. It is not public API: the barrel
 (`src/root.zig`) and the codec namespaces never re-export it, and there is no
 build module for it. A codec reaches it by relative import:
 
-```zig
+```text
 const internal = @import("../internal/root.zig");
 ```
 

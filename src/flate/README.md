@@ -28,7 +28,7 @@ const flate = @import("compress").flate;
 fn roundTrip(gpa: std.mem.Allocator, input: []const u8) !void {
     const compressed = try gpa.alloc(u8, flate.encode.maxCompressedLength(input.len));
     defer gpa.free(compressed);
-    const n = try flate.encode.compress(input, compressed, .init);
+    const n = try flate.encode.compress(input, compressed, .{});
 
     const decoded = try gpa.alloc(u8, input.len); // the stream records no size: a cap
     defer gpa.free(decoded);
@@ -41,7 +41,7 @@ Streaming, from any `std.Io.Reader` to any `std.Io.Writer`:
 ```zig
 fn compressStream(in: *std.Io.Reader, out: *std.Io.Writer) !void {
     var buffer: flate.Writer.Buffer = undefined;
-    var w: flate.Writer = .init(out, &buffer, .init);
+    var w: flate.Writer = .init(out, &buffer, .{});
     _ = try in.streamRemaining(&w.writer);
     try w.finish(); // writes the final block; the stream is incomplete without it
 }
@@ -54,13 +54,13 @@ entry points and `options.dict` on the encode ones.
 
 ## API
 
-```zig
+```text
 encode.compress(source: []const u8, target: []u8, options: Options)
     error{BufferTooSmall}!usize
 encode.maxCompressedLength(input_len: usize) usize  // input_len + 5 * ceil(input_len / 65535) + 2
 encode.Level = enum(u8) { @"1" = 1, @"6" = 6, @"7" = 7, @"9" = 9 } // the zlib scale's numbers
 encode.Options = struct { level: Level, dict: ?[]const u8, strategy: Strategy }
-    // .init: level 1, no dictionary, the default strategy
+    // .{}: level 1, no dictionary, the default strategy
     // level: the implemented classes, named by the zlib-scale number:
     //   @"1": fixed-Huffman blocks over the level-1 finder, or a stored
     //         block when that is smaller.

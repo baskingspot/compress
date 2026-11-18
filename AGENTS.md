@@ -181,9 +181,10 @@ onto a nearly-full disk):
   runs a target outside the support tier; CI adds the best-effort lanes.
 - `just lint`: `ziglint-0-17` over `.ziglint.zon` paths, `zig fmt --check`
   over `src/`, `build.zig`, `demo/`, `examples/`, `bench/`, and
-  `docs/examples/`, `uvx ruff`/`uvx ty` over `scripts/`, and `nix fmt`,
-  `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the rest. Run it
-  before you call Zig work done.
+  `docs/examples/`, the README's Zig samples type-checked
+  (`scripts/check_readme_fences.py`), `uvx ruff`/`uvx ty` over `scripts/`,
+  and `nix fmt`, `oxfmt`, `actionlint`, `zizmor`, and `just --fmt` over the
+  rest. Run it before you call Zig work done.
 - `just fmt`: apply `zig fmt` to the same Zig paths.
 - `just check-baseline`: cross-target `zig build check` on the support tier
   only, `x86_64-linux`, `aarch64-linux`, and `aarch64-macos`.
@@ -284,6 +285,15 @@ Deviations, on purpose:
 - README-first: each codec directory carries its own `README.md` documenting
   the public API. Write it before the implementation — it is the API sketch
   Matt reviews. An API change updates the module README in the same commit.
+- Every Zig-tagged fence in a README compiles: `just lint` extracts them
+  and builds them against the public module. A fence that cannot be a
+  compilation unit is a listing, and a listing is tagged `text`. A fence
+  may use `std`, `compress`, and the six codec names without importing
+  them; the rest is its own. The checker fails closed: a fence it cannot
+  analyze in full — a container that declares a member, a generic function,
+  a statement it does not recognize — fails the lint with the README and
+  line, never passes. A new declaration spelling is a checker change, not a
+  regex to leave behind.
 - Docs split by reader. A `README.md` is for a human deciding whether and how
   to use the code: what it is, usage, the API, behavior a caller needs,
   limitations. No milestone labels (M3), research-row ids (OQ7, T10), process
