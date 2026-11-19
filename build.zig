@@ -248,6 +248,30 @@ pub fn build(b: *Build) void {
     const check_step = b.step("check", "Compile the tests without running (cross-target gate)");
     check_step.dependOn(&compress_tests.step);
 
+    // Compile an analysis root whose exports call the public entry points.
+    // Referencing compress_mod alone leaves every function body unanalyzed.
+    const check_lib_mod = b.createModule(.{
+        .root_source_file = b.path("src/check_lib.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "compress", .module = compress_mod }},
+    });
+    const check_lib = b.addObject(.{
+        .name = "compress",
+        .root_module = check_lib_mod,
+    });
+    const check_lib_step = b.step(
+        "check-lib",
+        "Compile the library module as an object (weekly cross-target gate)",
+    );
+    // Depend on the emitted file. The compile step alone passes -fno-emit-bin.
+    const install_check_lib = b.addInstallFileWithDir(
+        check_lib.getEmittedBin(),
+        .{ .custom = "check-lib" },
+        "compress.o",
+    );
+    check_lib_step.dependOn(&install_check_lib.step);
+
     // The README samples: scripts/check_readme_fences.py writes every ```zig
     // fence in the READMEs into zig-out/readme-fences/ as a compilation unit,
     // and this compiles them. The script owns the extraction and runs this

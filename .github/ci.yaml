@@ -15,10 +15,8 @@ jobs:
   - recipe: check-target aarch64-linux
   - recipe: check-target x86-linux
     blocking: false
-  - recipe: check-target arm-linux
-    blocking: false
-  - recipe: check-target riscv64-linux
-    blocking: false
+  # The weekly workflow checks arm-linux and riscv64-linux library objects.
+  # Their test-binary code generation costs too much for pull-request CI.
   - recipe: check-target wasm32-wasi
     blocking: false
   # aarch64-darwin is in the support tier, so its failure fails CI.
