@@ -188,6 +188,13 @@ onto a nearly-full disk):
 - `just fmt`: apply `zig fmt` to the same Zig paths.
 - `just check-baseline`: cross-target `zig build check` on the support tier
   only, `x86_64-linux`, `aarch64-linux`, and `aarch64-macos`.
+- `just check-target <target>`: compile the test binary for any target without
+  running it. This command remains available for manual use. Pull-request CI
+  omits `arm-linux` and `riscv64-linux`: the former exhausts runner memory
+  during code generation, and the latter took 4h38m.
+- `just check-lib <target>`: compile only the library as an object. A weekly
+  workflow runs this for `arm-linux` and `riscv64-linux`, without the test
+  binary that made their pull-request jobs too expensive.
 - `just flate-oracle`: external-oracle conformance for flate — `python3
   zlib` raw, both directions (catches bit-packing bugs invisible to a
   self-round-trip; the layer is `scripts/flate_oracle.py`).

@@ -248,6 +248,18 @@ pub fn build(b: *Build) void {
     const check_step = b.step("check", "Compile the tests without running (cross-target gate)");
     check_step.dependOn(&compress_tests.step);
 
+    // Compile only the public library module as an object. Weekly CI uses
+    // this step where test-binary code generation costs too much.
+    const check_lib = b.addObject(.{
+        .name = "compress",
+        .root_module = compress_mod,
+    });
+    const check_lib_step = b.step(
+        "check-lib",
+        "Compile the library module as an object (weekly cross-target gate)",
+    );
+    check_lib_step.dependOn(&check_lib.step);
+
     // The README samples: scripts/check_readme_fences.py writes every ```zig
     // fence in the READMEs into zig-out/readme-fences/ as a compilation unit,
     // and this compiles them. The script owns the extraction and runs this

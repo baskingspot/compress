@@ -1,0 +1,41 @@
+name: weekly-target-check
+
+# The arm-linux test compile exhausts runner memory. The riscv64-linux test
+# compile once took 4h38m. Check only their library objects each week instead.
+on:
+  schedule:
+    # Monday 06:17 UTC.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check-lib:
+    name: check-lib ${{ matrix.target }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - arm-linux
+          - riscv64-linux
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+        with:
+          install_url: https://releases.nixos.org/nix/nix-2.35.3/install
+      - uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: baskingspot
+          extraPullNames: mattrobenolt
+          skipPush: true
+      - name: Compile the library object
+        run: nix develop --command just check-lib "$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}

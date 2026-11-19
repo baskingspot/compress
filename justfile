@@ -76,10 +76,15 @@ check-baseline:
     just check-target aarch64-linux
     just check-target aarch64-macos
 
-[doc("Compile-only check for one target, such as `just check-target x86-linux`. CI runs one job per target")]
+[doc("Compile the test binary for one target without running it, such as `just check-target x86-linux`. This remains available for every target")]
 [group("test")]
 check-target TARGET:
     zig build check -Dtarget={{ TARGET }}
+
+[doc("Compile only the library object for one target. The weekly workflow uses this for arm-linux and riscv64-linux")]
+[group("test")]
+check-lib TARGET:
+    zig build check-lib -Dtarget={{ TARGET }}
 
 [doc("Decode very large streams on a 32-bit target, with wasm32-wasi under wasmtime: the zstd probe's frames and the brotli probe's streams over 4 GiB")]
 [group("test")]
