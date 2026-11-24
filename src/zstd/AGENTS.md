@@ -706,6 +706,23 @@ comment.
   std decode `01 0D` to `00 01 04 05` and the example's `10 0D` to `00 01 05 04`.
   The `pair_*` and `frame_pair*` fixtures (hand-built 19-byte frames, zstd-notes
   §5.4) pin both; no test asserts the example's claim. T1.
+- **Format spec 0.4.5 (2026-05; not in the RFC text).** The specification
+  clarified Block_Maximum_Size: it bounds Block_Content and the decompressed
+  size of every block, and a compressed block whose content is larger than its
+  output is legal at or under the cap. The RFC sentence ("applicable to both
+  the decompressed size and the compressed size") says the same thing more
+  loosely. Ours enforces both bounds: `block.zig`'s declared-size check and the
+  output cap, pinned by `frame_amplify_match` and `frame_oversize_literals`;
+  T7 rests on the same rule.
+- **CVE-2026-124851 (C v1.5.1-v1.5.7): not a class here.** The C kept expired
+  dictionary and prefix history addressable after an output-buffer wrap, and
+  its wildcopy read the literals padding, so a malformed offset could expose
+  uninitialized bytes or an earlier decompression's literals. This decoder
+  cannot: copies are exact length (`sequences.zig`), the addressable history is
+  this frame's bytes capped at Window_Size (`block.zig`), the dictionary slice
+  starts at its content (`frame.zig`'s `dict_content`), and a literals scratch
+  is filled whole or the decode fails. Keep those properties when touching the
+  copy paths.
 - 7567, 8085, and 8668 are editorial or Reported only. 8085 argues Table 18's last
   row should read 1111; the vendored text stands.
 
