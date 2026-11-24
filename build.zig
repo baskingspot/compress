@@ -364,6 +364,10 @@ pub fn build(b: *Build) void {
     const zig_exe: []const u8 = b.graph.zig_exe;
     const bench_vendor = b.addSystemCommand(&.{ zig_exe, "build", "bench-vendor" });
     bench_vendor.setCwd(b.path("bench"));
+    // The pin lives in the bench package's manifest; without it as an input
+    // the step is cached forever and a version bump keeps the old tree.
+    bench_vendor.addFileInput(b.path("bench/build.zig.zon"));
+    bench_vendor.addFileInput(b.path("bench/build.zig"));
     bench_vendor_step.dependOn(&bench_vendor.step);
 
     // The 32-bit probes (src/zstd/probe32.zig, src/brotli/probe32.zig): decode
