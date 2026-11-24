@@ -1,4 +1,4 @@
-/* The zstd-c arm (bench/README.md): the pinned facebook/zstd v1.5.7, the
+/* The zstd-c arm (bench/README.md): the pinned facebook/zstd v1.6.0, the
  * native reference, using whole-buffer ZSTD_compress2 at the CCtx's level-1
  * and level-3 parameters (the fast classes the zc arm's `zstd` and `zstd3`
  * rows measure) and ZSTD_decompressDCtx on reused contexts. This is the

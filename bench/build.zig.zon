@@ -25,8 +25,8 @@
             .lazy = true,
         },
         .zstd = .{
-            .url = "https://github.com/facebook/zstd/archive/refs/tags/v1.5.7.tar.gz",
-            .hash = "N-V-__8AAPZ7fwBg4JoCzM_0o2A8wxH2hsUUeiU1iuZv53L5",
+            .url = "https://github.com/facebook/zstd/archive/refs/tags/v1.6.0.tar.gz",
+            .hash = "N-V-__8AAP_3hwAsMAZNjvhm2_nBqi7XVt0yTHe31DHf_cvO",
             .lazy = true,
         },
         .brotli = .{

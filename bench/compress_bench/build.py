@@ -33,7 +33,7 @@ ARMS = ("zc", "klauspost", "libdeflate", "zlibng", "googlesnappy", "zstd-c", "br
 LIBDEFLATE_VERSION = "v1.26"
 ZLIBNG_VERSION = "2.3.3"
 SNAPPY_VERSION = "1.3.1"
-ZSTD_C_VERSION = "v1.5.7"
+ZSTD_C_VERSION = "v1.6.0"
 BROTLI_C_VERSION = "v1.2.0"
 # The local research checkout (~/code/klauspost-compress), pinned in go.mod.
 KLAUSPOST_VERSION = "v1.18.1-0.20250402062133-8df4d013ff17"
