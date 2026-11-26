@@ -16,6 +16,8 @@ const native_arch = builtin.target.cpu.arch;
 
 const fastmem = @import("fastmem");
 
+const sentinel = @import("sentinel.zig");
+
 /// 16-byte vector type for the shuffle loads/stores. PascalCase because it's
 /// a type alias (per Zig convention); ziglint's Z006 misfires on type-alias
 /// consts and has no inline-ignore directive, so this is documented here.
@@ -181,21 +183,24 @@ pub fn copyMatch(target: []u8, pos: usize, offset: usize, length: usize) void {
 // each branch: the 16-byte pattern path, the 16-byte window path, and the
 // non-overlapping memcpy. A wrong phase mask passes a round trip and fails here.
 test "copyMatch: every overlapping offset matches a byte copy" {
-    var buffer: [1024]u8 = undefined;
-    var reference: [1024]u8 = undefined;
+    const guard_len = 64;
+    var buffer: [1024 + guard_len]u8 = undefined;
+    var reference: [1024 + guard_len]u8 = undefined;
     for (1..65) |offset| {
         for ([_]usize{ 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 200 }) |length| {
             for ([_]usize{ 0, 1, 7, 16, 40 }) |slack| {
                 const pos = offset + slack;
-                for (&buffer, 0..) |*byte, i| byte.* = @truncate(i *% 37 +% 11);
+                const end = pos + length;
+                // The store path writes through a many-pointer, so a slice
+                // ending at `end` does not trap an overrun by itself. The
+                // sentinel past `end` does.
+                sentinel.fill(&buffer);
+                for (buffer[0..pos], 0..) |*byte, i| byte.* = @truncate(i *% 37 +% 11);
                 @memcpy(&reference, &buffer);
-                copyMatch(&buffer, pos, offset, length);
+                copyMatch(buffer[0..end], pos, offset, length);
                 for (0..length) |i| reference[pos + i] = reference[pos + i - offset];
-                try testing.expectEqualSlices(
-                    u8,
-                    reference[0 .. pos + length],
-                    buffer[0 .. pos + length],
-                );
+                try testing.expectEqualSlices(u8, reference[0..end], buffer[0..end]);
+                try sentinel.expect(&buffer, end);
             }
         }
     }

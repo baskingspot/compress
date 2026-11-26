@@ -11,8 +11,9 @@
 //!   - `offset > 16`: the 16-byte source window does not overlap the store, so
 //!     a vectorized chunk copy is correct.
 //!
+//! The copies live in `../internal/match.zig`, shared with the LZ4 decoder.
 //! Targets without those instructions use the same masks with a byte-wise
-//! permute (`shuffleBytes`) and produce the same output.
+//! permute and produce the same output.
 //!
 //! Format: https://github.com/google/snappy/blob/main/format_description.txt
 

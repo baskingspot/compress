@@ -13,6 +13,8 @@ Code moves here when a second codec needs it, not before.
 
 - `sentinel.zig`: the byte pattern decode tests pre-fill output buffers with,
   and the check that a decode did not write past its decoded length.
+- `match.zig`: the overlapping LZ77 match copy (`copyMatch`) that snappy and
+  LZ4 decode share, with the SIMD pattern path for offsets of 16 or less.
 - `reader.zig`: the `Io.Reader` lifecycle (`State`, `guard`, `fail`) and the
   generated reader vtable entries.
 - `writer.zig`: the generated `Io.Writer` entries and `finish` for
