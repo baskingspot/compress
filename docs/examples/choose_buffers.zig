@@ -4,6 +4,7 @@ const zstd = compress.zstd;
 const zlib = compress.zlib;
 const gzip = compress.gzip;
 const snappy = compress.snappy;
+const lz4 = compress.lz4;
 
 // Sizing the target is the encoder's job. Each codec exports its own exact
 // worst case, so no sizing is a guess.
@@ -27,12 +28,16 @@ test "the encoders size their own targets" {
     var block: [snappy.encode.maxCompressedLength(data.len)]u8 = undefined;
     const block_len = try snappy.encode.compressBlock(data, &block);
     try std.testing.expect(block_len <= block.len);
+
+    var lz4_block: [lz4.encode.maxCompressedLength(data.len)]u8 = undefined;
+    const lz4_block_len = try lz4.encode.compressBlock(data, &lz4_block);
+    try std.testing.expect(lz4_block_len <= lz4_block.len);
 }
 
-// Sizing the decode target differs by format. Only snappy tells the caller
-// the decoded length up front: the block header is a varint. For the other
-// codecs the caller knows the size or bounds it.
-test "snappy reads the decoded length from the block header" {
+// Sizing the decode target differs by format. Snappy tells the caller the
+// decoded length up front: the block header is a varint. An LZ4 caller supplies
+// the exact length as the target's length. The other codecs take a target cap.
+test "block decoded lengths come from the header or the caller" {
     const data = "how big is the result?";
     var block: [snappy.encode.maxCompressedLength(data.len)]u8 = undefined;
     const block_len = try snappy.encode.compressBlock(data, &block);
@@ -41,6 +46,15 @@ test "snappy reads the decoded length from the block header" {
         data.len,
         try snappy.decode.decompressedBlockLength(block[0..block_len]),
     );
+
+    var lz4_block: [lz4.encode.maxCompressedLength(data.len)]u8 = undefined;
+    const lz4_block_len = try lz4.encode.compressBlock(data, &lz4_block);
+    var lz4_plain: [data.len]u8 = undefined;
+    const lz4_plain_len = try lz4.decode.decompressBlock(
+        lz4_block[0..lz4_block_len],
+        &lz4_plain,
+    );
+    try std.testing.expectEqualSlices(u8, data, lz4_plain[0..lz4_plain_len]);
 
     // The other formats keep no header field the decoder trusts for this:
     // gzip and zlib carry the decoded size only in their trailers, and a

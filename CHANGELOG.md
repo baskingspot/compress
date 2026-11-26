@@ -5,6 +5,13 @@ All notable changes to compress are recorded here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `lz4.encode.compressBlock` and `lz4.decode.decompressBlock`: raw LZ4 blocks
+  over caller-owned buffers, with `lz4.encode.maxCompressedLength` for sizing
+  and the decoded length supplied as the decode target's length. No allocation,
+  frame format, legacy format, high-compression mode, or dictionaries.
+
 ## [0.4.0] - 2026-11-16
 
 ### Changed

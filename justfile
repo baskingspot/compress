@@ -146,6 +146,13 @@ snappy-oracle:
     go build -C scripts/snappy_klauspost -o ../../zig-out/bin/snappy-klauspost .
     uv run scripts/snappy_oracle.py
 
+[doc("Check raw LZ4 blocks against pierrec/lz4 and liblz4 in both directions, including foreign encoder tails and corrupt input")]
+[group("conformance")]
+lz4-oracle:
+    zig build lz4-oracle-harness
+    go build -C scripts/lz4_go -o ../../zig-out/bin/lz4-go .
+    uv run --with lz4==4.4.5 scripts/lz4_oracle.py
+
 [doc("Check zstd against the reference CLI and klauspost/compress. klauspost makes the strict Window_Size check that the C decoder does not")]
 [group("conformance")]
 zstd-oracle:

@@ -1,4 +1,4 @@
-//! compress: fast, self-contained compression codecs in pure Zig.
+//! Compression codecs in pure Zig: Snappy, LZ4, DEFLATE, gzip, zlib, Zstandard, and Brotli.
 //!
 //! One module; each codec is a namespace under it. Codecs import only `std`
 //! and `fastmem`, plus the shared `src/internal/` by relative import (gzip and
@@ -23,6 +23,11 @@ pub const flate = @import("flate/root.zig");
 /// buffers, no heap allocation. API: `src/gzip/README.md`. Format:
 /// docs/specs/rfc1952-gzip.txt.
 pub const gzip = @import("gzip/root.zig");
+/// LZ4 blocks: `encode.compressBlock` and `decode.decompressBlock` over
+/// caller-owned buffers. The caller supplies the decoded length as the decode
+/// target's length. No heap allocation. API: `src/lz4/README.md`. Format:
+/// docs/specs/lz4-block-format.md.
+pub const lz4 = @import("lz4/root.zig");
 /// Snappy blocks: `encode.compressBlock` and `decode.decompressBlock` over
 /// caller-owned buffers, and a streaming `Reader` and `Writer` over a
 /// length-prefixed framing of this package's own. No heap allocation. API:
@@ -46,6 +51,7 @@ test {
     _ = flate;
     _ = snappy;
     _ = gzip;
+    _ = lz4;
     _ = zlib;
     _ = zstd;
     // The consumer surface, spelled the way a consumer spells it: names are
@@ -63,6 +69,8 @@ test {
     _ = gzip.decode.decompress;
     _ = gzip.Reader.streamAll;
     _ = gzip.Writer.streamAll;
+    _ = lz4.encode.compressBlock;
+    _ = lz4.decode.decompressBlock;
     _ = snappy.encode.compressBlock;
     _ = snappy.decode.decompressBlock;
     _ = snappy.Reader.streamAll;

@@ -37,7 +37,7 @@ QUOTE = re.compile(r"^[ \t]*(?:>[ \t]?)+")
 
 # The names a fence may use without importing them: `compress` is the module
 # under test, and the codec aliases match the barrel's namespaces.
-PREAMBLE = ("std", "compress", "snappy", "flate", "gzip", "zlib", "zstd", "brotli")
+PREAMBLE = ("std", "compress", "snappy", "lz4", "flate", "gzip", "zlib", "zstd", "brotli")
 
 # The head of a top-level statement: any modifiers the language allows before
 # the kind, then a kind this checker can handle. A statement it cannot name is

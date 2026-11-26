@@ -4,14 +4,13 @@ const comptimePrint = std.fmt.comptimePrint;
 
 /// The codecs with an example CLI (examples/<codec>.zig). brotli's is
 /// decode-only.
-const example_codecs = [_][]const u8{ "brotli", "snappy", "flate", "gzip", "zlib", "zstd" };
+const example_codecs = [_][]const u8{ "brotli", "snappy", "lz4", "flate", "gzip", "zlib", "zstd" };
 
 /// The codecs with a local bench (src/<codec>/bench.zig).
-// The codecs with a local bench (src/<codec>/bench.zig).
-const bench_codecs = [_][]const u8{ "snappy", "flate", "gzip", "zlib", "zstd", "brotli" };
+const bench_codecs = [_][]const u8{ "snappy", "lz4", "flate", "gzip", "zlib", "zstd", "brotli" };
 
 /// The codecs with an oracle harness (src/<codec>/oracle.zig).
-const oracle_codecs = [_][]const u8{ "brotli", "flate", "gzip", "snappy", "zlib", "zstd" };
+const oracle_codecs = [_][]const u8{ "brotli", "flate", "gzip", "snappy", "lz4", "zlib", "zstd" };
 
 /// One binary fixture the golden data commits as base64 text: `path` is the
 /// committed file, `name` the file name it decodes back to inside the

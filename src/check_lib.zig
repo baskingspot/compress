@@ -11,6 +11,7 @@ const compress = @import("compress");
 const brotli = compress.brotli;
 const flate = compress.flate;
 const gzip = compress.gzip;
+const lz4 = compress.lz4;
 const snappy = compress.snappy;
 const zlib = compress.zlib;
 const zstd = compress.zstd;
@@ -28,6 +29,12 @@ export fn checkSnappy() void {
     _ = snappy.decode.decompressBlock(&source, &target) catch 0;
     _ = snappy.Writer.streamAll(&input, &output) catch 0;
     _ = snappy.Reader.streamAll(&input, &output) catch 0;
+}
+
+export fn checkLz4() void {
+    _ = lz4.encode.maxCompressedLength(source.len);
+    _ = lz4.encode.compressBlock(&source, &target) catch 0;
+    _ = lz4.decode.decompressBlock(&source, &target) catch 0;
 }
 
 export fn checkFlate() void {

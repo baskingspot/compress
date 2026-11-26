@@ -24,6 +24,12 @@ it before you change a kernel or make a performance claim.
   `src/snappy/README.md`); `bench.zig` is the local benchmark;
   `fuzz.zig` ships fuzz targets; `common.zig` (LEB128 varint) is a shared
   helper. One-call pumps: `Writer.streamAll`, `Reader.streamAll`.
+- `src/lz4/`: raw-block LZ4. `encode.zig` follows pierrec/lz4's fast match
+  finder (THIRD_PARTY.md); `decode.zig` accepts any structurally valid block,
+  without the encoder-side end margins; `golden.zig` holds the hand-composed
+  format vectors and offset sweep; `oracle.zig` is the harness behind `just
+  lz4-oracle`; `bench.zig` is the 64-KiB local benchmark; `fuzz.zig` holds the
+  block targets. No frame, legacy, HC, dictionary, or streaming layer.
 - `src/flate/`: raw deflate (RFC 1951). `encode.zig` ports the klauspost
   level-1 match-finder (THIRD_PARTY.md); `decode.zig` carries inflate, the
   bit reader, and the canonical Huffman-table construction and §3.2.5 code
@@ -99,8 +105,9 @@ it before you change a kernel or make a performance claim.
   entries, the shared writer machinery (the generated `Io.Writer` entries
   and the poisoned `finish`), the endian-bound integer helpers the codec
   `common.zig` files bind, the container driver over a codec's framing
-  type, and `constant.copyInto` (a copy whose source is a comptime constant;
-  `constant.zig` explains why fastmem refuses one). Imports only
+  type, `constant.copyInto` (a copy whose source is a comptime constant;
+  `constant.zig` explains why fastmem refuses one), and `match.copyMatch`
+  (the shared overlapping-match SIMD kernel). Imports only
   `std` and `fastmem`; reached by relative import
   (`@import("../internal/root.zig")`), never a build module, and never
   re-exported by the barrel; a codec that uses it lifts with it in tow,
@@ -207,6 +214,10 @@ onto a nearly-full disk):
   (wbits 15), both directions (plus the FDICT refusal, the T5 FCHECK=31
   corner, and the exact stream boundary; the layer is
   `scripts/zlib_oracle.py`).
+- `just lz4-oracle`: external-oracle conformance for raw LZ4 blocks against
+  pierrec/lz4 v4.1.34 and liblz4 through the Python `lz4` 4.4.5 package, both
+  directions, including C's exact-capacity decoder, foreign tails, and corrupt
+  input (`scripts/lz4_oracle.py`, `scripts/lz4_go`).
 - `just zstd-oracle`: external-oracle conformance for zstd — the reference
   CLI v1.5.7 and klauspost/compress (the strict Window_Size check the C
   decoder does not make), both directions and byte-parity with `zstd -1` on
@@ -296,7 +307,7 @@ Deviations, on purpose:
 - Every Zig-tagged fence in a README compiles: `just lint` extracts them
   and builds them against the public module. A fence that cannot be a
   compilation unit is a listing, and a listing is tagged `text`. A fence
-  may use `std`, `compress`, and the six codec names without importing
+  may use `std`, `compress`, and the seven codec names without importing
   them; the rest is its own. The checker fails closed: a fence it cannot
   analyze in full — a container that declares a member, a generic function,
   a statement it does not recognize — fails the lint with the README and
