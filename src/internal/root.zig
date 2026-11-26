@@ -20,6 +20,8 @@ pub const writer = @import("writer.zig");
 /// Integer access with a fixed byte order (`Int`, `little`, `big`): the
 /// `readInt` and `writeInt` that each codec's `common.zig` binds.
 pub const int = @import("int.zig");
+/// LZ77 match copies, including overlapping matches (`copyMatch`).
+pub const match = @import("match.zig");
 /// Copies from a comptime constant into a runtime buffer: the fastmem
 /// restriction, explained in `constant.zig`.
 pub const constant = @import("constant.zig");
