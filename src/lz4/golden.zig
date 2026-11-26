@@ -74,6 +74,33 @@ pub fn expectEncoderBlock(source: []const u8, block: []const u8) !void {
     }
 }
 
+/// Whether any match in `block` reads from an earlier 64 KiB segment. The
+/// decoder does not care, but the encoder's candidate reconstruction does, and
+/// nothing else in the tests observes it.
+pub fn crossesSegment(block: []const u8) !bool {
+    const window_size = 1 << 16;
+    var in_pos: usize = 0;
+    var out_pos: usize = 0;
+    while (true) {
+        if (in_pos == block.len) return error.InvalidEncodedBlock;
+        const token = block[in_pos];
+        in_pos += 1;
+        const literal_len = try readEncodedLength(block, &in_pos, token >> 4, 0);
+        if (literal_len > block.len - in_pos) return error.InvalidEncodedBlock;
+        in_pos += literal_len;
+        out_pos += literal_len;
+        if (in_pos == block.len) return false;
+        if (block.len - in_pos < 2) return error.InvalidEncodedBlock;
+        const offset = readInt(u16, block[in_pos..][0..2]);
+        in_pos += 2;
+        if (offset == 0 or offset > out_pos) return error.InvalidEncodedBlock;
+        const segment_start = (out_pos / window_size) * window_size;
+        if (out_pos - offset < segment_start) return true;
+        const match_len = try readEncodedLength(block, &in_pos, token & 15, 4);
+        out_pos += match_len;
+    }
+}
+
 const DecodeCase = struct {
     desc: []const u8,
     source: []const u8,

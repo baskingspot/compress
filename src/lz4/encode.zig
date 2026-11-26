@@ -278,6 +278,12 @@ fn emitLastLiterals(target: []u8, literals: []const u8) error{BufferTooSmall}!us
     return written + literals.len;
 }
 
+fn runExpectEncoderBlock(input: []const u8, block: []const u8) void {
+    golden.expectEncoderBlock(input, block) catch |err| {
+        std.debug.panic("encoder block is invalid: {s}", .{@errorName(err)});
+    };
+}
+
 fn roundTrip(input: []const u8) !void {
     const bound = maxCompressedLength(input.len);
     const compressed = try testing.allocator.alloc(u8, bound);
@@ -336,14 +342,46 @@ test "encode: the 13, 16, and 64 KiB boundaries round-trip" {
 
 test "encode: the three-position scan preserves the last-match margin" {
     // docs/specs/lz4-block-format.md, End of block conditions §3. The second
-    // candidate used to start two bytes past the permitted match start.
-    try roundTrip("abababbababba");
+    // candidate used to start two bytes past the permitted match start. The
+    // input is 16 bytes because anything under 14 takes the literal-only path
+    // and never reaches the scan; a 13-byte vector silently stopped testing
+    // this when the minimum rose to 14. `expectEncoderBlock` asserts the
+    // margin independently of the decoder, and liblz4 rejects the block a
+    // regressed encoder emits here.
+    try roundTrip("baaabbaaaabbabaa");
 }
 
 test "encode: a mismatch tail keeps the match cursor paired" {
     // The eight-byte compare stops at a mismatch. Both cursors must advance by
     // the common prefix before the byte-wise tail starts.
     try roundTrip(" allocat allocator, for b");
+}
+
+test "encode: a repetitive input compresses to a small block" {
+    // A ceiling, not a pin: the point is that the match finder still runs.
+    // `matches4` forced to false would emit literals and fail this.
+    const input = repeat.repeatString("the quick brown fox jumps over the lazy dog. ", 2000);
+    var target: [maxCompressedLength(input.len)]u8 = undefined;
+    const written = try compressBlock(input, &target);
+    try testing.expect(written * 50 <= input.len);
+    runExpectEncoderBlock(input, target[0..written]);
+}
+
+test "encode: a match points into the previous 64 KiB segment" {
+    // 64 KiB of noise, then the last 4 KiB again. The second copy's first
+    // match is 4096 bytes back and lands on position 61440, which is in the
+    // previous segment: `getCandidate` subtracts the window and points there,
+    // where a wrong reconstruction would look inside the current segment.
+    const noise_len = 64 * 1024;
+    const repeat_len = 4 * 1024;
+    var input: [noise_len + repeat_len]u8 = undefined;
+    var rng: DefaultPrng = .init(0x5E6);
+    rng.random().bytes(input[0..noise_len]);
+    @memcpy(input[noise_len..][0..repeat_len], input[noise_len - repeat_len ..][0..repeat_len]);
+    var target: [maxCompressedLength(input.len)]u8 = undefined;
+    const written = try compressBlock(&input, &target);
+    runExpectEncoderBlock(&input, target[0..written]);
+    try testing.expect(try golden.crossesSegment(target[0..written]));
 }
 
 test "encode: matches work beyond the first 64 KiB" {
@@ -353,15 +391,19 @@ test "encode: matches work beyond the first 64 KiB" {
 }
 
 test "encode: maxCompressedLength covers the literal form" {
-    // The reference LZ4_COMPRESSBOUND is input + input/255 + 16.
-    inline for (.{ 0, 1, 14, 15, 16, 254, 255, 270, 4096, 65536, 65537 }) |len| {
-        const input = try testing.allocator.alloc(u8, len);
-        defer testing.allocator.free(input);
-        fastmem.set(u8, input, 0xAB);
-        const target = try testing.allocator.alloc(u8, maxCompressedLength(len));
-        defer testing.allocator.free(target);
-        const written = try compressBlock(input, target);
-        try testing.expect(written <= target.len);
+    // The reference LZ4_COMPRESSBOUND is input + input/255 + 16. The inputs are
+    // random because a fill of one byte is a run: above the 14-byte minimum it
+    // compresses to almost nothing and never exercises the literal path.
+    const lengths = [_]usize{ 0, 1, 14, 15, 16, 254, 255, 270, 4096, 65536, 65537 };
+    var source: [65537]u8 = undefined;
+    var target: [maxCompressedLength(source.len)]u8 = undefined;
+    for (lengths) |len| {
+        var rng: DefaultPrng = .init(0xB0A7 +% len);
+        rng.random().bytes(source[0..len]);
+        const written = try compressBlock(source[0..len], &target);
+        try testing.expect(written <= maxCompressedLength(len));
+        // Below the minimum the encoder has one form, and its size is exact.
+        if (len < min_non_literal_block_size) try testing.expectEqual(1 + len, written);
     }
 }
 

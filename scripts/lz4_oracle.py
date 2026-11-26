@@ -175,6 +175,16 @@ def main() -> int:
         binary_data = bytes(97 + binary_rng.getrandbits(1) for _ in range(size))
         check_round_trip(f"two-symbol {size}", binary_data)
 
+    # The late-match class: short two-symbol inputs over many seeds, so the
+    # 12-byte margin is exercised across the scan's phase rather than at one
+    # size. A single 13-byte vector stopped reaching the scan when the
+    # literal-only minimum rose to 14, and nothing noticed.
+    for length in range(14, 65):
+        for seed in range(8):
+            rng = random.Random((length << 8) ^ seed ^ 0x5EED)
+            data = bytes(97 + rng.getrandbits(1) for _ in range(length))
+            check_round_trip(f"two-symbol {length}/{seed}", data)
+
     # Structurally valid blocks whose tails break the encoder-side 5-byte and
     # 12-byte restrictions. The final token's low nibble is unused.
     expect_valid("empty", b"\x00", b"")
