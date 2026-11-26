@@ -9,6 +9,7 @@
 
 const std = @import("std");
 const assert = std.debug.assert;
+const testing = std.testing;
 const Target = std.Target;
 const builtin = @import("builtin");
 const native_arch = builtin.target.cpu.arch;
@@ -173,5 +174,29 @@ pub fn copyMatch(target: []u8, pos: usize, offset: usize, length: usize) void {
     const tail = end - p;
     if (tail > 0) {
         fastmem.copy(u8, target[p..][0..tail], target[p - offset ..][0..tail]);
+    }
+}
+
+// Every collapsing offset against a byte-at-a-time copy, at positions that push
+// each branch: the 16-byte pattern path, the 16-byte window path, and the
+// non-overlapping memcpy. A wrong phase mask passes a round trip and fails here.
+test "copyMatch: every overlapping offset matches a byte copy" {
+    var buffer: [1024]u8 = undefined;
+    var reference: [1024]u8 = undefined;
+    for (1..65) |offset| {
+        for ([_]usize{ 1, 2, 3, 7, 15, 16, 17, 31, 32, 33, 63, 64, 65, 100, 200 }) |length| {
+            for ([_]usize{ 0, 1, 7, 16, 40 }) |slack| {
+                const pos = offset + slack;
+                for (&buffer, 0..) |*byte, i| byte.* = @truncate(i *% 37 +% 11);
+                @memcpy(&reference, &buffer);
+                copyMatch(&buffer, pos, offset, length);
+                for (0..length) |i| reference[pos + i] = reference[pos + i - offset];
+                try testing.expectEqualSlices(
+                    u8,
+                    reference[0 .. pos + length],
+                    buffer[0 .. pos + length],
+                );
+            }
+        }
     }
 }
