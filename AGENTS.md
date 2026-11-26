@@ -94,7 +94,8 @@ it before you change a kernel or make a performance claim.
   `fuzz.zig` the targets; `probe32.zig` the 32-bit proof probe
   (`just check-32`). API: `src/brotli/README.md`.
 - `src/internal/`: the codec-agnostic shares (plan, "Architecture"): the
-  sentinel test machinery, the reader lifecycle + generated reader vtable
+  sentinel test machinery, the overlapping match copy (`match.zig`) that
+  snappy and LZ4 decode share, the reader lifecycle + generated reader vtable
   entries, the shared writer machinery (the generated `Io.Writer` entries
   and the poisoned `finish`), the endian-bound integer helpers the codec
   `common.zig` files bind, the container driver over a codec's framing
