@@ -10,6 +10,13 @@ and dependency with a license that is not ours.
   Snappy-Go reference encoder. The algorithm is ported, not the code.
   Attribution: Copyright klauspost/compress contributors,
   https://github.com/klauspost/compress (s2/encode_all.go).
+- `src/lz4/encode.zig`: follows the fast match-finding algorithm in
+  pierrec/lz4 v4.1.34 (BSD-3-Clause) `internal/lz4block/block.go`: the
+  six-byte hash, three candidate positions per load, 16-bit position table,
+  occupancy bitmap, and eight-byte match extension. The end margins follow the
+  block specification rather than the Go encoder's more conservative tail.
+  Attribution: Copyright the pierrec/lz4 contributors,
+  https://github.com/pierrec/lz4.
 - `src/flate/encode.zig`: a port of the algorithm in klauspost/compress
   (BSD-3-Clause) `flate/level1.go` (`fastEncL1`) and `flate/fast_encoder.go` —
   the single-slot `[1 << 15]` table, the 5-byte hash and its `prime5bytes`,
@@ -123,7 +130,8 @@ and dependency with a license that is not ours.
 
 Verbatim spec text, fetched once with provenance recorded in the directory
 `README.md`. IETF RFCs are freely distributed. The Snappy format and framing
-descriptions come from google/snappy (BSD-3-Clause).
+descriptions come from google/snappy (BSD-3-Clause). The LZ4 block format
+description comes from lz4/lz4 (BSD-2-Clause).
 
 ## Studied, not copied
 

@@ -2,12 +2,12 @@
 title = "compress"
 +++
 
-Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brotli.
+Compression codecs in pure Zig: Snappy, LZ4, DEFLATE, gzip, zlib, Zstandard, and Brotli.
 
 One module, a namespace per codec, the same buffer discipline everywhere: the caller owns every buffer, the default APIs do not allocate, and every failure has a name. Streaming goes through `std.Io`. The encoders target the speed class — the zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3 — and the zstd decoder verifies what the C library does not.
 
 - [Codecs](#codecs): one namespace per format, and which of them are containers over `flate`.
-- [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.17, and what this package adds. gzip, zlib, and Snappy are missing from std entirely; zstd in std is decode-only.
+- [Choose std or compress](#choose-std-or-compress): what `std.compress` has in 0.17, and what this package adds. gzip, zlib, Snappy, and LZ4 are missing from std entirely; zstd in std is decode-only.
 - [One-shot encode and decode](#one-shot-encode-and-decode): the same shape in every codec. Encode returns the compressed length, decode returns the decoded length, and both take caller-owned buffers.
 - [Size the buffers](#size-the-buffers): every encoder exports its exact worst case, and decode never writes past the length it returns.
 - [Streaming](#streaming): `Writer` and `Reader` over `std.Io`, with one-call pumps.
@@ -73,17 +73,18 @@ just test
 | Namespace                        | Format                | Support                                      |
 | -------------------------------- | --------------------- | -------------------------------------------- |
 | [`snappy`](api/#compress.snappy) | Snappy blocks         | encode, decode, streaming                    |
+| [`lz4`](api/#compress.lz4)       | LZ4 blocks            | encode, decode                               |
 | [`flate`](api/#compress.flate)   | raw DEFLATE, RFC 1951 | encode, decode, streaming, preset dictionary |
 | [`gzip`](api/#compress.gzip)     | gzip, RFC 1952        | encode, decode, streaming                    |
 | [`zlib`](api/#compress.zlib)     | zlib, RFC 1950        | encode, decode, streaming, preset dictionary |
 | [`zstd`](api/#compress.zstd)     | Zstandard, RFC 8878   | encode, decode, streaming, dictionaries      |
 | [`brotli`](api/#compress.brotli) | Brotli, RFC 7932      | encode (quality 3), decode, streaming        |
 
-`flate` is the kernel: `gzip` and `zlib` are containers over it, each adding its framing, its checksum, and its own error names. `snappy`, `zstd`, and `brotli` are self-contained.
+`flate` is the kernel: `gzip` and `zlib` are containers over it, each adding its framing, its checksum, and its own error names. `snappy`, `lz4`, `zstd`, and `brotli` are self-contained.
 
 # Choose std or compress
 
-`std.compress` in Zig 0.17 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, Snappy, or Brotli at all.
+`std.compress` in Zig 0.17 ships `flate` with both directions, `zstd` with decode only, and the LZMA family. It does not ship gzip, zlib, Snappy, LZ4, or Brotli at all.
 
 | Format  | std.compress 0.17 | this package                                                  |
 | ------- | ----------------- | ------------------------------------------------------------- |
@@ -91,6 +92,7 @@ just test
 | gzip    | not present       | both, one-shot and streaming                                  |
 | zlib    | not present       | both, one-shot and streaming, preset history                  |
 | Snappy  | not present       | both, one-shot and streaming                                  |
+| LZ4     | not present       | both, raw blocks only                                         |
 | zstd    | decode only       | both, byte-identical to `zstd -1` and `zstd -3`, dictionaries |
 | Brotli  | not present       | both, one-shot and streaming                                  |
 
@@ -104,17 +106,17 @@ The one-shot shape is identical in every codec:
 {{ load_data(path="examples/oneshot_roundtrip.zig", format="plain") | trim_end }}
 ```
 
-Encode takes `source` and `target` and returns the compressed length. Decode takes the compressed bytes and a `target` cap and returns the decoded length. `target` on the decode side is a cap, not a promise: the decode may fill the cap on its way to a refusal, but a result that does not fit fails `error.BufferTooSmall` and nothing past the cap is ever written. The returned length carries the other half of the rule: decode never writes past it, so a larger target keeps its tail untouched.
+Encode takes `source` and `target` and returns the compressed length. Decode takes the compressed bytes and a `target` cap and returns the decoded length. `target` on the decode side is a cap, not a promise: the decode may fill the cap on its way to a refusal, but a result that does not fit fails `error.BufferTooSmall` and nothing past the cap is ever written. LZ4 is the exception: its raw block has no decoded-length field, so `target.len` is the exact expected length and a mismatch is `error.DecompressionFailed`. The returned length carries the other half of the rule: decode never writes past it, so a larger target keeps its tail untouched.
 
 # Size the buffers
 
-Never guess a size. Every encoder exports its exact worst case, and Snappy's block form tells the decoder its exact decoded length up front:
+Never guess a size. Every encoder exports its exact worst case. Snappy's block form tells the decoder its exact decoded length up front, while an LZ4 caller supplies it through the output buffer:
 
 ```zig
 {{ load_data(path="examples/choose_buffers.zig", format="plain") | trim_end }}
 ```
 
-With the exact worst case, `snappy.encode.compressBlock` cannot fail, and its error set drops to `error{}` at the call site. For the other codecs, decode sizing is the caller's: gzip and zlib carry the decoded size only in their trailers, and a decode that must know it up front needs the caller's bound. Decode never writes past the length it returns, so a larger target keeps its tail untouched — every codec's test suite pins that rule with sentinels.
+With the exact worst case, `snappy.encode.compressBlock` and `lz4.encode.compressBlock` cannot fail, and their error sets drop to `error{}` at the call site. Decode sizing is the caller's: Snappy carries the length in its block header, LZ4 takes it as the exact target length, and gzip and zlib carry the decoded size only in their trailers. Decode never writes past the length it returns, so a larger target keeps its tail untouched — every codec's test suite pins that rule with sentinels.
 
 # Streaming
 
@@ -139,7 +141,7 @@ A `Buffer` is storage that the codec writes into, not state that it owns. The ty
 
 A failed allocation from a `*Alloc` pump is `error.OutOfMemory`.
 
-The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming layer uses Google's framed format: the `sNaPpY` identifier, per-chunk masked CRC-32C, and skippable chunks, so its streams interoperate with other framed-snappy tools.
+The container codecs are self-delimiting at the member boundary: `gzip.Reader.streamAll` walks every member in a multi-member stream, and the exact boundary stays visible when a caller needs to stop there. Snappy's streaming layer uses Google's framed format: the `sNaPpY` identifier, per-chunk masked CRC-32C, and skippable chunks, so its streams interoperate with other framed-snappy tools. LZ4 has block functions only; its example CLI supplies an example-local record header.
 
 # Dictionaries
 
@@ -163,10 +165,11 @@ Pick the format for the job, not the fastest name:
 
 | You need                        | Use    | The trade                                                    |
 | ------------------------------- | ------ | ------------------------------------------------------------ |
-| The smallest payloads           | zstd   | The heaviest format of the five; also the best ratio         |
+| The smallest payloads           | zstd   | The heaviest format here; also the best ratio                |
 | Interop with everything         | gzip   | DEFLATE's ratio and speed, universal acceptance              |
 | A zlib-shaped wire format       | zlib   | gzip without the file framing, plus a preset dictionary      |
 | In-memory blocks, latency-bound | snappy | No ratio to speak of; the framing here is this package's own |
+| Existing raw LZ4 block records  | lz4    | The decoded length stays out of band; no frame or dictionary |
 | Web text, either direction      | brotli | Encoder at quality 3; the static dictionary ships inside     |
 
 The zstd encoder is byte-identical to `zstd -1` at level 1 and `zstd -3` at level 3, which pins it to the fast class; its `Level` enum has `@"1"` and `@"3"`, and another number is not representable. The DEFLATE encoder's `Level` has `@"1"` (fixed-Huffman and stored blocks) and `@"6"` (dynamic-Huffman, byte-identical to klauspost/compress's level 6); `gzip` and `zlib` take the same type.
@@ -209,6 +212,7 @@ plot` from the recorded run.
 
 # Limits
 
+- LZ4 is the raw block format only. There is no frame, legacy format, high-compression mode, or dictionary API.
 - The Brotli encoder is quality 3 only; the reference's other qualities are different encoders.
 - There is no zstd dictionary trainer. The `zstd` CLI trains, and this package consumes.
 - The zstd encoder implements levels 1 and 3. The CLI's other levels are different encoders, and `Level` cannot represent them.

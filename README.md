@@ -5,7 +5,7 @@
   </picture>
 </h1>
 
-Compression codecs in pure Zig: Snappy, DEFLATE, gzip, zlib, Zstandard, and Brotli.
+Compression codecs in pure Zig: Snappy, LZ4, DEFLATE, gzip, zlib, Zstandard, and Brotli.
 
 `compress` is one Zig module with a namespace per codec. The caller owns
 every buffer, and the default APIs do not allocate: zstd's streaming
@@ -23,6 +23,7 @@ large for a stack. Streaming goes through `std.Io`. The module imports only
 | Namespace                        | Format                       | Support                                               |
 | -------------------------------- | ---------------------------- | ----------------------------------------------------- |
 | [`snappy`](src/snappy/README.md) | Snappy blocks                | encode, decode, streaming                             |
+| [`lz4`](src/lz4/README.md)       | LZ4 blocks                   | encode, decode                                        |
 | [`flate`](src/flate/README.md)   | raw DEFLATE, RFC 1951        | encode, decode, streaming, preset dictionary          |
 | [`gzip`](src/gzip/README.md)     | gzip, RFC 1952, over `flate` | encode, decode, streaming                             |
 | [`zlib`](src/zlib/README.md)     | zlib, RFC 1950, over `flate` | encode, decode, streaming, preset dictionary          |
