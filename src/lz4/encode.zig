@@ -25,6 +25,7 @@ const common = @import("common.zig");
 const readInt = common.readInt;
 const writeInt = common.writeInt;
 const decode = @import("decode.zig");
+const golden = @import("golden.zig");
 const repeat = @import("../repeat.zig");
 
 /// Largest input `compressBlock` accepts. This is the reference LZ4 maximum,
@@ -42,9 +43,10 @@ const table_size: usize = 1 << table_bits;
 const HashTable = [table_size]u16;
 const Occupancy = [table_size / 32]u32;
 
-/// Independent blocks shorter than 13 bytes cannot contain a match under the
-/// end-of-block rules. The 64-bit hash loads are also in bounds above this.
-const min_non_literal_block_size: usize = 13;
+/// Inputs shorter than 14 bytes skip match finding. The extra byte above the
+/// format's 13-byte minimum keeps the three-position scan inside the 12-byte
+/// match-start margin.
+const min_non_literal_block_size: usize = 14;
 const last_literals: usize = 5;
 const match_find_margin: usize = 12;
 const min_match: usize = 4;
@@ -115,9 +117,9 @@ inline fn matches4(source: []const u8, position: usize, candidate: usize, word: 
 ///
 /// `source.len` must be at most `max_block_size` (asserted). Returns
 /// `error.BufferTooSmall` if `target` cannot hold the result. A `target` of
-/// `maxCompressedLength(source.len)` bytes always can. Uses 136 KiB of stack
-/// and does not allocate. The output is valid LZ4 but need not match another
-/// encoder's bytes.
+/// `maxCompressedLength(source.len)` bytes always can. `source` and `target`
+/// must not overlap. Uses 136 KiB of stack and does not allocate. The output
+/// is valid LZ4 but need not match another encoder's bytes.
 pub fn compressBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usize {
     assert(source.len <= max_block_size);
     if (source.len < min_non_literal_block_size) return emitLastLiterals(target, source);
@@ -126,7 +128,9 @@ pub fn compressBlock(source: []const u8, target: []u8) error{BufferTooSmall}!usi
     var occupied: Occupancy = undefined;
     fastmem.set(u32, &occupied, 0);
 
-    const scan_limit = source.len - match_find_margin;
+    // The scan probes s, s+1, and s+2. Reserve those two positions so the
+    // latest possible match starts exactly 12 bytes before the input's end.
+    const scan_limit = source.len - match_find_margin - 2;
     const match_limit = source.len - last_literals;
     var written: usize = 0;
     var next_emit: usize = 0;
@@ -280,6 +284,7 @@ fn roundTrip(input: []const u8) !void {
     defer testing.allocator.free(compressed);
     const compressed_len = try compressBlock(input, compressed);
     try testing.expect(compressed_len <= bound);
+    try golden.expectEncoderBlock(input, compressed[0..compressed_len]);
 
     const decoded = try testing.allocator.alloc(u8, input.len);
     defer testing.allocator.free(decoded);
@@ -289,7 +294,8 @@ fn roundTrip(input: []const u8) !void {
 }
 
 test "encode: empty and short inputs are final literals" {
-    inline for (.{ 0, 1, 4, 5, 12 }) |len| {
+    // docs/specs/lz4-block-format.md, End of block conditions §2 and §3.
+    inline for (.{ 0, 1, 4, 5, 12, 13 }) |len| {
         const input = repeat.repeatString("a", len);
         var target: [maxCompressedLength(12)]u8 = undefined;
         const written = try compressBlock(input, &target);
@@ -328,6 +334,12 @@ test "encode: the 13, 16, and 64 KiB boundaries round-trip" {
     }
 }
 
+test "encode: the three-position scan preserves the last-match margin" {
+    // docs/specs/lz4-block-format.md, End of block conditions §3. The second
+    // candidate used to start two bytes past the permitted match start.
+    try roundTrip("abababbababba");
+}
+
 test "encode: a mismatch tail keeps the match cursor paired" {
     // The eight-byte compare stops at a mismatch. Both cursors must advance by
     // the common prefix before the byte-wise tail starts.
@@ -341,6 +353,7 @@ test "encode: matches work beyond the first 64 KiB" {
 }
 
 test "encode: maxCompressedLength covers the literal form" {
+    // The reference LZ4_COMPRESSBOUND is input + input/255 + 16.
     inline for (.{ 0, 1, 14, 15, 16, 254, 255, 270, 4096, 65536, 65537 }) |len| {
         const input = try testing.allocator.alloc(u8, len);
         defer testing.allocator.free(input);

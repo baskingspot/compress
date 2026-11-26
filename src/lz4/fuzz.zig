@@ -24,6 +24,7 @@ const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const decode = @import("decode.zig");
 const encode = @import("encode.zig");
+const golden = @import("golden.zig");
 
 const source_max: usize = 8 * 1024;
 const block_max: usize = 128 * 1024;
@@ -40,6 +41,7 @@ fn blockRoundTrip(bytes: []const u8) !void {
     var compressed: [encode.maxCompressedLength(block_max)]u8 = undefined;
     const compressed_len = try encode.compressBlock(bytes, &compressed);
     try testing.expect(compressed_len <= encode.maxCompressedLength(bytes.len));
+    try golden.expectEncoderBlock(bytes, compressed[0..compressed_len]);
 
     var window: [block_max + guard_len]u8 = undefined;
     sentinel.fill(window[0 .. bytes.len + guard_len]);

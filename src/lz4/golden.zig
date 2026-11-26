@@ -13,9 +13,66 @@ const internal = @import("../internal/root.zig");
 const sentinel = internal.sentinel;
 const decode = @import("decode.zig");
 const decompressBlock = decode.decompressBlock;
+const common = @import("common.zig");
+const readInt = common.readInt;
 const repeat = @import("../repeat.zig");
 
 const guard_len = 256;
+
+/// Read one length in the encoder-output walker. This is deliberately separate
+/// from the decoder's helper: the walker checks the encoder's tail policy.
+fn readEncodedLength(block: []const u8, in_pos: *usize, nibble: u8, base: usize) !usize {
+    var length = base + nibble;
+    if (nibble < 15) return length;
+    while (true) {
+        if (in_pos.* == block.len) return error.InvalidEncodedBlock;
+        const byte = block[in_pos.*];
+        in_pos.* += 1;
+        length += byte;
+        if (byte != 255) return length;
+    }
+}
+
+/// Check the encoder-side end conditions independently of both decoders. The
+/// walker records each match's output position and the final literal run.
+pub fn expectEncoderBlock(source: []const u8, block: []const u8) !void {
+    var in_pos: usize = 0;
+    var out_pos: usize = 0;
+    var sequences: usize = 0;
+    var last_match_start: ?usize = null;
+
+    while (true) {
+        if (in_pos == block.len) return error.InvalidEncodedBlock;
+        const token = block[in_pos];
+        in_pos += 1;
+        sequences += 1;
+
+        const literal_len = try readEncodedLength(block, &in_pos, token >> 4, 0);
+        if (literal_len > block.len - in_pos) return error.InvalidEncodedBlock;
+        in_pos += literal_len;
+        out_pos += literal_len;
+
+        if (in_pos == block.len) {
+            try testing.expectEqual(source.len, out_pos);
+            if (source.len >= 5) try testing.expect(literal_len >= 5);
+            if (last_match_start) |start| try testing.expect(start + 12 <= source.len);
+            if (source.len < 14) {
+                try testing.expectEqual(@as(usize, 1), sequences);
+                try testing.expect(last_match_start == null);
+            }
+            return;
+        }
+
+        if (block.len - in_pos < 2) return error.InvalidEncodedBlock;
+        const offset = readInt(u16, block[in_pos..][0..2]);
+        in_pos += 2;
+        if (offset == 0 or offset > out_pos) return error.InvalidEncodedBlock;
+        const match_len = try readEncodedLength(block, &in_pos, token & 15, 4);
+        last_match_start = out_pos;
+        out_pos += match_len;
+        if (out_pos > source.len) return error.InvalidEncodedBlock;
+    }
+}
 
 const DecodeCase = struct {
     desc: []const u8,

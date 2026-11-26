@@ -106,7 +106,7 @@ The one-shot shape is identical in every codec:
 {{ load_data(path="examples/oneshot_roundtrip.zig", format="plain") | trim_end }}
 ```
 
-Encode takes `source` and `target` and returns the compressed length. Decode takes the compressed bytes and a `target` cap and returns the decoded length. `target` on the decode side is a cap, not a promise: the decode may fill the cap on its way to a refusal, but a result that does not fit fails `error.BufferTooSmall` and nothing past the cap is ever written. LZ4 is the exception: its raw block has no decoded-length field, so `target.len` is the exact expected length and a mismatch is `error.DecompressionFailed`. The returned length carries the other half of the rule: decode never writes past it, so a larger target keeps its tail untouched.
+Encode takes `source` and `target` and returns the compressed length. Decode takes the compressed bytes and a `target` cap and returns the decoded length. `target` on the decode side is a cap, not a promise: the decode may fill the cap on its way to a refusal, but a result that does not fit fails `error.BufferTooSmall` and nothing past the cap is ever written. LZ4 is the exception: its raw block has no decoded-length field, so `target.len` is the exact expected length and a mismatch is `error.DecompressionFailed`. For the cap-style codecs, decode never writes past the returned length, so a larger target keeps its tail untouched.
 
 # Size the buffers
 
@@ -116,7 +116,7 @@ Never guess a size. Every encoder exports its exact worst case. Snappy's block f
 {{ load_data(path="examples/choose_buffers.zig", format="plain") | trim_end }}
 ```
 
-With the exact worst case, `snappy.encode.compressBlock` and `lz4.encode.compressBlock` cannot fail, and their error sets drop to `error{}` at the call site. Decode sizing is the caller's: Snappy carries the length in its block header, LZ4 takes it as the exact target length, and gzip and zlib carry the decoded size only in their trailers. Decode never writes past the length it returns, so a larger target keeps its tail untouched — every codec's test suite pins that rule with sentinels.
+With the exact worst case, `snappy.encode.compressBlock` and `lz4.encode.compressBlock` cannot fail. Decode sizing is the caller's: Snappy carries the length in its block header, LZ4 takes it as the exact target length, and gzip and zlib carry the decoded size only in their trailers. For the cap-style codecs, decode never writes past the returned length, so a larger target keeps its tail untouched. Every codec's test suite pins its output boundary with sentinels.
 
 # Streaming
 

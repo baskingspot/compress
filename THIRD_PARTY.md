@@ -13,8 +13,8 @@ and dependency with a license that is not ours.
 - `src/lz4/encode.zig`: follows the fast match-finding algorithm in
   pierrec/lz4 v4.1.34 (BSD-3-Clause) `internal/lz4block/block.go`: the
   six-byte hash, three candidate positions per load, 16-bit position table,
-  occupancy bitmap, and eight-byte match extension. The end margins follow the
-  block specification rather than the Go encoder's more conservative tail.
+  occupancy bitmap, and eight-byte match extension. The three-position scan
+  reserves two positions to preserve the specification's last-match margin.
   Attribution: Copyright the pierrec/lz4 contributors,
   https://github.com/pierrec/lz4.
 - `src/flate/encode.zig`: a port of the algorithm in klauspost/compress
@@ -138,6 +138,9 @@ description comes from lz4/lz4 (BSD-2-Clause).
 Reference implementations read or run to settle behavior. No code is copied from
 them; the rows are here so the debt is visible.
 
+- `src/lz4/`: the reference C library through Python `lz4` 4.4.5 and
+  pierrec/lz4 v4.1.34 (BSD-3-Clause) run as block oracles. No decoder code is
+  copied.
 - `src/gzip/`, `src/zlib/`: klauspost/compress (BSD-3-Clause) `gzip/` and `zlib/`,
   the Go stdlib containers over the klauspost flate engine, for the header and
   trailer emission policy and where the checksum is computed.

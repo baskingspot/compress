@@ -58,7 +58,17 @@ fn makeShape(allocator: Allocator, shape: Shape, len: usize) ![]u8 {
         .rle => fastmem.set(u8, buf, 0x41),
         .mixed => {
             var rng: DefaultPrng = .init(0x5A4BEEF);
-            for (buf, 0..) |*b, i| b.* = @truncate(rng.random().int(u8) ^ @as(u8, @truncate(i)));
+            const random = rng.random();
+            var i: usize = 0;
+            while (i < len) {
+                const n = @min(random.intRangeAtMost(usize, 1, 128), len - i);
+                if (random.boolean()) {
+                    fastmem.set(u8, buf[i..][0..n], random.int(u8));
+                } else {
+                    random.bytes(buf[i..][0..n]);
+                }
+                i += n;
+            }
         },
     }
     return buf;
@@ -138,10 +148,12 @@ pub fn benchmarkRatio(b: *testingx.B) !void {
                 const compressed_len = try lz4.encode.compressBlock(input, target);
                 const ratio = @as(f64, @floatFromInt(compressed_len)) /
                     @as(f64, @floatFromInt(input.len));
-                try bb.reportMetric(ratio, "ratio");
                 while (try bb.loop()) {
                     bb.keepAlive(compressed_len);
                 }
+                // The harness resets per-iteration metrics in `loop`; report
+                // after the final iteration so the ratio survives to the row.
+                try bb.reportMetric(ratio, "ratio");
             }
         }.run);
     }

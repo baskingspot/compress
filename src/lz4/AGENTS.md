@@ -17,9 +17,12 @@
   table, an 8-KiB occupancy bitmap, three candidates per 64-bit load, and an
   adaptive skip. Only the bitmap is cleared. Position reconstruction selects
   the current or previous 64-KiB segment and rejects offsets of 65,536 or more.
-- The scan uses the specification's 12-byte match-start margin and five last
-  literals. The Go encoder uses a 14-byte combined limit instead; byte parity
-  is not a goal.
+- The scan reserves its second and third candidate positions inside the
+  specification's 12-byte match-start margin. Match extension leaves five last
+  literals. Inputs below 14 bytes are literals. Byte parity is not a goal.
+- `golden.expectEncoderBlock` walks every unit-test and fuzz round trip. It
+  checks the last match's start and the final literal count independently of
+  the decoders. `abababbababba` pins the former `s+2` overrun.
 - Match extension advances both cursors on an eight-byte mismatch before the
   byte-wise tail. The 25-byte regression in `encode.zig` pins that pairing.
 - Decode copies share `internal.match.copyMatch` with Snappy. Exact-sized
@@ -32,11 +35,14 @@
   match extensions, zero-literal sequences, offset 65,535, late matches, short
   final literals, and the corrupt-input matrix. Every case has a sentinel
   region after the exact target.
-- `just lz4-oracle` runs both directions against pierrec/lz4 v4.1.34. The Go
-  destination is always `CompressBlockBound`, so random inputs produce a
-  literal-only block instead of Go's no-block zero return. Go's empty-input
-  zero return is not a block; the canonical zero-token empty block is tested
-  directly. klauspost/compress's LZ4 encoder is in `internal/lz4ref`; its
+- `just lz4-oracle` runs both directions against pierrec/lz4 v4.1.34 and
+  liblz4 through Python `lz4` 4.4.5. The C seat uses exact-capacity decode for
+  our output and emits default, fast, and high-compression blocks for ours.
+  Two-symbol inputs cover the late-match class. The Go destination is always
+  `CompressBlockBound`, so random inputs produce a literal-only block instead
+  of Go's no-block zero return. Go's empty-input zero return is not a block;
+  the canonical zero-token empty block is tested directly.
+  klauspost/compress's LZ4 encoder is in `internal/lz4ref`; its
   public `s2.LZ4Converter` consumes LZ4 and emits S2, so it is not an oracle
   seat here.
 - The fuzz targets cap arbitrary decode input at 8 KiB and decoded output at

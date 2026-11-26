@@ -56,8 +56,9 @@ inline fn readLength(
 /// Returns `error.DecompressionFailed` for an empty or truncated source, a
 /// length overflow, input or output overrun, offset zero, an offset before the
 /// output's start, a missing final literal sequence, or decoded output shorter
-/// than `target.len`. Never writes past `target`; after an error its contents
-/// are unspecified. Does not allocate.
+/// than `target.len`. `source` and `target` must not overlap. Never writes
+/// past `target`; after an error its contents are unspecified. Does not
+/// allocate.
 pub fn decompressBlock(source: []const u8, target: []u8) DecompressError!usize {
     if (source.len == 0) return error.DecompressionFailed;
 

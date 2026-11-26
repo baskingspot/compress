@@ -44,8 +44,9 @@ pub const DecompressError = error{DecompressionFailed};
 
 ## Behavior
 
-- **Buffers and sizing.** The caller owns every buffer. Nothing is allocated,
-  retained, or freed, and no function takes an allocator. A `target` of
+- **Buffers and sizing.** The caller owns every buffer. `source` and `target`
+  must not overlap. Nothing is allocated, retained, or freed, and no function
+  takes an allocator. A `target` of
   `maxCompressedLength(source.len)` bytes makes `compressBlock` infallible.
   `compressBlock` requires `source.len <= max_block_size` (asserted, not
   returned). `decompressBlock` requires `target.len` to equal the decoded
@@ -65,7 +66,7 @@ pub const DecompressError = error{DecompressionFailed};
   token with a zero-length `target`. An empty compressed slice is invalid.
 - **Encoder output.** Valid LZ4, with no promise of matching another encoder's
   bytes. The encoder follows the end-of-block restrictions: inputs shorter
-  than 13 bytes are literals, the last match starts at least 12 bytes before
+  than 14 bytes are literals, the last match starts at least 12 bytes before
   the end, and at least five trailing bytes are literals.
 - **Stack.** `compressBlock` uses a 128 KiB position table and an 8 KiB
   occupancy bitmap. The bitmap alone is cleared for each call. Blocks larger
@@ -81,21 +82,22 @@ carry each decoded length out of band.
 
 `just test` runs the unit tests, including hand-composed format vectors and
 blocks that break the encoder-side end restrictions. `just lz4-oracle`
-cross-checks blocks against `github.com/pierrec/lz4/v4` in both directions.
+cross-checks blocks against `github.com/pierrec/lz4/v4` and liblz4 in both
+directions. The C decoder uses the exact output capacity.
 `just fuzz 10M` runs the fuzz targets and `just bench` the local benchmarks.
 Local numbers are not claims; a claim names the run that produced it.
 
 A 2026-11-26 local run measured 64 KiB inputs on aarch64-linux with a Neoverse
-V3. These are five-round medians in GB/s over uncompressed bytes, not a
+V3. These are ten-round medians in GB/s over uncompressed bytes, not a
 cross-library comparison:
 
 | Shape  | Encode | Decode | Compressed/raw |
 | ------ | -----: | -----: | -------------: |
-| text   |   6.50 |   9.45 |       0.004761 |
-| random |  11.69 |  79.80 |       1.003937 |
-| html   |   7.53 |  13.35 |       0.004807 |
-| rle    |   6.54 |  24.81 |       0.004074 |
-| mixed  |  11.83 |  79.80 |       1.003937 |
+| text   |   9.08 |   9.35 |       0.004761 |
+| random |  11.82 |  79.61 |       1.003937 |
+| html   |   9.02 |  13.40 |       0.004807 |
+| rle    |   9.12 |  24.82 |       0.004074 |
+| mixed  |   1.25 |  10.59 |        0.5107 |
 
 ## License
 

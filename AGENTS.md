@@ -105,8 +105,9 @@ it before you change a kernel or make a performance claim.
   entries, the shared writer machinery (the generated `Io.Writer` entries
   and the poisoned `finish`), the endian-bound integer helpers the codec
   `common.zig` files bind, the container driver over a codec's framing
-  type, and `constant.copyInto` (a copy whose source is a comptime constant;
-  `constant.zig` explains why fastmem refuses one). Imports only
+  type, `constant.copyInto` (a copy whose source is a comptime constant;
+  `constant.zig` explains why fastmem refuses one), and `match.copyMatch`
+  (the shared overlapping-match SIMD kernel). Imports only
   `std` and `fastmem`; reached by relative import
   (`@import("../internal/root.zig")`), never a build module, and never
   re-exported by the barrel; a codec that uses it lifts with it in tow,
@@ -214,7 +215,8 @@ onto a nearly-full disk):
   corner, and the exact stream boundary; the layer is
   `scripts/zlib_oracle.py`).
 - `just lz4-oracle`: external-oracle conformance for raw LZ4 blocks against
-  pierrec/lz4 v4.1.34, both directions, including foreign tails and corrupt
+  pierrec/lz4 v4.1.34 and liblz4 through the Python `lz4` 4.4.5 package, both
+  directions, including C's exact-capacity decoder, foreign tails, and corrupt
   input (`scripts/lz4_oracle.py`, `scripts/lz4_go`).
 - `just zstd-oracle`: external-oracle conformance for zstd — the reference
   CLI v1.5.7 and klauspost/compress (the strict Window_Size check the C

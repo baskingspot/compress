@@ -1,10 +1,10 @@
-"""Check raw LZ4 blocks against github.com/pierrec/lz4/v4.
+"""Check raw LZ4 blocks against pierrec/lz4 and the reference C library.
 
-Both directions run over empty and tiny inputs, compressible and random data,
-and the 13-byte, 16-KiB, and 64-KiB boundaries. Foreign Go blocks decode through
-this package, and this package's blocks decode through Go. Hand-composed rows
-pin the valid tails that break encoder-side restrictions and the corrupt-input
-refusals.
+Both directions run over empty and tiny inputs, compressible, random, and
+two-symbol data, and the 13-byte, 16-KiB, and 64-KiB boundaries. Foreign Go and
+C blocks decode through this package. This package's blocks decode through Go
+and liblz4's exact-capacity decoder. Hand-composed rows pin valid tails that
+break encoder-side restrictions and the corrupt-input refusals.
 
 Run with `just lz4-oracle`. The harnesses are `zig-out/bin/lz4-oracle` and
 `zig-out/bin/lz4-go`; shared plumbing is in `scripts/oracle_common.py`.
@@ -12,12 +12,17 @@ Run with `just lz4-oracle`. The harnesses are `zig-out/bin/lz4-oracle` and
 
 from __future__ import annotations
 
+import importlib
 import random
 import subprocess
 import tempfile
 from pathlib import Path
 
 import oracle_common as common
+
+# The `lz4` package is a justfile dependency (`uv run --with lz4==4.4.5`).
+# The import is dynamic so the repository-wide type check does not need it.
+c_block = importlib.import_module("lz4.block")
 
 ROOT = common.ROOT
 HARNESS = ROOT / "zig-out/bin/lz4-oracle"
@@ -66,6 +71,22 @@ def go_decode(block: bytes, expected: bytes) -> bool:
         Path(expected_path).unlink()
 
 
+def c_decode(block: bytes, expected: bytes) -> bool:
+    try:
+        decoded = c_block.decompress(block, uncompressed_size=len(expected))
+    except c_block.LZ4BlockError:
+        return False
+    return decoded == expected
+
+
+def c_encode(data: bytes, mode: str, level: int) -> bytes:
+    if mode == "fast":
+        return c_block.compress(data, mode=mode, acceleration=level, store_size=False)
+    if mode == "high_compression":
+        return c_block.compress(data, mode=mode, compression=level, store_size=False)
+    return c_block.compress(data, mode="default", store_size=False)
+
+
 def check_round_trip(label: str, data: bytes) -> None:
     global rows
     ours = our_encode(data)
@@ -75,16 +96,29 @@ def check_round_trip(label: str, data: bytes) -> None:
         raise SystemExit(f"{label}: Go could not decode our block")
     if our_decode(ours, len(data)) != data:
         raise SystemExit(f"{label}: our decoder disagrees with our encoder")
+    rows += 2
 
     theirs = go_encode(data)
-    if not theirs and not data:
-        # Go's zero return is its no-block convention. The block format's
-        # canonical empty block is the single zero token, checked below.
-        rows += 2
-        return
-    if our_decode(theirs, len(data)) != data:
-        raise SystemExit(f"{label}: our decoder could not decode Go's block")
-    rows += 3
+    if theirs or data:
+        if our_decode(theirs, len(data)) != data:
+            raise SystemExit(f"{label}: our decoder could not decode Go's block")
+        rows += 1
+    # Go's empty-input zero return is its no-block convention. The canonical
+    # empty block is the single zero token, checked below.
+
+    if not c_decode(ours, data):
+        raise SystemExit(f"{label}: liblz4 could not decode our block")
+    rows += 1
+    for mode, level in (
+        ("default", 0),
+        ("fast", 9),
+        ("high_compression", 9),
+        ("high_compression", 12),
+    ):
+        foreign = c_encode(data, mode, level)
+        if our_decode(foreign, len(data)) != data:
+            raise SystemExit(f"{label}: our decoder rejected liblz4 {mode}/{level}")
+        rows += 1
 
 
 def expect_valid(label: str, block: bytes, expected: bytes) -> None:
@@ -137,6 +171,9 @@ def main() -> int:
         check_round_trip(f"text {size}", (phrase * (size // len(phrase) + 1))[:size])
         random_data = random.Random(0xC0FFEE ^ size).randbytes(size)
         check_round_trip(f"random {size}", random_data)
+        binary_rng = random.Random(0xB1A4 ^ size)
+        binary_data = bytes(97 + binary_rng.getrandbits(1) for _ in range(size))
+        check_round_trip(f"two-symbol {size}", binary_data)
 
     # Structurally valid blocks whose tails break the encoder-side 5-byte and
     # 12-byte restrictions. The final token's low nibble is unused.
@@ -178,8 +215,8 @@ def main() -> int:
         expect_invalid(f"foreign prefix {cut}", foreign[:cut], len(data))
 
     print(
-        f"lz4-oracle: {rows} rows against pierrec/lz4 v4.1.34, both directions, "
-        f"{len(sizes)} sizes in compressible and random forms, valid foreign tails, "
+        f"lz4-oracle: {rows} rows against pierrec/lz4 v4.1.34 and liblz4, "
+        f"both directions, {len(sizes)} sizes in three forms, valid foreign tails, "
         "corruption, and every strict prefix of a foreign block: OK"
     )
     return 0
